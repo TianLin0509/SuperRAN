@@ -27,12 +27,24 @@ from typing import Any
 
 @dataclass
 class Option:
+    """一个可选项。
+
+    ``recommended`` 参考 superpowers 的做法：给选项的同时明确说出推荐哪个
+    并讲理由，用户才好判断，而不是面对一排平铺的选项自己权衡。
+    """
+
     value: Any
     label: str
     note: str = ""
+    recommended: bool = False
 
     def as_dict(self) -> dict[str, Any]:
-        return {"value": self.value, "label": self.label, "note": self.note}
+        return {
+            "value": self.value,
+            "label": self.label,
+            "note": self.note,
+            "recommended": self.recommended,
+        }
 
 
 @dataclass
@@ -134,20 +146,15 @@ _DESIGN: dict[str, DesignQuestion] = {
                 "才知道要不要同时生成对照数据。"
             ),
             options=[
-                Option("type1", "3GPP Type I 码本",
-                       "最常见的基线，几乎所有 CSI 相关工作都会比这个"),
-                Option("type2", "3GPP Type II / eType II 码本",
-                       "更强的基线：精度高但反馈开销大，压缩类课题常用它证明「省了开销还不掉精度」"),
+                Option("type1_2", "3GPP Type I 或 Type II 码本",
+                       "最常见的基线，几乎所有 CSI 相关工作都会比它",
+                       recommended=True),
                 Option("svd_bound", "理想信道的 SVD 预编码",
-                       "理论天花板，用来看你离上界还差多少"),
-                Option("full_feedback", "不压缩的全反馈",
-                       "看压缩到底省了多少比特，代价是多少"),
-                Option("classic_est", "传统 LS / MMSE 估计",
-                       "信道估计类课题的标准对照"),
+                       "理论天花板，看你离上界还差多少"),
                 Option("published", "某篇已发表方法",
-                       "告诉我是哪篇，我尽量对齐它的实验设置便于横向比"),
+                       "告诉我哪篇，我尽量对齐它的实验设置便于横向比"),
                 Option("none_yet", "还没定，先看可行性",
-                       "那就先跑一组基准数据，基线之后再补"),
+                       "先跑一组基准数据，基线之后再补"),
             ],
         ),
         DesignQuestion(
@@ -159,20 +166,14 @@ _DESIGN: dict[str, DesignQuestion] = {
                 "事后补指标往往要重跑。"
             ),
             options=[
-                Option("nmse", "NMSE / 余弦相似度",
-                       "重建精度，最直接，只需要信道矩阵"),
-                Option("spectral_eff", "频谱效率或吞吐损失",
-                       "更贴近系统收益；需要额外留预编码矩阵和 SINR"),
-                Option("bler", "误块率 BLER",
-                       "链路级指标，需要你自己接一段接收机仿真"),
-                Option("beam_hit", "波束选对的概率 / Top-K 命中率",
-                       "波束管理类常用；需要每条径的角度，必须用 CDL"),
-                Option("pos_err", "定位误差 CDF",
-                       "定位类；带宽决定精度上限，建议 100 MHz 以上"),
-                Option("rate_curve", "压缩率 vs 性能曲线",
-                       "要扫多个压缩比，数据量按扫描点数翻倍"),
+                Option("accuracy", "重建精度类：NMSE / 余弦相似度",
+                       "最直接，只需要信道矩阵", recommended=True),
+                Option("system_gain", "系统收益类：频谱效率或吞吐损失",
+                       "更贴近实际价值；需要额外留预编码矩阵和 SINR"),
+                Option("task_specific", "任务专属：波束命中率 / 定位误差 CDF / BLER",
+                       "波束命中率必须用 CDL；定位精度受带宽限制；BLER 要你自己接收机仿真"),
                 Option("not_sure", "还没想好",
-                       "那我按任务类型把常用量都给你留上，事后不用重跑"),
+                       "那我按任务类型把常用量都留上，事后不用重跑"),
             ],
         ),
         DesignQuestion(
@@ -186,17 +187,13 @@ _DESIGN: dict[str, DesignQuestion] = {
             ),
             options=[
                 Option("single", "就这一个场景，先看可行性",
-                       "最快，一组数据即可"),
+                       "最快，一组数据即可", recommended=True),
                 Option("urban_general", "城区宏站普遍适用",
-                       "建议扫散射丰富度（CDL-A vs CDL-C）和视距比例（改站间距）"),
-                Option("mobility", "覆盖不同移动速度",
-                       "扫 3 / 60 / 120 km/h，看信道老化的影响"),
-                Option("antenna_scale", "覆盖不同天线规模",
-                       "扫 32T / 64T，看方法是否可扩展"),
+                       "建议扫散射丰富度和视距比例，两组对照"),
                 Option("real_world", "要在真实地形上站得住",
-                       "统计信道定型后，用射线追踪的真实城市地图复核一遍"),
+                       "统计信道定型后，用射线追踪的真实城市地图复核"),
                 Option("paper", "要写进论文或对外汇报",
-                       "建议至少两个维度的对照，且明确报告视距比例与信噪比分布"),
+                       "建议至少两个维度对照，并明确报告视距比例与信噪比分布"),
             ],
             optional=True,
         ),
@@ -204,19 +201,17 @@ _DESIGN: dict[str, DesignQuestion] = {
             key="hypothesis",
             question="你预期会看到什么？",
             why=(
-                "先说出预期能暴露隐含假设。而且如果结果和预期一致但原因不对"
-                "（比如信道恰好低秩，导致什么方法都表现好），事先想过就容易发现。"
+                "先说出预期能暴露隐含假设。如果结果和预期一致但原因不对"
+                "（比如信道恰好低秩，什么方法都表现好），事先想过就容易发现。"
             ),
             options=[
-                Option("big_win", "明显优于基线（3 dB 以上）", ""),
+                Option("clear_win", "明显优于基线（3 dB 以上）", ""),
                 Option("small_win", "小幅优于基线（1~2 dB）",
-                       "差距小的话样本数要够，建议 200 以上才看得出统计显著性"),
-                Option("low_snr_win", "低信噪比下优势更明显",
-                       "那就别只测高信噪比区间"),
-                Option("robust", "高速场景会掉但仍优于基线",
-                       "建议扫速度"),
+                       "差距小则样本数要够，建议 200 以上才有统计显著性"),
+                Option("conditional", "特定条件下更好（低信噪比 / 高速等）",
+                       "那这个条件维度就得扫，否则看不出来"),
                 Option("unknown", "没有明确预期，先看看",
-                       "完全可以，探索性实验也是实验"),
+                       "探索性实验也是实验"),
             ],
             optional=True,
         ),
@@ -243,11 +238,9 @@ _CHANNEL_MODEL = Decision(
         "生成后 los_ratio 会报告实际比例。"
     ),
     options=[
-        Option("CDL-A", "非视距 · 强散射", "时延与角度扩展都大"),
-        Option("CDL-B", "非视距 · 中等散射", ""),
-        Option("CDL-C", "非视距 · 城区基准（默认）", "最常用的对比基线"),
-        Option("CDL-D", "视距 · K=13.3 dB", "仅在链路判为视距时生效"),
-        Option("CDL-E", "视距 · K=22 dB", "强视距，几乎单径主导"),
+        Option("CDL-C", "非视距 · 城区基准", "最常用的对比基线", recommended=True),
+        Option("CDL-A", "非视距 · 强散射", "角度与时延扩展更大，适合与 CDL-C 做对照"),
+        Option("CDL-D", "视距 · K=13.3 dB", "仅在链路判为视距时生效，见上文说明"),
         Option("TDL-C", "非视距 · 仅抽头", "无角度信息，不能做波束/定位"),
     ],
     priority=1,
@@ -265,10 +258,9 @@ _SNR = Decision(
         "想整体抬高或压低信噪比，调发射功率或站间距比筛选更有效。"
     ),
     options=[
-        Option(None, "不限定（默认）", "自然分布，最快"),
-        Option([0.0, 25.0], "0~25 dB", "覆盖边缘到近点，可能拒绝率较高"),
-        Option([-5.0, 5.0], "-5~5 dB", "只看小区边缘"),
-        Option([25.0, 45.0], "25~45 dB", "只看近点"),
+        Option(None, "不限定", "自然分布，最快", recommended=True),
+        Option([-5.0, 5.0], "-5~5 dB · 只看小区边缘", "走拒绝采样，可能慢"),
+        Option([25.0, 45.0], "25~45 dB · 只看近点", "走拒绝采样，可能慢"),
     ],
     priority=2,
 )
@@ -283,10 +275,9 @@ _BANDWIDTH = Decision(
         "分辨率约等于光速除以带宽，100 MHz 对应 3 米。"
     ),
     options=[
-        Option(100e6, "100 MHz（默认）", "273 RB，n78 典型"),
-        Option(50e6, "50 MHz", "133 RB"),
-        Option(20e6, "20 MHz", "51 RB，跑得快"),
-        Option(200e6, "200 MHz", "毫米波常用，时延分辨率更高"),
+        Option(100e6, "100 MHz", "273 RB，n78 典型", recommended=True),
+        Option(20e6, "20 MHz", "51 RB，跑得快，适合先验证流程"),
+        Option(200e6, "200 MHz", "时延分辨率更高，定位类课题用"),
     ],
     priority=3,
 )
@@ -301,8 +292,7 @@ _SPEED = Decision(
         "依赖互易性的方案会明显掉性能。"
     ),
     options=[
-        Option(3.0, "3 km/h · 步行（默认）", "信道近似静止"),
-        Option(30.0, "30 km/h · 市区车速", ""),
+        Option(3.0, "3 km/h · 步行", "信道近似静止", recommended=True),
         Option(60.0, "60 km/h · 快速路", "信道老化开始显著"),
         Option(120.0, "120 km/h · 高速", "互易性明显退化"),
     ],
@@ -318,10 +308,9 @@ _ANTENNA = Decision(
         "这是 3.5 GHz 宏站的主流配置；32 口及以下码本更小、搜索更快。"
     ),
     options=[
-        Option("64T4R", "64 发 4 收（默认）", "8H4V 双极化，宏站主流"),
-        Option("32T4R", "32 发 4 收", "8H2V 双极化"),
-        Option("16T2R", "16 发 2 收", "小站/快速验证"),
-        Option("4T4R", "4 发 4 收", "最小配置，秒级出数据"),
+        Option("64T4R", "64 发 4 收", "8H4V 双极化，宏站主流", recommended=True),
+        Option("32T4R", "32 发 4 收", "8H2V 双极化，码本更小搜索更快"),
+        Option("4T4R", "4 发 4 收", "最小配置，先跑通流程用"),
     ],
     priority=3,
 )
@@ -336,9 +325,9 @@ _EST_MODE = Decision(
         "注意理想信道会一并给出，所以选实际估计不会损失真值参照。"
     ),
     options=[
-        Option("ideal", "理想信道", "无估计误差，算上界用"),
-        Option("ls_linear", "LS + 线性插值（默认）", "贴近实际实现"),
+        Option("ls_linear", "LS + 线性插值", "贴近实际实现；理想信道会一并给出", recommended=True),
         Option("ls_mmse", "LS + MMSE", "更好的估计器"),
+        Option("ideal", "理想信道", "无估计误差，只在算上界时用"),
     ],
     priority=2,
 )
@@ -352,7 +341,7 @@ _PILOT = Decision(
         "SRS 跳频相关的课题必须走 srs_zc，否则拿不到 SRS 侧的量。"
     ),
     options=[
-        Option("csi_rs_gold", "CSI-RS · Gold 序列（默认）", "下行"),
+        Option("csi_rs_gold", "CSI-RS · Gold 序列", "下行", recommended=True),
         Option("srs_zc", "SRS · ZC 序列", "上行，互易性相关课题用"),
     ],
     priority=4,
@@ -364,7 +353,7 @@ _LINK = Decision(
     default="DL",
     why="下行看 CSI 反馈与预编码，上行看 SRS 与互易性。做互易性对比需要成对的上下行。",
     options=[
-        Option("DL", "下行（默认）", ""),
+        Option("DL", "下行", "看 CSI 反馈与预编码", recommended=True),
         Option("UL", "上行", ""),
         Option("both", "上下行成对", "互易性课题必选，数据量翻倍"),
     ],
@@ -381,9 +370,9 @@ _NUM_SAMPLES = Decision(
         "要做分布尾部分析（如 5% 边缘用户）则需要上千。"
     ),
     options=[
-        Option(20, "20 · 冒烟测试", "验证流程"),
-        Option(200, "200（默认）", "够画分布图"),
-        Option(1000, "1000 · 正式实验", "尾部统计可信"),
+        Option(20, "20 · 先验证流程", "几秒出结果，确认配置对不对", recommended=True),
+        Option(200, "200 · 正式实验", "够画分布图"),
+        Option(1000, "1000 · 尾部统计", "看 5% 边缘用户时需要"),
     ],
     priority=6,
 )
@@ -397,9 +386,9 @@ _SCENARIO = Decision(
         "站距更小；室内工厂（InF）时延扩展与角度分布都明显不同。"
     ),
     options=[
-        Option("UMa_NLOS", "城区宏站 · 非视距（默认）", "38.901 基准"),
-        Option("UMi_NLOS", "城区微站 · 非视距", "密集城区"),
-        Option("InF", "室内工厂", "38.901 §7.2"),
+        Option("UMa_NLOS", "城区宏站", "38.901 基准，站高 25m 站距 500m", recommended=True),
+        Option("UMi_NLOS", "城区微站", "密集城区，站高 10m 站距更小"),
+        Option("InF", "室内工厂", "38.901 §7.2，时延扩展差别明显"),
     ],
     priority=3,
 )
@@ -414,9 +403,9 @@ _NUM_SITES = Decision(
         "但耗时约为 7 站的三倍。"
     ),
     options=[
-        Option(1, "1 站 · 单小区", "无小区间干扰"),
-        Option(7, "7 站 21 小区（默认）", "一圈邻区"),
-        Option(19, "19 站 57 小区", "两圈邻区，38.901 基准"),
+        Option(7, "7 站 21 小区", "一圈邻区，干扰环境完整", recommended=True),
+        Option(19, "19 站 57 小区", "两圈邻区，38.901 基准，耗时约三倍"),
+        Option(1, "1 站 · 单小区", "无小区间干扰，干扰类课题不适用"),
     ],
     priority=1,
 )
@@ -431,9 +420,9 @@ _UE_DIST = Decision(
         "SINR 分布整体平移，跨实验对比会失效。"
     ),
     options=[
-        Option("uniform", "均匀分布（默认）", "标准做法"),
+        Option("uniform", "均匀分布", "标准做法", recommended=True),
+        Option("hotspot", "热点分布", "边缘用户比例高，更能拉开干扰算法差距"),
         Option("clustered", "成簇分布", "若干簇中心"),
-        Option("hotspot", "热点分布", "边缘用户比例高，干扰更重"),
     ],
     priority=2,
 )
@@ -447,9 +436,9 @@ _PRB_UTIL = Decision(
         "轻载下干扰问题会被掩盖，容易得出「算法没用」的错误结论。"
     ),
     options=[
-        Option(1.0, "满载 1.0（默认）", "干扰最坏情况"),
+        Option(1.0, "满载", "干扰最坏情况", recommended=True),
         Option(0.7, "0.7 · 忙时典型", ""),
-        Option(0.3, "0.3 · 轻载", "干扰弱"),
+        Option(0.3, "0.3 · 轻载", "干扰弱，容易低估协调算法的价值"),
     ],
     priority=3,
 )
@@ -463,7 +452,7 @@ _TDD = Decision(
         "间隔越长，用 SRS 推下行时信道老化越严重。"
     ),
     options=[
-        Option("DDDSU", "DDDSU（默认）", "国内主流 2.5 ms 单周期"),
+        Option("DDDSU", "DDDSU", "国内主流 2.5 ms 单周期", recommended=True),
         Option("DDSUU", "DDSUU", "上行更多，SRS 更密"),
         Option("DDDDDDDSUU", "DDDDDDDSUU", "下行为主，SRS 间隔长"),
     ],
@@ -479,7 +468,7 @@ _MOBILITY = Decision(
         "做切换、跟踪、信道预测类课题必须用它，否则样本间没有时序关系。"
     ),
     options=[
-        Option("static", "静止（默认）", "样本间独立"),
+        Option("static", "静止", "样本间独立", recommended=True),
         Option("linear", "直线移动", "轨迹连续"),
         Option("random_walk", "随机游走", ""),
         Option("random_waypoint", "随机路点", ""),
@@ -497,9 +486,9 @@ _NUM_SLOTS = Decision(
         "才有真实的时间相关性。数据量按时隙数线性增长。"
     ),
     options=[
-        Option(1, "1 个（默认）", "单快照"),
-        Option(5, "5 个", "短时序"),
-        Option(14, "14 个", "覆盖一个 TDD 周期以上"),
+        Option(14, "14 个", "覆盖一个 TDD 周期以上", recommended=True),
+        Option(5, "5 个", "短时序，数据量小"),
+        Option(1, "1 个", "单快照，无时序结构"),
     ],
     priority=2,
 )
@@ -747,10 +736,7 @@ def classify_intent(intent: str) -> TaskProfile:
 
 
 def decisions_for(profile: TaskProfile, *, limit: int = 6) -> list[Decision]:
-    """取该任务应当询问的仿真参数，按优先级排序，最多 limit 个。
-
-    上限默认 6：一次抛八个问题，用户会直接说「你看着办」。
-    """
+    """取该任务应当询问的仿真参数，按优先级排序，最多 limit 个。"""
     picked = [ALL_DECISIONS[k] for k in profile.decision_keys if k in ALL_DECISIONS]
     picked.sort(key=lambda d: d.priority)
     return picked[:limit]
@@ -761,6 +747,83 @@ def design_questions_for(profile: TaskProfile, *, limit: int = 3) -> list[Design
     picked = [_DESIGN[k] for k in profile.design_keys if k in _DESIGN]
     picked.sort(key=lambda q: (q.optional,))
     return picked[:limit]
+
+
+# ---------------------------------------------------------------------------
+# 多轮提问
+# ---------------------------------------------------------------------------
+# superpowers 的 brainstorming 是「一次一个问题、问到你真正understand为止」。
+# 我们的参数空间有限且已知，一次一个会拖到八九轮，所以改成
+# **一轮 2~4 个问题、按主题分轮、答完再决定要不要下一轮**。
+# 每轮都能直接生成——用户随时可以说「就这样吧」。
+
+_MAX_PER_ROUND = 4
+
+
+def next_round(
+    profile: TaskProfile,
+    answered_design: set[str],
+    answered_params: set[str],
+    *,
+    round_no: int = 1,
+) -> dict[str, Any]:
+    """根据已回答的内容决定这一轮问什么，以及还要不要继续问。
+
+    分轮思路：
+      第 1 轮 —— 实验设计（跟什么比、看什么指标）。这层错了整个结论作废。
+      第 2 轮 —— 高影响参数（信道模型、天线、拓扑这类一改结论就变的）。
+      第 3 轮 —— 次要参数 + 可选的设计问题（推广范围、预期结果）。
+      之后 —— 不再主动问，用户想调什么自己说。
+
+    返回的 ``can_generate`` 恒为 True：任何一轮之后都能直接生成，
+    没答的走默认值。提问是为了让结论更可靠，不是准入门槛。
+    """
+    design_all = [_DESIGN[k] for k in profile.design_keys if k in _DESIGN]
+    param_all = [ALL_DECISIONS[k] for k in profile.decision_keys if k in ALL_DECISIONS]
+    param_all.sort(key=lambda d: d.priority)
+
+    design_todo = [q for q in design_all if q.key not in answered_design and not q.optional]
+    design_opt_todo = [q for q in design_all if q.key not in answered_design and q.optional]
+    param_todo = [d for d in param_all if d.key not in answered_params]
+    param_key = [d for d in param_todo if d.priority <= 2]
+    param_rest = [d for d in param_todo if d.priority > 2]
+
+    if round_no <= 1 and design_todo:
+        picked_d, picked_p = design_todo[:_MAX_PER_ROUND], []
+        focus = "实验设计"
+        rationale = "先把基线和指标定下来——参数配错重跑就行，实验设计错了整个结论作废。"
+    elif param_key:
+        picked_d, picked_p = [], param_key[:_MAX_PER_ROUND]
+        focus = "关键参数"
+        rationale = "这几个参数一改结论就变，值得单独确认。"
+    elif design_opt_todo or param_rest:
+        picked_d = design_opt_todo[:2]
+        picked_p = param_rest[: max(0, _MAX_PER_ROUND - len(picked_d))]
+        focus = "补充确认"
+        rationale = "剩下这些影响较小，用户没意见就走默认。"
+    else:
+        picked_d, picked_p = [], []
+        focus = "已问完"
+        rationale = "该确认的都确认了，可以生成。"
+
+    remaining = (
+        len(design_todo) + len(design_opt_todo) + len(param_todo)
+        - len(picked_d) - len(picked_p)
+    )
+    return {
+        "round": round_no,
+        "focus": focus,
+        "rationale": rationale,
+        "design_questions": [q.as_dict() for q in picked_d],
+        "questions": [d.as_dict() for d in picked_p],
+        "has_more": remaining > 0,
+        "remaining_count": max(remaining, 0),
+        "can_generate": True,
+        "stop_hint": (
+            "用户说「随便 / 默认就行 / 就这样」时立刻停止提问直接生成，"
+            "不要再问下一轮。没答的项会用默认值，生成后会如实列出。"
+        ),
+    }
 
 
 def also_configurable(profile: TaskProfile) -> list[str]:

@@ -179,6 +179,7 @@ class Draft:
     params: dict[str, Any] = field(default_factory=dict)
     user_set: list[str] = field(default_factory=list)  # 用户显式指定过的键
     design: dict[str, str] = field(default_factory=dict)  # 实验设计层的回答
+    round_no: int = 1  # 当前问到第几轮
     created_at: float = field(default_factory=time.time)
     history: list[str] = field(default_factory=list)
 
@@ -192,6 +193,7 @@ class Draft:
             "params": self.params,
             "user_set": self.user_set,
             "design": self.design,
+            "round_no": self.round_no,
             "created_at": self.created_at,
             "history": self.history,
         }
@@ -293,8 +295,14 @@ def revise_draft(
             d.design[k] = str(v)
             changes.append(f"实验设计 {k}: {str(v)[:40]}")
 
-    if changes:
-        d.history.append("修改 " + "；".join(changes))
+    # 用户回应过一轮就推进轮次，下次 build_proposal 问新的一批。
+    # 注意即使用户只是"确认默认值"（值没变、changes 为空）也要推进——
+    # 否则下一轮会把同样的问题再问一遍。
+    if overrides or design:
+        d.round_no += 1
+        d.history.append(
+            f"第 {d.round_no - 1} 轮：" + ("；".join(changes) if changes else "确认默认值")
+        )
     save_draft(d)
     return d, profile, changes
 
@@ -328,23 +336,25 @@ def build_proposal(
     另外 ``sweeps`` 给出建议的对比组，``pitfalls`` 是这类课题的常见坑。
     """
     ch_cfg, own = resolved_config(d)
-    picked = dec.decisions_for(profile, limit=max_questions)
+
+    # 本轮该问什么由 MCP 自己算：已答的不再问，一轮最多 4 个
+    rnd = dec.next_round(
+        profile,
+        answered_design=set(d.design),
+        answered_params=set(d.user_set),
+        round_no=d.round_no,
+    )
 
     questions = []
-    for item in picked:
-        current = d.params.get(item.key, item.default)
+    for item in rnd["questions"]:
         questions.append(
             {
-                **item.as_dict(),
-                "current": current,
-                "user_specified": item.key in d.user_set,
+                **item,
+                "current": d.params.get(item["key"], item["default"]),
+                "user_specified": item["key"] in d.user_set,
             }
         )
-
-    design = [
-        {**q.as_dict(), "answered": d.design.get(q.key)}
-        for q in dec.design_questions_for(profile)
-    ]
+    design = [{**q, "answered": d.design.get(q["key"])} for q in rnd["design_questions"]]
 
     issues = dec.check_guards(profile, d.params)
     presets = load_presets()
@@ -356,21 +366,37 @@ def build_proposal(
         "preset": d.preset,
         "preset_label": presets.get(d.preset, {}).get("label", d.preset),
         "preset_summary": presets.get(d.preset, {}).get("summary", ""),
+        # --- 本轮提问 ---
+        "round": rnd["round"],
+        "round_focus": rnd["focus"],
+        "round_rationale": rnd["rationale"],
+        # round_questions 是本轮全部问题的合并视图（设计层在前），
+        # 调用方直接照着问即可，不必自己拼两个列表。
+        # 第 1 轮通常只有设计层问题，questions 会是空的，这是正常的。
+        "round_questions": [{**q, "layer": "design"} for q in design]
+        + [{**q, "layer": "param"} for q in questions],
         "design_questions": design,
         "questions": questions,
+        "has_more_rounds": rnd["has_more"],
+        "remaining_count": rnd["remaining_count"],
+        "stop_hint": rnd["stop_hint"],
+        # --- 参考信息 ---
         "also_configurable": dec.also_configurable(profile),
         "suggested_sweeps": dec.sweep_suggestions(profile),
         "pitfalls": list(profile.pitfalls),
         "issues": issues,
         "ready_to_go": not any(i["severity"] == "block" for i in issues),
+        "can_generate_now": True,
         "resolved_config": ch_cfg,
         "superwireless_params": own,
         "user_specified": d.user_set,
+        "answered_design": dict(d.design),
         "hint": (
-            "建议顺序：先用 design_questions 和用户对齐实验设计（尤其是基线和指标），"
-            "再问 questions 里的仿真参数。用户没有明确偏好时直接用默认值生成，"
-            "不必逐条确认。suggested_sweeps 里的对比组值得主动提一句——"
-            "很多结论必须靠 A/B 才立得住。"
+            "这一轮只问上面这几个（最多 4 个），别把 also_configurable 里的也问了。"
+            "每个问题都带 options，把选项编号列出来并标明推荐项（recommended=true），"
+            "最后留一句「或者你直接说」。"
+            "用户答完后再调 sw_revise，它会返回下一轮该问什么；"
+            "has_more_rounds 为 false 或用户说「随便」就直接生成。"
         ),
     }
 

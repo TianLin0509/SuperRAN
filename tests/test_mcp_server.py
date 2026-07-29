@@ -91,19 +91,23 @@ async def main() -> None:
                     },
                 )
             )
+            rq = prop["round_questions"]
             print(f"  draft_id   {prop['draft_id']}")
             print(f"  任务       {prop['task_label']}")
             print(f"  场景       {prop['preset_label']}")
             print(f"  预估体积   {prop['estimated']['size_mb']} MB")
-            print("\n  会问用户的问题：")
-            for q in prop["questions"]:
-                print(f"    · {q['question']}  默认 {q['default']}")
-                print(f"        why: {q['why'][:78]}…")
+            print(f"\n  第 {prop['round']} 轮 · {prop['round_focus']}：{prop['round_rationale']}")
+            for q in rq:
+                print(f"    · {q['question']}  [{q['layer']}]")
+                for i, o in enumerate(q["options"], 1):
+                    star = "  ← 推荐" if o.get("recommended") else ""
+                    print(f"        {i}) {o['label']}{star}")
             print(f"\n  还能调（只给名字）：{'、'.join(prop['also_configurable'][:11])}…")
-            check(3 <= len(prop["questions"]) <= 6, "问题数在 3~6")
-            check(all(q.get("why") for q in prop["questions"]), "每题都带 why")
+            check(2 <= len(rq) <= 4, f"一轮 2~4 问（实际 {len(rq)}）")
+            check(all(3 <= len(q["options"]) <= 4 for q in rq), "每题 3~4 个选项")
+            check(all(q.get("why") for q in rq), "每题都带 why")
             check(len(prop["also_configurable"]) >= 10, "给出可配项关键词列表")
-            check(prop["ready_to_go"], "未表态也可直接生成")
+            check(prop["ready_to_go"] and prop["can_generate_now"], "未表态也可直接生成")
 
             draft_id = prop["draft_id"]
 

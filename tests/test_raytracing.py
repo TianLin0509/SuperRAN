@@ -148,17 +148,52 @@ for q in prop["design_questions"]:
 check(len(prop["design_questions"]) >= 2, "提供了实验设计层问题")
 check(all(q["why"] and q["examples"] for q in prop["design_questions"]), "设计问题都带 why 和示例")
 
-print("\n  选项式提问（启发思路，不是开放式发问）：")
+print(f"\n  第 {prop['round']} 轮 · {prop['round_focus']}")
+print(f"    {prop['round_rationale']}")
 q0 = prop["design_questions"][0]
-print(f"    {q0['question']}")
-for i, o in enumerate(q0["options"][:4], 1):
-    print(f"      {i}) {o['label']}  —— {o['note'][:44]}")
-print(f"      …共 {len(q0['options'])} 个选项" + ("，且允许自由作答" if q0["allow_free"] else ""))
-check(all(len(q["options"]) >= 3 for q in prop["design_questions"]), "每个设计问题至少 3 个选项")
-check(all(any(o["note"] for o in q["options"]) for q in prop["design_questions"]),
-      "选项带「什么情况下选它」的说明")
-check(all(q["allow_free"] for q in prop["design_questions"]), "都允许自由作答，选项只用于启发")
-check(all(q["options"] for q in prop["questions"]), "仿真参数问题也都带选项")
+print(f"\n    {q0['question']}")
+for i, o in enumerate(q0["options"], 1):
+    star = "  ← 推荐" if o.get("recommended") else ""
+    print(f"      {i}) {o['label']}  —— {o['note'][:40]}{star}")
+print("      或者你直接说")
+
+n_this_round = len(prop["design_questions"]) + len(prop["questions"])
+print(f"\n    本轮 {n_this_round} 问，还剩 {prop['remaining_count']} 项")
+check(2 <= n_this_round <= 4, f"一轮问 2~4 个（实际 {n_this_round}）")
+check(all(3 <= len(q["options"]) <= 4 for q in prop["design_questions"] + prop["questions"]),
+      "每个问题 3~4 个选项")
+check(all(any(o.get("recommended") for o in q["options"])
+          for q in prop["design_questions"] + prop["questions"] if not q.get("optional")),
+      "必答问题都标出了推荐项")
+check(all(q["allow_free"] for q in prop["design_questions"]), "允许自由作答，选项只用于启发")
+check(prop["can_generate_now"], "任何一轮之后都能直接生成")
+
+# --- 多轮推进 ---
+print("\n  多轮推进：")
+seen_questions: set[str] = set()
+dr, pr = d3, p3
+for _ in range(4):
+    pp = pl.build_proposal(dr, pr)
+    keys = [q["key"] for q in pp["design_questions"] + pp["questions"]]
+    dup = seen_questions & set(keys)
+    print(f"    第 {pp['round']} 轮 · {pp['round_focus']}：{len(keys)} 问 {keys}")
+    check(not dup, f"第 {pp['round']} 轮不重复问已答过的（重复：{dup or '无'}）")
+    seen_questions |= set(keys)
+    if not pp["has_more_rounds"]:
+        print(f"    → has_more_rounds=false，停止提问")
+        break
+    ov = {q["key"]: q["default"] for q in pp["questions"]}
+    dg = {q["key"]: "（用户已答）" for q in pp["design_questions"]}
+    dr, pr, _ = pl.revise_draft(dr.draft_id, overrides=ov or None, design=dg or None)
+check(not pp["has_more_rounds"], "有限轮内收敛完毕")
+
+# 用户确认默认值（值没变）也应推进轮次，否则会重复问
+d_c, p_c = pl.create_draft("验证 CSI 压缩")
+r_before = pl.build_proposal(d_c, p_c)["round"]
+d_c, p_c, ch_c = pl.revise_draft(d_c.draft_id, design={"baseline": "Type II"})
+d_c2, _, ch2 = pl.revise_draft(d_c.draft_id, overrides={"channel_model": "CDL-C"})
+print(f"\n    确认默认值时 changes={ch2}（空），轮次 {r_before} → {d_c2.round_no}")
+check(d_c2.round_no > r_before + 1, "确认默认值也推进轮次，不会重复问")
 
 print("\n  建议的对比组：")
 for s in prop["suggested_sweeps"]:

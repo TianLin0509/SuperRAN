@@ -181,8 +181,8 @@
 <p>测量量都是从信道现算的。半小时后想起还要 PMI？重新取货，<strong>实测 1 毫秒</strong>，不重跑仿真。</p>
 </div>
 <div class="mini">
-<h4>④ 先问实验设计，再问参数</h4>
-<p>参数配错重跑就行，实验设计错了整个结论作废。所以先问"跟什么比、用什么指标"，再问信道模型和天线数。<strong>每题都给编号选项</strong>——开放式提问容易卡壳，看到选项才想得起还有哪些路。</p>
+<h4>④ 分轮问，每轮 2~4 个</h4>
+<p>先问实验设计（跟什么比、用什么指标），再问参数——参数配错重跑就行，实验设计错了结论作废。<strong>每题 3~4 个选项并标明推荐</strong>，最后留"或者你直接说"。用户说"随便"立刻停。</p>
 </div>
 </div>
 
@@ -203,28 +203,26 @@
 <span class="who who-a">Agent</span>
 <div class="say">
 <p>配好了：单小区 64T4R 宏站、273 RB、CDL-C、100 MHz，预估 215 MB。</p>
-<p><strong>先对齐两件事，这比参数重要：</strong></p>
+<p><strong>第 1 轮 · 实验设计</strong>——先把这两件事定下来，参数配错重跑就行，实验设计错了整个结论作废。</p>
 <div class="sub-q"><strong>① 你的方法要跟什么比？</strong><br>
 <span class="why">没有基线的结果没法解读——"NMSE 达到 −18 dB"本身不说明问题，关键是比现有方案好还是差。</span>
 <ol style="margin:6px 0; font-size:14px;">
-<li>3GPP Type I 码本 <span class="why">—— 最常见的基线，几乎所有 CSI 工作都会比它</span></li>
-<li>3GPP Type II / eType II 码本 <span class="why">—— 更强：精度高但反馈开销大，常用来证明"省了开销还不掉精度"</span></li>
+<li>3GPP Type I 或 Type II 码本 <span class="why">—— 最常见的基线，几乎所有 CSI 工作都会比它</span> <strong>← 推荐</strong></li>
 <li>理想信道的 SVD 预编码 <span class="why">—— 理论天花板，看你离上界差多少</span></li>
-<li>不压缩的全反馈 <span class="why">—— 看压缩到底省了多少比特</span></li>
 <li>某篇已发表方法 <span class="why">—— 告诉我哪篇，我尽量对齐它的实验设置</span></li>
-<li>还没定，先看可行性 <span class="why">—— 那就先跑一组基准数据</span></li>
+<li>还没定，先看可行性 <span class="why">—— 先跑一组基准数据</span></li>
 </ol>
-<span class="why">选一个，或者直接说你的想法。</span></div>
+<span class="why">或者你直接说。</span></div>
 <div class="sub-q"><strong>② 用什么指标判断好坏？</strong><br>
 <span class="why">指标决定要留哪些量，事后补往往要重跑。</span>
 <ol style="margin:6px 0; font-size:14px;">
-<li>NMSE / 余弦相似度 <span class="why">—— 最直接，只需要信道矩阵</span></li>
-<li>频谱效率或吞吐损失 <span class="why">—— 更贴近系统收益，需额外留预编码矩阵和 SINR</span></li>
-<li>波束选对的概率 <span class="why">—— 需要每条径的角度，必须用 CDL</span></li>
-<li>压缩率 vs 性能曲线 <span class="why">—— 要扫多个压缩比，数据量按扫描点翻倍</span></li>
+<li>重建精度类：NMSE / 余弦相似度 <span class="why">—— 最直接，只需要信道矩阵</span> <strong>← 推荐</strong></li>
+<li>系统收益类：频谱效率或吞吐损失 <span class="why">—— 更贴近实际价值，需额外留预编码矩阵和 SINR</span></li>
+<li>任务专属：波束命中率 / 定位误差 / BLER <span class="why">—— 波束命中率必须用 CDL</span></li>
 <li>还没想好 <span class="why">—— 那我按任务类型把常用量都留上</span></li>
 </ol>
-<span class="why">选一个，或者直接说。</span></div>
+<span class="why">或者你直接说。</span></div>
+<p class="why" style="margin-top:10px;">（这一轮只问 2 个。参数层留到下一轮——一次抛八个问题，用户会直接说"你看着办"。）</p>
 <p><strong>然后三个参数会影响结论：</strong>信道模型 CDL-C（非视距基准）· 信噪比范围（默认不限）· 样本数 200（建议先跑 20 个验证流程）</p>
 <p><strong>另外建议跑两组对比，否则结论站不住：</strong></p>
 <div class="sub-q"><strong>CDL-A vs CDL-C</strong> —— 都是非视距但散射丰富度差很多，能看出方法是否敏感<br>
@@ -237,12 +235,31 @@
 
 <div class="turn">
 <span class="who who-u">你</span>
-<div class="say">跟 Type II 码本比，看 NMSE 和频谱效率损失。按你说的对比组跑。</div>
+<div class="say">跟 Type II 码本比，看 NMSE 和频谱效率损失。</div>
 </div>
 
 <div class="turn">
 <span class="who who-a">Agent</span>
-<div class="say">四组数据都好了，计划书已存档。</div>
+<div class="say">
+<p>记下了。<strong>第 2 轮 · 关键参数</strong>——这两个一改结论就变：</p>
+<div class="sub-q"><strong>① 信道模型？</strong>
+CDL-C 非视距城区基准 <strong>← 推荐</strong> ｜ CDL-A 强散射（可与 C 对照）｜
+CDL-D 视距（注意：视距与否由几何判定，选它不等于得到视距信道）｜ TDL-C 无角度</div>
+<div class="sub-q"><strong>② 要不要限定信噪比范围？</strong>
+不限定 <strong>← 推荐</strong>（自然分布最快）｜ 只看边缘 −5~5 dB ｜ 只看近点 25~45 dB</div>
+<p>另外建议跑两组对比，否则结论站不住：<strong>CDL-A vs CDL-C</strong>（散射丰富度）、
+<strong>站间距 200m vs 800m</strong>（真正改变视距比例的是几何）。</p>
+</div>
+</div>
+
+<div class="turn">
+<span class="who who-u">你</span>
+<div class="say">都用推荐的，按你说的对比组跑。</div>
+</div>
+
+<div class="turn">
+<span class="who who-a">Agent</span>
+<div class="say">（`has_more_rounds` 已为 false，停止提问）四组数据都好了，计划书已存档。</div>
 </div>
 
 <div class="measured">
