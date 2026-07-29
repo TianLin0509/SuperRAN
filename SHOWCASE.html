@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>superwireless — 给 Agent 用的无线仿真信道供应站</title>
+<style>
+  :root{
+    --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
+    --border:#d2d2d7; --accent:#0071e3;
+    --success:#34c759; --warning:#ff9f0a; --danger:#ff3b30;
+    --code-bg:#1d1d1f; --code-ink:#f5f5f7;
+    --tint-blue:#eef5fd; --tint-blue-ink:#0055b3;
+    --tint-green:#eef9f0; --tint-green-ink:#1a7a34;
+    --tint-amber:#fdf5e8; --tint-amber-ink:#8a5a00;
+    --tint-red:#fdeeed; --tint-red-ink:#a32620;
+    --tint-grey:#f2f2f4; --tint-grey-ink:#4a4a4e;
+    --tint-purple:#f3f0fb; --tint-purple-ink:#5a3ec8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#1d1d1f; --card:#2c2c2e; --ink:#f5f5f7; --ink-soft:#aeaeb2;
+      --border:#38383a; --accent:#0a84ff;
+      --success:#30d158; --warning:#ffd60a; --danger:#ff453a;
+      --tint-blue:#12263c; --tint-blue-ink:#8ec2ff;
+      --tint-green:#14301c; --tint-green-ink:#7ee096;
+      --tint-amber:#33280c; --tint-amber-ink:#ffd77a;
+      --tint-red:#3a1a18; --tint-red-ink:#ff9a92;
+      --tint-grey:#333336; --tint-grey-ink:#c8c8cc;
+      --tint-purple:#241d3d; --tint-purple-ink:#b9a6f5;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; padding:40px 20px; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    font-size:15px; line-height:1.75; overflow-x:hidden;
+  }
+  .wrap{max-width:1100px; margin:0 auto;}
+  h1{font-size:36px; font-weight:700; letter-spacing:-0.03em; margin:0 0 10px;}
+  .tagline{font-size:18px; color:var(--ink-soft); margin:0 0 10px;}
+  .meta{color:var(--ink-soft); font-size:13px; margin:0 0 30px; font-family:"SF Mono",Consolas,monospace;}
+  h2{font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:56px 0 8px; padding-top:22px; border-top:1px solid var(--border);}
+  h3{font-size:17px; font-weight:600; margin:30px 0 8px;}
+  h4{font-size:15px; font-weight:600; margin:20px 0 6px;}
+  p{margin:10px 0;}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:24px; margin:20px 0;}
+  .lead{font-size:16px; color:var(--ink-soft); margin:0 0 18px;}
+
+  .badges{display:flex; gap:8px; flex-wrap:wrap; margin:0 0 28px;}
+  .badge{font-size:12px; font-family:"SF Mono",Consolas,monospace; padding:4px 11px; border-radius:20px;
+         background:var(--tint-grey); color:var(--tint-grey-ink); border:1px solid var(--border);}
+  .badge.ok{background:var(--tint-green); color:var(--tint-green-ink); border-color:transparent;}
+
+  .callout{border-radius:10px; padding:16px 20px; margin:18px 0; border-left:3px solid;}
+  .callout p:first-child{margin-top:0;} .callout p:last-child{margin-bottom:0;}
+  .c-blue{background:var(--tint-blue); color:var(--tint-blue-ink); border-left-color:var(--accent);}
+  .c-green{background:var(--tint-green); color:var(--tint-green-ink); border-left-color:var(--success);}
+  .c-amber{background:var(--tint-amber); color:var(--tint-amber-ink); border-left-color:var(--warning);}
+  .c-red{background:var(--tint-red); color:var(--tint-red-ink); border-left-color:var(--danger);}
+  .c-purple{background:var(--tint-purple); color:var(--tint-purple-ink); border-left-color:#5a3ec8;}
+
+  .plain{background:var(--tint-grey); color:var(--tint-grey-ink); border-radius:10px; padding:14px 18px; margin:14px 0; font-size:14.5px;}
+  .plain::before{content:"白话讲　"; font-weight:600;}
+  .plain p{margin:8px 0;} .plain p:first-of-type{display:inline;}
+
+  .tbl-wrap{overflow-x:auto; margin:18px 0; border:1px solid var(--border); border-radius:10px;}
+  table{border-collapse:collapse; width:100%; font-size:14px; background:var(--card);}
+  th,td{padding:11px 14px; text-align:left; border-bottom:1px solid var(--border); vertical-align:top;}
+  th{background:var(--tint-grey); color:var(--tint-grey-ink); font-weight:600; white-space:nowrap;}
+  tr:last-child td{border-bottom:none;}
+  code{font-family:"SF Mono",Consolas,Monaco,monospace; background:var(--tint-grey); color:var(--tint-grey-ink); padding:1px 6px; border-radius:5px; font-size:13px;}
+  td code,th code{font-size:12.5px;}
+  pre{background:var(--code-bg); color:var(--code-ink); padding:16px 20px; border-radius:10px; overflow-x:auto;
+      font-family:"SF Mono",Consolas,Monaco,monospace; font-size:12.5px; line-height:1.62; margin:14px 0;}
+  pre code{background:none; color:inherit; padding:0; font-size:inherit;}
+  .cm{color:#8e8e93;}
+
+  ul,ol{margin:10px 0; padding-left:24px;} li{margin:6px 0;}
+
+  /* 对话 */
+  .chat{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:0; margin:20px 0; overflow:hidden;}
+  .chat-hd{padding:14px 22px; background:var(--tint-grey); color:var(--tint-grey-ink);
+           border-bottom:1px solid var(--border); font-weight:600; font-size:14px;
+           display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center;}
+  .chat-tag{font-size:11.5px; font-family:"SF Mono",Consolas,monospace; opacity:0.8; font-weight:400;}
+  .chat-bd{padding:20px 22px;}
+  .turn{margin:0 0 16px; display:flex; gap:12px; align-items:flex-start;}
+  .turn:last-child{margin-bottom:0;}
+  .who{flex:0 0 auto; font-size:11.5px; font-weight:700; padding:3px 9px; border-radius:6px; margin-top:2px; white-space:nowrap;}
+  .who-u{background:var(--tint-grey); color:var(--tint-grey-ink);}
+  .who-a{background:var(--tint-blue); color:var(--tint-blue-ink);}
+  .say{flex:1; min-width:0; font-size:14.5px;}
+  .say p{margin:6px 0;} .say p:first-child{margin-top:0;} .say p:last-child{margin-bottom:0;}
+  .sub-q{margin:8px 0 8px 4px; padding-left:12px; border-left:2px solid var(--border);}
+  .sub-q .why{color:var(--ink-soft); font-size:13.5px;}
+  .kw{display:inline-block; background:rgba(127,127,127,0.16); border-radius:5px; padding:1px 7px;
+      margin:2px 3px 2px 0; font-size:12px; font-family:"SF Mono",Consolas,monospace;}
+  .measured{background:var(--tint-green); color:var(--tint-green-ink); border-radius:8px;
+            padding:12px 16px; margin:14px 0 0; font-size:13.5px;}
+  .measured::before{content:"实测　"; font-weight:700; font-family:inherit;}
+  .measured table{background:transparent; font-size:13px; margin:8px 0 0;}
+  .measured th,.measured td{border-bottom-color:rgba(127,127,127,0.25); padding:6px 10px;}
+  .measured th{background:transparent; color:inherit; opacity:0.85;}
+
+  .pill{display:inline-block; font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:20px; white-space:nowrap;}
+  .p-ok{background:var(--tint-green); color:var(--tint-green-ink);}
+  .p-no{background:var(--tint-red); color:var(--tint-red-ink);}
+  .p-mid{background:var(--tint-amber); color:var(--tint-amber-ink);}
+  .p-l0{background:var(--tint-green); color:var(--tint-green-ink);}
+  .p-l1{background:var(--tint-blue); color:var(--tint-blue-ink);}
+  .p-l2{background:var(--tint-purple); color:var(--tint-purple-ink);}
+  .p-l3{background:var(--tint-amber); color:var(--tint-amber-ink);}
+
+  .grid2{display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:16px; margin:18px 0;}
+  .mini{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:18px;}
+  .mini h4{margin:0 0 8px; font-size:15px;}
+  .mini p{margin:6px 0; font-size:14px; color:var(--ink-soft);}
+
+  .flow{display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin:18px 0; font-size:13.5px;}
+  .flow-box{background:var(--tint-grey); color:var(--tint-grey-ink); border-radius:8px; padding:9px 13px; font-family:"SF Mono",Consolas,monospace;}
+  .flow-box.hi{background:var(--tint-purple); color:var(--tint-purple-ink); font-weight:600;}
+  .flow-arr{color:var(--ink-soft); font-weight:700;}
+
+  .layer{border:1px solid var(--border); border-radius:12px; margin:14px 0; overflow:hidden;}
+  .layer-hd{padding:12px 20px; font-weight:700; font-size:15px; display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:baseline;}
+  .layer-bd{padding:16px 20px; background:var(--card); font-size:14.5px;}
+  .layer-bd p{margin:6px 0;}
+  .l0 .layer-hd{background:var(--tint-green); color:var(--tint-green-ink);}
+  .l1 .layer-hd{background:var(--tint-blue); color:var(--tint-blue-ink);}
+  .l2 .layer-hd{background:var(--tint-purple); color:var(--tint-purple-ink);}
+  .l3 .layer-hd{background:var(--tint-amber); color:var(--tint-amber-ink);}
+  .layer-tag{font-size:12px; font-weight:600; font-family:"SF Mono",Consolas,monospace; opacity:0.85;}
+
+  .src{font-family:"SF Mono",Consolas,monospace; font-size:12px; color:var(--ink-soft);}
+  .q{font-size:14px; color:var(--ink-soft); margin:14px 0 0; padding-left:14px; border-left:2px solid var(--border);}
+  footer{margin-top:64px; padding-top:24px; border-top:1px solid var(--border); color:var(--ink-soft); font-size:13px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>superwireless</h1>
+<p class="tagline">给 Agent 用的无线仿真信道供应站</p>
+<p class="meta">本页所有数字均来自真实运行，非示意 · 2026-07-29</p>
+
+<div class="badges">
+  <span class="badge ok">测试 84 项全通过</span>
+  <span class="badge ok">Claude Code + Codex 通用</span>
+  <span class="badge">统计信道 0.2 秒/样本</span>
+  <span class="badge">射线追踪 10 个城市</span>
+  <span class="badge">11 类仿真任务</span>
+  <span class="badge">MIT</span>
+</div>
+
+<div class="card">
+<p class="lead" style="margin-bottom:14px;">以前每验证一个无线通信 idea，都要从零搭一遍信道仿真——参数怎么配、数据怎么存、PDP/PMI 怎么算，每个人写得都不一样，结果无法横向对比。</p>
+<p style="margin:0;"><strong>现在一句话就能拿到数据</strong>，而且拿到的是<strong>物理量</strong>，不是别人裁剪过的训练特征。</p>
+</div>
+
+<div class="flow">
+<span class="flow-box">你说想验证什么</span><span class="flow-arr">→</span>
+<span class="flow-box hi">Agent 问 3~6 件关键的事</span><span class="flow-arr">→</span>
+<span class="flow-box">落一份计划书</span><span class="flow-arr">→</span>
+<span class="flow-box hi">生成 + 给取货代码</span>
+</div>
+
+<h2>一、四条设计铁律</h2>
+
+<div class="grid2">
+<div class="mini">
+<h4>① 不传数据，传取货代码</h4>
+<p>单个信道样本几百 KB，序列化成 JSON 会膨胀到十几 MB——进不了任何模型的上下文。所以 MCP 只回句柄、统计摘要，和一段能直接跑的 Python。</p>
+</div>
+<div class="mini">
+<h4>② 给物理量，不给训练特征</h4>
+<p>PDP 不归一化、RSRP 不截断、SRS 给完整协方差和全部特征值、PMI 给码本索引而非嵌入向量。绕开为表征学习裁剪过的那条路。</p>
+</div>
+<div class="mini">
+<h4>③ 生成与取货解耦</h4>
+<p>测量量都是从信道现算的。半小时后想起还要 PMI？重新取货，<strong>实测 1 毫秒</strong>，不重跑仿真。</p>
+</div>
+<div class="mini">
+<h4>④ 先问实验设计，再问参数</h4>
+<p>参数配错重跑就行，实验设计错了整个结论作废。所以先问"跟什么比、用什么指标"，再问信道模型和天线数。</p>
+</div>
+</div>
+
+<h2>二、实测场景</h2>
+<p class="lead">以下六个场景全部真实运行，对话是按 MCP 的实际返回值还原的，数字直接来自运行输出。</p>
+
+<!-- 场景 1 -->
+<div class="chat">
+<div class="chat-hd"><span>场景 1 · CSI 压缩验证</span><span class="chat-tag">展示：实验设计层 + 对比组建议</span></div>
+<div class="chat-bd">
+
+<div class="turn">
+<span class="who who-u">你</span>
+<div class="say">帮我验证一个 CSI 压缩的想法，先弄一批单小区 64T4R 的信道数据。</div>
+</div>
+
+<div class="turn">
+<span class="who who-a">Agent</span>
+<div class="say">
+<p>配好了：单小区 64T4R 宏站、273 RB、CDL-C、100 MHz，预估 215 MB。</p>
+<p><strong>先对齐两件事，这比参数重要：</strong></p>
+<div class="sub-q"><strong>① 你的方法要跟什么比？</strong><br>
+<span class="why">没有基线的结果没法解读——"NMSE 达到 −18 dB"本身不说明问题，关键是比现有方案好还是差。<br>
+参考：3GPP Type I / Type II 码本 · 理想信道 SVD 上界 · 已发表方法 · 不压缩的全反馈</span></div>
+<div class="sub-q"><strong>② 用什么指标判断好坏？</strong><br>
+<span class="why">指标决定要留哪些量。只看 NMSE 不需要 PMI，但要算频谱效率损失就得同时留预编码矩阵和 SINR，事后补往往要重跑。</span></div>
+<p><strong>然后三个参数会影响结论：</strong>信道模型 CDL-C（非视距基准）· 信噪比范围（默认不限）· 样本数 200（建议先跑 20 个验证流程）</p>
+<p><strong>另外建议跑两组对比，否则结论站不住：</strong></p>
+<div class="sub-q"><strong>CDL-A vs CDL-C</strong> —— 都是非视距但散射丰富度差很多，能看出方法是否敏感<br>
+<strong>站间距 200 m vs 800 m</strong> —— 真正改变视距比例的是几何，不是选哪个剖面</div>
+<p><strong>还能调：</strong>
+<span class="kw">传播场景</span><span class="kw">移动速度</span><span class="kw">信道估计方式</span><span class="kw">导频类型</span><span class="kw">上下行</span><span class="kw">TDD配比</span><span class="kw">站点数</span><span class="kw">撒点方式</span><span class="kw">邻区负载</span><span class="kw">连续时隙数</span><span class="kw">随机种子</span>…共 20 项</p>
+<p>都用默认吗？</p>
+</div>
+</div>
+
+<div class="turn">
+<span class="who who-u">你</span>
+<div class="say">跟 Type II 码本比，看 NMSE 和频谱效率损失。按你说的对比组跑。</div>
+</div>
+
+<div class="turn">
+<span class="who who-a">Agent</span>
+<div class="say">四组数据都好了，计划书已存档。</div>
+</div>
+
+<div class="measured">
+<table>
+<thead><tr><th>数据组</th><th>耗时</th><th>SINR 中位</th><th>能量集中度</th><th>条件数</th><th>视距比例</th></tr></thead>
+<tbody>
+<tr><td>CDL-A（强散射）</td><td>5.0 s</td><td>26.2 dB</td><td><strong>0.311</strong></td><td>13.4</td><td>0.167</td></tr>
+<tr><td>CDL-C（城区基准）</td><td>1.2 s</td><td>26.2 dB</td><td><strong>0.807</strong></td><td>38.2</td><td>0.167</td></tr>
+<tr><td>站间距 200 m</td><td>1.2 s</td><td>45.6 dB</td><td>0.809</td><td>61.3</td><td><strong>0.458</strong></td></tr>
+<tr><td>站间距 800 m</td><td>1.2 s</td><td>13.3 dB</td><td>0.807</td><td>55.6</td><td><strong>0.125</strong></td></tr>
+</tbody>
+</table>
+<p style="margin:10px 0 0;">CDL-A 的能量集中度只有 CDL-C 的四成——方法对散射丰富度是否敏感，一测便知。视距比例则确实只能靠站间距拉开（0.458 vs 0.125）。</p>
+</div>
+
+<div class="callout c-amber" style="margin-bottom:0;">
+<p><strong>这里有个坑，是实测中发现的。</strong>直觉上"想对比视距/非视距就跑 CDL-C 和 CDL-D"，但实测两组数据<strong>逐比特相同</strong>。</p>
+<p>根因：仿真器按几何逐链路判定视距与否，如果你选的剖面类别和判定不符，它会<strong>自动替换成同类别的默认剖面</strong>（非视距→CDL-C，视距→CDL-D）。所以在非视距链路上选 CDL-D，实际用的还是 CDL-C。</p>
+<p>这个行为文档里没写。MCP 现在会在提问时直接讲明，并把对比组建议改成"改站间距"——那才是真正能改变视距比例的旋钮。</p>
+</div>
+
+</div>
+</div>
+
+<!-- 场景 2 -->
+<div class="chat">
+<div class="chat-hd"><span>场景 2 · 拦住一个不会报错的错误</span><span class="chat-tag">展示：物理合理性体检</span></div>
+<div class="chat-bd">
+
+<div class="turn">
+<span class="who who-u">你</span>
+<div class="say">我想做基于到达角的波束搜索算法，用 TDL-C 信道。</div>
+</div>
+
+<div class="turn">
+<span class="who who-a">Agent</span>
+<div class="say">
+<p>这个组合我得先拦一下 —— MCP 返回 <code>status: blocked</code>：</p>
+<div class="callout c-red" style="margin:8px 0;">
+<p>波束管理 / 波束搜索依赖每条径的角度信息，但 <strong>TDL 模型不含角度</strong>。算法会跑出结果，但那些结果没有物理意义，<strong>而且不会报错</strong>。</p>
+<p style="margin-top:8px;"><strong>建议：</strong>改用 CDL-A~E 中的任一个（默认 CDL-C）。</p>
+</div>
+<p>换 CDL-C 吗？</p>
+</div>
+</div>
+
+<div class="plain" style="margin-bottom:0;">
+<p>这类错误最难查：程序不崩、数值量级正常、图也画得出来，但结论是假的。MCP 拦的就是这种<strong>"跑得出结果但结果没意义"</strong>的组合。目前有四条这样的护栏。</p>
+</div>
+
+</div>
+</div>
+
+<!-- 场景 3 -->
+<div class="chat">
+<div class="chat-hd"><span>场景 3 · 多小区干扰协调</span><span class="chat-tag">展示：干扰信道 + 撒点</span></div>
+<div class="chat-bd">
+
+<div class="turn">
+<span class="who who-u">你</span>
+<div class="say">多小区场景，验证一个干扰协调算法，用户按热点分布撒。</div>
+</div>
+
+<div class="turn">
+<span class="who who-a">Agent</span>
+<div class="say">
+<p>识别为干扰协调任务，自动选了 7 站 21 小区，撒点设成热点，邻区满载。</p>
+<p>另外<strong>替你打开了干扰小区信道的保存开关</strong>——默认是关的，干扰只体现在 SINR 里，但你要做协调算法必须拿到干扰信道矩阵本身。代价是数据量按干扰小区数翻倍。</p>
+</div>
+</div>
+
+<div class="measured">
+<table>
+<thead><tr><th>产出</th><th>形状</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>服务小区信道</td><td><code>(6, 1, 51, 4, 4)</code></td><td>N × T × RB × BS × UE</td></tr>
+<tr><td>干扰小区信道</td><td><code>(6, 3, 1, 51, 4, 4)</code></td><td>多一维 K−1 = 3 个干扰小区</td></tr>
+<tr><td>每小区 SSB RSRP</td><td><code>(6, 21)</code></td><td>21 个小区全测到</td></tr>
+</tbody>
+</table>
+<p style="margin:10px 0 0;">生成 2.2 秒。SINR 分布：中位 34.2 dB，5% 分位 26.6 dB，95% 分位 40.7 dB。</p>
+</div>
+
+</div>
+</div>
+
+<!-- 场景 4 -->
+<div class="chat">
+<div class="chat-hd"><span>场景 4 · 换到真实城市地图复核</span><span class="chat-tag">展示：射线追踪 + 正确性护栏</span></div>
+<div class="chat-bd">
+
+<div class="turn">
+<span class="who who-u">你</span>
+<div class="say">在深圳福田的真实地图上复核一下覆盖。</div>
+</div>
+
+<div class="turn">
+<span class="who who-a">Agent</span>
+<div class="say">
+<p>切到射线追踪，6 站 18 小区。首次使用这个场景，自动准备了一下资产（仓库里的 PLY 是 VTK 导出的，头部字段 Mitsuba 不认，复制到缓存后清理掉，原文件不动）。</p>
+<p><strong>取货代码和统计信道完全一样</strong>，你的算法代码一行不用改。</p>
+</div>
+</div>
+
+<div class="measured">
+<p>1.8 秒/样本 · 模式 <code>sionna_rt</code>（真射线追踪，非 TDL 回退）</p>
+<table>
+<thead><tr><th>量</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td>SINR</td><td>中位 7.35 dB（密集高楼下的真实边缘场景）</td></tr>
+<tr><td>路损</td><td>中位 77.2 dB</td></tr>
+<tr><td>视距比例</td><td>0（高楼遮挡，全部非视距）</td></tr>
+<tr><td>PDP RMS 时延扩展</td><td>223.9 ns</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="turn" style="margin-top:16px;">
+<span class="who who-u">你</span>
+<div class="say">把每条径的到达角也给我。</div>
+</div>
+
+<div class="turn">
+<span class="who who-a">Agent</span>
+<div class="say">
+<p>这个拿不到，MCP 直接报错了：</p>
+<div class="callout c-red" style="margin:8px 0;">
+<p>数据集由射线追踪生成，多径结构取决于真实建筑几何，<strong>不能用 CDL/TDL 的标准剖面代替</strong>——那样得到的角度与本数据无关。</p>
+</div>
+<p>需要逐径角度的话，改用 CDL 模型重新生成。这批数据的信道矩阵、PDP、协方差、PMI、几何量都不受影响，照常可用。</p>
+</div>
+</div>
+
+<div class="callout c-blue" style="margin-bottom:0;">
+<p><strong>为什么这条护栏重要。</strong>如果不拦，<code>ds.paths()</code> 会照常返回一组 CDL 剖面的理论角度——数值完全正常，但和这批射线追踪数据毫无关系。宁可报错，不给错误答案。</p>
+</div>
+
+</div>
+</div>
+
+<!-- 场景 5 -->
+<div class="chat">
+<div class="chat-hd"><span>场景 5 · 改主意零成本</span><span class="chat-tag">展示：生成与取货解耦</span></div>
+<div class="chat-bd">
+
+<div class="turn">
+<span class="who who-u">你</span>
+<div class="say">先只要信道。</div>
+</div>
+<div class="turn">
+<span class="who who-a">Agent</span>
+<div class="say">给你取货代码，只含信道矩阵。</div>
+</div>
+
+<div class="turn">
+<span class="who who-u">你</span>
+<div class="say">（半小时后）我还想看 PMI 和 SRS RSRP，再加上时延功率谱。</div>
+</div>
+<div class="turn">
+<span class="who who-a">Agent</span>
+<div class="say">重新取货即可，<strong>不用重跑仿真</strong>。</div>
+</div>
+
+<div class="measured">
+<p>第一次点单 → <code>['channel']</code>　　改主意后 → <code>['channel', 'srs', 'pmi', 'rsrp', 'pdp']</code>　　耗时 <strong>1 毫秒</strong></p>
+<p style="margin-top:8px;">自然语言点单直接生效，不必记参数名。</p>
+</div>
+
+<pre><code><span class="cm"># 取货代码节选（可直接运行）</span>
+from superwireless import load
+
+ds = load("ds_af700fef")
+
+H      = ds.h_true      <span class="cm"># [N, T, RB, BS_ant, UE_ant] complex64，理想信道</span>
+H_est  = ds.h_est       <span class="cm"># 同形，带导频与噪声的估计信道</span>
+
+p = ds.pdp(0)           <span class="cm"># 未归一化功率 + 真实时延轴</span>
+w = ds.pmi(0)           <span class="cm"># 38.214 Type I 码本索引 + 预编码矩阵</span>
+f = ds.srs(0)           <span class="cm"># 完整协方差 + 全部特征值</span>
+g = ds.geometry         <span class="cm"># 路损、视距判定、多普勒、UE 位置</span></code></pre>
+
+</div>
+</div>
+
+<!-- 场景 6 -->
+<div class="chat">
+<div class="chat-hd"><span>场景 6 · 换一套天线硬件</span><span class="chat-tag">展示：扩展性（下一节详述）</span></div>
+<div class="chat-bd">
+
+<div class="turn">
+<span class="who who-u">你</span>
+<div class="say">我们的 AAU 是 1 驱 3 的：64 个 RF 口，每口驱动 3 个垂直相邻阵子，共 192 个物理阵子。能仿这个吗？</div>
+</div>
+
+<div class="turn">
+<span class="who who-a">Agent</span>
+<div class="say">可以，把阵列配置传下去就行，<strong>superwireless 侧不需要任何改动</strong>。</div>
+</div>
+
+<div class="measured">
+<table>
+<thead><tr><th></th><th>基线 legacy_64</th><th>1驱3 AAU</th></tr></thead>
+<tbody>
+<tr><td>阵列模型</td><td><code>legacy_3gpp_64_independent</code></td><td><code>fixed_1to3_vertical_subarray_64T</code></td></tr>
+<tr><td>特征值前三</td><td>51.88 / 6.38 / 1.77</td><td>42.40 / 8.22 / 4.11</td></tr>
+<tr><td>能量集中度</td><td>0.811</td><td><strong>0.662</strong></td></tr>
+</tbody>
+</table>
+<p style="margin:10px 0 0;">1 驱 3 的垂直合并把能量从主特征模分散了出去，物理上合理。信道矩阵确实不同（逐元素比对）。</p>
+</div>
+
+</div>
+</div>
+
+<h2>三、想改信道生成逻辑，要动多少东西？</h2>
+<p class="lead">这是设计时就考虑的问题：末端阵子结构、PMI 权、PDP 权这些迟早要改。结论是<strong>分四层，绝大多数改动落在最外两层，主体不动。</strong></p>
+
+<div class="callout c-purple">
+<p><strong>之所以能做到，是因为四件事彼此独立：</strong>信道<u>怎么生成</u>（ChannelHub）· 测量量<u>怎么算</u>（<code>measure.py</code>）· 该<u>问用户什么</u>（<code>decisions.py</code>）· 有哪些<u>现成场景</u>（<code>presets.yaml</code>）。改其中一个不牵动其余三个。</p>
+</div>
+
+<div class="layer l0">
+<div class="layer-hd"><span>L0 · 零改动 —— 纯配置透传</span><span class="layer-tag">已实测验证</span></div>
+<div class="layer-bd">
+<p><strong>什么情况：</strong>ChannelHub 已经支持的能力，只是没默认开启。</p>
+<p><strong>例子：</strong>1驱3 / 1驱6 子阵结构、每 RF 口的阵子数与间距、馈电幅度相位、固定下倾、天线方向图（波瓣宽度 / 增益 / 交叉极化比）、端口映射顺序、有效子阵 vs 物理阵子建模模式。</p>
+<p><strong>怎么做：</strong>在 <code>overrides</code> 里写进去就行。superwireless 对不认识的键<strong>原样透传</strong>，不做解释也不拦截。</p>
+<p><strong>场景 6 就是这一层</strong>——改动 0 行代码。</p>
+</div>
+</div>
+
+<div class="layer l1">
+<div class="layer-hd"><span>L1 · 改一个 YAML —— 沉淀成预设</span><span class="layer-tag">presets/presets.yaml</span></div>
+<div class="layer-bd">
+<p><strong>什么情况：</strong>L0 那套配置每次都要手写太麻烦，想固化成"我们的标准 AAU"。</p>
+<p><strong>怎么做：</strong>在 <code>presets.yaml</code> 里加一个条目，把整块阵列配置塞进 <code>config</code>。之后用户说"用我们的 AAU 配置"就能命中。</p>
+<p><strong>不碰任何代码。</strong>加射线追踪城市场景也在这一层。</p>
+</div>
+</div>
+
+<div class="layer l2">
+<div class="layer-hd"><span>L2 · 加知识 —— 让 MCP 会问这件事</span><span class="layer-tag">decisions.py</span></div>
+<div class="layer-bd">
+<p><strong>什么情况：</strong>新参数会实质影响结论，希望 MCP <strong>主动问用户</strong>而不是等用户想起来。</p>
+<p><strong>例子：</strong>加一个决策点"末端合并方式（1驱3 / 1驱6 / 独立端口）"，写清楚 <code>why</code>——合并会降低垂直自由度、栅瓣位置随子阵间距变化；再配一条护栏"做垂直维波束赋形时若选了 1驱6 要提醒自由度不足"；还可以加一个对比组"1驱3 vs 独立端口"。</p>
+<p><strong>改动范围：</strong>往三个列表里各加一条（<code>ALL_DECISIONS</code> / <code>TASK_PROFILES</code> / 可选的 <code>_DESIGN</code>）。<strong>纯数据，无逻辑改动</strong>，不影响任何已有任务类型。</p>
+</div>
+</div>
+
+<div class="layer l3">
+<div class="layer-hd"><span>L3 · 加算法 —— 新测量量或改算法</span><span class="layer-tag">measure.py + 三处登记</span></div>
+<div class="layer-bd">
+<p><strong>什么情况：</strong>要新的物理量，或者现有算法要换口径。这是你问的"PMI 权 / PDP 权"落点。</p>
+
+<div class="tbl-wrap" style="margin:12px 0;">
+<table>
+<thead><tr><th>你想改什么</th><th>动哪个函数</th><th>会牵动谁</th></tr></thead>
+<tbody>
+<tr><td>PDP 换算法<span class="src">（加窗、改时延分辨率、按天线分开）</span></td><td><code>power_delay_profile()</code></td><td>只有它。PMI/SRS 不受影响</td></tr>
+<tr><td>PMI 换码本<span class="src">（Type II、eType II、自研码本）</span></td><td><code>type_i_codebook()</code> 旁边加新函数 + <code>pmi_type_i()</code> 加分支</td><td>只有 PMI。PDP/协方差不受影响</td></tr>
+<tr><td>PMI 换搜索准则<span class="src">（容量最大化替代匹配增益）</span></td><td><code>pmi_type_i()</code> 内的度量式</td><td>只有 PMI</td></tr>
+<tr><td>协方差换加权<span class="src">（IIR 滤波、按 RB 分组）</span></td><td><code>spatial_covariance()</code></td><td>只有 SRS 那组量</td></tr>
+<tr><td>加一个全新测量量</td><td>新函数 + 三处登记</td><td>不影响任何已有量</td></tr>
+</tbody>
+</table>
+</div>
+
+<p><strong>加新测量量的三处登记：</strong>目录 <code>MEASUREMENT_CATALOG</code>（让用户能查到）· 自然语言别名 <code>_ALIASES</code>（让用户能点单）· 取货代码片段 <code>deliver._BLOCKS</code> + <code>loader</code> 的一个方法。</p>
+<p class="q">这一层是唯一需要真写算法的地方，但每个测量量是独立函数，改一个不会波及其他。</p>
+</div>
+</div>
+
+<h3>什么情况下必须动 ChannelHub</h3>
+<div class="callout c-amber">
+<p>只有一种：<strong>你要的物理效应 ChannelHub 根本没建模</strong>。比如末端合并要引入互耦、或者要按实测 Jones 方向图（而非参数化方向图）建模。</p>
+<p>这时改的是 ChannelHub 的信道生成内核，<strong>superwireless 侧通常仍是零改动</strong>——它只负责把配置传下去、把结果接出来。除非新增了需要单独暴露的物理量，那就顺带做一次 L3。</p>
+</div>
+
+<h3>已经踩过的一个坑，值得记住</h3>
+<div class="callout c-red">
+<p>做这次扩展性验证时发现：superwireless 的抽象参数 <code>bs_antenna</code>（当时用来表示 "64T4R" 这种简写）<strong>和 ChannelHub 的 <code>bs_antenna</code> 配置块重名了</strong>——后者正是 1驱3 子阵的落点。结果阵列配置被静默吞掉，不报错。</p>
+<p>已改名为 <code>antenna_preset</code>，并保留字符串写法的向后兼容。<strong>教训：抽象层的参数名不能和被封装层撞车</strong>，这类冲突只有真去传一次配置才发现得了。</p>
+</div>
+
+<h2>四、能力一览</h2>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>测量量</th><th>内容</th><th>与训练特征的区别</th></tr></thead>
+<tbody>
+<tr><td><code>channel</code></td><td>频域信道矩阵，理想 + 估计两版</td><td>—</td></tr>
+<tr><td><code>pdp</code></td><td>时延功率谱 + 真实时延轴 + RMS 时延扩展</td><td><strong>不做峰值归一化</strong></td></tr>
+<tr><td><code>paths</code></td><td>每条径的时延、功率、角度</td><td>CDL 才有角度；射线追踪数据会拒绝</td></tr>
+<tr><td><code>srs</code></td><td>完整空间协方差、全部特征值、波束域 RSRP</td><td><strong>不只取前 4 个特征向量</strong></td></tr>
+<tr><td><code>pmi</code></td><td>38.214 Type I 码本索引 + 预编码矩阵 + 秩</td><td><strong>码本索引，不是嵌入向量</strong></td></tr>
+<tr><td><code>rsrp</code></td><td>每天线信道增益</td><td><strong>不做区间截断</strong></td></tr>
+<tr><td><code>sinr</code> / <code>capacity</code></td><td>链路标量 / MIMO 容量与条件数</td><td>—</td></tr>
+<tr><td><code>geometry</code></td><td>路损、阴影、3D 距离、视距判定、多普勒、位置</td><td>原本在存盘时被丢弃</td></tr>
+<tr><td><code>topology</code></td><td>多小区 SSB 测量与干扰小区信道</td><td>—</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>支持的任务类型</h3>
+<p>CSI 压缩/反馈 · 波束管理 · 信道估计 · 预编码与码本 · 定位与时延估计 · 干扰协调与调度 · 移动性切换 · 上下行互易性与 SRS 老化 · 信道预测 · 链路自适应 · 信道表征学习</p>
+<p class="q">每类都有自己的实验设计问题、该问的参数、建议对比组和常见陷阱。</p>
+
+<h3>场景</h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>引擎</th><th>速度</th><th>场景</th></tr></thead>
+<tbody>
+<tr><td><strong>统计信道</strong><br><span class="src">3GPP 38.901 CDL/TDL，纯 numpy</span></td><td>约 0.2 秒/样本</td><td>单小区 64T4R · 单小区 4T4R 最小配置 · 7 站 21 扇区 · 19 站 57 扇区（38.901 Case 1）· 室内工厂 InF</td></tr>
+<tr><td><strong>射线追踪</strong><br><span class="src">Sionna RT + Mitsuba</span></td><td>约 2~6 秒/样本</td><td>内置：慕尼黑 · 巴黎凯旋门 · 佛罗伦萨 · 旧金山<br>真实 OSM：北京中关村 · 上海陆家嘴 · 深圳福田 · 广州天河 · 杭州钱江 · 重庆解放碑</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>五、快速开始</h2>
+
+<pre><code><span class="cm"># 1. 拿到物理内核和本项目</span>
+git clone https://github.com/wangxz0803-lab/ChannelHub_main
+git clone &lt;本仓库&gt; && cd superwireless && pip install -e .
+
+<span class="cm"># 2. 可选：射线追踪（约 300 MB，实测不会降级 numpy/scipy/torch）</span>
+pip install sionna-rt
+
+<span class="cm"># 3. 注册到 Agent</span>
+claude mcp add superwireless -- python /path/to/superwireless/scripts/mcp_server.py
+codex  mcp add superwireless -- python /path/to/superwireless/scripts/mcp_server.py
+
+<span class="cm"># 4. 可选：装 skill（完整工作流编排），两个 Agent 用同一份 SKILL.md</span>
+cp -r skills/channel-sim ~/.claude/skills/
+cp -r skills/channel-sim ~/.codex/skills/</code></pre>
+
+<p>ChannelHub 会自动在本项目同级/上级目录查找，放在别处就设 <code>SUPERWIRELESS_CHANNELHUB</code>。不装射线追踪也能用，<code>sw_capabilities</code> 会如实报告哪些引擎可用、不可用的缺什么。</p>
+
+<h3>九个 MCP 工具</h3>
+<div class="tbl-wrap">
+<table>
+<tbody>
+<tr><td><code>sw_capabilities</code></td><td>引擎可用性</td><td><code>sw_plan</code></td><td>意图 → 实验设计问题 + 参数提案 + 对比组 + 陷阱</td></tr>
+<tr><td><code>sw_list_presets</code></td><td>场景预设与任务类型</td><td><code>sw_revise</code></td><td>差分修正</td></tr>
+<tr><td><code>sw_list_scenes</code></td><td>射线追踪场景</td><td><code>sw_generate</code></td><td>生成数据集</td></tr>
+<tr><td><code>sw_describe_dataset</code></td><td>维度与分布</td><td><code>sw_deliver</code></td><td>自然语言点单 → 取货代码</td></tr>
+<tr><td><code>sw_list_datasets</code></td><td>已有数据集</td><td colspan="2"></td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>六、已知约束</h2>
+<ul>
+<li><strong>信噪比不能直接设定</strong>。它由路损、发射功率和撒点位置决定。要求特定区间时走拒绝采样，可能很慢或取不到；想整体调整，改发射功率或站间距更有效。</li>
+<li><strong>视距比例不由信道剖面决定</strong>。见场景 1 的说明——靠几何控制。</li>
+<li><strong>射线追踪拿不到逐径几何</strong>。ChannelHub 尚未把 Sionna 的 <code>Paths</code> 对象导出到数据契约，所以射线追踪数据集会拒绝 <code>ds.paths()</code>（而不是返回假角度）。</li>
+<li><strong>QuaDRiGa 未纳入</strong>，它需要 MATLAB/Octave 运行时。</li>
+</ul>
+
+<footer>
+<p>物理计算内核来自 <strong>ChannelHub</strong>，射线追踪基于 <strong>Sionna RT</strong>，工作流设计参考 <strong>superpowers</strong> 的 brainstorm → plan → execute 三段式。</p>
+<p>测试：端到端 35 项 · MCP 全链路 20 项 · 射线追踪与决策层 29 项，共 84 项全通过。本页所有数字均来自真实运行输出。</p>
+<p>MIT License</p>
+</footer>
+
+</div>
+</body>
+</html>

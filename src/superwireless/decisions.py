@@ -1,4 +1,4 @@
-"""决策点知识表：这个任务该和用户对齐哪些事。
+﻿"""决策点知识表：这个任务该和用户对齐哪些事。
 
 这是 superwireless 唯一不可替代的部分。参数转发谁都能写，但"哪几件事
 一改结论就翻盘、为什么、选错会怎样"是无线领域知识。
@@ -193,16 +193,20 @@ _CHANNEL_MODEL = Decision(
     question="信道模型用哪个？",
     default="CDL-C",
     why=(
-        "CDL-C 是密集散射的非视距基准，信道矩阵接近满秩，难度贴近真实城区；"
-        "换成 CDL-D/E（视距，K 因子 13.3/22 dB）信道近似低秩，压缩率、"
-        "波束增益这类指标会明显偏乐观。TDL 系列没有每条径的角度信息，"
-        "凡是依赖角度的算法都不能用它。"
+        "CDL-A/B/C 是非视距剖面，CDL-D/E 是视距剖面（K 因子 13.3/22 dB，"
+        "信道近似低秩）。TDL 系列没有每条径的角度信息，依赖角度的算法不能用它。\n"
+        "**重要**：视距与否由几何按 38.901 的 LOS 概率逐链路判定，"
+        "不是由你选的剖面决定。选的剖面类别和判定结果不符时，仿真器会自动换成"
+        "同类别的默认剖面（非视距→CDL-C，视距→CDL-D）——所以"
+        "「选 CDL-D」不等于「得到视距信道」，在非视距判定下它实际会退成 CDL-C。"
+        "想调视距比例要改场景和站间距（距离近则视距概率高），"
+        "生成后 los_ratio 会报告实际比例。"
     ),
     options=[
         Option("CDL-A", "非视距 · 强散射", "时延与角度扩展都大"),
         Option("CDL-B", "非视距 · 中等散射", ""),
         Option("CDL-C", "非视距 · 城区基准（默认）", "最常用的对比基线"),
-        Option("CDL-D", "视距 · K=13.3 dB", "信道低秩，指标偏乐观"),
+        Option("CDL-D", "视距 · K=13.3 dB", "仅在链路判为视距时生效"),
         Option("CDL-E", "视距 · K=22 dB", "强视距，几乎单径主导"),
         Option("TDL-C", "非视距 · 仅抽头", "无角度信息，不能做波束/定位"),
     ],
@@ -266,7 +270,7 @@ _SPEED = Decision(
 )
 
 _ANTENNA = Decision(
-    key="bs_antenna",
+    key="antenna_preset",
     question="基站天线配置？",
     default="64T4R",
     why=(
@@ -474,11 +478,26 @@ ALL_DECISIONS: dict[str, Decision] = {
 # 任务画像
 # ---------------------------------------------------------------------------
 
-_LOS_NLOS_SWEEP = Sweep(
+_SCATTER_SWEEP = Sweep(
     key="channel_model",
-    values=["CDL-C", "CDL-D"],
-    label="非视距 vs 视距",
-    why="视距下信道近似低秩，很多方法会显得特别好。两者都跑才知道结论是否普遍成立。",
+    values=["CDL-A", "CDL-C"],
+    label="强散射 vs 城区基准",
+    why=(
+        "两者都是非视距剖面但角度/时延扩展差异明显，能看出方法对散射丰富度是否敏感。"
+        "注意别用 CDL-C vs CDL-D 做这个对比——视距与否由几何判定，"
+        "非视距链路上选 CDL-D 会被自动退成 CDL-C，两组数据会完全相同。"
+    ),
+)
+
+_LOS_SWEEP = Sweep(
+    key="isd_m",
+    values=[200.0, 800.0],
+    label="近距（视距多）vs 远距（视距少）",
+    why=(
+        "视距比例是几何决定的，改站间距才能真正改变它——站距近则视距概率高。"
+        "视距下信道近似低秩，很多方法会显得特别好，两种几何都跑结论才站得住。"
+        "生成后看 los_ratio 确认实际比例。"
+    ),
 )
 
 _SPEED_SWEEP = Sweep(
@@ -489,7 +508,7 @@ _SPEED_SWEEP = Sweep(
 )
 
 _ANTENNA_SWEEP = Sweep(
-    key="bs_antenna",
+    key="antenna_preset",
     values=["32T4R", "64T4R"],
     label="不同天线规模",
     why="维度变化会改变压缩率与码本搜索开销，只测一种规模难说方法可扩展。",
@@ -508,8 +527,8 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         label="CSI 压缩 / 反馈",
         keywords=("csi", "压缩", "反馈", "feedback", "compress", "码本量化", "自编码", "csinet"),
         design_keys=("baseline", "metric", "scope"),
-        decision_keys=("channel_model", "bs_antenna", "snr_range_dB", "bandwidth_hz", "num_samples"),
-        sweeps=(_LOS_NLOS_SWEEP, _ANTENNA_SWEEP),
+        decision_keys=("channel_model", "antenna_preset", "snr_range_dB", "bandwidth_hz", "num_samples"),
+        sweeps=(_SCATTER_SWEEP, _LOS_SWEEP, _ANTENNA_SWEEP),
         pitfalls=(
             "只在视距场景验证会高估压缩率——视距信道本身就低秩，压什么都好压。",
             "压缩率要跟反馈开销对齐比较：比 Type II 码本省多少比特，而不是只看重建误差。",
@@ -522,8 +541,8 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         label="波束管理 / 波束搜索",
         keywords=("波束", "beam", "赋形", "beamforming", "波束搜索", "扫描", "码本搜索", "波束跟踪"),
         design_keys=("baseline", "metric"),
-        decision_keys=("channel_model", "bs_antenna", "ue_speed_kmh", "scenario", "num_samples"),
-        sweeps=(_LOS_NLOS_SWEEP, _SPEED_SWEEP),
+        decision_keys=("channel_model", "antenna_preset", "ue_speed_kmh", "scenario", "num_samples"),
+        sweeps=(_SCATTER_SWEEP, _LOS_SWEEP, _SPEED_SWEEP),
         pitfalls=(
             "TDL 模型没有每条径的角度，波束类算法在它上面跑出的结果没有物理意义。",
             "只用视距信道验证波束搜索，会严重高估命中率——非视距下最强径未必对着用户。",
@@ -552,7 +571,7 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         keywords=("定位", "position", "toa", "时延估计", "测距", "localization", "tdoa", "aoa估计"),
         design_keys=("baseline", "metric", "scope"),
         decision_keys=("bandwidth_hz", "channel_model", "scenario", "num_sites", "num_samples"),
-        sweeps=(_LOS_NLOS_SWEEP,),
+        sweeps=(_SCATTER_SWEEP, _LOS_SWEEP),
         pitfalls=(
             "时延分辨率约等于光速除以带宽——100 MHz 只有 3 米，定位精度先被带宽卡死。",
             "非视距下首径未必是直达径，视距比例直接决定定位误差分布，必须报告。",
@@ -566,8 +585,8 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         label="预编码 / 码本设计",
         keywords=("预编码", "precod", "码本", "codebook", "pmi", "svd", "波束成形权", "mu-mimo配对"),
         design_keys=("baseline", "metric"),
-        decision_keys=("channel_model", "bs_antenna", "snr_range_dB", "channel_est_mode", "num_samples"),
-        sweeps=(_LOS_NLOS_SWEEP, _ANTENNA_SWEEP),
+        decision_keys=("channel_model", "antenna_preset", "snr_range_dB", "channel_est_mode", "num_samples"),
+        sweeps=(_SCATTER_SWEEP, _LOS_SWEEP, _ANTENNA_SWEEP),
         pitfalls=(
             "拿理想信道算预编码增益是上界，实际系统用的是估计信道，两者差距可能很大。",
             "码本方案要跟 SVD 理想预编码比，才知道量化损失有多少。",
@@ -624,7 +643,7 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         label="信道预测 / 时序建模",
         keywords=("预测", "predict", "时序", "外推", "extrapolat", "信道跟踪", "lstm", "时间相关"),
         design_keys=("baseline", "metric", "scope"),
-        decision_keys=("num_slots_per_sample", "ue_speed_kmh", "channel_model", "bs_antenna", "num_samples"),
+        decision_keys=("num_slots_per_sample", "ue_speed_kmh", "channel_model", "antenna_preset", "num_samples"),
         sweeps=(_SPEED_SWEEP,),
         pitfalls=(
             "默认每样本只有 1 个时隙，样本之间独立，根本没有时序可预测——必须调大连续时隙数。",
@@ -652,8 +671,8 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         label="信道表征 / 嵌入学习",
         keywords=("表征", "embedding", "charting", "嵌入", "自监督", "对比学习", "mae", "预训练"),
         design_keys=("baseline", "metric", "scope"),
-        decision_keys=("channel_model", "bs_antenna", "scenario", "ue_distribution", "num_samples"),
-        sweeps=(_LOS_NLOS_SWEEP,),
+        decision_keys=("channel_model", "antenna_preset", "scenario", "ue_distribution", "num_samples"),
+        sweeps=(_SCATTER_SWEEP, _LOS_SWEEP),
         pitfalls=(
             "表征学习需要的样本量比常规仿真大一个量级，先估算好数据体积。",
             "如果要跟位置对齐评估（如信道图），必须保留 UE 坐标——geometry 里有。",
@@ -667,7 +686,7 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         label="通用信道仿真",
         keywords=(),
         design_keys=("metric",),
-        decision_keys=("scenario", "channel_model", "bs_antenna", "snr_range_dB", "num_samples"),
+        decision_keys=("scenario", "channel_model", "antenna_preset", "snr_range_dB", "num_samples"),
         sweeps=(),
         pitfalls=(),
         config_hints={},
@@ -712,7 +731,7 @@ def also_configurable(profile: TaskProfile) -> list[str]:
     """
     asked = set(profile.decision_keys)
     labels = {
-        "scenario": "传播场景", "channel_model": "信道模型", "bs_antenna": "天线配置",
+        "scenario": "传播场景", "channel_model": "信道模型", "antenna_preset": "天线配置",
         "snr_range_dB": "信噪比范围", "bandwidth_hz": "带宽", "ue_speed_kmh": "移动速度",
         "channel_est_mode": "信道估计方式", "pilot_type": "导频类型", "link": "上下行",
         "tdd_pattern": "TDD配比", "num_sites": "站点数", "ue_distribution": "撒点方式",

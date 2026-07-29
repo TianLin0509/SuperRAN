@@ -32,7 +32,14 @@ _ANTENNA_PRESETS: dict[str, dict[str, int]] = {
 
 # ChannelHub 不认识、由 superwireless 自己消化的键
 # scene 会展开成 scenario / osm_path / 站点布局（见 scenes.resolve_scene_config）
-_SUPERWIRELESS_ONLY = {"bs_antenna", "snr_range_dB", "measurements_wanted", "scene", "scene_site_preset"}
+#
+# 注意 antenna_preset 这个名字：它是"64T4R"这类简写标签，展开成 num_bs_tx_ant 等。
+# **不能叫 bs_antenna** —— ChannelHub 自己有一个 bs_antenna 配置块（嵌套 dict，
+# 含 port_order / element_pattern / fixed_vertical_subarray），是描述 1驱3 子阵这类
+# 阵列细节用的。两者重名会让阵列配置被静默吞掉。
+_SUPERWIRELESS_ONLY = {
+    "antenna_preset", "snr_range_dB", "measurements_wanted", "scene", "scene_site_preset",
+}
 
 
 def antenna_label(params: dict[str, Any]) -> str | None:
@@ -50,17 +57,27 @@ def antenna_label(params: dict[str, Any]) -> str | None:
 def translate(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """拆成 (ChannelHub 实参, superwireless 自用参数)。
 
-    bs_antenna 这类抽象参数最后展开，因为它要覆盖具体的 num_bs_* ——
+    antenna_preset 这类抽象参数最后展开，因为它要覆盖具体的 num_bs_* ——
     能出现在 params 里就说明是被明确选定的阵型。
+
+    ChannelHub 自己的 ``bs_antenna``（嵌套 dict：port_order / element_pattern /
+    fixed_vertical_subarray 等，1驱3 子阵就配在这里）原样透传，不做任何解释。
+    为兼容早期写法，字符串形式的 bs_antenna 仍按 antenna_preset 处理。
     """
     ch: dict[str, Any] = {}
     own: dict[str, Any] = {}
     antenna: str | None = None
 
     for k, v in params.items():
-        if k == "bs_antenna":
+        if k == "antenna_preset":
             antenna = str(v)
-            own["bs_antenna"] = v
+            own[k] = v
+        elif k == "bs_antenna":
+            if isinstance(v, str):  # 早期写法：bs_antenna="64T4R"
+                antenna = v
+                own["antenna_preset"] = v
+            else:  # ChannelHub 的阵列配置块，原样透传
+                ch[k] = v
         elif k in _SUPERWIRELESS_ONLY:
             own[k] = v
         else:
@@ -217,7 +234,7 @@ def create_draft(
     # preset 若已给具体天线数，就按它反推标签，不要让默认标签把 preset 冲掉
     inferred = antenna_label(params)
     if inferred:
-        params["bs_antenna"] = inferred
+        params["antenna_preset"] = inferred
 
     # 决策点的默认值补进来（preset 已给的不覆盖）
     for d in dec.decisions_for(profile, limit=99):
