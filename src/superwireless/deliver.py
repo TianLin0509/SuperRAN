@@ -104,6 +104,34 @@ if ds.h_interferers is not None:
 else:
     print("单小区场景，无干扰信道")
 ''',
+    "linkperf": '''
+# ── 链路性能：预编码 → 逐层 SINR → 谱效 ────────────────────
+r = ds.link(0, method="svd", receiver="mmse")
+print("谱效 %.2f bit/s/Hz（容量上界 %.2f，达成 %.0f%%）" % (
+    r.spectral_efficiency, r.capacity_bound,
+    100 * r.spectral_efficiency / r.capacity_bound))
+print("逐层 SINR:", [round(x, 1) for x in r.sinr_per_layer_db], "dB   rank =", r.rank)
+
+# 蒙特卡洛：均值 + 95% 置信区间 + 收敛判断
+mc = ds.monte_carlo(method="svd")
+print("谱效 %.3f ± %.3f，收敛=%s" % (
+    mc.se_mean, (mc.se_ci95[1] - mc.se_ci95[0]) / 2, mc.converged))
+if not mc.converged:
+    print("  样本量不足，两方案的差异可能只是噪声")
+
+# 横向对比：你的方案该跟这些比
+for name, v in ds.compare_precoders().items():
+    print("  %-14s %6.2f bit/s/Hz  (SVD 的 %.0f%%)" % (name, v["se_mean"], v["vs_svd_pct"]))
+
+# 用估计信道做预编码，评估 CSI 误差的代价
+# r_est = ds.link(0, method="svd", h_for_precoding=ds.h_est[0])
+''',
+    "validate": '''
+# ── 可信度体检 ──────────────────────────────────────────────
+rep = ds.validate()
+print(rep.text())
+# rep.passed 为 False 时，结论不可信——先修配置再跑实验
+''',
 }
 
 

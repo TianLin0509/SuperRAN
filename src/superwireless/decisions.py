@@ -272,12 +272,15 @@ _BANDWIDTH = Decision(
     why=(
         "带宽决定频域维度（100 MHz@30kHz 对应 273 个 RB），"
         "既是压缩率的分母，也决定时延分辨率——做定位/时延估计时，"
-        "分辨率约等于光速除以带宽，100 MHz 对应 3 米。"
+        "分辨率约等于光速除以带宽，100 MHz 对应 3 米。\n"
+        "完整档位有 13 档（5/10/15/20/25/30/40/50/60/70/80/90/100 MHz），"
+        "上面只列常用的，其余直接写数值即可。"
     ),
     options=[
-        Option(100e6, "100 MHz", "273 RB，n78 典型", recommended=True),
+        Option(100e6, "100 MHz", "273 RB @30kHz，n78 典型", recommended=True),
         Option(20e6, "20 MHz", "51 RB，跑得快，适合先验证流程"),
-        Option(200e6, "200 MHz", "时延分辨率更高，定位类课题用"),
+        Option(50e6, "50 MHz", "133 RB，折中"),
+        Option(5e6, "5 MHz", "11 RB，窄带物联场景"),
     ],
     priority=3,
 )
@@ -383,12 +386,17 @@ _SCENARIO = Decision(
     default="UMa_NLOS",
     why=(
         "城区宏站（UMa）站高 25 m、站间距 500 m；城区微站（UMi）站高 10 m、"
-        "站距更小；室内工厂（InF）时延扩展与角度分布都明显不同。"
+        "站距更小；室内工厂（InF）时延扩展与角度分布都明显不同。\n"
+        "带 _LOS 后缀的版本改用视距路损公式——实测同一配置下 UMa_LOS 路损 83.9 dB、"
+        "UMa_NLOS 116.3 dB，差 32 dB，是完全不同的两类信道。"
+        "注意它改的是**路损模型**；每条链路的视距标志仍按 38.901 的 LOS 概率判定。"
     ),
     options=[
-        Option("UMa_NLOS", "城区宏站", "38.901 基准，站高 25m 站距 500m", recommended=True),
-        Option("UMi_NLOS", "城区微站", "密集城区，站高 10m 站距更小"),
-        Option("InF", "室内工厂", "38.901 §7.2，时延扩展差别明显"),
+        Option("UMa_NLOS", "城区宏站 · 非视距", "38.901 基准，站高 25m 站距 500m", recommended=True),
+        Option("UMa_LOS", "城区宏站 · 视距", "路损比非视距低约 30 dB，SINR 显著更高"),
+        Option("UMi_NLOS", "城区微站 · 非视距", "密集城区，站高 10m 站距更小"),
+        Option("UMi_LOS", "城区微站 · 视距", "密集城区视距"),
+        Option("InF", "室内工厂", "38.901 §7.2，时延扩展与城区差别明显"),
     ],
     priority=3,
 )
@@ -455,6 +463,8 @@ _TDD = Decision(
         Option("DDDSU", "DDDSU", "国内主流 2.5 ms 单周期", recommended=True),
         Option("DDSUU", "DDSUU", "上行更多，SRS 更密"),
         Option("DDDDDDDSUU", "DDDDDDDSUU", "下行为主，SRS 间隔长"),
+        Option("DDDSUDDSUU", "DDDSUDDSUU", "5 ms 双周期"),
+        Option("DSUUD", "DSUUD", "上行占比高"),
     ],
     priority=5,
 )
@@ -493,12 +503,63 @@ _NUM_SLOTS = Decision(
     priority=2,
 )
 
+
+_SCS = Decision(
+    key="subcarrier_spacing",
+    question="子载波间隔？",
+    default=30000,
+    why=(
+        "子载波间隔同时决定三件事：时隙长度（15/30/60/120 kHz 对应 1/0.5/0.25/0.125 ms）、"
+        "同带宽下的 RB 数、以及抗多普勒能力。做高速移动或低时延课题时它是关键变量；"
+        "间隔越大时隙越短、跟踪越快，但同带宽下频域分辨率越粗。"
+    ),
+    options=[
+        Option(30000, "30 kHz", "n78 主流，时隙 0.5 ms", recommended=True),
+        Option(15000, "15 kHz", "低频段，时隙 1 ms，频域分辨率最细"),
+        Option(60000, "60 kHz", "时隙 0.25 ms，抗多普勒更好"),
+        Option(120000, "120 kHz", "毫米波，时隙 0.125 ms"),
+    ],
+    priority=4,
+)
+
+_TOPOLOGY_LAYOUT = Decision(
+    key="topology_layout",
+    question="站点怎么布？",
+    default="hexagonal",
+    why=(
+        "六边形栅格是 38.901 的标准蜂窝布局；线性布局把站点排成一条线，"
+        "用于高铁、公路、隧道这类沿线覆盖场景——两者的干扰几何完全不同。"
+    ),
+    options=[
+        Option("hexagonal", "六边形栅格", "标准蜂窝布局", recommended=True),
+        Option("linear", "线性布站", "高铁 / 公路 / 隧道沿线覆盖"),
+    ],
+    priority=3,
+)
+
+_HYPERCELL = Decision(
+    key="hypercell_size",
+    question="几个小区合并成一个超级小区？",
+    default=1,
+    why=(
+        "超级小区把 N 个物理小区合并成一个逻辑小区（共用 PCI），用户在其中移动不触发切换。"
+        "高铁场景常用，代价是小区内干扰无法通过调度规避。1 表示不合并。"
+    ),
+    options=[
+        Option(1, "不合并", "标准蜂窝", recommended=True),
+        Option(3, "3 个合并", "常用规模"),
+        Option(5, "5 个合并", "覆盖更长的沿线区段"),
+    ],
+    priority=4,
+)
+
 ALL_DECISIONS: dict[str, Decision] = {
     d.key: d
     for d in (
         _CHANNEL_MODEL, _SNR, _BANDWIDTH, _SPEED, _ANTENNA, _EST_MODE,
         _PILOT, _LINK, _NUM_SAMPLES, _SCENARIO, _NUM_SITES, _UE_DIST,
         _PRB_UTIL, _TDD, _MOBILITY, _NUM_SLOTS,
+        _SCS, _TOPOLOGY_LAYOUT, _HYPERCELL,
     )
 }
 
@@ -839,11 +900,13 @@ def also_configurable(profile: TaskProfile) -> list[str]:
         "channel_est_mode": "信道估计方式", "pilot_type": "导频类型", "link": "上下行",
         "tdd_pattern": "TDD配比", "num_sites": "站点数", "ue_distribution": "撒点方式",
         "prb_utilization": "邻区负载", "mobility_mode": "移动模型", "num_samples": "样本数",
-        "num_slots_per_sample": "连续时隙数",
+        "num_slots_per_sample": "连续时隙数", "subcarrier_spacing": "子载波间隔",
+        "topology_layout": "站点布局", "hypercell_size": "超级小区规模",
     }
     extra = [
         "载波频率", "终端天线数", "用户数", "站间距", "发射功率",
-        "噪声系数", "SRS跳频", "干扰用户数", "随机种子",
+        "噪声系数", "SRS跳频", "干扰用户数", "随机种子", "扇区数",
+        "多TRP联合", "高铁穿透损耗", "轨道偏移", "自定义站点坐标", "自定义用户坐标",
     ]
     return [v for k, v in labels.items() if k not in asked] + extra
 

@@ -221,6 +221,51 @@ class Dataset:
             return measure.condition_number(self.h_true[index])
         return np.asarray([measure.condition_number(h) for h in self.h_true])
 
+    # ---- 链路性能：预编码 → SINR → 谱效 ----
+    def link(self, index: int = 0, **kw: Any) -> Any:
+        """单样本的链路性能。见 :func:`superwireless.linklevel.link_performance`。
+
+        常用：``ds.link(0, snr_db=20, method="svd")``。
+        传 ``h_for_precoding=ds.h_est[0]`` 可评估"用有误差的 CSI 做预编码"的代价。
+        """
+        from . import linklevel as ll
+
+        kw.setdefault("snr_db", float(self.sinr_dB[index]))
+        if self.h_interferers is not None:
+            kw.setdefault("h_interferers", self.h_interferers[index])
+        return ll.link_performance(self.h_true[index], **kw)
+
+    def monte_carlo(self, **kw: Any) -> Any:
+        """整批样本的蒙特卡洛统计，含 95% 置信区间与收敛判断。
+
+        不指定 ``snr_db`` 时用各样本自身的信干噪比反推噪声——这更贴近真实
+        分布，因为近点和边缘用户的工况本就不同。
+        """
+        from . import linklevel as ll
+
+        if "snr_db" not in kw and "noise_powers" not in kw:
+            sig = np.mean(np.abs(self.h_true) ** 2, axis=(1, 2, 3, 4))
+            kw["noise_powers"] = sig / np.maximum(10.0 ** (self.sinr_dB / 10.0), 1e-30)
+        if self.h_interferers is not None:
+            kw.setdefault("interferers", self.h_interferers)
+        return ll.monte_carlo(self.h_true, **kw)
+
+    def compare_precoders(self, **kw: Any) -> dict[str, Any]:
+        """同一批信道上横向对比 SVD / 宽带 SVD / Type I 码本 / DFT 波束。"""
+        from . import linklevel as ll
+
+        kw.setdefault("snr_db", float(np.median(self.sinr_dB)))
+        return ll.compare_precoders(self.h_true, **kw)
+
+    def validate(self, **kw: Any) -> Any:
+        """可信度体检：对标 38.901、对标物理定律、检查蒙特卡洛收敛。
+
+        生成数据后建议先跑一次——结论建立在信道之上，信道不可信则结论不可信。
+        """
+        from . import validate as va
+
+        return va.full_report(self, **kw)
+
 
 def load(dataset_id: str) -> Dataset:
     """按句柄取数据集。这是取货代码的入口。"""

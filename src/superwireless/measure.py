@@ -468,6 +468,8 @@ def path_structure(model: str, tau_rms_s: float) -> PathStructure:
 # ---------------------------------------------------------------------------
 
 MEASUREMENT_CATALOG: dict[str, str] = {
+    "linkperf": "链路性能：预编码 → 逐层 SINR → 谱效，含容量上界与多方案对比",
+    "validate": "可信度体检：对标 38.901、物理定律自检、蒙特卡洛收敛判断",
     "channel": "频域信道矩阵 [T, RB, BS_ant, UE_ant]，理想与估计两版",
     "pdp": "时延功率谱：未归一化功率 + 真实时延轴 + RMS 时延扩展",
     "paths": "每条径/簇的时延、功率、角度（CDL 才有角度）",
@@ -493,6 +495,11 @@ _ALIASES: dict[str, str] = {
     "rsrp": "rsrp", "接收功率": "rsrp", "信号功率": "rsrp", "增益": "rsrp",
     "sinr": "sinr", "snr": "sinr", "信噪比": "sinr", "信干噪比": "sinr", "sir": "sinr",
     "capacity": "capacity", "容量": "capacity", "条件数": "capacity",
+    "linkperf": "linkperf", "谱效": "linkperf", "频谱效率": "linkperf",
+    "链路性能": "linkperf", "spectral": "linkperf", "预编码增益": "linkperf",
+    "蒙特卡洛": "linkperf", "monte": "linkperf",
+    "validate": "validate", "验证": "validate", "可信": "validate",
+    "体检": "validate", "标定": "validate", "校验": "validate",
     "geometry": "geometry", "几何": "geometry", "路损": "geometry",
     "pathloss": "geometry", "位置": "geometry", "距离": "geometry",
     "topology": "topology", "拓扑": "topology", "站点": "topology",

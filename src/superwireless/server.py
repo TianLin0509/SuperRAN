@@ -345,6 +345,107 @@ def sw_list_datasets() -> dict[str, Any]:
     return _jsonable({"datasets": gen.list_datasets()})
 
 
+@mcp.tool()
+async def sw_validate(dataset_id: str) -> dict[str, Any]:
+    """可信度体检：这批信道能不能拿来下结论。
+
+    三类检查：对标 3GPP 38.901 的路损与时延扩展；对标物理定律（时频能量守恒、
+    谱效不超容量上界、预编码方案的性能排序、SISO 退化到香农公式）；
+    统计层面（蒙特卡洛是否收敛、信噪比分布是否够宽）。
+
+    **蒙特卡洛仿真前建议先跑一次。** 结论建立在信道之上，
+    ``passed`` 为 false 时先修配置再做实验。
+    """
+    return await anyio.to_thread.run_sync(functools.partial(_validate_sync, dataset_id))
+
+
+def _validate_sync(dataset_id: str) -> dict[str, Any]:
+    from . import loader as ld
+    from . import validate as va
+
+    ds = ld.load(dataset_id)
+    rep = va.full_report(ds)
+    out = rep.as_dict()
+    out["dataset_id"] = dataset_id
+    out["text"] = rep.text()
+    return _jsonable(out)
+
+
+@mcp.tool()
+async def sw_link_performance(
+    dataset_id: str,
+    snr_db: float | None = None,
+    methods: list[str] | None = None,
+    receiver: str = "mmse",
+    use_estimated_csi: bool = False,
+) -> dict[str, Any]:
+    """算谱效：预编码 → 逐层 SINR → 频谱效率，并横向对比多种预编码方案。
+
+    这是蒙特卡洛仿真最常用的评价链路。返回各方案的谱效均值、95% 置信区间
+    和收敛判断——**不收敛时方案间的差异可能只是噪声**，会明确标出。
+
+    参数
+    ----
+    methods : 默认对比 ``["svd", "svd_wideband", "type1", "dft"]``。
+        SVD 是理论上界，Type I 是 3GPP 码本，DFT 是单层波束。
+        用户自研方案应当和这几个在同一批信道上比。
+    use_estimated_csi : True 时用估计信道计算预编码、用理想信道评估性能，
+        得到的是"CSI 有误差时的实际代价"——CSI 反馈类课题的核心对比。
+    receiver : ``mmse``（默认）/ ``zf`` / ``mrc``。
+    """
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _link_perf_sync,
+            dataset_id=dataset_id, snr_db=snr_db, methods=methods,
+            receiver=receiver, use_estimated_csi=use_estimated_csi,
+        )
+    )
+
+
+def _link_perf_sync(
+    *, dataset_id: str, snr_db: float | None, methods: list[str] | None,
+    receiver: str, use_estimated_csi: bool,
+) -> dict[str, Any]:
+    import numpy as np
+
+    from . import linklevel as ll
+    from . import loader as ld
+
+    ds = ld.load(dataset_id)
+    ms = tuple(methods or ("svd", "svd_wideband", "type1", "dft"))
+    snr = float(snr_db) if snr_db is not None else float(np.median(ds.sinr_dB))
+
+    kw: dict[str, Any] = {"snr_db": snr, "receiver": receiver}
+    if use_estimated_csi:
+        kw["channels_for_precoding"] = ds.h_est
+
+    cmp = ll.compare_precoders(ds.h_true, methods=ms, **kw)
+    best = max(cmp.items(), key=lambda kv: kv[1]["se_mean"])
+    unconverged = [m for m, v in cmp.items() if not v["converged"]]
+
+    return _jsonable(
+        {
+            "dataset_id": dataset_id,
+            "n_samples": int(ds.n),
+            "snr_db": round(snr, 2),
+            "receiver": receiver,
+            "csi_for_precoding": "estimated" if use_estimated_csi else "ideal",
+            "results": cmp,
+            "best_method": best[0],
+            "note": (
+                "谱效口径：SE = mean_rb Σ_layer log2(1 + 后处理SINR)。"
+                "SVD 为理论上界，vs_svd_pct 是相对它的百分比。"
+            ),
+            "warning": (
+                f"这些方案的置信区间还没收敛到 5%：{unconverged}。"
+                f"样本量不足时方案间差异可能只是随机波动，建议加大 num_samples。"
+                if unconverged
+                else None
+            ),
+        }
+    )
+
+
 def main() -> None:
     # 启动即预热：依赖问题在这里暴露，且不拖慢第一次调用。
     # 注意只能写 stderr —— stdio 传输下 stdout 是 JSON-RPC 通道。
