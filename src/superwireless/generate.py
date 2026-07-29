@@ -236,12 +236,29 @@ def generate(
     sinr_arr = payload["scalar__sinr_dB"]
     finite = sinr_arr[np.isfinite(sinr_arr)]
 
+    # 六边形栅格会把站数吸附到环数（0→1 站、1→7 站、2→19 站），
+    # 所以"配了 6 站"可能实际跑的是 7 站。这里对比配置值与实际值，
+    # 不一致时在 summary 里显式记下——否则用户拿着错误的小区数下结论。
+    cells_cfg = int(cfg.get("num_sites", 1) or 1) * int(cfg.get("sectors_per_site", 1) or 1)
+    cells_real = first_meta.get("num_cells")
+    topology_note = None
+    if cells_real and int(cells_real) != cells_cfg:
+        topology_note = (
+            f"配置为 {cfg.get('num_sites')} 站 × {cfg.get('sectors_per_site')} 扇区 "
+            f"= {cells_cfg} 小区，实际生成 {cells_real} 小区。"
+            f"六边形栅格的站数只能是 1/7/19（按环数展开），会向上吸附。"
+            f"需要精确站数请用 topology_layout='linear' 或 custom_site_positions。"
+        )
+
     summary = {
         "dataset_id": dataset_id,
         "draft_id": draft_id,
         "source": source_name,
         "num_samples": int(accepted),
         "requested": int(num_samples),
+        "cells_configured": cells_cfg,
+        "cells_actual": int(cells_real) if cells_real else None,
+        "topology_note": topology_note,
         "shape": {
             "N": int(shape[0]), "T": int(shape[1]), "RB": int(shape[2]),
             "BS_ant": int(shape[3]), "UE_ant": int(shape[4]),

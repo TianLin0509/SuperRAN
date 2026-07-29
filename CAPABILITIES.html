@@ -104,7 +104,7 @@
 
 <h1>superwireless 能力手册</h1>
 <p class="tagline">能产生哪些信道 · 能拿到哪些观察量 · 能力边界在哪</p>
-<p class="meta">全部内容由代码与实跑导出，非手写 · 2026-07-29 · 测试 97 项全通过</p>
+<p class="meta">全部内容由代码与实跑导出，非手写 · 2026-07-29 · 测试 132 项全通过</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -114,7 +114,7 @@
 <li><a href="#s3">数据长什么样（维度约定）</a></li>
 <li><a href="#s4">能拿到哪些观察量（完整清单）</a></li>
 <li><a href="#s5">参数：会问你的 vs 你可以自己传的</a></li>
-<li><a href="#s6">支持的 11 类任务</a></li>
+<li><a href="#s6">支持的 12 类任务</a></li>
 <li><a href="#s7">能力边界：做得到 / 做不到 / 有条件</a></li>
 <li><a href="#s8">性能参考</a></li>
 </ol>
@@ -180,6 +180,28 @@
 </tr>
 </tbody>
 </table>
+</div>
+
+<h3>5 个传播场景</h3>
+<p>决定路损模型与空间相关性。<strong>视距版本实测比非视距低 32 dB 路损。</strong></p>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>场景</th><th>路损模型</th><th>阴影 σ</th><th>实测路损<span class="src">（同配置同种子）</span></th><th>实测 SINR</th></tr></thead>
+<tbody>
+<tr><td><code>UMa_NLOS</code> 城区宏站·非视距</td><td>38.901 Table 7.4.1-1</td><td>6 dB</td><td>116.3 dB</td><td>21.0 dB</td></tr>
+<tr><td><code>UMa_LOS</code> 城区宏站·视距</td><td>含断点距离分段</td><td>4 dB</td><td><strong>83.9 dB</strong></td><td><strong>49.9 dB</strong></td></tr>
+<tr><td><code>UMi_NLOS</code> 城区微站·非视距</td><td>街道峡谷</td><td>7.82 dB</td><td>107.1 dB</td><td>20.3 dB</td></tr>
+<tr><td><code>UMi_LOS</code> 城区微站·视距</td><td>含断点距离分段</td><td>4 dB</td><td><strong>94.4 dB</strong></td><td><strong>33.0 dB</strong></td></tr>
+<tr><td><code>InF</code> 室内工厂</td><td>38.901 §7.2 InF-SH</td><td>7.56 dB</td><td>82.5 dB</td><td>35.9 dB</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="callout c-amber">
+<p><strong>视距与否由几何逐链路判定，不是选场景就定了。</strong>选 <code>*_NLOS</code> 时，
+仿真器按 38.901 的 LOS 概率逐条判断，判为视距的链路会自动改用 LOS 公式；
+选 <code>*_LOS</code> 时则<strong>所有链路</strong>都用 LOS 公式。</p>
+<p>想调视距比例要改站间距——实测 200 m 时视距比例 0.46、800 m 时 0.13。</p>
 </div>
 
 <h3>10 个信道模型剖面</h3>
@@ -398,6 +420,53 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 <p><strong>两个限制。</strong>TDL 模型下角度字段全是 <code>None</code>。<strong>射线追踪数据集调这个方法会直接报错</strong>——那里的多径来自真实建筑几何，套用 CDL 标准剖面会得到一组与数据无关的假角度。宁可报错，不给错误答案。</p>
 </div>
 
+<h3>链路性能：预编码 → SINR → 谱效</h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>访问方式</th><th>返回</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>ds.link(i, method=, receiver=)</code></td><td>LinkPerformance</td><td>单样本：逐层 SINR、谱效、容量上界、达成率</td></tr>
+<tr><td><code>ds.monte_carlo(method=)</code></td><td>MonteCarloResult</td><td>均值 + 95% 置信区间 + <strong>收敛判断</strong> + 分位数 + rank 分布</td></tr>
+<tr><td><code>ds.compare_precoders()</code></td><td>dict</td><td>SVD / 宽带SVD / TypeI / DFT 横向对比</td></tr>
+<tr><td><code>ds.validate()</code></td><td>ValidationReport</td><td><strong>12 项可信度检查</strong></td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>可选</th><th>取值</th></tr></thead>
+<tbody>
+<tr><td>预编码 <code>method</code></td><td><code>svd</code> 理论上界 · <code>svd_wideband</code> 全带共用一个 W ·
+<code>type1</code> 38.214 码本 · <code>dft</code> 波束 rank-1 · <code>mrt</code> · <code>identity</code></td></tr>
+<tr><td>接收机 <code>receiver</code></td><td><code>mmse</code>（默认）· <code>zf</code> · <code>mrc</code></td></tr>
+<tr><td>用估计 CSI 预编码</td><td><code>channels_for_precoding=ds.h_est</code></td></tr>
+<tr><td>计入干扰</td><td>多小区数据集自动传 <code>h_interferers</code></td></tr>
+</tbody>
+</table>
+</div>
+<p class="q">谱效口径：<code>SE = mean_rb Σ_layer log2(1 + 后处理SINR)</code>。
+实测四方案比例 SVD 100% ＞ 宽带 71% ＞ TypeI 63% ＞ DFT 34%。</p>
+
+<h3>物理层工具箱 <code>superwireless.physical</code></h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>函数</th><th>作用</th><th>实测</th></tr></thead>
+<tbody>
+<tr><td><code>nr_rb_count(bw, scs)</code></td><td>NR 标准带宽↔RB 查表</td><td>100MHz@30kHz → 273 RB</td></tr>
+<tr><td><code>tdd_pattern_info(name)</code></td><td>帧结构 + 特殊时隙符号切分</td><td>DDDSU：周期 5 时隙 / 5 ms，特殊时隙 10 DL + 2 UL</td></tr>
+<tr><td><code>srs_config(num_rb, b_srs=)</code></td><td>SRS 跳频配置</td><td>b_srs=1 → 跳频周期 17，每跳 16 RB，覆盖 6%</td></tr>
+<tr><td><code>zadoff_chu(u, N)</code></td><td>ZC 序列</td><td>恒模误差 4.1e−08，自相关峰旁比 151 dB</td></tr>
+<tr><td><code>ssb_sequences(pci)</code></td><td>PSS / SSS / PBCH-DMRS</td><td>PSS、SSS 长 127，DMRS 长 144</td></tr>
+<tr><td><code>gold_sequence(c_init, n)</code></td><td>Gold 伪随机序列</td><td>CSI-RS / DMRS 的基础</td></tr>
+<tr><td><code>dft_codebook(n_h, n_v, n_p)</code></td><td>CSI-RS 波束码本</td><td>8H4V2P → [512, 64]</td></tr>
+<tr><td><code>estimate_channel(h, method=)</code></td><td>LS / MMSE 估计基线</td><td>导频间隔 8 时 LS +1.24 dB 已失效，MMSE −5.76 dB 仍可用</td></tr>
+<tr><td><code>project_interference(...)</code></td><td>干扰投影到自身预编码子空间</td><td>不投影会高估干扰</td></tr>
+<tr><td><code>sequence_correlation(a, b)</code></td><td>自/互相关分析</td><td>导频设计与污染研究</td></tr>
+</tbody>
+</table>
+</div>
+
 <h3>容量与其他派生量</h3>
 <div class="tbl-wrap">
 <table>
@@ -415,7 +484,7 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 
 <h2 id="s5">五、参数</h2>
 
-<h3>会主动问你的 16 个</h3>
+<h3>会主动问你的 19 个</h3>
 <p>这些是 MCP 判断"一改结论就变"的参数，会分轮问（一轮 2~4 个，每题 3~4 个选项并标推荐）。</p>
 
 <div class="tbl-wrap">
@@ -437,12 +506,15 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 <tr><td><code>link</code></td><td>DL</td><td>下行 / 上行 / 上下行成对</td><td>4</td></tr>
 <tr><td><code>tdd_pattern</code></td><td>DDDSU</td><td>DDDSU / DDSUU / DDDDDDDSUU</td><td>5</td></tr>
 <tr><td><code>mobility_mode</code></td><td>static</td><td>静止 / 直线 / 随机游走 / 随机路点</td><td>5</td></tr>
+<tr><td><code>subcarrier_spacing</code></td><td>30 kHz</td><td>15 / 30 / 60 / 120 kHz</td><td>4</td></tr>
+<tr><td><code>topology_layout</code></td><td>hexagonal</td><td>六边形栅格 / 线性布站</td><td>3</td></tr>
+<tr><td><code>hypercell_size</code></td><td>1</td><td>不合并 / 3 个 / 5 个</td><td>4</td></tr>
 <tr><td><code>num_samples</code></td><td>200</td><td>20 / 200 / 1000</td><td>6</td></tr>
 </tbody>
 </table>
 </div>
 
-<h3>你还可以自己传 31 个</h3>
+<h3>你还可以自己传 28 个</h3>
 <p><code>internal_sim</code> 一共接受 <strong>44 个参数</strong>，<code>sionna_rt</code> 接受 <strong>49 个</strong>。上表之外的都可以直接写进 <code>overrides</code>——<strong>superwireless 对不认识的键原样透传，不做解释也不拦截</strong>。</p>
 
 <div class="tbl-wrap">
@@ -464,7 +536,7 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 <p>实测生效：阵列模型从 <code>legacy_3gpp_64_independent</code> 变成 <code>fixed_1to3_vertical_subarray_64T</code>，能量集中度 0.811 → 0.662（垂直合并把能量从主特征模分散出去，物理上合理）。</p>
 </div>
 
-<h2 id="s6">六、支持的 11 类任务</h2>
+<h2 id="s6">六、支持的 12 类任务</h2>
 <p class="lead">每类任务有自己的实验设计问题、该问的参数、建议对比组和护栏。</p>
 
 <div class="tbl-wrap">
@@ -523,6 +595,8 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 <tr><td>时序相关性</td><td><code>num_slots_per_sample</code> &gt; 1</td><td>T=1 时样本间独立，无时序可预测</td></tr>
 <tr><td>指定信噪比区间</td><td>走拒绝采样</td><td>区间偏离实际分布太远时可能一个样本都取不到，会报错并给出实际分布</td></tr>
 <tr><td>射线追踪</td><td><code>pip install sionna-rt</code></td><td><code>sw_capabilities</code> 如实报告不可用及缺什么</td></tr>
+<tr><td>精确小区数</td><td>六边形栅格站数只能是 1/7/19</td><td>配 2 站实际生成 7 站；用 <code>topology_layout="linear"</code> 或 <code>custom_site_positions</code> 可精确指定。<strong>生成后会自动对比并报出不一致</strong></td></tr>
+<tr><td>视距场景</td><td>信道剖面类别要匹配</td><td>视距场景配非视距剖面时时延扩展偏离 4.4 倍，体检会拦</td></tr>
 </tbody>
 </table>
 </div>

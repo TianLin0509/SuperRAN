@@ -242,6 +242,36 @@ def check_scenario_model_consistency(ds: Any) -> Check:
     )
 
 
+def check_cell_count(ds: Any) -> Check:
+    """配置的小区数与实际生成的是否一致。
+
+    六边形栅格按环数展开，站数只能是 1 / 7 / 19（0/1/2 环），配 2 站会实际
+    生成 7 站。而 ``describe()`` 只回显配置值，不会告诉你这件事——
+    用户拿着"我跑的是 6 小区"下结论，实际数据是 21 小区。
+
+    需要精确站数用 ``topology_layout="linear"`` 或 ``custom_site_positions``。
+    """
+    s = ds.summary
+    cfg_n = s.get("cells_configured")
+    real_n = s.get("cells_actual")
+    if not cfg_n or not real_n:
+        return Check("小区数与配置一致", True, "数据集未记录小区数对比，跳过", severity="info")
+    if int(cfg_n) == int(real_n):
+        return Check(
+            "小区数与配置一致", True,
+            f"配置 {cfg_n} 小区，实际 {real_n} 小区",
+        )
+    return Check(
+        "小区数与配置一致",
+        False,
+        s.get("topology_note")
+        or f"配置 {cfg_n} 小区，实际生成 {real_n} 小区",
+        measured=int(real_n),
+        expected=int(cfg_n),
+        tolerance="必须一致，否则干扰环境与预期不符",
+    )
+
+
 def check_pathloss_range(ds: Any) -> Check:
     """样本距离是否落在 38.901 公式的适用范围内。
 
@@ -614,6 +644,7 @@ def full_report(ds: Any, *, snr_db: float = 20.0) -> ValidationReport:
     checks = [
         check_pathloss_vs_38901(ds),
         check_scenario_model_consistency(ds),
+        check_cell_count(ds),
         check_pathloss_range(ds),
         check_pathloss_above_free_space(ds),
         check_delay_spread_vs_profile(ds),
