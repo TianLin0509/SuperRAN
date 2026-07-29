@@ -17,13 +17,16 @@
 ## 测试
 
 ```bash
-python tests/test_e2e.py         # 端到端 35 项
-python tests/test_mcp_server.py  # MCP 全链路 20 项
-python tests/test_raytracing.py  # 射线追踪与决策层 29 项
+python tests/test_e2e.py         # 端到端 37 项
+python tests/test_mcp_server.py  # MCP 全链路 21 项
+python tests/test_raytracing.py  # 射线追踪与决策层 39 项
+python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
+python tests/test_gates.py       # 校准、标准表、三道门 62 项
 ```
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
-后三个都要跑。
+后前三个都要跑；改动 `linklevel.py` / `validate.py` / `calibration.py` /
+`gates.py` / `spec38901.py` 要跑后两个。
 
 ## 与 ChannelHub 的边界
 
@@ -116,6 +119,43 @@ Mitsuba 3.8 的解析器直接报错。`scenes.prepare_scene()` 会复制到 art
 缓存再清理，**不动 ChannelHub 原文件**。加新城市场景时如果报
 "invalid PLY header"，就是这个原因。
 
+### ChannelHub 的 CDL-A/B/C 角度表与 38.901 不符
+
+三张表都标着 "TS 38.901 Table 7.7.1-x"，**时延与功率两列是对的，角度列从中段起不是**。
+CDL-C 有 23/24 簇有出入、占总功率 93.8%，按 Annex A.1 算 ASA 偏 14.5°、ASD 偏 7.1°。
+
+`spec38901.py` 放了一份逐字核对过的标准表（**手抄 + 从 PDF 机械解析两条独立路径
+对过账**），`apply_spec_tables()` 在 `channelhub._ensure_path()` 里灌回仿真器——
+替换的是 `get_cdl_profile` 读的 `_PROFILES` 字典，**不改 ChannelHub 一行源码**。
+
+挂在 `_ensure_path` 而不是只挂 `warmup` 是有意的：任何取 ChannelHub 东西的路径
+都会先过它，包括直接调 `cdl_profile`、跑测试、REPL 里试。只挂 `warmup` 会出现
+"跑 MCP 时信道是标准的、跑测试时不是"这种最难查的不一致。
+
+`SUPERWIRELESS_CDL_SPEC=0` 可关闭。CDL-D/E 未覆盖——表结构含 `Cluster PAS` 列、
+首簇拆成镜面与 Laplacian 两行，没逐字核对过的表宁可不放。
+
+### 没有 bs_panel 时干扰根本不进 SINR
+
+`internal_sim.py:1436` 只在 `bs_panel is not None` 时才建 DFT 码本，
+而几何 SINR 的前提是 `self._sinr_codebook is not None and K > 1`（`:2446`）。
+拿不到码本就走兜底：`sir_dB = 49.9`（贴着 ±50 dB 契约边界的哨兵值）、
+`sinr_dB = snr_db`。**这条路径不报错、不告警、不打日志。**
+
+后果是配了 21 个小区、报出来的"SINR"是单小区热噪声 SNR。实测同配置修复前后
+SINR 中位数 35.7 → 18.1 dB。`generate._ensure_bs_panel()` 现在由 `num_bs_tx_ant`
+推导排布，`validate.check_interference_modeled()` 用两条判据复查
+（SINR 是否逐点等于 SNR、SIR 是否恒为 49.9）。
+
+2026-07-29 之前生成的数据集都没有这一步，它们的干扰类结论不成立。
+
+### Type I 码本必须做秩自适应
+
+38.214 的 Type I 反馈里 RI 和 PMI 是一起报的。`compute_precoder` 早期版本
+把 type1 的秩硬定为 `max_rank`，在低秩信道上会输给 rank-1 的 DFT 波束——
+总功率固定时多开的层每层分到的功率更少、SINR 更低。看起来像"码本不如单波束"，
+其实是没做秩自适应。现在用与 SVD 同一套奇异值门限判据，两者才可比。
+
 ### 射线追踪数据不能用 CDL 剖面算角度
 
 `sionna_rt` 数据源的 `channel_model` 字段只是它内部 TDL 回退路径的标记，
@@ -126,6 +166,9 @@ Mitsuba 3.8 的解析器直接报错。`scenes.prepare_scene()` 会复制到 art
 
 ## 加东西的地方
 
+- 新的 3GPP 校准量 → `calibration.py`，按条款号标注来源
+- 新的门禁判据 → `gates.py`（门 2/门 3）或 `validate.py`（门 1，会自动进门 1）
+- 新的标准查表值 → `spec38901.py`，**必须两条独立路径核对过**才录入
 - 新场景 → `presets/presets.yaml`，不改代码
 - 新射线追踪城市 → ChannelHub 的 `configs/scenes/`，`scenes.py` 自动发现
 - 新任务类型 / 新决策点 / 新对比组 / 新陷阱 → `decisions.py` 的

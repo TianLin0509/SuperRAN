@@ -317,23 +317,89 @@ TDD 配比 7 种 · SRS 完整跳频配置</p>
 </div>
 
 <h2>四、可信度是怎么保证的</h2>
-<p class="lead">12 项检查，分三类。<strong>不通过不会静默</strong>，会说明偏差多少、容差依据是什么、怎么改。</p>
+<p class="lead"><strong>三道门</strong>，各守一个阶段。体检管的是"信道对不对"，
+但<strong>信道对了结论照样可以是错的</strong>——所以后面还有两道。</p>
 
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>门</th><th>什么时候过</th><th>过不去意味着</th></tr></thead>
+<tbody>
+<tr><td><strong>门 1 · 信道可信</strong></td><td>生成之后</td><td>这批信道不可信，后面全白做</td></tr>
+<tr><td><strong>门 2 · 比较公平</strong></td><td>跑对比之前</td><td>比出来的差异不能归因到被测变量</td></tr>
+<tr><td><strong>门 3 · 结论站得住</strong></td><td>写结论之前</td><td>数字也许对，但支撑不了要下的结论</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>门 1 的 19 项检查</h3>
 <div class="tbl-wrap">
 <table>
 <thead><tr><th>类别</th><th>检查项</th></tr></thead>
 <tbody>
-<tr><td><strong>对标准</strong></td><td>路损逐点对 38.901（按视距/非视距分组）· 距离在公式适用范围内 ·
-路损与自由空间的关系 · 时延扩展对标剖面</td></tr>
+<tr><td><strong>对 3GPP 标准</strong></td><td>路损逐点对 38.901（按视距/非视距分组）·
+<strong>CDL 剖面逐簇对 Table 7.7.1-x</strong> · <strong>角度扩展对 Annex A.1 圆周定义</strong> ·
+距离在公式适用范围内 · 路损与自由空间的关系 · 时延扩展对标剖面</td></tr>
 <tr><td><strong>对物理定律</strong></td><td>时频能量守恒 · SISO 容量退化到香农公式 ·
 谱效不超容量上界 · 预编码方案性能排序 · 信道估计误差合理</td></tr>
-<tr><td><strong>对配置</strong></td><td>场景与信道模型视距类别自洽 · 小区数与配置一致</td></tr>
+<tr><td><strong>对配置</strong></td><td>场景与信道模型视距类别自洽 · 小区数与配置一致 ·
+<strong>干扰是否真的进了 SINR</strong></td></tr>
 <tr><td><strong>对统计</strong></td><td>蒙特卡洛置信区间收敛 · 信噪比分布覆盖足够宽</td></tr>
 </tbody>
 </table>
 </div>
 
+<h3>3GPP 官方的校准口径</h3>
+<p>业界判断信道生成得对不对，不看曲线好不好看，而是<strong>按 TR 38.901 §7.8
+规定的口径把指定的统计量算出来，跟各公司提交给 3GPP 的参考曲线对</strong>。
+<code>sw_calibrate</code> 按条款出数：</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>条款</th><th>指标</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>§7.8.1 指标1<br>§7.8.2 指标1</td><td>耦合损耗 CDF（服务小区）</td>
+<td>= 发射功率 − 接收功率。串联检验路损模型 + 天线方向图 + 小区选择，任一环错了整条曲线平移</td></tr>
+<tr><td>§7.8.1 指标2<br>§7.8.2 指标2</td><td>几何量 CDF，含噪与不含噪两条</td>
+<td>不含噪那条即宽带 SIR。<strong>查"干扰进没进计算"最直接的手段</strong></td></tr>
+<tr><td>§7.8.2 指标3</td><td>时延扩展 + 角度扩展 ASD/ASA/ZSD/ZSA</td>
+<td>角度扩展按 Annex A.1 <strong>圆周</strong>定义，不是普通标准差——普通标准差在角度绕回 0/360° 时会算出荒谬的大值</td></tr>
+<tr><td>§7.8.2 指标4</td><td>PRB 奇异值：最大、次大、比值三条 CDF</td>
+<td>标准原话是"PRB 内平均协方差矩阵的<strong>特征值</strong>"，10log10 尺度，t=0。比值那条尺度无关，是三条里最稳的判据</td></tr>
+</tbody>
+</table>
+</div>
+<p class="q">参考曲线在 3GPP 文稿 <code>R1-165974</code>（大尺度）、<code>R1-165975</code>（全校准）、
+<code>R1-1909704</code>（InF）里。本工具只出数不判决，判决在门 1。
+不适用的项会说明原因——比如 CDL 的时延角度是查表固定值，它的 CDF 是退化的，
+拿去比参考曲线没有意义。</p>
+
 <h3>它真的抓到过问题</h3>
+
+<div class="callout c-red">
+<p><strong>CDL 剖面表本身抄错了。</strong>ChannelHub 的 <code>CDL_A/B/C</code> 三张表标着
+"TS 38.901 Table 7.7.1-x"，时延与功率两列对得上，<strong>但角度列从中段起与标准不符</strong>。
+CDL-C 有 <strong>23/24 簇</strong>有出入，这些簇占总功率 <strong>93.8%</strong>；
+按 Annex A.1 算出来 <strong>ASA 偏 14.5°、ASD 偏 7.1°</strong>。</p>
+<p style="margin-top:8px;">角度错了不会报错，只会让空间相关性、波束赋形增益、到达角估计
+这类结论安静地偏掉——而这正是谱效仿真最依赖的部分。现在 superwireless 启动时会把
+逐字核对过的标准表灌回仿真器（<strong>不改 ChannelHub 一行源码</strong>，替换的是
+<code>get_cdl_profile</code> 读的那个字典），门 1 里逐簇复核。</p>
+<p style="margin-top:8px;">为了不冤枉别人，标准表是<strong>手抄一遍 + 从 PDF 机械解析一遍</strong>
+两条独立路径核对过的，两者逐项一致才下的结论。</p>
+</div>
+
+<div class="callout c-red">
+<p><strong>多小区跑了半天，干扰根本没进 SINR。</strong>ChannelHub 只在配置里给了
+<code>bs_panel</code>（面板排布）时才建 DFT 码本，而几何 SINR 依赖这个码本。
+拿不到码本时它走兜底：<code>sir_dB = 49.9</code>（刚好卡在 ±50 dB 契约边界内的哨兵值）、
+<code>sinr_dB = snr_dB</code>——<strong>这条路径不报错、不告警</strong>。</p>
+<p style="margin-top:8px;">结果是配了 21 个小区、报出来的"SINR"却是单小区热噪声 SNR。
+实测同一配置修复前后：<strong>SINR 中位数 35.7 dB → 18.1 dB</strong>，差 17 dB。
+在此之前所有多小区数据集的干扰类结论都不成立。</p>
+<p style="margin-top:8px;">现在生成时由 <code>num_bs_tx_ant</code> 自动推导面板排布，
+门 1 里用"SINR 是否逐点等于 SNR"和"SIR 是否恒为 49.9"两条判据复查。
+<strong>这正是 3GPP 那条"geometry with and without white noise"要出两条曲线的用意</strong>。</p>
+</div>
 
 <div class="callout c-red">
 <p><strong>配置矛盾：视距场景配非视距剖面。</strong>
@@ -363,6 +429,51 @@ TDD 配比 7 种 · SRS 完整跳频配置</p>
 <div class="plain">
 <p>这几个都属于"跑得出结果、数值看着正常、图也画得出来，但结论是错的"。
 蒙特卡洛仿真最怕的就是这种——所以体检不是可选项。</p>
+</div>
+
+<h3>门 2 与门 3：信道对了，结论仍可能是错的</h3>
+<p>真正让仿真结论翻车的，多数不是信道：</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>门</th><th>拦什么</th><th>为什么致命</th></tr></thead>
+<tbody>
+<tr><td rowspan="3"><strong>门 2</strong><br>比较公平</td><td>两臂不在同一批信道上</td>
+<td>差值里混进了信道抽样噪声，配对检验的前提直接没了</td></tr>
+<tr><td>配置有未声明的漂移</td><td>增益来自那个"别的"不同，而不是被测变量</td></tr>
+<tr><td><strong>CSI 口径不一致</strong></td>
+<td>一边理想一边估计，等于让自己的方法偷看答案。<strong>无线论文评审最常抓的一条</strong></td></tr>
+<tr><td rowspan="4"><strong>门 3</strong><br>结论站得住</td><td>95% 置信区间跨零</td>
+<td>方向都不能确定，谈不上"提升"</td></tr>
+<tr><td>配对检验不显著</td><td>t 检验 + Wilcoxon 双保险；两者结论不一致说明分布偏态，以 Wilcoxon 为准</td></tr>
+<tr><td>单个样本贡献过半差值</td><td>这是个案不是规律</td></tr>
+<tr><td>声称的增益落在区间外</td><td>该报区间而不是点估计</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="measured">
+<p><strong>两臂必须跑在同一批信道上。</strong>共同的路损、撒点、衰落起伏被差分抵消，
+剩下的才是方案本身的差别——<strong>配对设计所需样本数常比非配对少一个数量级</strong>。</p>
+</div>
+
+<h3>样本数是算出来的，不是问出来的</h3>
+<pre><code>N ≥ ( (1.96 + 0.84) · σ_d / Δ )²</code></pre>
+<p>σ_d 是<strong>逐样本差值</strong>的标准差，Δ 是想检出的最小效应。
+流程：先跑 20 个样本试点量 σ_d，再算正式样本数。</p>
+<p><strong>反解更该先看一眼</strong>：给定样本数，算出<strong>最小可检出效应</strong>。
+它比期望增益还大时，这次实验<strong>无论跑出什么结果都不足以下结论</strong>——
+该加样本，而不是跑完再解释。</p>
+
+<div class="measured">
+<p>实测互为反解：σ_d = 0.83、要检出 Δ = 0.30 → 需要 <strong>61 个样本</strong>；
+反过来 n = 60 时最小可检出 <strong>0.3002</strong>。效应减半，样本数变四倍（平方关系）。</p>
+</div>
+
+<div class="plain">
+<p>问用户"你想跑多少次蒙特卡洛"，是把自己该做的功课推回去。
+这一条是从 superpowers 那句
+<em>prevent agents from delegating prioritization back to humans</em> 学来的。</p>
 </div>
 
 <h2>五、谱效链路的设计</h2>

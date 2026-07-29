@@ -446,6 +446,190 @@ def _link_perf_sync(
     )
 
 
+@mcp.tool()
+async def sw_calibrate(dataset_id: str) -> dict[str, Any]:
+    """按 3GPP TR 38.901 §7.8 的口径算校准量。
+
+    这是业界判断"信道生成得对不对"的标准做法：不看曲线好不好看，而是把标准
+    规定的几个统计量按规定口径算出来，跟各公司提交给 3GPP 的参考曲线对。
+
+    出的量（括号内是标准里的条款与指标号）：
+
+    * 耦合损耗 CDF（§7.8.1 指标1）—— 串联检验路损模型 + 天线方向图 + 小区选择
+    * 几何量 CDF，含噪与不含噪两条（§7.8.1 指标2 / §7.8.2 指标2）
+    * 时延扩展与角度扩展 ASD/ASA/ZSD/ZSA（§7.8.2 指标3，Annex A.1 圆周定义）
+    * PRB 奇异值：最大、次大、比值三条 CDF，10log10 尺度（§7.8.2 指标4）
+
+    参考曲线在 3GPP 文稿 R1-165974（大尺度）、R1-165975（全校准）、
+    R1-1909704（InF）里。**本工具只出数不判决**，判决在 ``sw_gate``。
+    不适用的项会说明原因（例如 CDL 的时延角度是查表固定值，CDF 是退化的）。
+    """
+    return await anyio.to_thread.run_sync(functools.partial(_calibrate_sync, dataset_id))
+
+
+def _calibrate_sync(dataset_id: str) -> dict[str, Any]:
+    from . import calibration as cal
+    from . import loader as ld
+
+    rep = cal.calibration_report(ld.load(dataset_id))
+    out = rep.as_dict()
+    out["text"] = rep.text()
+    return _jsonable(out)
+
+
+@mcp.tool()
+async def sw_gate(
+    dataset_id: str,
+    stage: str = "channel",
+) -> dict[str, Any]:
+    """评审门：拦住站不住的结论。
+
+    ``stage="channel"``（门 1）—— 生成之后、做实验之前跑。把可信度体检的
+    结果翻译成门禁语言：硬性检查不通过就是拦截项，不修不许往下走。
+
+    门 2（比较公平）与门 3（结论站得住）在 ``sw_compare_arms`` 里一次跑完，
+    因为它们需要两个方案的逐样本结果。
+    """
+    if stage != "channel":
+        return {
+            "error": f"stage={stage!r} 不支持",
+            "hint": "门 2 与门 3 请用 sw_compare_arms，它需要两个方案的逐样本结果",
+        }
+    return await anyio.to_thread.run_sync(functools.partial(_gate_sync, dataset_id))
+
+
+def _gate_sync(dataset_id: str) -> dict[str, Any]:
+    from . import gates as g
+    from . import loader as ld
+
+    res = g.gate_channel(ld.load(dataset_id))
+    out = res.as_dict()
+    out["text"] = res.text()
+    return _jsonable(out)
+
+
+@mcp.tool()
+async def sw_compare_arms(
+    dataset_id: str,
+    method_a: str,
+    method_b: str,
+    name_a: str = "方案A",
+    name_b: str = "方案B",
+    csi_a: str = "ideal",
+    csi_b: str = "ideal",
+    receiver: str = "mmse",
+    snr_db: float | None = None,
+    max_samples: int = 500,
+) -> dict[str, Any]:
+    """在**同一批信道**上跑两个方案，做配对比较，并连过门 2、门 3。
+
+    这是下结论前的最后一道关。它做四件普通的"比均值"做不到的事：
+
+    1. **配对** —— 两臂共用同一批信道实例，共同的路损/撒点/衰落起伏被差分
+       抵消，剩下的才是方案本身的差别。配对设计所需样本数常比非配对少一个数量级。
+    2. **公平性检查（门 2）** —— 配置漂移、CSI 口径不一致（一边理想一边估计
+       就是让自己的方法偷看答案）会被直接拦截。
+    3. **统计检验（门 3）** —— 配对 t 检验 + Wilcoxon 符号秩双保险，95% 置信
+       区间跨零就拦，单个样本贡献过半也拦。
+    4. **一句可直接写进报告的结论** —— 过不了门时它会明说结论不成立及原因。
+
+    ``method_*``：``svd`` / ``svd_wideband`` / ``type1`` / ``dft`` / ``mrt`` / ``identity``。
+    ``csi_*``：``ideal`` 用理想信道预编码，``estimated`` 用估计信道。
+    ``snr_db`` 不给时用数据集逐样本自身的 SINR（各用户真实工作点）。
+    """
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _compare_arms_sync,
+            dataset_id=dataset_id, method_a=method_a, method_b=method_b,
+            name_a=name_a, name_b=name_b, csi_a=csi_a, csi_b=csi_b,
+            receiver=receiver, snr_db=snr_db, max_samples=max_samples,
+        )
+    )
+
+
+def _compare_arms_sync(
+    *, dataset_id: str, method_a: str, method_b: str, name_a: str, name_b: str,
+    csi_a: str, csi_b: str, receiver: str, snr_db: float | None, max_samples: int,
+) -> dict[str, Any]:
+    from . import loader as ld
+
+    ds = ld.load(dataset_id)
+    res = ds.compare_arms(
+        {"name": name_a, "method": method_a, "csi": csi_a, "receiver": receiver},
+        {"name": name_b, "method": method_b, "csi": csi_b, "receiver": receiver},
+        snr_db=snr_db, max_samples=max_samples,
+    )
+    out = res.as_dict()
+    out["dataset_id"] = dataset_id
+    out["text"] = res.text()
+    return _jsonable(out)
+
+
+@mcp.tool()
+def sw_sample_size(
+    std_diff: float | None = None,
+    expected_effect: float | None = None,
+    n_current: int | None = None,
+) -> dict[str, Any]:
+    """样本数该定多少 —— **算出来的，不是问用户的**。
+
+    蒙特卡洛跑多少次，取决于想检出多大的效应和逐样本差值有多离散::
+
+        N ≥ ( (1.96 + 0.84) · σ_d / Δ )²
+
+    三种用法：
+
+    * 给 ``std_diff`` 和 ``expected_effect`` → 返回需要的样本数；
+    * 给 ``std_diff`` 和 ``n_current`` → 返回这个实验最小能检出多大效应。
+      **这个数比样本数更该先看**：它比期望增益还大时，实验无论跑出什么结果
+      都不足以下结论；
+    * 什么都不给 → 返回试点流程（先跑 20 个样本量方差）。
+
+    ``std_diff`` 从 ``sw_compare_arms`` 的 ``paired.std_diff`` 取。
+    """
+    from . import decisions as dec
+
+    return _jsonable(
+        dec.sample_size_advice(
+            std_diff=std_diff, expected_effect=expected_effect, n_current=n_current
+        )
+    )
+
+
+@mcp.tool()
+def sw_missing_slots(
+    answered_design: list[str] | None = None,
+    answered_params: list[str] | None = None,
+) -> dict[str, Any]:
+    """结论模板里还空着哪些槽 —— 决定该主动问用户什么。
+
+    一次蒙特卡洛仿真的产出说到底就是一句话::
+
+        在【场景】下，【方法】相对【基线】在【指标】上【效应 ± 置信区间】（n 样本），
+        该结论在【扫描维度】上成立。
+
+    每个方括号是一个必须填的槽。**空着的槽就是该问的问题**，按"空着的代价"
+    从大到小排序返回，每个槽带 3~4 个选项。
+
+    注意样本数不在槽里——它是由效应量和试点方差**算出来**的（``sw_sample_size``），
+    把它当问题抛回给用户是把该自己做的功课推回去。
+    """
+    from . import decisions as dec
+
+    slots = dec.missing_slots(set(answered_design or []), set(answered_params or []))
+    return _jsonable(
+        {
+            "conclusion_template": dec.CONCLUSION_TEMPLATE,
+            "n_missing": len(slots),
+            "slots": slots,
+            "how_to_ask": (
+                "一轮问 2~4 个，每题 3~4 个选项，推荐项放第一位并说明理由。"
+                "允许用户自由作答。用户说「随便 / 默认就行」时立刻停止提问。"
+            ),
+        }
+    )
+
+
 def main() -> None:
     # 启动即预热：依赖问题在这里暴露，且不拖慢第一次调用。
     # 注意只能写 stderr —— stdio 传输下 stdout 是 JSON-RPC 通道。

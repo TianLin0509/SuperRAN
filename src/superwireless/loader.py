@@ -266,6 +266,32 @@ class Dataset:
 
         return va.full_report(self, **kw)
 
+    def calibrate(self, **kw: Any) -> Any:
+        """按 3GPP 38.901 §7.8 的口径出校准量。
+
+        出的是数不是判决——耦合损耗、几何量、时延/角度扩展、PRB 奇异值三条 CDF，
+        拿去跟 R1-165974 / R1-165975 里各公司提交的曲线对。
+        """
+        from . import calibration as cal
+
+        return cal.calibration_report(self, **kw)
+
+    def gate(self, **kw: Any) -> Any:
+        """门 1：这批信道能不能拿来下结论。拦截项没清空就别往下走。"""
+        from . import gates as g
+
+        return g.gate_channel(self, **kw)
+
+    def compare_arms(self, arm_a: dict, arm_b: dict, **kw: Any) -> Any:
+        """在这批信道上跑两个方案，配对比较并连过门 2、门 3。
+
+        ``ds.compare_arms({"name":"我的","method":"svd","csi":"estimated"},
+                          {"name":"基线","method":"type1","csi":"estimated"})``
+        """
+        from . import gates as g
+
+        return g.compare_arms(self, arm_a, arm_b, **kw)
+
 
 def load(dataset_id: str) -> Dataset:
     """按句柄取数据集。这是取货代码的入口。"""

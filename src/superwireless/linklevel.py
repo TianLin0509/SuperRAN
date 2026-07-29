@@ -125,7 +125,15 @@ def compute_precoder(
     if method == "type1":
         from .measure import pmi_type_i
 
-        r = pmi_type_i(h, n_h=n_h, n_v=n_v, max_rank=max_rank)
+        # 秩自适应。38.214 的 Type I 反馈里 RI（秩指示）和 PMI 是一起报的，
+        # 真实系统绝不会在低秩信道上硬塞满层——总功率固定时多开的那几层
+        # 每层分到的功率更少、SINR 更低，谱效反而掉。
+        # 这里用与 SVD 同一套判据（奇异值相对最大值的门限），两者才可比；
+        # 缺了这一步，Type I 会在低秩信道上输给 rank-1 的 DFT 波束，
+        # 看起来像"码本不如单波束"，其实是没做秩自适应。
+        sv = np.linalg.svd(h_avg, compute_uv=False)
+        eff_rank = int(max((sv >= rank_threshold * sv[0]).sum(), 1))
+        r = pmi_type_i(h, n_h=n_h, n_v=n_v, max_rank=min(max_rank, eff_rank))
         w = np.broadcast_to(r.precoder[None], (rb, *r.precoder.shape)).astype(np.complex64).copy()
         return Precoder(w=w, rank=r.rank, method=method, indices=list(r.indices))
 

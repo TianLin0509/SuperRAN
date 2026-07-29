@@ -73,6 +73,48 @@ def _rb_from_bandwidth(cfg: dict[str, Any]) -> int:
     return max(1, int(bw / (12 * scs) * 0.95))
 
 
+# 端口数 → [n_h, n_v, n_p] 面板排布。按 3GPP AAU 的常规做法：
+# 双极化、水平优先铺满，再往垂直方向长。
+_PANEL_BY_PORTS = {
+    2: [1, 1, 2], 4: [2, 1, 2], 8: [2, 2, 2], 16: [4, 2, 2], 32: [8, 2, 2],
+    64: [8, 4, 2], 96: [8, 6, 2], 128: [16, 4, 2], 192: [16, 6, 2], 256: [16, 8, 2],
+}
+
+
+def _panel_from_ports(n_ports: int) -> list[int]:
+    """把端口数拆成面板排布。
+
+    **这个函数不是可有可无的。** ChannelHub 只有拿到 ``bs_panel`` 才会构造
+    DFT 码本，而几何 SINR（`internal_sim.py:2446` 的 `self._sinr_codebook is not
+    None and K > 1`）依赖这个码本。码本为 None 时它走兜底分支：
+    ``sir_dB = 49.9``（刚好卡在 ±50 dB 契约边界内的哨兵值）、
+    ``sinr_dB = snr_db``——**小区间干扰完全不进计算**，报出来的"SINR"其实是
+    纯热噪声 SNR。这条路径不报错、不告警，只能靠 `sinr == snr` 反查。
+
+    对不在表里的端口数，退化成单极化水平线阵——能让码本建起来，
+    但排布不一定符合用户预期，所以调用方应在摘要里如实说明。
+    """
+    n = max(int(n_ports), 1)
+    if n in _PANEL_BY_PORTS:
+        return list(_PANEL_BY_PORTS[n])
+    if n % 2 == 0:
+        return [n // 2, 1, 2]
+    return [n, 1, 1]
+
+
+def _ensure_bs_panel(cfg: dict[str, Any]) -> tuple[list[int], bool]:
+    """确保 cfg 里有 bs_panel，返回 (排布, 是否为推导得来)。"""
+    raw = cfg.get("bs_panel")
+    if raw:
+        p = [int(x) for x in raw]
+        cfg["num_bs_tx_ant"] = p[0] * p[1] * p[2]
+        cfg["num_bs_rx_ant"] = p[0] * p[1] * p[2]
+        return p, False
+    panel = _panel_from_ports(int(cfg.get("num_bs_tx_ant", 64) or 64))
+    cfg["bs_panel"] = panel
+    return panel, True
+
+
 def _align_to_ues(n: int, num_ues: int) -> int:
     """向上取整到 num_ues 的倍数。
 
@@ -102,6 +144,7 @@ def generate(
     cfg = dict(cfg)
     source_name = str(cfg.pop("source", "internal_sim"))
     cfg["num_samples"] = int(num_samples)
+    panel, panel_derived = _ensure_bs_panel(cfg)
 
     dataset_id = "ds_" + uuid.uuid4().hex[:8]
     out_dir = dataset_dir(dataset_id)
@@ -250,6 +293,21 @@ def generate(
             f"需要精确站数请用 topology_layout='linear' 或 custom_site_positions。"
         )
 
+    # 干扰是否真的进了 SINR。判据：sir_dB 恰为兜底哨兵 49.9，或 sinr 与 snr 逐点相同。
+    sir_arr = payload.get("scalar__sir_dB")
+    snr_arr = payload.get("scalar__snr_dB")
+    sinr_is_snr = (
+        snr_arr is not None and snr_arr.size and np.allclose(sinr_arr, snr_arr, atol=1e-6)
+    )
+    sir_sentinel = bool(sir_arr is not None and sir_arr.size and np.allclose(sir_arr, 49.9))
+    interference_modeled = bool(cells_cfg > 1 and not sinr_is_snr and not sir_sentinel)
+    interference_note = None
+    if cells_cfg > 1 and not interference_modeled:
+        interference_note = (
+            "多小区配置但小区间干扰未进入 SINR —— 报出的 sinr_dB 等于纯热噪声 snr_dB。"
+            "干扰相关的结论不成立。"
+        )
+
     summary = {
         "dataset_id": dataset_id,
         "draft_id": draft_id,
@@ -259,6 +317,10 @@ def generate(
         "cells_configured": cells_cfg,
         "cells_actual": int(cells_real) if cells_real else None,
         "topology_note": topology_note,
+        "bs_panel": list(panel),
+        "bs_panel_derived": bool(panel_derived),
+        "interference_modeled": interference_modeled if cells_cfg > 1 else None,
+        "interference_note": interference_note,
         "shape": {
             "N": int(shape[0]), "T": int(shape[1]), "RB": int(shape[2]),
             "BS_ant": int(shape[3]), "UE_ant": int(shape[4]),

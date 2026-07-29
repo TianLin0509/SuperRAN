@@ -161,20 +161,66 @@ _DESIGN: dict[str, DesignQuestion] = {
             key="metric",
             question="用什么指标判断好坏？",
             why=(
-                "指标决定了要留哪些量。比如只看 NMSE 就不需要 PMI，"
-                "但要算频谱效率损失就得同时留预编码矩阵和 SINR。"
-                "事后补指标往往要重跑。"
+                "指标决定了要留哪些量，也决定了需要多少样本——不同指标的方差"
+                "差一个数量级，谱效均值收敛得快，5% 边缘用户谱效要慢得多。\n"
+                "谱效的口径是 `SE = mean_rb Σ_layer log2(1 + 后处理SINR)`，"
+                "各层等功率、总发射功率归一，接收机默认 MMSE。"
             ),
             options=[
-                Option("accuracy", "重建精度类：NMSE / 余弦相似度",
-                       "最直接，只需要信道矩阵", recommended=True),
-                Option("system_gain", "系统收益类：频谱效率或吞吐损失",
-                       "更贴近实际价值；需要额外留预编码矩阵和 SINR"),
-                Option("task_specific", "任务专属：波束命中率 / 定位误差 CDF / BLER",
-                       "波束命中率必须用 CDL；定位精度受带宽限制；BLER 要你自己接收机仿真"),
-                Option("not_sure", "还没想好",
-                       "那我按任务类型把常用量都留上，事后不用重跑"),
+                Option("se", "平均谱效 bit/s/Hz",
+                       "最常用。含预编码与接收机全链路，收敛也最快",
+                       recommended=True),
+                Option("sinr", "SINR 分布",
+                       "不经过预编码，直接看链路质量；适合干扰协调、功控类工作"),
+                Option("both", "谱效 + SINR 都要",
+                       "谱效给结论、SINR 给解释；代价只是多存一个标量，建议默认这个"),
+                Option("cell_edge", "5% 边缘用户谱效",
+                       "看公平性而非平均收益。**方差大得多**，样本数要按平均谱效的 3~5 倍准备"),
             ],
+        ),
+        DesignQuestion(
+            key="effect_size",
+            question="你预期的增益有多大？低于多少就不值得做？",
+            why=(
+                "**这题决定样本数，所以它比样本数本身更该问。**\n"
+                "样本量不是拍脑袋定的：给定期望效应 Δ 和逐样本差值的标准差 σ_d，"
+                "N ≥ ((1.96+0.84)·σ_d/Δ)²。反过来，样本数定了就能算出这个实验"
+                "最小能检出多大效应——如果它比你期望的增益还大，这次实验"
+                "**无论跑出什么结果都不足以下结论**，该加样本而不是跑完再解释。\n"
+                "流程上先跑 20 个样本做试点量 σ_d，再算正式样本数（`sw_sample_size`）。"
+            ),
+            options=[
+                Option("large", "明显增益：谱效 +10% 以上",
+                       "样本数需求低，几十个通常够", recommended=True),
+                Option("moderate", "中等增益：谱效 +3~10%",
+                       "典型量级，一般需要一两百个样本"),
+                Option("small", "小幅增益：谱效 +1~3%",
+                       "**要几百到上千个样本**。先想清楚这个量级的增益值不值得这么跑"),
+                Option("unknown", "不知道，先探路",
+                       "那就先跑 20 个试点，用实测的方差反推正式样本数"),
+            ],
+        ),
+        DesignQuestion(
+            key="csi_basis",
+            question="预编码用理想信道还是估计信道？",
+            why=(
+                "这题不问清楚，最容易出的错是**两边口径不一致**——自己的方法用理想"
+                "信道预编码、基线用估计信道，那测出来的增益里混着"
+                "「知道了答案」的部分。这是无线论文评审最常抓的一条，"
+                "门 2 会强制两臂口径一致。\n"
+                "理想 CSI 给的是上界，估计 CSI 给的是实际系统能做到的，两者都有意义，"
+                "但必须在同一口径下比。"
+            ),
+            options=[
+                Option("ideal", "理想信道（h_true）",
+                       "算法本身的上界，排除估计误差干扰。适合先看想法成不成立",
+                       recommended=True),
+                Option("estimated", "估计信道（h_est）",
+                       "贴近实际系统。导频开销与估计误差的代价都会体现出来"),
+                Option("both", "两个都跑",
+                       "两者之差就是 CSI 误差的代价，本身常常是个有价值的结论"),
+            ],
+            optional=True,
         ),
         DesignQuestion(
             key="scope",
@@ -886,6 +932,118 @@ def next_round(
         "stop_hint": (
             "用户说「随便 / 默认就行 / 就这样」时立刻停止提问直接生成，"
             "不要再问下一轮。没答的项会用默认值，生成后会如实列出。"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 「缺什么就问什么」—— 由结论模板反推
+# ---------------------------------------------------------------------------
+# 上面的分轮是按主题走的。但真正决定该问什么的，是**最终那句结论还缺哪几个词**。
+# 一次蒙特卡洛仿真的产出，说到底就是这么一句话：
+#
+#     在【场景】下，【方法】相对【基线】在【指标】上 【效应 ± 置信区间】（n 样本），
+#     该结论在【扫描维度】上成立。
+#
+# 每个方括号是一个必须填的槽。槽空着 → 那句话就说不完整 → 该问。
+# 反过来，能算的就别问：样本数由效应量和试点方差算出来（superpowers 那条
+# "prevent agents from delegating prioritization back to humans" 的精神），
+# 问用户"你要多少样本"是把该自己做的功课推回去。
+
+CONCLUSION_TEMPLATE = (
+    "在【{scenario}】下，【{method}】相对【{baseline}】在【{metric}】上"
+    "{effect}（n={n}），该结论在【{scope}】上成立。"
+)
+
+# 槽位 → (是哪个设计问题 / 参数决策点在填它, 空着的后果)
+_SLOTS: tuple[tuple[str, str, str, str], ...] = (
+    ("baseline", "design", "baseline",
+     "没有基线，「谱效 28 bit/s/Hz」这个数说明不了任何事"),
+    ("metric", "design", "metric",
+     "指标没定就不知道该留哪些量，也算不出需要多少样本"),
+    ("effect", "design", "effect_size",
+     "不知道要检出多大的效应，样本量就只能拍脑袋；样本不够时结论正负全凭运气"),
+    ("csi_basis", "design", "csi_basis",
+     "两臂 CSI 口径不一致时，增益里混着「偷看答案」的部分"),
+    ("scenario", "param", "scenario",
+     "场景决定路损与散射强度，换个场景结论可能反号"),
+    ("scope", "design", "scope",
+     "推广范围没定，就不知道要扫哪几个维度，结论只能限定在这一组配置上"),
+)
+
+
+def missing_slots(answered_design: set[str], answered_params: set[str]) -> list[dict[str, Any]]:
+    """结论模板里还空着的槽，按"空着的代价"从大到小排。
+
+    这是给 Agent 的提问依据：**问空着的槽，不问已经填上的**。
+    """
+    out = []
+    for slot, kind, key, cost in _SLOTS:
+        answered = key in (answered_design if kind == "design" else answered_params)
+        if answered:
+            continue
+        q = _DESIGN.get(key) if kind == "design" else ALL_DECISIONS.get(key)
+        out.append(
+            {
+                "slot": slot,
+                "kind": kind,
+                "key": key,
+                "cost_if_empty": cost,
+                "question": q.question if q else "",
+                "options": [o.as_dict() for o in q.options] if q else [],
+            }
+        )
+    return out
+
+
+def sample_size_advice(
+    std_diff: float | None = None,
+    expected_effect: float | None = None,
+    *,
+    n_current: int | None = None,
+) -> dict[str, Any]:
+    """样本数建议。**算出来的，不是问出来的。**
+
+    三种输入组合：
+
+    * 有 σ_d 和期望效应 → 直接给需要的 N；
+    * 有 σ_d 和当前 N   → 给这个实验的最小可检出效应；
+    * 什么都没有       → 给试点流程（先跑 20 个量方差）。
+    """
+    from .gates import detectable_effect, required_samples
+
+    if std_diff is not None and expected_effect:
+        need = required_samples(std_diff, expected_effect)
+        return {
+            "mode": "由效应量定样本数",
+            "std_diff": round(float(std_diff), 4),
+            "expected_effect": float(expected_effect),
+            "required_n": need,
+            "note": (
+                f"α=0.05、功效 80% 下需要 {need} 个样本。"
+                f"这是**配对**设计的样本数（两个方案跑在同一批信道上）；"
+                f"若两臂用不同数据集，需求会高得多。"
+            ),
+        }
+    if std_diff is not None and n_current:
+        mde = detectable_effect(std_diff, int(n_current))
+        return {
+            "mode": "由样本数定可检出效应",
+            "std_diff": round(float(std_diff), 4),
+            "n": int(n_current),
+            "min_detectable_effect": round(mde, 4),
+            "note": (
+                f"{n_current} 个样本最小能可靠检出 {mde:.4f} 的差异。"
+                f"比这更小的差异，本实验分辨不出来——**这时候结果无论正负都不该下结论**。"
+            ),
+        }
+    return {
+        "mode": "先做试点",
+        "pilot_n": 20,
+        "note": (
+            "先用 20 个样本把两个方案都跑一遍，拿逐样本差值的标准差 σ_d，"
+            "再回来算正式样本数。直接猜样本数是这类实验最常见的浪费来源："
+            "猜少了结论不成立，猜多了白等几小时。"
         ),
     }
 

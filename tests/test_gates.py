@@ -1,0 +1,351 @@
+"""3GPP 校准量、标准查表值、三道评审门的测试。
+
+直接运行：python tests/test_gates.py
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from superwireless import calibration as cal  # noqa: E402
+from superwireless import channelhub as ch  # noqa: E402
+from superwireless import decisions as dec  # noqa: E402
+from superwireless import gates as g  # noqa: E402
+from superwireless import generate as gen  # noqa: E402
+from superwireless import load  # noqa: E402
+from superwireless import plan as pl  # noqa: E402
+from superwireless import spec38901 as spec  # noqa: E402
+
+FAILED: list[str] = []
+
+
+def check(cond: bool, label: str) -> None:
+    print(("  PASS  " if cond else "  FAIL  ") + label)
+    if not cond:
+        FAILED.append(label)
+
+
+def sect(t: str) -> None:
+    print("\n" + "=" * 70 + f"\n{t}\n" + "=" * 70)
+
+
+def make(n: int = 30, **ov):
+    base = {"num_samples": n, "num_ues": max(n // 3, 4), "antenna_preset": "32T4R",
+            "bandwidth_hz": 20000000.0}
+    base.update(ov)
+    d, _ = pl.create_draft("蒙特卡洛评估谱效", overrides=base)
+    cfg, _ = pl.resolved_config(d)
+    cfg.pop("num_samples", None)
+    s = gen.generate(cfg, num_samples=n)
+    return load(s["dataset_id"]), s
+
+
+# ---------------------------------------------------------------------------
+sect("1  38.901 标准查表值")
+
+info = ch.warmup()
+print(f"  预热：{info.get('cdl_spec_tables')}")
+check(bool(info.get("cdl_spec_tables", {}).get("applied")), "标准 CDL 表已灌入")
+
+for name in spec.COVERED:
+    s = spec.as_arrays(name)
+    p = ch.cdl_profile(name)
+    same = all(
+        np.allclose(s[f], np.asarray(getattr(p, f), dtype=float), atol=1e-9)
+        for f in ("delays_norm", "powers_dB", "aod_deg", "aoa_deg", "zod_deg", "zoa_deg")
+    )
+    check(same, f"{name} 与 {spec.CDL_TABLES[name]['table']} 逐簇一致")
+
+# 灌表必须幂等：重复调用不改变结果
+before = ch.cdl_profile("CDL-C").aoa_deg.copy()
+ch.ensure_spec_tables()
+check(np.allclose(before, ch.cdl_profile("CDL-C").aoa_deg), "重复灌表幂等")
+
+# 差异报告本身要能跑（灌表后应当无差异）
+d = spec.diff_against_channelhub()
+check(
+    all(v["n_mismatched_clusters"] == 0 for v in d.values()),
+    "灌表后差异报告显示零差异",
+)
+
+# ---------------------------------------------------------------------------
+sect("2  Annex A.1 圆周角度扩展")
+
+# 全部功率集中在一个角度 → 角度扩展为 0。
+# 容差取 1e-6 rad 而非 0：sqrt(−2·ln r) 在 r→1 处把浮点误差开方放大，
+# 数学上的 0 在浮点里是 ~1e-8 rad（约 6e-7 度），远小于任何物理意义上的角度。
+check(
+    abs(cal.circular_angular_spread_rad(np.array([1.234]), np.array([1.0]))) < 1e-6,
+    "单一角度的角度扩展为 0",
+)
+# 绕回免疫：0° 与 360° 是同一个方向，普通标准差会算出 180°，圆周定义应当给 0
+a = np.radians(np.array([0.0, 360.0]))
+check(
+    cal.circular_angular_spread_rad(a, np.ones(2)) < 1e-6,
+    "0° 与 360° 视为同一方向（普通标准差会误判）",
+)
+# 均匀铺满一圈 → 矢量和趋近 0 → 角度扩展趋近无穷大
+wide = cal.circular_angular_spread_rad(
+    np.linspace(0, 2 * np.pi, 64, endpoint=False), np.ones(64)
+)
+check(wide > 3.0, "角度均布一圈时角度扩展很大")
+
+# 与标准表算出的值应稳定可复现
+asa = np.degrees(
+    cal.circular_angular_spread_rad(
+        np.radians(spec.as_arrays("CDL-C")["aoa_deg"]),
+        10 ** (spec.as_arrays("CDL-C")["powers_dB"] / 10),
+    )
+)
+print(f"  CDL-C 标准表 ASA = {asa:.2f}°")
+check(60.0 < asa < 80.0, "CDL-C 的 ASA 在合理量级")
+
+# ---------------------------------------------------------------------------
+sect("3  38.901 §7.8 校准量")
+
+ds, summ = make(30)
+print(f"  数据集 {summ['dataset_id']}，{summ['shape']}")
+rep = cal.calibration_report(ds)
+print(rep.text())
+
+names = {m.name: m for m in rep.metrics}
+check("耦合损耗（服务小区）" in names, "出了耦合损耗")
+cl = names["耦合损耗（服务小区）"]
+check(cl.n == ds.n, "耦合损耗逐样本都有")
+check(50 < cl.percentiles["p50"] < 180, "耦合损耗量级合理")
+
+check(rep.singular_values is not None, "出了 PRB 奇异值")
+sv = rep.singular_values
+check(
+    bool(np.all(sv.largest_db >= sv.smallest_db - 1e-6)),
+    "最大奇异值不小于次大奇异值",
+)
+check(bool(np.all(sv.ratio_db >= -1e-6)), "奇异值比值非负")
+
+# 角度扩展四项都应出数
+for k in ("ASD", "ASA", "ZSD", "ZSA"):
+    m = cal.angular_spread_deg(ds, k)
+    check(m.values is not None and np.isfinite(m.values[0]), f"角度扩展 {k} 出数")
+
+# ---------------------------------------------------------------------------
+sect("4  跨引擎 KS 比较")
+
+x = np.random.default_rng(0).normal(0, 1, 500)
+y = np.random.default_rng(1).normal(0, 1, 500)
+z = np.random.default_rng(2).normal(3, 1, 500)
+d_same = cal.ks_statistic(x, y)
+d_diff = cal.ks_statistic(x, z)
+crit = cal.ks_critical(500, 500)
+print(f"  同分布 D={d_same:.3f}，异分布 D={d_diff:.3f}，临界值 {crit:.3f}")
+check(d_same < crit, "同分布判为一致")
+check(d_diff > crit, "异分布判为不一致")
+
+cmpres = cal.cross_engine_compare(ds, ds)
+check(
+    cmpres["metrics"]["coupling_loss"]["same_distribution"],
+    "同一数据集与自己比必然一致",
+)
+
+# ---------------------------------------------------------------------------
+sect("5  功效分析")
+
+# 两个方向必须互为反解
+std, eff = 0.83, 0.30
+n = g.required_samples(std, eff)
+mde = g.detectable_effect(std, n)
+print(f"  σ_d={std}，Δ={eff} → 需要 {n} 个样本；n={n} 时最小可检出 {mde:.4f}")
+check(n > 0, "样本数为正")
+check(abs(mde - eff) / eff < 0.05, "样本数与可检出效应互为反解")
+
+# 效应减半，样本数应当约为四倍
+check(
+    abs(g.required_samples(std, eff / 2) / (4 * n) - 1) < 0.02,
+    "效应减半时样本数变四倍（平方关系）",
+)
+# 方差为零或效应为零时不给出荒谬的数
+check(g.required_samples(std, 0.0) == -1, "效应为 0 时拒绝给样本数")
+
+adv = dec.sample_size_advice()
+check(adv["mode"] == "先做试点", "无输入时给试点流程")
+adv2 = dec.sample_size_advice(std_diff=std, expected_effect=eff)
+check(adv2["required_n"] == n, "决策层与门控层样本数一致")
+
+# ---------------------------------------------------------------------------
+sect("6  配对比较")
+
+rng = np.random.default_rng(7)
+base = rng.normal(20, 5, 200)  # 共同的场景起伏
+a = base + rng.normal(0.5, 0.4, 200)  # A 系统性高 0.5
+b = base + rng.normal(0.0, 0.4, 200)
+pr = g.paired_compare(a, b)
+print(f"  配对：差值 {pr.mean_diff:+.3f}，CI [{pr.ci_low:+.3f}, {pr.ci_high:+.3f}]，p={pr.p_value:.2e}")
+check(pr.significant, "真实差异被检出")
+check(pr.ci_excludes_zero, "置信区间不跨零")
+check(pr.std_diff < base.std(), "配对后的差值标准差远小于单组标准差")
+
+# 无差异时不该报显著
+c = base + rng.normal(0.0, 0.4, 200)
+pr0 = g.paired_compare(c, b)
+print(f"  无差异：差值 {pr0.mean_diff:+.3f}，p={pr0.p_value:.3f}")
+check(not pr0.significant, "无差异时不报显著")
+
+# 单个极端样本主导要被识别出来
+d = b.copy()
+d[0] += 500.0
+prx = g.paired_compare(d, b)
+check(prx.max_single_contribution > 0.5, "识别出单样本主导")
+
+# ---------------------------------------------------------------------------
+sect("7  配置差分")
+
+cfg1 = {"scenario": "UMa_NLOS", "isd_m": 500.0, "seed": 1, "num_samples": 10}
+cfg2 = {"scenario": "UMa_NLOS", "isd_m": 800.0, "seed": 99, "num_samples": 200}
+d = g.config_diff(cfg1, cfg2)
+print(f"  差异：{d}")
+check(set(d) == {"isd_m"}, "只报物理差异，忽略 seed / num_samples")
+
+# ---------------------------------------------------------------------------
+sect("8  门 1 · 信道可信")
+
+r1 = ds.gate()
+print(r1.text())
+check(isinstance(r1.passed, bool), "门 1 给出明确结论")
+check(len(r1.items) >= 10, "门 1 覆盖足够多的判据")
+check(
+    all(i.severity in ("block", "warn", "info") for i in r1.items),
+    "每项都有明确严重度",
+)
+
+# ---------------------------------------------------------------------------
+sect("9  门 2 · 比较公平")
+
+fair = g.gate_comparison(
+    {"name": "A", "dataset_id": "ds_x", "config": {"isd_m": 500.0}, "csi": "ideal"},
+    {"name": "B", "dataset_id": "ds_x", "config": {"isd_m": 500.0}, "csi": "ideal"},
+)
+check(fair.passed, "同数据集同口径放行")
+
+peek = g.gate_comparison(
+    {"name": "我的", "dataset_id": "ds_x", "config": {}, "csi": "ideal"},
+    {"name": "基线", "dataset_id": "ds_x", "config": {}, "csi": "estimated"},
+)
+print(f"  偷看理想信道 → 拦截项 {[i.name for i in peek.blockers]}")
+check(not peek.passed, "一边理想一边估计被拦")
+check(any("CSI" in i.name for i in peek.blockers), "拦截原因指向 CSI 口径")
+
+# 但 CSI 口径本身可以是被测变量 —— 声明了就该放行
+declared = g.gate_comparison(
+    {"name": "理想CSI", "dataset_id": "ds_x", "config": {}, "csi": "ideal",
+     "varies": ["csi"]},
+    {"name": "估计CSI", "dataset_id": "ds_x", "config": {}, "csi": "estimated"},
+)
+check(declared.passed, "声明 varies=[csi] 后放行（测 CSI 误差的代价是正当实验）")
+
+drift = g.gate_comparison(
+    {"name": "A", "dataset_id": "ds_x", "config": {"isd_m": 500.0, "speed_kmh": 3},
+     "csi": "ideal"},
+    {"name": "B", "dataset_id": "ds_x", "config": {"isd_m": 800.0, "speed_kmh": 30},
+     "csi": "ideal", "varies": ["isd_m"]},
+)
+print(f"  配置漂移 → 拦截项 {[i.name for i in drift.blockers]}")
+check(not drift.passed, "未声明的配置差异被拦")
+
+split = g.gate_comparison(
+    {"name": "A", "dataset_id": "ds_1", "config": {}, "csi": "ideal"},
+    {"name": "B", "dataset_id": "ds_2", "config": {}, "csi": "ideal"},
+)
+check(not split.passed, "两臂用不同数据集被拦")
+
+# ---------------------------------------------------------------------------
+sect("10  门 3 · 结论站得住")
+
+ok3 = g.gate_conclusion(pr)
+check(ok3.passed, "真实显著差异过门")
+
+bad3 = g.gate_conclusion(pr0)
+print(f"  无差异 → 拦截项 {[i.name for i in bad3.blockers]}")
+check(not bad3.passed, "不显著的差异被拦")
+
+dom3 = g.gate_conclusion(prx)
+check(
+    any("单个样本" in i.name for i in dom3.blockers) or not dom3.passed,
+    "单样本主导被拦",
+)
+
+# ---------------------------------------------------------------------------
+sect("11  端到端：同批信道跑两个方案")
+
+res = ds.compare_arms(
+    {"name": "SVD", "method": "svd", "csi": "ideal"},
+    {"name": "DFT波束", "method": "dft", "csi": "ideal"},
+    max_samples=30,
+)
+print(res.text())
+check(res.paired.n == min(ds.n, 30), "配对样本数正确")
+check(res.paired.mean_a > res.paired.mean_b, "SVD 优于 DFT 单波束")
+check(res.gate2.passed, "公平性门通过")
+check("结论" in res.statement(), "给出可直接引用的结论句")
+
+# 过不了门时必须明说结论不成立
+tie = ds.compare_arms(
+    {"name": "SVD-1", "method": "svd", "csi": "ideal"},
+    {"name": "SVD-2", "method": "svd", "csi": "ideal"},
+    max_samples=30,
+)
+print(f"  自己跟自己比：{tie.statement()}")
+check(not tie.passed, "零差异对比不通过门 3")
+check("不成立" in tie.statement(), "结论句明说不成立")
+
+# ---------------------------------------------------------------------------
+sect("12  结论模板空槽")
+
+allslots = dec.missing_slots(set(), set())
+print(f"  全空时 {len(allslots)} 个槽：{[s['slot'] for s in allslots]}")
+check(len(allslots) >= 5, "空槽数量合理")
+check(all(s["options"] for s in allslots), "每个槽都带选项")
+check(
+    all(2 <= len(s["options"]) <= 5 for s in allslots),
+    "每题选项数在 2~5 之间（superpowers 的做法是别给太多）",
+)
+check(
+    any(o.get("recommended") for s in allslots for o in s["options"]),
+    "有推荐项",
+)
+
+part = dec.missing_slots({"baseline", "metric"}, {"scenario"})
+print(f"  答了 3 项后剩 {[s['slot'] for s in part]}")
+check(len(part) == len(allslots) - 3, "答过的槽不再问")
+check(all(s["slot"] not in ("baseline", "metric", "scenario") for s in part),
+      "已答的槽被排除")
+
+# ---------------------------------------------------------------------------
+sect("13  干扰建模的自动推导与检出")
+
+print(f"  bs_panel={summ.get('bs_panel')}（推导={summ.get('bs_panel_derived')}）")
+check(bool(summ.get("bs_panel")), "生成时自动推导出 bs_panel")
+
+multi, msum = make(12, num_sites=7, sectors_per_site=3, isd_m=200.0)
+print(f"  多小区：{msum['cells_actual']} 小区，干扰建模={msum['interference_modeled']}")
+check(bool(msum["interference_modeled"]), "多小区场景下干扰确实进了 SINR")
+sinr = np.asarray(multi.sinr_dB)
+snr = np.asarray(multi.snr_dB)
+check(not np.allclose(sinr, snr), "SINR 不等于纯热噪声 SNR")
+
+from superwireless import validate as va  # noqa: E402
+
+c = va.check_interference_modeled(multi)
+print(f"  检查：{c.detail}")
+check(c.passed, "干扰检查放行正确配置")
+
+# ---------------------------------------------------------------------------
+print("\n" + "=" * 70)
+if FAILED:
+    print(f"FAILED {len(FAILED)} 项：")
+    for f in FAILED:
+        print("  -", f)
+    sys.exit(1)
+print("校准、标准表、三道门全部通过。")

@@ -493,11 +493,20 @@ def check_se_below_capacity(ds: Any, *, n: int = 5, snr_db: float = 20.0) -> Che
     )
 
 
-def check_precoder_ordering(ds: Any, *, snr_db: float = 20.0, n: int = 8) -> Check:
+# 判定预编码排序所需的最小样本数。样本太少时相邻两档（尤其 Type I 与 DFT）
+# 的均值差远小于抽样噪声，会随机翻转——判定它只会制造假警报，而习惯了假警报
+# 的人会连真警报一起忽略。
+_ORDERING_MIN_N = 20
+
+
+def check_precoder_ordering(ds: Any, *, snr_db: float = 20.0, n: int = 24) -> Check:
     """预编码方案的性能排序：SVD ≥ 宽带 SVD ≥ Type I 码本 ≥ DFT rank-1。
 
     这个排序有明确物理含义——逐 RB 最优 ≥ 全带共用一个 W ≥ 码本量化 ≥ 单层波束。
     顺序反了说明某个实现有问题。
+
+    样本数不足 ``_ORDERING_MIN_N`` 时只报数不判定：这时相邻档位的差距被抽样
+    噪声淹没，判定结果没有意义。
     """
     from .linklevel import monte_carlo
 
@@ -509,12 +518,19 @@ def check_precoder_ordering(ds: Any, *, snr_db: float = 20.0, n: int = 8) -> Che
 
     order = ["svd", "svd_wideband", "type1", "dft"]
     seq = [res[m] for m in order]
-    ok = all(seq[i] >= seq[i + 1] - 1e-6 for i in range(len(seq) - 1))
     txt = " ≥ ".join(f"{m}({res[m]:.2f})" for m in order)
+    if k < _ORDERING_MIN_N:
+        return Check(
+            "预编码性能排序", True,
+            f"仅 {k} 个样本（需 ≥{_ORDERING_MIN_N} 才判定），实测 {txt} bit/s/Hz",
+            measured=[round(res[m], 3) for m in order],
+            severity="info",
+        )
+    ok = all(seq[i] >= seq[i + 1] - 1e-6 for i in range(len(seq) - 1))
     return Check(
         "预编码性能排序",
         ok,
-        f"实测 {txt} bit/s/Hz",
+        f"{k} 个样本，实测 {txt} bit/s/Hz",
         measured=[round(res[m], 3) for m in order],
         expected="单调不增",
         tolerance="允许 1e-6 数值误差",
@@ -602,6 +618,172 @@ def check_sinr_distribution(ds: Any) -> Check:
     )
 
 
+def check_interference_modeled(ds: Any) -> Check:
+    """多小区配置下，小区间干扰是否真的进了 SINR。
+
+    ChannelHub 算几何 SINR 的前提是拿得到 DFT 码本，而码本只在配置里给了
+    ``bs_panel`` 时才建（`internal_sim.py:1436`）。拿不到码本时它走兜底：
+    ``sir_dB = 49.9``（贴着 ±50 dB 契约边界的哨兵）、``sinr_dB = snr_dB``。
+
+    **这条兜底路径不报错、不告警。** 结果是配了 21 个小区、报出来的"SINR"
+    却是单小区热噪声 SNR，干扰相关的任何结论都不成立。判据有两个，命中一个就算：
+    SIR 恒为 49.9，或 SINR 与 SNR 逐点相同。
+    """
+    cells = int(ds.config.get("num_sites", 1) or 1) * int(
+        ds.config.get("sectors_per_site", 1) or 1
+    )
+    if cells <= 1:
+        return Check(
+            "干扰是否进入 SINR", True, f"单小区配置（{cells} 小区），无小区间干扰，不适用",
+            severity="info",
+        )
+
+    sinr = np.asarray(ds.sinr_dB, dtype=float)
+    snr = np.asarray(ds.snr_dB, dtype=float)
+    try:
+        sir = np.asarray(ds.scalar("sir_dB"), dtype=float)
+    except KeyError:
+        sir = np.full_like(sinr, np.nan)
+
+    same = bool(sinr.size and snr.size == sinr.size and np.allclose(sinr, snr, atol=1e-6))
+    sentinel = bool(np.isfinite(sir).any() and np.allclose(sir[np.isfinite(sir)], 49.9))
+    ok = not (same or sentinel)
+
+    why = []
+    if same:
+        why.append("SINR 与纯热噪声 SNR 逐点相同")
+    if sentinel:
+        why.append("SIR 恒为 49.9 dB（兜底哨兵值）")
+    detail = (
+        f"{cells} 小区，干扰已进入 SINR"
+        f"（SINR 中位 {np.nanmedian(sinr):.1f} dB vs SNR 中位 {np.nanmedian(snr):.1f} dB）"
+        if ok
+        else (
+            f"{cells} 小区但 " + "、".join(why) + "。报出的 SINR 实为单小区 SNR，"
+            f"干扰相关结论不成立。生成时需给 bs_panel（superwireless 会由 "
+            f"num_bs_tx_ant 自动推导，旧数据集没有这一步）"
+        )
+    )
+    return Check(
+        "干扰是否进入 SINR", ok, detail,
+        measured=round(float(np.nanmedian(sinr) - np.nanmedian(snr)), 2),
+        expected="SINR < SNR（干扰使其下降）",
+        tolerance="SINR 与 SNR 不得逐点相同",
+    )
+
+
+def check_cdl_table_vs_38901(ds: Any, *, tol: float = 0.05) -> Check:
+    """所用 CDL 剖面的查表值是否与 38.901 原表一致。
+
+    仿真器内部那份剖面表抄错了不会报错——时延、功率、角度都还是"合理"的数，
+    只是不再是标准剖面。用一份独立录入的标准表（``spec38901``）逐簇对，
+    是唯一能发现这类错误的办法。
+
+    严重度按**功率加权**给：只有末尾几个弱簇不符，影响有限；如果不符的簇
+    加起来占了大半功率，那这个剖面的名字就名不副实了。
+    """
+    from . import spec38901
+
+    model = str(getattr(ds, "channel_model", "") or "").upper()
+    if model not in spec38901.COVERED:
+        return Check(
+            "CDL 剖面对标 38.901", True,
+            f"{model or '未知剖面'} 未录入标准表（本模块只覆盖 {'/'.join(spec38901.COVERED)}），跳过",
+            severity="info",
+        )
+
+    from .channelhub import cdl_profile
+
+    spec = spec38901.as_arrays(model)
+    prof = cdl_profile(model)
+    n = len(spec["powers_dB"])
+    impl_n = len(np.asarray(prof.powers_dB, dtype=float))
+    if impl_n != n:
+        return Check(
+            "CDL 剖面对标 38.901", False,
+            f"{model} 簇数不符：标准 {n}，实现 {impl_n}",
+            measured=impl_n, expected=n,
+        )
+
+    bad = np.zeros(n, dtype=bool)
+    worst: list[str] = []
+    for f in ("delays_norm", "powers_dB", "aod_deg", "aoa_deg", "zod_deg", "zoa_deg"):
+        d = np.abs(spec[f] - np.asarray(getattr(prof, f), dtype=float))
+        hit = d > tol
+        bad |= hit
+        if hit.any():
+            worst.append(f"{f} {int(hit.sum())} 簇（最大差 {d.max():.1f}）")
+
+    pw = 10.0 ** (spec["powers_dB"] / 10.0)
+    pw = pw / pw.sum()
+    share = float(pw[bad].sum())
+    ok = not bad.any()
+    return Check(
+        "CDL 剖面对标 38.901", ok,
+        (
+            f"{model}（{spec38901.CDL_TABLES[model]['table']}）逐簇一致"
+            if ok
+            else (
+                f"{model} 与 {spec38901.CDL_TABLES[model]['table']} 不符："
+                f"{int(bad.sum())}/{n} 簇有出入，占总功率 {share:.1%}。"
+                f"明细：{'；'.join(worst)}。"
+                f"时延与功率对得上、只有角度不符时，PDP 类结论仍可用，"
+                f"但空间相关性、波束赋形增益、到达角估计这类依赖角度的结论会偏。"
+            )
+        ),
+        measured=round(share, 4),
+        expected="0（逐簇一致）",
+        tolerance=f"逐项差 ≤ {tol}",
+        severity="error" if share > 0.10 else "warn",
+    )
+
+
+def check_angular_spread_vs_spec(ds: Any, *, tol_deg: float = 3.0) -> Check:
+    """角度扩展（Annex A.1 圆周定义）与 38.901 原表算出的值是否一致。
+
+    这是 ``check_cdl_table_vs_38901`` 的"后果"版本：逐簇差异最终体现为多大的
+    角度扩展偏差，直接对应波束宽度与空间相关性的偏差量级。
+    """
+    from . import spec38901
+    from .calibration import circular_angular_spread_rad
+
+    model = str(getattr(ds, "channel_model", "") or "").upper()
+    if model not in spec38901.COVERED:
+        return Check("角度扩展对标 38.901", True, f"{model or '未知剖面'} 无标准表，跳过",
+                     severity="info")
+
+    try:
+        st = ds.paths()
+    except (NotImplementedError, KeyError, AttributeError) as exc:
+        return Check("角度扩展对标 38.901", True, f"取不到多径角度：{exc}", severity="info")
+
+    spec = spec38901.as_arrays(model)
+    pw_spec = 10.0 ** (spec["powers_dB"] / 10.0)
+    pairs = (("ASD", "aod_deg", "aod_rad"), ("ASA", "aoa_deg", "aoa_rad"),
+             ("ZSD", "zod_deg", "zod_rad"), ("ZSA", "zoa_deg", "zoa_rad"))
+
+    lines: list[str] = []
+    worst = 0.0
+    for label, sf, df in pairs:
+        want = math.degrees(circular_angular_spread_rad(np.radians(spec[sf]), pw_spec))
+        got = math.degrees(
+            circular_angular_spread_rad(getattr(st, df), st.powers_linear)
+        )
+        diff = got - want
+        worst = max(worst, abs(diff))
+        lines.append(f"{label} 标准 {want:.1f}° / 实测 {got:.1f}°（{diff:+.1f}°）")
+
+    ok = worst <= tol_deg
+    return Check(
+        "角度扩展对标 38.901", ok,
+        "；".join(lines) + ("" if ok else "。角度扩展决定波束宽度与空间相关性，偏差会传导到预编码增益"),
+        measured=round(worst, 2),
+        expected=f"|差| ≤ {tol_deg}°",
+        tolerance=f"Annex A.1 圆周定义，容差 {tol_deg}°",
+        severity="warn",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 汇总
 # ---------------------------------------------------------------------------
@@ -643,8 +825,11 @@ def full_report(ds: Any, *, snr_db: float = 20.0) -> ValidationReport:
     """跑全部检查。生成数据后调一次，确认这批数据能不能拿来下结论。"""
     checks = [
         check_pathloss_vs_38901(ds),
+        check_cdl_table_vs_38901(ds),
+        check_angular_spread_vs_spec(ds),
         check_scenario_model_consistency(ds),
         check_cell_count(ds),
+        check_interference_modeled(ds),
         check_pathloss_range(ds),
         check_pathloss_above_free_space(ds),
         check_delay_spread_vs_profile(ds),

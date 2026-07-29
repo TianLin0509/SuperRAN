@@ -52,12 +52,40 @@ def channelhub_root() -> Path:
     return _candidate_roots()[0]
 
 
+_spec_tables_state: dict[str, Any] = {}
+
+
 def _ensure_path() -> None:
-    """把 ChannelHub 的 src 加进 sys.path（幂等）。"""
+    """把 ChannelHub 的 src 加进 sys.path（幂等），并确保标准 CDL 表已就位。"""
     src = channelhub_root() / "src"
     s = str(src)
     if s not in sys.path:
         sys.path.insert(0, s)
+    ensure_spec_tables()
+
+
+def ensure_spec_tables() -> dict[str, Any]:
+    """确保 ChannelHub 的 CDL 剖面表已被替换为逐字核对过的 38.901 查表值。
+
+    **挂在 ``_ensure_path`` 上而不是只挂在 ``warmup`` 上是有意的。** 任何取
+    ChannelHub 东西的路径都会先过 ``_ensure_path``——直接调 ``cdl_profile``、
+    跑测试、在 REPL 里试都算。如果只在 ``warmup`` 里做，就会出现"跑 MCP 时
+    信道是标准的、跑测试时不是"这种最难查的不一致。
+
+    幂等：只在第一次真正执行替换。
+    """
+    if _spec_tables_state:
+        return _spec_tables_state
+    _spec_tables_state["pending"] = True  # 占位，防止替换过程里的重入
+    try:
+        from .spec38901 import apply_spec_tables  # noqa: PLC0415
+
+        result = apply_spec_tables()
+    except Exception as exc:  # noqa: BLE001
+        result = {"applied": False, "error": f"{type(exc).__name__}: {exc}"}
+    _spec_tables_state.clear()
+    _spec_tables_state.update(result)
+    return _spec_tables_state
 
 
 @dataclass
@@ -189,6 +217,9 @@ def warmup() -> dict[str, Any]:
         scipy.linalg.svd(a, full_matrices=False)
         numpy.linalg.eigh(a @ a.conj().T)
         numpy.fft.ifft(a, axis=0)
+
+        # 标准 CDL 表已由 _ensure_path → ensure_spec_tables 灌好，这里只是报状态。
+        info["cdl_spec_tables"] = ensure_spec_tables()
         info["ok"] = True
     except Exception as exc:  # noqa: BLE001
         info["ok"] = False
