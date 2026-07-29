@@ -1,0 +1,25 @@
+# 生成的数据与场景缓存 —— 体积大且可重新生成
+artifacts/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 工具
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db

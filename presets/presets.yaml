@@ -1,0 +1,176 @@
+﻿# 场景预设。加新场景只改这个文件，不改代码。
+#
+# 每个 preset 只给"场景骨架"（站点规模、传播场景、天线规模），
+# 具体参数由决策点协商决定。preset 里没写的键一律走 ChannelHub 默认值。
+
+single_cell_64t4r:
+  label: 单小区 · 64T4R 宏站
+  summary: 最常用的算法验证基线。城区宏站非视距，64 发 4 收，100 MHz。
+  typical_for: [CSI 压缩, 预编码, 码本设计, 信道估计]
+  config:
+    source: internal_sim
+    scenario: UMa_NLOS
+    channel_model: CDL-C
+    num_sites: 1
+    sectors_per_site: 1
+    num_ues: 10
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+single_cell_4t4r:
+  label: 单小区 · 4T4R 最小配置
+  summary: 维度最小、跑得最快，适合先把流程跑通再放大。
+  typical_for: [冒烟测试, 流程验证]
+  config:
+    source: internal_sim
+    scenario: UMa_NLOS
+    channel_model: CDL-C
+    num_sites: 1
+    sectors_per_site: 1
+    num_ues: 5
+    num_bs_tx_ant: 4
+    num_bs_rx_ant: 4
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 20000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+multicell_7site:
+  label: 多小区 · 7 站 21 扇区
+  summary: 密集城区，中心小区被一圈邻区包围，干扰环境完整。
+  typical_for: [干扰协调, 调度, 切换]
+  config:
+    source: internal_sim
+    scenario: UMi_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 200.0
+    num_ues: 21
+    num_interfering_ues: 10
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+multicell_19site:
+  label: 多小区 · 19 站 57 扇区（38.901 Case 1）
+  summary: 两圈邻区的标准宏站基准，中心小区干扰最完整。耗时约为 7 站的三倍。
+  typical_for: [干扰协调, 系统级评估, 论文对标]
+  config:
+    source: internal_sim
+    scenario: UMa_NLOS
+    channel_model: CDL-C
+    num_sites: 19
+    sectors_per_site: 3
+    isd_m: 500.0
+    num_ues: 57
+    num_interfering_ues: 10
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+# --- 射线追踪场景 ---------------------------------------------------------
+# `scene` 字段会在 resolve 时展开成 scenario / osm_path / 站点布局，
+# 真实城市场景还会自动完成资产准备（修 PLY 头）。
+# 场景清单用 sw_list_scenes 查，或直接在 overrides 里换 scene。
+
+rt_munich:
+  label: 射线追踪 · 慕尼黑老城
+  summary: Sionna 自带场景，开箱即用。真实建筑几何下的反射与绕射。
+  typical_for: [site-specific 验证, 波束管理, 定位]
+  config:
+    source: sionna_rt
+    scene: munich
+    channel_model: TDL-C
+    num_ues: 10
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    link: DL
+    channel_est_mode: ls_linear
+    device: cpu
+
+rt_shanghai_lujiazui:
+  label: 射线追踪 · 上海陆家嘴
+  summary: 真实 OSM 建筑，中国一线城市 CBD 超高层密集区。首次使用自动准备资产。
+  typical_for: [密集城区验证, 覆盖分析, 干扰研究]
+  config:
+    source: sionna_rt
+    scene: shanghai_lujiazui
+    channel_model: TDL-C
+    num_ues: 12
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    link: DL
+    channel_est_mode: ls_linear
+    device: cpu
+
+rt_shenzhen_futian:
+  label: 射线追踪 · 深圳福田 CBD
+  summary: 真实 OSM 建筑，6 站 18 小区，130 栋楼平均 41.5 m。首次使用自动准备资产。
+  typical_for: [密集城区验证, 覆盖分析, 干扰研究]
+  config:
+    source: sionna_rt
+    scene: shenzhen_futian
+    channel_model: TDL-C
+    num_ues: 12
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    link: DL
+    channel_est_mode: ls_linear
+    device: cpu
+
+indoor_factory:
+  label: 室内工厂 · InF
+  summary: 38.901 §7.2 室内工厂场景，时延扩展与城区差别明显。
+  typical_for: [室内定位, 工业物联]
+  config:
+    source: internal_sim
+    scenario: InF
+    channel_model: CDL-A
+    num_sites: 4
+    sectors_per_site: 1
+    isd_m: 50.0
+    num_ues: 12
+    num_bs_tx_ant: 16
+    num_bs_rx_ant: 16
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 2
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 2000000000.0
+    link: DL
+    channel_est_mode: ls_linear
