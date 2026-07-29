@@ -148,6 +148,18 @@ for q in prop["design_questions"]:
 check(len(prop["design_questions"]) >= 2, "提供了实验设计层问题")
 check(all(q["why"] and q["examples"] for q in prop["design_questions"]), "设计问题都带 why 和示例")
 
+print("\n  选项式提问（启发思路，不是开放式发问）：")
+q0 = prop["design_questions"][0]
+print(f"    {q0['question']}")
+for i, o in enumerate(q0["options"][:4], 1):
+    print(f"      {i}) {o['label']}  —— {o['note'][:44]}")
+print(f"      …共 {len(q0['options'])} 个选项" + ("，且允许自由作答" if q0["allow_free"] else ""))
+check(all(len(q["options"]) >= 3 for q in prop["design_questions"]), "每个设计问题至少 3 个选项")
+check(all(any(o["note"] for o in q["options"]) for q in prop["design_questions"]),
+      "选项带「什么情况下选它」的说明")
+check(all(q["allow_free"] for q in prop["design_questions"]), "都允许自由作答，选项只用于启发")
+check(all(q["options"] for q in prop["questions"]), "仿真参数问题也都带选项")
+
 print("\n  建议的对比组：")
 for s in prop["suggested_sweeps"]:
     print(f"    · {s['label']}: {s['key']} = {s['values']}")

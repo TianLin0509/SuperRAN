@@ -62,21 +62,30 @@ class DesignQuestion:
     """实验设计层的问题。没有默认值——这些必须用户自己想清楚。
 
     它不影响任何仿真参数，但决定了这批数据能不能支撑用户想要的结论。
+
+    **给选项，不要只抛问题。** 开放式提问会让用户卡壳——"你要跟什么比"
+    这种问题，很多人第一反应是答不上来，但看到"理想信道的 SVD 上界"
+    这个选项就会想起来还有这条路。选项的作用是启发，不是限制，
+    所以每题都留"其他/让我自己说"。
     """
 
     key: str
     question: str
     why: str
-    examples: list[str] = field(default_factory=list)
+    options: list[Option] = field(default_factory=list)
     optional: bool = False  # True 表示用户不答也能走
+    allow_free: bool = True  # 是否允许自由作答
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "key": self.key,
             "question": self.question,
             "why": self.why,
-            "examples": self.examples,
+            "options": [o.as_dict() for o in self.options],
+            # examples 是 options 的扁平化，保留给只想要一句话提示的调用方
+            "examples": [o.label for o in self.options],
             "optional": self.optional,
+            "allow_free": self.allow_free,
         }
 
 
@@ -124,12 +133,21 @@ _DESIGN: dict[str, DesignQuestion] = {
                 "关键是它比现有方案好还是差。基线定下来，"
                 "才知道要不要同时生成对照数据。"
             ),
-            examples=[
-                "3GPP Type I / Type II 码本",
-                "理想信道下的 SVD 上界",
-                "已发表的某个方法",
-                "不压缩的全反馈",
-                "传统 LS / MMSE 估计",
+            options=[
+                Option("type1", "3GPP Type I 码本",
+                       "最常见的基线，几乎所有 CSI 相关工作都会比这个"),
+                Option("type2", "3GPP Type II / eType II 码本",
+                       "更强的基线：精度高但反馈开销大，压缩类课题常用它证明「省了开销还不掉精度」"),
+                Option("svd_bound", "理想信道的 SVD 预编码",
+                       "理论天花板，用来看你离上界还差多少"),
+                Option("full_feedback", "不压缩的全反馈",
+                       "看压缩到底省了多少比特，代价是多少"),
+                Option("classic_est", "传统 LS / MMSE 估计",
+                       "信道估计类课题的标准对照"),
+                Option("published", "某篇已发表方法",
+                       "告诉我是哪篇，我尽量对齐它的实验设置便于横向比"),
+                Option("none_yet", "还没定，先看可行性",
+                       "那就先跑一组基准数据，基线之后再补"),
             ],
         ),
         DesignQuestion(
@@ -140,12 +158,21 @@ _DESIGN: dict[str, DesignQuestion] = {
                 "但要算频谱效率损失就得同时留预编码矩阵和 SINR。"
                 "事后补指标往往要重跑。"
             ),
-            examples=[
-                "NMSE / 余弦相似度",
-                "频谱效率或吞吐损失",
-                "误块率 BLER",
-                "波束选对的概率",
-                "定位误差 CDF",
+            options=[
+                Option("nmse", "NMSE / 余弦相似度",
+                       "重建精度，最直接，只需要信道矩阵"),
+                Option("spectral_eff", "频谱效率或吞吐损失",
+                       "更贴近系统收益；需要额外留预编码矩阵和 SINR"),
+                Option("bler", "误块率 BLER",
+                       "链路级指标，需要你自己接一段接收机仿真"),
+                Option("beam_hit", "波束选对的概率 / Top-K 命中率",
+                       "波束管理类常用；需要每条径的角度，必须用 CDL"),
+                Option("pos_err", "定位误差 CDF",
+                       "定位类；带宽决定精度上限，建议 100 MHz 以上"),
+                Option("rate_curve", "压缩率 vs 性能曲线",
+                       "要扫多个压缩比，数据量按扫描点数翻倍"),
+                Option("not_sure", "还没想好",
+                       "那我按任务类型把常用量都给你留上，事后不用重跑"),
             ],
         ),
         DesignQuestion(
@@ -153,30 +180,43 @@ _DESIGN: dict[str, DesignQuestion] = {
             question="这个结论想推广到什么范围？",
             why=(
                 "只在一种场景下验证，结论就只在那种场景成立。"
-                "想说「在城区普遍有效」，至少要覆盖视距和非视距两类；"
+                "想说「在城区普遍有效」，至少要覆盖散射强弱两类；"
                 "想说「对高速用户也管用」，就得扫速度。"
                 "范围定下来，需要几组对照就清楚了。"
             ),
-            examples=[
-                "就这一个场景，先看可行性",
-                "城区宏站普遍适用（视距+非视距）",
-                "覆盖不同移动速度",
-                "覆盖不同天线规模",
+            options=[
+                Option("single", "就这一个场景，先看可行性",
+                       "最快，一组数据即可"),
+                Option("urban_general", "城区宏站普遍适用",
+                       "建议扫散射丰富度（CDL-A vs CDL-C）和视距比例（改站间距）"),
+                Option("mobility", "覆盖不同移动速度",
+                       "扫 3 / 60 / 120 km/h，看信道老化的影响"),
+                Option("antenna_scale", "覆盖不同天线规模",
+                       "扫 32T / 64T，看方法是否可扩展"),
+                Option("real_world", "要在真实地形上站得住",
+                       "统计信道定型后，用射线追踪的真实城市地图复核一遍"),
+                Option("paper", "要写进论文或对外汇报",
+                       "建议至少两个维度的对照，且明确报告视距比例与信噪比分布"),
             ],
             optional=True,
         ),
         DesignQuestion(
             key="hypothesis",
-            question="你预期会看到什么？如果结果相反说明什么？",
+            question="你预期会看到什么？",
             why=(
-                "先说出预期，能暴露隐含假设。"
-                "而且如果结果和预期一致但原因不对（比如信道恰好低秩导致谁都表现好），"
-                "事先想过就容易发现。"
+                "先说出预期能暴露隐含假设。而且如果结果和预期一致但原因不对"
+                "（比如信道恰好低秩，导致什么方法都表现好），事先想过就容易发现。"
             ),
-            examples=[
-                "预期比 Type I 好 3 dB 以上",
-                "预期在低信噪比下优势更明显",
-                "预期高速场景下性能会掉但仍优于基线",
+            options=[
+                Option("big_win", "明显优于基线（3 dB 以上）", ""),
+                Option("small_win", "小幅优于基线（1~2 dB）",
+                       "差距小的话样本数要够，建议 200 以上才看得出统计显著性"),
+                Option("low_snr_win", "低信噪比下优势更明显",
+                       "那就别只测高信噪比区间"),
+                Option("robust", "高速场景会掉但仍优于基线",
+                       "建议扫速度"),
+                Option("unknown", "没有明确预期，先看看",
+                       "完全可以，探索性实验也是实验"),
             ],
             optional=True,
         ),

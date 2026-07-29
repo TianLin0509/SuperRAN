@@ -182,7 +182,7 @@
 </div>
 <div class="mini">
 <h4>④ 先问实验设计，再问参数</h4>
-<p>参数配错重跑就行，实验设计错了整个结论作废。所以先问"跟什么比、用什么指标"，再问信道模型和天线数。</p>
+<p>参数配错重跑就行，实验设计错了整个结论作废。所以先问"跟什么比、用什么指标"，再问信道模型和天线数。<strong>每题都给编号选项</strong>——开放式提问容易卡壳，看到选项才想得起还有哪些路。</p>
 </div>
 </div>
 
@@ -205,10 +205,26 @@
 <p>配好了：单小区 64T4R 宏站、273 RB、CDL-C、100 MHz，预估 215 MB。</p>
 <p><strong>先对齐两件事，这比参数重要：</strong></p>
 <div class="sub-q"><strong>① 你的方法要跟什么比？</strong><br>
-<span class="why">没有基线的结果没法解读——"NMSE 达到 −18 dB"本身不说明问题，关键是比现有方案好还是差。<br>
-参考：3GPP Type I / Type II 码本 · 理想信道 SVD 上界 · 已发表方法 · 不压缩的全反馈</span></div>
+<span class="why">没有基线的结果没法解读——"NMSE 达到 −18 dB"本身不说明问题，关键是比现有方案好还是差。</span>
+<ol style="margin:6px 0; font-size:14px;">
+<li>3GPP Type I 码本 <span class="why">—— 最常见的基线，几乎所有 CSI 工作都会比它</span></li>
+<li>3GPP Type II / eType II 码本 <span class="why">—— 更强：精度高但反馈开销大，常用来证明"省了开销还不掉精度"</span></li>
+<li>理想信道的 SVD 预编码 <span class="why">—— 理论天花板，看你离上界差多少</span></li>
+<li>不压缩的全反馈 <span class="why">—— 看压缩到底省了多少比特</span></li>
+<li>某篇已发表方法 <span class="why">—— 告诉我哪篇，我尽量对齐它的实验设置</span></li>
+<li>还没定，先看可行性 <span class="why">—— 那就先跑一组基准数据</span></li>
+</ol>
+<span class="why">选一个，或者直接说你的想法。</span></div>
 <div class="sub-q"><strong>② 用什么指标判断好坏？</strong><br>
-<span class="why">指标决定要留哪些量。只看 NMSE 不需要 PMI，但要算频谱效率损失就得同时留预编码矩阵和 SINR，事后补往往要重跑。</span></div>
+<span class="why">指标决定要留哪些量，事后补往往要重跑。</span>
+<ol style="margin:6px 0; font-size:14px;">
+<li>NMSE / 余弦相似度 <span class="why">—— 最直接，只需要信道矩阵</span></li>
+<li>频谱效率或吞吐损失 <span class="why">—— 更贴近系统收益，需额外留预编码矩阵和 SINR</span></li>
+<li>波束选对的概率 <span class="why">—— 需要每条径的角度，必须用 CDL</span></li>
+<li>压缩率 vs 性能曲线 <span class="why">—— 要扫多个压缩比，数据量按扫描点翻倍</span></li>
+<li>还没想好 <span class="why">—— 那我按任务类型把常用量都留上</span></li>
+</ol>
+<span class="why">选一个，或者直接说。</span></div>
 <p><strong>然后三个参数会影响结论：</strong>信道模型 CDL-C（非视距基准）· 信噪比范围（默认不限）· 样本数 200（建议先跑 20 个验证流程）</p>
 <p><strong>另外建议跑两组对比，否则结论站不住：</strong></p>
 <div class="sub-q"><strong>CDL-A vs CDL-C</strong> —— 都是非视距但散射丰富度差很多，能看出方法是否敏感<br>
