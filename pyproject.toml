@@ -14,6 +14,8 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "structlog>=23.0",
+    # 1.x 与 2.x 都支持。2.0 把 mcp.server.fastmcp.FastMCP 挪成了
+    # mcp.server.mcpserver.MCPServer 并删掉了旧模块，server.py 里做了兼容导入。
     "mcp>=1.0",
 ]
 

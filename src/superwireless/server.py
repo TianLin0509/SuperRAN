@@ -14,7 +14,22 @@ import sys
 from typing import Any
 
 import anyio
-from mcp.server.fastmcp import FastMCP
+
+# mcp 1.x 与 2.x 的服务端类改了名字和位置：
+#   1.x  mcp.server.fastmcp.FastMCP
+#   2.x  mcp.server.mcpserver.MCPServer   （fastmcp 子模块整个删掉了）
+# 两者的 .tool() 装饰器与 .run(transport=...) 签名一致，所以只需换个导入。
+# 不做这个兼容的话，今天新装的用户 `pip install mcp` 拿到 2.x，
+# 服务端会在 import 阶段就 ModuleNotFoundError——而且报的是 mcp 的错，
+# 看起来像用户环境问题，很难联想到是版本不兼容。
+try:  # mcp >= 2.0
+    from mcp.server.mcpserver import MCPServer as _ServerClass
+
+    MCP_MAJOR = 2
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import FastMCP as _ServerClass
+
+    MCP_MAJOR = 1
 
 from . import channelhub as ch
 from . import decisions as dec
@@ -22,7 +37,7 @@ from . import deliver as dlv
 from . import generate as gen
 from . import plan as pl
 
-mcp = FastMCP("superwireless")
+mcp = _ServerClass("superwireless")
 
 _DEBUG = bool(os.environ.get("SUPERWIRELESS_DEBUG"))
 

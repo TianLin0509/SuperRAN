@@ -94,6 +94,7 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 ## 文档
 
 - **[安装说明 `SETUP.html`](SETUP.html)** —— 由哪几块拼成、要装什么、怎么装、装完先跑什么、排错
+- **[`INSTALL_AGENT.md`](INSTALL_AGENT.md)** —— 写给 AI agent 看的安装步骤，丢给它自己装
 - **[能力手册 `CAPABILITIES.html`](CAPABILITIES.html)** —— 能产生哪些信道、能拿到哪些观察量（含形状与单位）、参数全表、能力边界
 - **[实测场景演示 `SHOWCASE.html`](SHOWCASE.html)** —— 真实跑过的场景对话、三道门、踩过的坑
 
@@ -127,6 +128,37 @@ PMI 给码本索引而非嵌入向量。
 | 置信区间跨零却说"有提升" | 方向都不能确定 |
 
 ## 安装
+
+### 最省事：让 agent 自己装
+
+把这句话发给你的 Claude Code / Codex：
+
+> 帮我装 superwireless：读 https://github.com/TianLin0509/superwireless/blob/main/INSTALL_AGENT.md
+> 按里面的步骤装好并验证，装完告诉我能不能用。
+
+[`INSTALL_AGENT.md`](INSTALL_AGENT.md) 是**写给 agent 看的**：每步带验证命令与预期输出，
+标了哪些事该问你、哪些该自己查，附失败对照表。
+
+### 内网 / 不能联网
+
+在一台能联网的机器上打包，拷进去：
+
+```bash
+python scripts/make_offline_bundle.py              # 15 MB，含轻量依赖的 wheel
+python scripts/make_offline_bundle.py --with-numpy # 62 MB，连 numpy/scipy 一起带
+```
+
+产出 `dist/superwireless-offline-<平台>-py<版本>.zip`,里面有源码、skill、
+依赖 wheel、`INSTALL_AGENT.md` 和给人看的 `开始安装.txt`。
+接收方解压后把那句话发给自己的 agent 即可。
+
+**wheel 是平台相关的**,必须在与目标机器同平台、同 Python 大版本的机器上打包。
+
+> 包里**不含 ChannelHub** —— 该仓库没有开源许可证，默认保留所有权利，
+> 随包转发有法律风险。接收方需自备一份含 `src/msg_embedding/data/contract.py`
+> 的源码树。确认自己有权分发时用 `--include-channelhub <路径>`。
+
+### 手动
 
 需要 Python ≥ 3.10。
 

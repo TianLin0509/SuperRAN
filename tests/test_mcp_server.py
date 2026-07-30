@@ -69,7 +69,16 @@ async def main() -> None:
             for e in engines.values():
                 print(f"  {e['name']:<16} {'可用' if e['available'] else '不可用'}")
             check(engines.get("internal_sim", {}).get("available") is True, "internal_sim 报告可用")
-            check(engines.get("sionna_rt", {}).get("available") is True, "sionna_rt 报告可用")
+            # sionna-rt 是可选依赖，没装很正常。这里只要求"报告与事实一致"——
+            # 装了就说可用，没装就必须说出缺什么。硬断言"可用"会让没装射线追踪的
+            # 新用户按安装文档跑完看到 FAILED，误以为装坏了。
+            rt_e = engines.get("sionna_rt", {})
+            check(
+                rt_e.get("available") is True
+                or (rt_e.get("available") is False and bool(rt_e.get("missing"))),
+                "sionna_rt 可用性报告与事实一致"
+                + ("（已装）" if rt_e.get("available") else "（未装，已列出缺失项）"),
+            )
             # 引擎不可用时必须如实说明缺什么，不能假装能跑
             qr = engines.get("quadriga_real", {})
             check(qr.get("available") is False and bool(qr.get("missing")), "不可用引擎列出缺失项")
@@ -78,8 +87,13 @@ async def main() -> None:
             print(f"\n  射线追踪场景 {len(scenes['scenes'])} 个 "
                   f"(内置 {sum(1 for s in scenes['scenes'] if s['builtin'])} / "
                   f"真实OSM {sum(1 for s in scenes['scenes'] if not s['builtin'])})")
-            check(scenes["ray_tracing_available"] is True, "射线追踪可用")
-            check(len(scenes["scenes"]) >= 10, "场景清单完整")
+            # 场景清单与射线追踪能不能跑是两件事：清单来自 configs/scenes 的静态
+            # 元数据，没装 sionna-rt 也该列得出来，只是 ray_tracing_available 为 false。
+            check(
+                scenes["ray_tracing_available"] == rt_e.get("available"),
+                "场景清单里的射线追踪可用性与引擎探测一致",
+            )
+            check(len(scenes["scenes"]) >= 10, "场景清单完整（不依赖 sionna-rt 是否安装）")
 
             print("\n" + "=" * 68 + "\n3  sw_plan —— 交互提案\n" + "=" * 68)
             prop = _payload(

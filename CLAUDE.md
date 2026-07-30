@@ -62,6 +62,17 @@ python tests/test_gates.py       # 校准、标准表、三道门 62 项
 
 调试时设 `SUPERWIRELESS_DEBUG=1`，会开 faulthandler 并打点到 stderr。
 
+### mcp 1.x 与 2.x 的服务端类换了位置
+
+`mcp 2.0` 删掉了整个 `mcp.server.fastmcp` 子模块，`FastMCP` 改名叫
+`mcp.server.mcpserver.MCPServer`。两者 `.tool()` 与 `.run(transport=...)` 签名一致，
+`server.py` 里用 try/except 兼容，`MCP_MAJOR` 记录当前版本。
+
+不做这层兼容的后果：今天新装的用户 `pip install mcp` 拿到 2.x，服务端在 import
+阶段就 `ModuleNotFoundError`，而且报的是 mcp 的错，看起来像用户环境问题。
+**本机装的是 1.27，所以本地测试永远发现不了**——这个 bug 是打离线包时在干净
+venv 里才暴露出来的。改 `server.py` 的导入前先想清楚两个版本都要能跑。
+
 ### stdio 传输下 stdout 是 JSON-RPC 通道
 
 任何调试输出只能走 stderr。`_dbg()` 已经这么做了，别图省事用 `print()`。

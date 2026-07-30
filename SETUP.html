@@ -141,6 +141,7 @@
 <ol>
 <li><a href="#s1">一分钟看懂：四层结构</a></li>
 <li><a href="#s2">要装的东西一共三样</a></li>
+<li><a href="#s25">分发给别人：两条路</a></li>
 <li><a href="#s3">完整安装步骤</a></li>
 <li><a href="#s4">skill 只有一个：channel-sim</a></li>
 <li><a href="#s5">MCP 的 16 个工具</a></li>
@@ -233,6 +234,80 @@
 </div>
 <p class="q">都是常见包，不锁死版本。<code>sionna-rt</code> 会连带装 mitsuba + drjit，
 实测<strong>不会降级</strong>已有的 numpy / scipy / torch。</p>
+
+<h2 id="s25">二点五、分发给别人：两条路</h2>
+<p class="lead">自己装看第三节。<strong>要把这东西给别人用</strong>，走下面两条之一。</p>
+
+<div class="grid2">
+<div class="mini">
+<h4>① 外网用户：一句话交给 agent</h4>
+<p>让用户把这句话发给自己的 Claude Code / Codex：</p>
+<pre style="margin:8px 0; font-size:11.5px;"><code>帮我装 superwireless：读
+https://github.com/TianLin0509/superwireless/blob/main/INSTALL_AGENT.md
+按里面的步骤装好并验证，装完告诉我能不能用。</code></pre>
+<p><code>INSTALL_AGENT.md</code> 是<strong>写给 agent 看的</strong>，不是给人看的：
+每步带验证命令与预期输出，明确标了哪些事该问用户、哪些该自己跑命令查，
+最后附一张失败对照表。</p>
+</div>
+<div class="mini">
+<h4>② 内网用户：离线 .zip</h4>
+<p>在能联网的机器上打包：</p>
+<pre style="margin:8px 0; font-size:11.5px;"><code>python scripts/make_offline_bundle.py
+<span class="cm"># → dist/superwireless-offline-win_amd64-py3.12.zip  15.6 MB</span>
+
+python scripts/make_offline_bundle.py --with-numpy
+<span class="cm"># → 62 MB，连 numpy/scipy 的 wheel 一起带</span></code></pre>
+<p>接收方解压后，把 <code>开始安装.txt</code> 里那句话发给自己的 agent 即可，
+全程不需要联网。</p>
+</div>
+</div>
+
+<h3>离线包里有什么</h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>内容</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>开始安装.txt</code></td><td>给人看的一句话说明 + 需要自备什么</td></tr>
+<tr><td><code>INSTALL_AGENT.md</code></td><td>给 agent 看的安装步骤，自动识别离线模式</td></tr>
+<tr><td><code>wheels/</code></td><td>依赖的 wheel。装的时候 <code>pip install --no-index --find-links wheels -e .</code></td></tr>
+<tr><td>源码 + skill + presets + tests</td><td>与仓库一致，去掉了 <code>__pycache__</code> 与 <code>artifacts/</code></td></tr>
+<tr><td>三份 HTML 文档</td><td>SETUP / CAPABILITIES / SHOWCASE，离线可开</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="callout c-red">
+<p><strong>离线包不含 ChannelHub。</strong>该仓库<strong>没有 LICENSE 文件</strong>，
+按默认规则是保留所有权利，随包转发有法律风险。</p>
+<p style="margin-top:8px;">接收方需要自备一份，判据是目录下存在
+<code>src/msg_embedding/data/contract.py</code>。<code>INSTALL_AGENT.md</code> 里
+写了在内网常见位置搜索它的命令；找不到就会停下来问用户。</p>
+<p style="margin-top:8px;">确认自己有权分发时（公司内部本来就有这份代码、或已获授权），
+用 <code>--include-channelhub &lt;路径&gt;</code> 打进去。</p>
+</div>
+
+<div class="callout c-amber">
+<p><strong>wheel 是平台相关的。</strong>numpy、scipy、pydantic-core 都带编译好的二进制，
+在 Windows 上下的包拿到 Linux 上装不了。所以 zip 文件名里带了平台和 Python 版本，
+<strong>必须在与目标机器同平台、同 Python 大版本的机器上打包</strong>。</p>
+<p style="margin-top:8px;">跨平台打包用 <code>--platform manylinux2014_x86_64
+--python-version 3.11</code>，pip 会去下对应平台的轮子。</p>
+</div>
+
+<div class="plain">
+<p>默认只打 <code>mcp pydantic pyyaml structlog</code>（15 MB），
+<strong>假设目标机器已经有 numpy/scipy</strong>——做无线仿真的机器基本都有，
+而这两个占了 47 MB。目标机器是纯净环境就加 <code>--with-numpy</code>。</p>
+</div>
+
+<div class="callout c-green">
+<p><strong>整条链路是实测过的</strong>，不是照着文档写的：解压 zip → 建干净 venv →
+<code>pip install --no-index</code> 装完 31 个包（全程离线）→ 用该 venv 跑
+<code>tests/test_e2e.py</code> 与 <code>test_mcp_server.py</code> → 全部通过。</p>
+<p style="margin-top:8px;">这一跑还抓到一个真 bug：<code>mcp 2.0</code> 删掉了
+<code>mcp.server.fastmcp</code>，新装的用户会在 import 阶段就崩。
+开发机上装的是 1.27 所以一直没暴露。现已兼容两个版本。</p>
+</div>
 
 <h2 id="s3">三、完整安装步骤</h2>
 
@@ -554,6 +629,7 @@ sw_deliver(dataset_id="ds_xxxx", want="信道 + PDP + PMI")</code></pre>
 <tr><td>门 1 老是不过</td><td>多半是真的有问题，不是误报</td>
 <td>看 <code>detail</code> 字段——它会写清偏差多少、容差依据、怎么改。
 最常见是场景与信道剖面的视距类别不匹配</td></tr>
+<tr><td>服务端报 <code>No module named 'mcp.server.fastmcp'</code></td><td>装到了 mcp 2.x，该模块已被删除</td><td>升级 superwireless 到含兼容层的版本；或退回 <code>pip install "mcp&lt;2"</code></td></tr>
 <tr><td>生成很慢</td><td>射线追踪比统计信道慢一个量级</td>
 <td>统计信道约 0.2 秒/样本，射线追踪 2~6 秒/样本。先跑 20 个探路</td></tr>
 </tbody>
