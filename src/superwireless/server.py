@@ -208,6 +208,7 @@ async def sw_generate(
     overrides: dict[str, Any] | None = None,
     num_samples: int | None = None,
     prereg_id: str | None = None,
+    workers: int | str = "auto",
 ) -> dict[str, Any]:
     """生成信道数据集，返回句柄与统计摘要（不返回数据本身）。
 
@@ -221,6 +222,10 @@ async def sw_generate(
     prereg_id 是 sw_lock_analysis 返回的预注册句柄。传了它，主指标与基线会
     随数据存档，之后 sw_compare_results 能判断用的指标是不是事先定的那个。
     **只能在生成前绑定**——事后补绑没有意义。
+
+    workers 默认 "auto"：按配置预估耗时决定要不要起多进程。多小区大带宽的
+    配置能快 3 倍以上；轻配置起进程反而更慢，会自动走串行。
+    并行时各块用不同 seed，结果与串行统计等价但逐样本不同（摘要里会写明）。
     """
     # 仿真是 CPU 密集的，丢到工作线程，别把 MCP 事件循环堵死
     _dbg("sw_generate: 进入，准备切工作线程")
@@ -232,6 +237,7 @@ async def sw_generate(
             preset=preset,
             overrides=overrides,
             prereg_id=prereg_id,
+            workers=workers,
             num_samples=num_samples,
         )
     )
@@ -247,6 +253,7 @@ def _generate_sync(
     overrides: dict[str, Any] | None,
     num_samples: int | None,
     prereg_id: str | None = None,
+    workers: int | str = "auto",
 ) -> dict[str, Any]:
     if draft_id:
         draft = pl.load_draft(draft_id)
@@ -290,6 +297,7 @@ def _generate_sync(
         plan_markdown=plan_md,
         draft_id=draft.draft_id,
         prereg_id=prereg_id or "",
+        workers=workers,
     )
     _dbg(f"_generate_sync: 生成完成 {summary['dataset_id']} {summary['elapsed_s']}s")
 
@@ -767,6 +775,159 @@ def sw_list_results(dataset_id: str | None = None) -> dict[str, Any]:
             "pregs": an.list_pregs(),
         }
     )
+
+
+@mcp.tool()
+async def sw_throughput(
+    dataset_id: str,
+    mcs_table: int = 1,
+    target_bler: float = 0.1,
+    max_samples: int = 200,
+    method: str = "svd",
+) -> dict[str, Any]:
+    """算**真实吞吐**（Mbps）与 3GPP 口径的边缘用户指标，不是香农上界。
+
+    `sw_link_performance` 给的是 `SE = Σ log2(1+SINR)`——香农谱效，是个
+    任何真实系统都达不到的上界。这个工具走业界做系统级仿真的标准路径
+    （链路到系统映射），把三项真实损失算进来：
+
+    1. **调制受限** —— 20 dB 时香农说 6.66 bit/s/Hz，64QAM 最多给 5.80
+    2. **码率离散** —— MCS 只有 29 档
+    3. **有限码长 + 实现损失** —— LDPC 距容量 1~2 dB
+
+    返回吞吐的均值/中位/**5% 边缘用户**/95% 峰值、谱效、MCS 分布、平均 BLER。
+    边缘用户吞吐是 3GPP 评估里的公平性指标，比均值更能说明问题。
+
+    `mcs_table`：1 = 最高 64QAM（38.214 Table 5.1.3.1-1），
+    2 = 含 256QAM（Table 5.1.3.1-2）。**MCS 分布里大量样本压在最高档时，
+    说明限制来自 MCS 表而不是信道**，换表 2 通常能明显提升。
+
+    **BLER 是模型不是实测**：MCS/CQI/TBS 都按 38.214 精确算，QAM 约束容量
+    精确求积，但 BLER 用的是有限码长模型（没有 3GPP 参考曲线兜底）。
+    严格 BLER 结论请跑真正的链路级仿真。
+    """
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _throughput_sync, dataset_id=dataset_id, mcs_table=mcs_table,
+            target_bler=target_bler, max_samples=max_samples, method=method,
+        )
+    )
+
+
+def _throughput_sync(*, dataset_id: str, mcs_table: int, target_bler: float,
+                     max_samples: int, method: str) -> dict[str, Any]:
+    from . import loader as ld
+
+    ds = ld.load(dataset_id)
+    st = ds.throughput(max_samples=max_samples, mcs_table=mcs_table,
+                       cqi_table=min(mcs_table, 2), target_bler=target_bler,
+                       method=method)
+    out = st.as_dict()
+    out["dataset_id"] = dataset_id
+    out["mcs_table"] = mcs_table
+    out["text"] = st.text()
+    top = max(st.mcs_distribution) if st.mcs_distribution else 0
+    capped = st.mcs_distribution.get(top, 0) / max(st.n, 1)
+    if capped > 0.25 and mcs_table == 1:
+        out["hint"] = (
+            f"{capped:.0%} 的样本压在最高档 MCS {top} —— 限制来自 MCS 表而不是信道。"
+            f"试 mcs_table=2（含 256QAM）。"
+        )
+    return _jsonable(out)
+
+
+@mcp.tool()
+def sw_mcs_info(
+    table: int = 1,
+    show_bler_anchors: bool = False,
+) -> dict[str, Any]:
+    """查 38.214 的 MCS / CQI 表，以及 BLER 模型各档的门限。
+
+    `show_bler_anchors=true` 时给出各 MCS 达到 10% BLER 所需的有效 SINR，
+    以及它距同频谱效率的香农极限有多远。**这是模型预测，摆出来供人工对照
+    公开的 NR 链路级曲线**——常见量级是 MCS0 约 −5~−7 dB、MCS28 约 20~23 dB。
+
+    表格本身是逐字录入的标准值，`verify_tables` 用"SE == q_m·R/1024"这条
+    表内蕴关系做过自检。
+    """
+    from . import linkadapt as la
+
+    out: dict[str, Any] = {
+        "mcs_table": [m.as_dict() for m in la.MCS_TABLES[table]],
+        "cqi_table": [
+            {"index": c.index, "modulation": la._MOD_NAME[c.q_m],
+             "code_rate": round(c.r_1024 / 1024, 4), "se": c.se}
+            for c in la.CQI_TABLES[min(table, 2)]
+        ],
+        "verify": la.verify_tables(),
+        "source": "3GPP TS 38.214 V17.5.0 Table 5.1.3.1-1/-2、5.2.2.1-2/-3",
+    }
+    if show_bler_anchors:
+        out["bler_anchors"] = la.DEFAULT_BLER.anchor_check(table=table)
+    return _jsonable(out)
+
+
+@mcp.tool()
+async def sw_sweep_snr(
+    dataset_id: str,
+    snr_db_list: list[float] | None = None,
+    mcs_table: int = 1,
+    max_samples: int = 60,
+) -> dict[str, Any]:
+    """扫信噪比，出**谱效/吞吐 vs SNR 曲线** —— 无线论文里最标准的那张图。
+
+    对同一批信道，把工作点信噪比设成一组值，逐点给出香农谱效、实际谱效、
+    吞吐、选中的 MCS。**同一批信道**意味着各点之间是配对的，曲线不会被
+    信道抽样噪声搅乱。
+
+    默认扫 −5 ~ 35 dB。返回里 `efficiency_vs_shannon` 的走势最有信息量：
+    低信噪比处接近 1（受噪声限），高信噪比处掉下来（受 MCS 表封顶限）。
+    """
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _sweep_sync, dataset_id=dataset_id, snr_db_list=snr_db_list,
+            mcs_table=mcs_table, max_samples=max_samples,
+        )
+    )
+
+
+def _sweep_sync(*, dataset_id: str, snr_db_list: list[float] | None,
+                mcs_table: int, max_samples: int) -> dict[str, Any]:
+    import numpy as np
+
+    from . import linkadapt as la
+    from . import loader as ld
+
+    ds = ld.load(dataset_id)
+    grid = snr_db_list or [-5, 0, 5, 10, 15, 20, 25, 30, 35]
+    n = min(int(ds.n), int(max_samples))
+    n_prb = int(ds.h_true.shape[2])
+    rows = []
+    for snr in grid:
+        res = [ds.link_adaptation(i, snr_db=float(snr), n_prb=n_prb,
+                                  mcs_table=mcs_table, cqi_table=min(mcs_table, 2))
+               for i in range(n)]
+        st = la.throughput_stats(res)
+        rows.append({
+            "snr_db": float(snr),
+            "se_shannon": round(float(np.mean([r.se_shannon for r in res])), 3),
+            "se_achieved": round(st.mean_se, 3),
+            "efficiency_vs_shannon": round(
+                float(np.mean([r.efficiency_vs_shannon for r in res])), 3),
+            "throughput_mbps": round(st.mean_mbps, 2),
+            "cell_edge_mbps": round(st.cell_edge_mbps, 2),
+            "mcs_median": int(np.median([r.mcs_index for r in res])),
+            "mean_bler": round(st.mean_bler, 4),
+        })
+    return _jsonable({
+        "dataset_id": dataset_id, "n_samples": n, "mcs_table": mcs_table,
+        "curve": rows,
+        "note": (
+            "各点跑在同一批信道上，彼此配对，曲线不含信道抽样噪声。"
+            "efficiency_vs_shannon 在高信噪比处下滑通常是 MCS 表封顶所致，"
+            "不是信道或算法的问题。"
+        ),
+    })
 
 
 def main() -> None:

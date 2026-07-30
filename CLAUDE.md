@@ -23,6 +23,8 @@ python tests/test_raytracing.py  # 射线追踪与决策层 39 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
+python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 102 项
+python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 ```
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
@@ -95,6 +97,41 @@ python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 
 未绑定时 `classify` 返回 `unregistered` 而**不是** `primary`：没登记过就不能
 声称主指标是事先定的。这一条别放松成"默认 primary"。
+
+### QAM 互信息的 sigma 定义差一倍就是 3 dB
+
+`linkadapt._pam_mi` 里 `sigma = 1/sqrt(γ)`，**不是** `1/sqrt(2γ)`。
+约定是复符号 `E|x|²=1`、复噪声 `E|n|²=1/γ`；折到实维、星座归一化到单位能量后，
+噪声方差正好是 `1/γ`。写错会整体多给 3 dB，而且**看起来完全正常**——
+曲线形状对、饱和值对，只是位置平移。
+
+抓它的办法是低信噪比处对香农：约束容量在 γ→0 时必须与 `log2(1+γ)` 重合。
+这条自检在 `test_linkadapt` 第 1 节里。
+
+### BLER 是模型，MCS/TBS 不是
+
+`linkadapt` 里只有 `BlerModel` 是模型（有限码长形状 + 可配实现损失，
+没有 3GPP 参考曲线兜底）。MCS/CQI 表逐字录自 38.214、TBS 按 §5.1.3.2 复刻、
+QAM 约束容量精确求积——**这三样不能和 BLER 混为一谈**。
+对外说明必须分清，否则用户会把模型当实测用。
+
+`anchor_check` 的单调性**只能在同一调制阶数内部要求**：标准表在调制切换点上
+故意让 SE 重叠（MCS9 QPSK SE=1.3262 → MCS10 16QAM SE=1.3281，但码率只有 0.332），
+门限小幅回落是正确物理。整体判单调会把这两点误报成失败。
+
+### 多进程必须先压 BLAS 线程数
+
+`_chunk_worker` 里在 import numpy **之前**把 `OMP_NUM_THREADS` 等设成 1。
+不设的话每个 worker 各开满核数的线程：20 worker × 20 线程抢 20 个核，
+上下文切换吃掉全部收益——实测 10 进程只有 1.34 倍加速，设了才拿到应有的加速比。
+
+并行分块靠**给每块不同的 `seed`**。`ue_seed_offset` 实测对撒点没有影响
+（同 offset 与不同 offset 给出逐位相同的路损），只有 `seed` 真正换随机流。
+因此并行与串行不是同一批样本，统计等价但逐样本不同，摘要的 `parallel` 块必须写明。
+
+多进程在某些宿主里起不来（Windows spawn 需要可导入的 `__main__`，REPL 和
+`python -c` 里没有）。`generate` 会**降级串行并把原因记进摘要**，不让整次生成失败——
+但也不能静默，否则用户会纳闷为什么没变快。
 
 ### 门 3 的判决必须显式说清用哪个检验
 
@@ -261,6 +298,8 @@ SINR 中位数 35.7 → 18.1 dB。`generate._ensure_bs_panel()` 现在由 `num_b
 ## 加东西的地方
 
 - 新的 3GPP 校准量 → `calibration.py`，按条款号标注来源
+- 新的 MCS/CQI 表或 TBS 分支 → `linkadapt.py`，**必须过 `verify_tables` 的内蕴自检**
+- 改 BLER 模型参数 → 跑 `anchor_check`，门限要落在公开 NR 曲线的常见区间
 - 新的门禁判据 → `gates.py`（门 2/门 3）或 `validate.py`（门 1，会自动进门 1）
 - 新的外部结果校验 → `results.check_pairable`，每条都必须是**硬拦截**不是告警
 - 新指标 → `analysis.KNOWN_METRICS` 加单位；自定义指标也支持，单位由调用方给

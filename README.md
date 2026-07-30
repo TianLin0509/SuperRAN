@@ -10,7 +10,7 @@
 配套的 `channel-sim` skill 提供 superpowers 式工作流：
 **头脑风暴 → 计划书 → 生成 → 门 1 体检 → 跑实验 → 门 2/门 3 → 结论**。
 
-## 五件事
+## 七件事
 
 **一、信道可信。** 19 项体检，分四类：对 3GPP 标准（路损逐点对 38.901、
 **CDL 剖面逐簇对 Table 7.7.1-x**、Annex A.1 角度扩展）、对物理定律（时频能量守恒、
@@ -81,6 +81,30 @@ sw_compare_results(art_a.result_id, art_b.result_id)
 配对检验的有效性全靠"第 i 个数对应同一个信道实例"，**错配时它照样会算出
 一个看起来很显著的 p 值**。
 
+**六、香农谱效不是吞吐。** 上面的 `se_mean` 是上界，真实系统达不到。
+走 38.214 的链路到系统映射，把三项真实损失算进来：
+
+```python
+st = ds.throughput(mcs_table=1)
+print(st.text())
+# 吞吐（n=60）：均值 1373.11 / 中位 1474.69 / 边缘用户(5%) 833.48 / 峰值(95%) 1606.61 Mbps
+#   谱效 均值 19.052，边缘 11.565 bit/s/Hz
+#   平均 BLER 0.38%，中断比例 0.00%
+#   MCS 分布 {18: 1, 20: 1, ..., 28: 34}    ← 34/60 压在最高档 = 表封顶
+```
+
+三项损失：**调制受限**（20 dB 时香农 6.66，64QAM 只给 5.80）、**码率离散**
+（MCS 只有 29 档）、**有限码长 + 实现损失**（LDPC 距容量 1~2 dB）。
+QAM 约束容量用 Gauss-Hermite 求积**精确算**，MCS/CQI/TBS 按 38.214 精确复刻，
+**只有 BLER 是模型**（没有 3GPP 参考曲线兜底，`sw_mcs_info` 会把门限摆出来对照）。
+
+`sw_sweep_snr` 出谱效/吞吐 vs SNR 曲线——实测低信噪比达成 77%、
+高信噪比因 MCS 封顶掉到 38%。
+
+**七、跑得快。** `workers="auto"` 按配置预估耗时自动决定要不要多进程。
+实测单样本耗时差 85 倍（单小区 32T/20MHz 24 ms，21 小区 64T/100MHz 2054 ms），
+重配置 200 样本 **842s → 246s**；轻配置自动走串行，因为起进程的开销更大。
+
 样本数是**算出来的**，不是问用户的：
 
 ```python
@@ -121,6 +145,7 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 - **[能力手册 `CAPABILITIES.html`](CAPABILITIES.html)** —— 能产生哪些信道、能拿到哪些观察量（含形状与单位）、参数全表、能力边界
 - **[实测场景演示 `SHOWCASE.html`](SHOWCASE.html)** —— 真实跑过的场景对话、三道门、踩过的坑
 - **[接入自研算法 `EXTERNAL_ALGO.html`](EXTERNAL_ALGO.html)** —— 让你自己的算法进门 2/门 3、预注册分析口径、边界与局限
+- **[从 SINR 到真实吞吐 `LINK_ADAPTATION.html`](LINK_ADAPTATION.html)** —— L1 链路自适应、38.214 MCS/CQI、SNR 扫描曲线、并行生成
 
 ## 四条设计铁律
 
@@ -150,6 +175,8 @@ PMI 给码本索引而非嵌入向量。
 | 多小区但 SINR = 纯热噪声 SNR | 干扰没进计算，干扰类结论全不成立 |
 | 一臂理想 CSI、另一臂估计 CSI | 增益里混着"提前知道答案"的部分 |
 | 置信区间跨零却说"有提升" | 方向都不能确定 |
+| 把香农谱效当吞吐报 | 真实系统要打 4~6 折，差的是调制受限+码率离散+码长 |
+| 声称实测 BLER | BLER 是模型，没有 3GPP 参考曲线兜底 |
 
 ## 安装
 
@@ -231,7 +258,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 （§7.8.2 指标3，Annex A.1 圆周定义）、PRB 奇异值最大/次大/比值三条 CDF
 （指标4，10log10 尺度）。参考曲线在 R1-165974 / R1-165975 / R1-1909704。
 
-## MCP 工具（20 个）
+## MCP 工具（23 个）
 
 | 工具 | 作用 |
 |---|---|
@@ -249,6 +276,9 @@ cp -r skills/channel-sim ~/.codex/skills/
 | `sw_export_eval_template` | **自研算法评测脚本骨架**，替换一个函数即可 |
 | `sw_compare_results` | **判决外部算法结果** + 门 2 + 门 3 + 预注册身份 |
 | `sw_list_results` | 已注册的结果与预注册记录 |
+| `sw_throughput` | **真实吞吐 Mbps** + 5% 边缘用户（链路到系统映射） |
+| `sw_sweep_snr` | **谱效/吞吐 vs SNR 曲线**，各点配对无抽样噪声 |
+| `sw_mcs_info` | 38.214 MCS/CQI 表 + BLER 模型门限锚点 |
 | `sw_describe_dataset` / `sw_list_datasets` | 数据集信息 |
 
 ## 观察量（12 类）
@@ -328,9 +358,10 @@ python tests/test_raytracing.py  # 射线追踪与决策层 39 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
+python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 102 项
 ```
 
-共 **300 项**。
+共 **402 项**。
 
 ## 致谢
 

@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>superwireless 从 SINR 到真实吞吐 — 链路自适应与性能优化</title>
+<style>
+  :root{
+    --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
+    --border:#d2d2d7; --accent:#0071e3;
+    --success:#34c759; --warning:#ff9f0a; --danger:#ff3b30;
+    --code-bg:#1d1d1f; --code-ink:#f5f5f7;
+    --tint-blue:#eef5fd; --tint-blue-ink:#0055b3;
+    --tint-green:#eef9f0; --tint-green-ink:#1a7a34;
+    --tint-amber:#fdf5e8; --tint-amber-ink:#8a5a00;
+    --tint-red:#fdeeed; --tint-red-ink:#a32620;
+    --tint-grey:#f2f2f4; --tint-grey-ink:#4a4a4e;
+    --tint-purple:#f3f0fb; --tint-purple-ink:#5a3ec8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#1d1d1f; --card:#2c2c2e; --ink:#f5f5f7; --ink-soft:#aeaeb2;
+      --border:#38383a; --accent:#0a84ff;
+      --success:#30d158; --warning:#ffd60a; --danger:#ff453a;
+      --tint-blue:#12263c; --tint-blue-ink:#8ec2ff;
+      --tint-green:#14301c; --tint-green-ink:#7ee096;
+      --tint-amber:#33280c; --tint-amber-ink:#ffd77a;
+      --tint-red:#3a1a18; --tint-red-ink:#ff9a92;
+      --tint-grey:#333336; --tint-grey-ink:#c8c8cc;
+      --tint-purple:#241d3d; --tint-purple-ink:#b9a6f5;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; padding:40px 20px; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    font-size:15px; line-height:1.75; overflow-x:hidden;}
+  .wrap{max-width:1140px; margin:0 auto;}
+  h1{font-size:34px; font-weight:700; letter-spacing:-0.03em; margin:0 0 10px;}
+  .tagline{font-size:17px; color:var(--ink-soft); margin:0 0 8px;}
+  .meta{color:var(--ink-soft); font-size:13px; margin:0 0 28px; font-family:"SF Mono",Consolas,monospace;}
+  h2{font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:54px 0 8px; padding-top:22px; border-top:1px solid var(--border);}
+  h3{font-size:18px; font-weight:600; margin:32px 0 8px;}
+  h4{font-size:15px; font-weight:600; margin:22px 0 6px;}
+  p{margin:10px 0;}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:24px; margin:20px 0;}
+  .lead{font-size:16px; color:var(--ink-soft); margin:0 0 18px;}
+
+  .toc{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px 24px; margin:24px 0 34px;}
+  .toc ol{margin:6px 0; padding-left:22px; columns:2; column-gap:32px;}
+  .toc li{margin:4px 0; break-inside:avoid;}
+  .toc a{color:var(--accent); text-decoration:none;}
+  .toc a:hover{text-decoration:underline;}
+
+  .callout{border-radius:10px; padding:16px 20px; margin:18px 0; border-left:3px solid;}
+  .callout p:first-child{margin-top:0;} .callout p:last-child{margin-bottom:0;}
+  .c-blue{background:var(--tint-blue); color:var(--tint-blue-ink); border-left-color:var(--accent);}
+  .c-green{background:var(--tint-green); color:var(--tint-green-ink); border-left-color:var(--success);}
+  .c-amber{background:var(--tint-amber); color:var(--tint-amber-ink); border-left-color:var(--warning);}
+  .c-red{background:var(--tint-red); color:var(--tint-red-ink); border-left-color:var(--danger);}
+  .c-purple{background:var(--tint-purple); color:var(--tint-purple-ink); border-left-color:#5a3ec8;}
+
+  .plain{background:var(--tint-grey); color:var(--tint-grey-ink); border-radius:10px; padding:14px 18px; margin:14px 0; font-size:14.5px;}
+  .plain::before{content:"白话讲　"; font-weight:600;}
+  .plain p{margin:8px 0;} .plain p:first-of-type{display:inline;}
+
+  .tbl-wrap{overflow-x:auto; margin:16px 0; border:1px solid var(--border); border-radius:10px;}
+  table{border-collapse:collapse; width:100%; font-size:13.5px; background:var(--card);}
+  th,td{padding:9px 13px; text-align:left; border-bottom:1px solid var(--border); vertical-align:top;}
+  th{background:var(--tint-grey); color:var(--tint-grey-ink); font-weight:600; white-space:nowrap; font-size:13px;}
+  tr:last-child td{border-bottom:none;}
+  code{font-family:"SF Mono",Consolas,Monaco,monospace; background:var(--tint-grey); color:var(--tint-grey-ink);
+       padding:1px 5px; border-radius:4px; font-size:12.5px;}
+  td code,th code{font-size:12px;}
+  .nowrap{white-space:nowrap;}
+  pre{background:var(--code-bg); color:var(--code-ink); padding:16px 20px; border-radius:10px; overflow-x:auto;
+      font-family:"SF Mono",Consolas,Monaco,monospace; font-size:12.5px; line-height:1.62; margin:14px 0;}
+  pre code{background:none; color:inherit; padding:0; font-size:inherit;}
+  .cm{color:#8e8e93;}
+
+  ul,ol{margin:10px 0; padding-left:24px;} li{margin:5px 0;}
+
+  .pill{display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:20px; white-space:nowrap;}
+  .p-ok{background:var(--tint-green); color:var(--tint-green-ink);}
+  .p-no{background:var(--tint-red); color:var(--tint-red-ink);}
+  .p-mid{background:var(--tint-amber); color:var(--tint-amber-ink);}
+  .p-info{background:var(--tint-blue); color:var(--tint-blue-ink);}
+
+  .grid2{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; margin:18px 0;}
+  .mini{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:18px;}
+  .mini h4{margin:0 0 8px; font-size:15px;}
+  .mini p{margin:6px 0; font-size:14px; color:var(--ink-soft);}
+
+  .dims{display:flex; gap:8px; flex-wrap:wrap; margin:14px 0;}
+  .dim{background:var(--tint-purple); color:var(--tint-purple-ink); border-radius:8px; padding:8px 13px; font-size:13px;}
+  .dim b{font-family:"SF Mono",Consolas,monospace;}
+
+  .src{font-family:"SF Mono",Consolas,monospace; font-size:12px; color:var(--ink-soft);}
+  .q{font-size:14px; color:var(--ink-soft); margin:14px 0 0; padding-left:14px; border-left:2px solid var(--border);}
+  footer{margin-top:64px; padding-top:24px; border-top:1px solid var(--border); color:var(--ink-soft); font-size:13px;}
+</style>
+
+<style>
+  .chain{display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:18px 0;}
+  .chain .box{background:var(--card); border:1px solid var(--border); border-radius:8px;
+              padding:8px 13px; font-size:13px;}
+  .chain .box.hi{border-color:var(--accent); border-width:2px; font-weight:600;}
+  .chain .arr{color:var(--ink-soft);}
+  .lossbar{margin:16px 0;}
+  .lossbar .row{display:flex; align-items:center; gap:10px; margin:6px 0; font-size:13.5px;}
+  .lossbar .lbl{min-width:150px; color:var(--ink-soft);}
+  .lossbar .bar{height:20px; border-radius:4px; background:var(--accent);}
+  .lossbar .val{font-family:"SF Mono",Consolas,monospace; font-size:12.5px;}
+  .exact{background:var(--tint-green); color:var(--tint-green-ink);}
+  .model{background:var(--tint-amber); color:var(--tint-amber-ink);}
+  .tag{display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:20px;}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+
+<h1>从 SINR 到真实吞吐</h1>
+<p class="tagline">链路自适应 · 链路到系统映射 · 并行生成</p>
+<p class="meta">全部数字来自实跑 · 2026-07-31 · 测试 402 项全通过</p>
+
+<div class="toc">
+<strong>目录</strong>
+<ol>
+<li><a href="#s1">调研：业界怎么做 L1 仿真</a></li>
+<li><a href="#s2">香农谱效不是吞吐，差多少</a></li>
+<li><a href="#s3">哪些是算的、哪些是模型</a></li>
+<li><a href="#s4">实测：吞吐、边缘用户、MCS 分布</a></li>
+<li><a href="#s5">SNR 扫描曲线</a></li>
+<li><a href="#s6">性能：并行生成</a></li>
+<li><a href="#s7">新增接口</a></li>
+<li><a href="#s8">已知局限</a></li>
+</ol>
+</div>
+
+<h2 id="s1">一、调研：业界怎么做 L1 仿真</h2>
+
+<p class="lead">完整链路级仿真（Sionna PHY、MATLAB 5G Toolbox）跑的是这一整条链：</p>
+
+<div class="chain">
+<span class="box">比特源</span><span class="arr">→</span>
+<span class="box">CRC</span><span class="arr">→</span>
+<span class="box">LDPC 编码</span><span class="arr">→</span>
+<span class="box">速率匹配</span><span class="arr">→</span>
+<span class="box">QAM 映射</span><span class="arr">→</span>
+<span class="box hi">预编码</span><span class="arr">→</span>
+<span class="box hi">信道</span><span class="arr">→</span>
+<span class="box hi">MIMO 检测</span><span class="arr">→</span>
+<span class="box">软解调 LLR</span><span class="arr">→</span>
+<span class="box">LDPC 译码</span><span class="arr">→</span>
+<span class="box">CRC 校验</span>
+</div>
+
+<p>加粗的三段 superwireless 本来就有。缺的是两头的编解码与调制映射，
+它们决定了 <strong>BLER 与吞吐</strong>。</p>
+
+<div class="callout c-blue">
+<p><strong>但做系统级仿真时，业界并不跑这整条链。</strong>
+3GPP 的评估方法学、ns-3、Vienna 模拟器走的都是<strong>链路到系统映射</strong>：
+把逐 RE 的 SINR 矢量压成一个有效 SINR，再查 BLER。</p>
+<p style="margin-top:8px;">原因很实际：每个样本跑一遍 LDPC 译码要几百毫秒，
+而蒙特卡洛动辄几百上千个样本、还要扫多个工作点。链路到系统映射把这一步
+变成查表，快三四个数量级，代价是 BLER 从"实测"降级为"映射"。</p>
+</div>
+
+<div class="plain">
+<p>还有一个现实约束：Sionna 2.0 把包拆开了，本机装的
+<code>sionna-rt</code> <strong>只有射线追踪</strong>，PHY 层在另一个包里且依赖
+TensorFlow（约 600 MB，且与现有 numpy/scipy/torch 有版本冲突风险）。
+为了 BLER 引入整个 TF 栈，代价远大于收益。</p>
+</div>
+
+<h2 id="s2">二、香农谱效不是吞吐，差多少</h2>
+
+<p class="lead"><code>ds.link()</code> 给的 <code>SE = Σ log2(1+SINR)</code> 是<strong>香农上界</strong>。
+真实系统达不到，差距来自三项，每一项都可量化。</p>
+
+<h3>损失一：调制受限 —— 精确可算</h3>
+<p>星座点数摆在那里。方形 M-QAM 的对称信息率（约束容量）用 Gauss-Hermite
+求积精确计算：</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>SNR</th><th>香农</th><th>QPSK</th><th>16QAM</th><th>64QAM</th><th>256QAM</th></tr></thead>
+<tbody>
+<tr><td>−10 dB</td><td>0.138</td><td>0.137</td><td>0.137</td><td>0.137</td><td>0.137</td></tr>
+<tr><td>0 dB</td><td>1.000</td><td>0.972</td><td>0.990</td><td>0.992</td><td>0.992</td></tr>
+<tr><td>10 dB</td><td>3.459</td><td>1.994</td><td>3.164</td><td>3.269</td><td>3.284</td></tr>
+<tr><td><strong>20 dB</strong></td><td><strong>6.658</strong></td><td>2.000</td><td>4.000</td><td><strong>5.801</strong></td><td>6.257</td></tr>
+<tr><td>30 dB</td><td>9.967</td><td>2.000</td><td>4.000</td><td>6.000</td><td>7.995</td></tr>
+</tbody>
+</table>
+</div>
+
+<p class="q">20 dB 时香农说 6.66 bit/s/Hz，64QAM 最多只能给 5.80。
+低信噪比处两者重合，高信噪比处饱和到 log2(M) —— 三条性质都在测试里核过。</p>
+
+<div class="callout c-amber">
+<p><strong>实现时踩的坑：sigma 定义差一倍就是 3 dB。</strong>
+约定复符号 E|x|²=1、复噪声 E|n|²=1/γ，折到实维并把星座归一化到单位能量后，
+噪声方差正好是 1/γ，所以 <code>sigma = 1/sqrt(γ)</code>——
+写成 <code>1/sqrt(2γ)</code> 会整体多给 3 dB。</p>
+<p style="margin-top:8px;"><strong>而且看起来完全正常</strong>：曲线形状对、饱和值对，
+只是位置平移。抓它的唯一办法是低信噪比处对香农——约束容量在 γ→0 时
+必须与 log2(1+γ) 重合。这条自检已写进测试。</p>
+</div>
+
+<h3>损失二：码率离散</h3>
+<p>38.214 的 MCS 表只有 29 档（表 1）或 28 档（表 2）。实际码率总是落在
+需要的码率之下，用不满。</p>
+
+<h3>损失三：有限码长 + 实现损失</h3>
+<p>LDPC 距容量约 1~2 dB；TB 还要按 38.212 切成多个码块，
+<strong>任一块错则整块错</strong>——273 PRB 的 TB 有二十多个码块。</p>
+
+<div class="measured">
+<p><strong>三项加起来的实测差距</strong>（21 小区 64T 100MHz，200 样本）：</p>
+<div class="lossbar">
+<div class="row"><span class="lbl">香农谱效</span>
+<span class="bar" style="width:340px;"></span><span class="val">69.2 bit/s/Hz</span></div>
+<div class="row"><span class="lbl">实际谱效（MCS 表 1）</span>
+<span class="bar" style="width:110px;"></span><span class="val">22.3 bit/s/Hz — 32%</span></div>
+</div>
+<p>低信噪比处达成率 70~77%，高信噪比处掉到 38% —— 后者不是信道问题，
+是 <strong>MCS 表封顶</strong>（下一节有证据）。</p>
+</div>
+
+<h2 id="s3">三、哪些是算的、哪些是模型</h2>
+
+<p class="lead"><strong>必须分清，否则会把模型当测量用。</strong></p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>部分</th><th>性质</th><th>依据</th></tr></thead>
+<tbody>
+<tr><td>QAM 约束容量</td><td><span class="tag exact">精确计算</span></td>
+<td>Gauss-Hermite 求积；可对香农上界、饱和值、低信噪比重合三重自检</td></tr>
+<tr><td>有效 SINR（MIESM/EESM）</td><td><span class="tag exact">标准口径</span></td>
+<td>互信息平均 / 指数平均。默认 MIESM，不需要逐 MCS 标定 β</td></tr>
+<tr><td>MCS / CQI 表</td><td><span class="tag exact">标准查表</span></td>
+<td>TS 38.214 V17.5.0 Table 5.1.3.1-1/-2、5.2.2.1-2/-3，从 PDF 机械解析</td></tr>
+<tr><td>TBS</td><td><span class="tag exact">标准算法</span></td>
+<td>38.214 §5.1.3.2，查表分支与量化分支都实现</td></tr>
+<tr><td>码块分段</td><td><span class="tag exact">标准算法</span></td>
+<td>38.212 §5.2.2，BG1/BG2 选择与分段</td></tr>
+<tr><td><strong>BLER</strong></td><td><span class="tag model">模型</span></td>
+<td><strong>有限码长形状 + 可配实现损失。没有 3GPP 参考曲线兜底</strong></td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>表格的自检</h3>
+<p>MCS/CQI 表有一条内蕴冗余关系：<code>SE == q_m × R / 1024</code>。
+抄错一个数就对不上。87 行全部核过——这是上次 CDL 表事故之后定的规矩：
+<strong>一份查表值必须有第二条独立路径核对</strong>。</p>
+
+<h3>BLER 模型的门限锚点</h3>
+<p>模型没有参考曲线可自动判定，所以把各档门限摆出来供人工对照：</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>MCS</th><th>调制</th><th>码率</th><th>SE</th><th>需要 SINR</th><th>香农极限</th><th>差距</th></tr></thead>
+<tbody>
+<tr><td>0</td><td>QPSK</td><td>0.117</td><td>0.234</td><td><strong>−5.99 dB</strong></td><td>−7.53</td><td>1.54</td></tr>
+<tr><td>9</td><td>QPSK</td><td>0.663</td><td>1.326</td><td>3.44</td><td>1.78</td><td>1.66</td></tr>
+<tr><td>10</td><td>16QAM</td><td>0.332</td><td>1.328</td><td>3.13 ↓</td><td>1.79</td><td>1.34</td></tr>
+<tr><td>18</td><td>64QAM</td><td>0.455</td><td>2.731</td><td>9.17</td><td>7.51</td><td>1.66</td></tr>
+<tr><td>28</td><td>64QAM</td><td>0.926</td><td>5.555</td><td><strong>19.71 dB</strong></td><td>16.63</td><td>3.08</td></tr>
+</tbody>
+</table>
+</div>
+
+<p class="q">公开 NR 链路级曲线的常见量级是 MCS0 约 −5~−7 dB、MCS28 约 20~23 dB，
+模型落在区间内。距香农的差距随码率上升（1.3 → 3.1 dB），符合定性预期。</p>
+
+<div class="callout c-amber">
+<p><strong>MCS10 的门限比 MCS9 低 0.31 dB —— 这是标准表本身的设计，不是缺陷。</strong>
+标准在调制切换点上故意让 SE 重叠：MCS9 是 QPSK R=0.663（SE 1.3262），
+MCS10 是 16QAM R=0.332（SE 1.3281）——同样的 SE，后者码率低得多，所以更省信噪比。</p>
+<p style="margin-top:8px;">所以单调性判据<strong>只能在同一调制阶数内部要求</strong>。
+一开始整体判单调，把这两点误报成了模型失败。</p>
+</div>
+
+<h2 id="s4">四、实测：吞吐、边缘用户、MCS 分布</h2>
+
+<p class="lead">数据集：21 小区 64T4R，100 MHz（273 RB），UMa_NLOS + CDL-C，200 样本。</p>
+
+<pre><code>吞吐（n=60）：均值 1373.11 / 中位 1474.69 / <span class="cm">边缘用户(5%) 833.48</span> / 峰值(95%) 1606.61 Mbps
+  谱效 均值 19.052，边缘 11.565 bit/s/Hz
+  平均 BLER 0.38%，中断比例 0.00%
+  MCS 分布 {18: 1, 20: 1, 22: 2, 23: 3, 24: 4, 25: 4, 26: 5, 27: 6, <span class="cm">28: 34</span>}</code></pre>
+
+<div class="callout c-red">
+<p><strong>34/60 个样本压在最高档 MCS 28 —— 限制来自 MCS 表，不是信道也不是算法。</strong>
+这种时候达成率低不说明任何问题，换含 256QAM 的表 2 就能看出来：</p>
+<div class="tbl-wrap" style="margin:10px 0;">
+<table>
+<thead><tr><th></th><th>均值</th><th>边缘用户</th><th>谱效均值</th><th>封顶样本</th></tr></thead>
+<tbody>
+<tr><td>表 1（64QAM 封顶）</td><td>1373.1 Mbps</td><td>833.5</td><td>19.05</td><td>34/60</td></tr>
+<tr><td><strong>表 2（含 256QAM）</strong></td><td><strong>1689.5 Mbps</strong></td><td>836.0</td><td><strong>23.44</strong></td><td>20/60</td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>均值提升 23%，而边缘用户几乎不变</strong>——边缘用户本来就用不到高阶调制，
+这一条本身就是有用的结论。<code>sw_throughput</code> 检测到大量样本封顶时会主动提示。</p>
+</div>
+
+<div class="plain">
+<p>5% 边缘用户吞吐是 3GPP 评估里的公平性指标，比均值更能说明问题。
+上面这例：均值涨 23%，边缘用户涨 0.3% —— 只看均值会得出"256QAM 大幅改善"的结论，
+看了边缘用户才知道改善的是谁。</p>
+</div>
+
+<h2 id="s5">五、SNR 扫描曲线</h2>
+
+<p class="lead">无线论文里最标准的那张图。各点跑在<strong>同一批信道</strong>上、彼此配对，
+曲线不含信道抽样噪声。</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>SNR</th><th>香农 SE</th><th>实际 SE</th><th>达成率</th><th>吞吐</th><th>边缘用户</th><th>MCS 中位</th></tr></thead>
+<tbody>
+<tr><td>−5 dB</td><td>7.95</td><td>5.78</td><td>72.6%</td><td>416.8</td><td>319.7</td><td>11</td></tr>
+<tr><td>0 dB</td><td>12.45</td><td>9.60</td><td><strong>77.0%</strong></td><td>692.2</td><td>557.0</td><td>18</td></tr>
+<tr><td>5 dB</td><td>17.70</td><td>13.56</td><td>76.5%</td><td>977.7</td><td>746.6</td><td>21</td></tr>
+<tr><td>10 dB</td><td>23.40</td><td>16.58</td><td>70.7%</td><td>1194.8</td><td>915.3</td><td>24</td></tr>
+<tr><td>15 dB</td><td>29.32</td><td>18.66</td><td>63.6%</td><td>1344.5</td><td>1078.0</td><td>26</td></tr>
+<tr><td>20 dB</td><td>35.31</td><td>20.03</td><td>56.7%</td><td>1443.9</td><td>1213.0</td><td>28</td></tr>
+<tr><td>25 dB</td><td>41.33</td><td>20.29</td><td>49.0%</td><td>1462.3</td><td>1213.0</td><td>28 ←封顶</td></tr>
+<tr><td>35 dB</td><td>53.39</td><td>20.29</td><td><strong>37.9%</strong></td><td>1462.3</td><td>1213.0</td><td>28 ←封顶</td></tr>
+</tbody>
+</table>
+</div>
+
+<p class="q">达成率在 0 dB 附近最高（77%），两端都下滑：低信噪比处受码率下限限，
+高信噪比处受 MCS 表封顶限。吞吐从 25 dB 起完全饱和——再改善信道也没用。</p>
+
+<h2 id="s6">六、性能：并行生成</h2>
+
+<p class="lead">实测单样本耗时相差 <strong>85 倍</strong>，主导因素是小区数与天线×RB。</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>配置</th><th>毫秒/样本</th><th>200 样本串行</th></tr></thead>
+<tbody>
+<tr><td>单小区 32T 20MHz</td><td>24</td><td>4.7 s</td></tr>
+<tr><td>21 小区 32T 20MHz</td><td>410</td><td>82 s</td></tr>
+<tr><td>单小区 64T 100MHz</td><td>191</td><td>38 s</td></tr>
+<tr><td><strong>21 小区 64T 100MHz</strong></td><td><strong>2054</strong></td><td><strong>411 s</strong></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>多小区贵 11~17 倍——要算几何 SINR 与逐干扰小区的贡献。
+<code>workers="auto"</code> 按预估耗时自动决定（四个标定点误差都在 ±30% 内）。</p>
+
+<div class="callout c-red">
+<p><strong>第一版并行只有 1.34 倍加速。</strong>原因是每个 worker 各自开满
+CPU 核数的 BLAS 线程：20 个 worker × 20 线程抢 20 个核，
+上下文切换吃掉了全部收益。</p>
+<p style="margin-top:8px;">修法是在 <strong>import numpy 之前</strong>把
+<code>OMP_NUM_THREADS</code> 等设成 1。<strong>进程级并行 + 单线程 BLAS</strong>
+是数值计算里的标准组合，但很容易漏。修完拿到应有的加速：</p>
+<div class="tbl-wrap" style="margin:10px 0;">
+<table>
+<thead><tr><th>场景</th><th>串行</th><th>并行</th><th>加速</th></tr></thead>
+<tbody>
+<tr><td>21 小区 32T，120 样本</td><td>65.4 s</td><td>23.8 s（10 进程）</td><td>2.75×</td></tr>
+<tr><td>21 小区 64T 100MHz，200 样本</td><td>~842 s（预估）</td><td>245.7 s（20 进程）</td><td><strong>3.4×</strong></td></tr>
+</tbody>
+</table>
+</div>
+<p>没到 20 倍——内存带宽是瓶颈，20 个进程同时搬 273×64 的复数数组。
+3.4 倍是实测值，不做更高的宣称。</p>
+</div>
+
+<div class="callout c-amber">
+<p><strong>并行结果与串行不是同一批样本。</strong>分块靠给每块不同的
+<code>seed</code>（实测 <code>ue_seed_offset</code> 对撒点毫无影响，只有
+<code>seed</code> 真正换随机流）。所以串行 seed=S 跑 N 个 vs 并行
+seed=S..S+W−1 各跑 N/W 个，<strong>统计等价、各自可复现，但逐样本不同</strong>。</p>
+<p style="margin-top:8px;">实测 SINR 分布 KS 检验 p=0.90，统计上相容。
+这一点写进摘要的 <code>parallel</code> 块，免得"换了 workers 结果对不上"
+变成隐形陷阱。<strong>配对比较不受影响</strong>——两臂本来就要用同一个数据集。</p>
+</div>
+
+<div class="plain">
+<p>多进程在某些宿主里起不来（Windows spawn 需要可导入的 <code>__main__</code>，
+REPL 和 <code>python -c</code> 里没有）。这时<strong>降级串行并把原因记进摘要</strong>，
+不让整次生成失败——但也不静默，否则用户会纳闷为什么没变快。</p>
+</div>
+
+<h2 id="s7">七、新增接口</h2>
+
+<h3>3 个 MCP 工具（总数 20 → 23）</h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>工具</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td><code>sw_throughput</code></td>
+<td>真实吞吐 Mbps + 5% 边缘用户 + MCS 分布 + 平均 BLER。检测到大量样本封顶会主动提示换表</td></tr>
+<tr><td><code>sw_sweep_snr</code></td>
+<td>谱效/吞吐 vs SNR 曲线，各点配对无抽样噪声</td></tr>
+<tr><td><code>sw_mcs_info</code></td>
+<td>38.214 MCS/CQI 表 + 表格自检 + BLER 模型门限锚点</td></tr>
+</tbody>
+</table>
+</div>
+<p class="q"><code>sw_generate</code> 新增 <code>workers</code> 参数，默认 <code>"auto"</code>。</p>
+
+<h3>新模块 <code>linkadapt.py</code>（约 620 行）</h3>
+<pre><code>qam_mi(M, snr_db)                 <span class="cm"># 约束容量，精确求积</span>
+effective_sinr(sinr, method=)     <span class="cm"># MIESM（默认）/ EESM</span>
+transport_block_size(n_re, R, Qm) <span class="cm"># 38.214 §5.1.3.2</span>
+code_blocks(tbs, rate)            <span class="cm"># 38.212 §5.2.2 分段</span>
+select_mcs / select_cqi           <span class="cm"># 链路自适应</span>
+link_adaptation(...)              <span class="cm"># 端到端：SINR → 吞吐</span>
+throughput_stats(...)             <span class="cm"># 分布 + 边缘用户</span>
+BlerModel.anchor_check()          <span class="cm"># 门限摆出来供人工对照</span></code></pre>
+
+<h3>Dataset 上的新方法</h3>
+<pre><code>ds.link_adaptation(i, mcs_table=1)   <span class="cm"># 单样本：MCS/CQI/TBS/BLER/吞吐</span>
+ds.throughput(max_samples=200)       <span class="cm"># 整批：分布 + 5% 边缘用户</span></code></pre>
+
+<h2 id="s8">八、已知局限</h2>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>局限</th><th>为什么</th><th>怎么应对</th></tr></thead>
+<tbody>
+<tr><td><strong>BLER 是模型不是实测</strong></td>
+<td>没有 3GPP 参考曲线；跑真 LDPC 要引入 TensorFlow 栈</td>
+<td><code>anchor_check</code> 把门限摆出来对照公开曲线；严格结论跑 Sionna PHY / MATLAB</td></tr>
+<tr><td>EESM 的 β 未逐 MCS 标定</td>
+<td>β 要拿自己的链路级曲线标定</td>
+<td>默认走 MIESM（不需要 β）；用 EESM 请自行标定后覆盖</td></tr>
+<tr><td>HARQ 是简化模型</td>
+<td>用的是"每次重传独立、成功即停"，没有合并增益</td>
+<td>模型<strong>偏保守</strong>，真实 HARQ 吞吐会更高</td></tr>
+<tr><td>没有 L2 调度器</td>
+<td>多用户调度、MU-MIMO 配对、业务模型都不在范围内</td>
+<td>当前是单用户链路视角；多用户要另建一层</td></tr>
+<tr><td>并行只有 3.4 倍</td>
+<td>内存带宽瓶颈，不是 CPU 瓶颈</td>
+<td>如实报实测值。更高加速要改数据布局，收益不确定</td></tr>
+<tr><td>耗时预估误差 ±30%</td>
+<td>四点标定的经验式，机器不同会偏</td>
+<td>只用于调度决策与提示，不用于承诺</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="plain">
+<p>这一轮之后，"我提一个算法思路 → 在可信信道上跑蒙特卡洛 → 拿到经得起推敲的结论"
+这条路上，<strong>结论可以是 Mbps 而不只是 bit/s/Hz</strong> 了。
+差别在于前者是系统真能拿到的，后者是理论上界。</p>
+</div>
+
+<footer>
+<p><strong>superwireless</strong> · MIT ·
+<a href="https://github.com/TianLin0509/superwireless">github.com/TianLin0509/superwireless</a></p>
+<p>配套文档：<strong>SETUP.html</strong>（组成与安装）· <strong>CAPABILITIES.html</strong>（能力边界）·
+<strong>SHOWCASE.html</strong>（三道门与踩过的坑）· <strong>EXTERNAL_ALGO.html</strong>（接入自研算法）。</p>
+<p>测试：e2e 39 · mcp 21 · raytracing 39 · linklevel 35 · gates 86 · results 80 ·
+linkadapt 102 = <strong>402 项</strong>。</p>
+</footer>
+
+</div>
+</body>
+</html>

@@ -126,6 +126,322 @@ def _align_to_ues(n: int, num_ues: int) -> int:
     return max(((n + num_ues - 1) // num_ues) * num_ues, num_ues)
 
 
+def _resolve_workers(workers: int | str, num_samples: int, cfg: dict[str, Any]) -> int:
+    """决定用几个进程。
+
+    ``"auto"`` 时按**预估单样本耗时**决定：多小区带干扰的配置一个样本要 0.4~2 秒，
+    并行收益巨大；单小区小带宽只要 25 毫秒，起进程的开销（每个子进程要重新
+    import numpy/scipy/ChannelHub，约 3 秒）反而不划算。
+
+    判据取小区数与天线数——实测这两个是耗时的主导因素：
+    单小区 32T/20MHz 24 ms，21 小区同配置 410 ms（17 倍），
+    21 小区 64T/100MHz 2054 ms（87 倍）。
+    """
+    if isinstance(workers, int) and workers != 0:
+        n = workers
+    else:
+        est_total_s = estimate_seconds(cfg, num_samples)
+        # 每个子进程要重新 import numpy/scipy/ChannelHub，实测约 4 秒。
+        # 所以只在总工作量够大时才并行，且保证**每个 worker 至少有
+        # _MIN_WORK_S 的活**，否则启动成本吃掉收益（实测每 worker 只分到
+        # 6 秒活时，10 进程只有 1.34 倍加速）。
+        if est_total_s < _PARALLEL_MIN_TOTAL_S:
+            return 1
+        n = max(2, int(est_total_s // _MIN_WORK_S))
+    if n <= 1:
+        return 1
+    return max(1, min(int(n), num_samples, (os.cpu_count() or 4)))
+
+
+# 并行的两个门槛：总活少于这个数就不值得起进程；每个 worker 至少要分到这么多活。
+_PARALLEL_MIN_TOTAL_S = 30.0
+_MIN_WORK_S = 20.0
+
+
+def estimate_seconds(cfg: dict[str, Any], num_samples: int) -> float:
+    """粗估串行生成要多久（秒）。用于自动并行决策与给用户提示。
+
+    实测标定点（本机 20 核）：
+
+    ============================  ===========
+    配置                          毫秒/样本
+    ============================  ===========
+    单小区 32T 20MHz                     24
+    21 小区 32T 20MHz                   410
+    单小区 64T 100MHz                   191
+    21 小区 64T 100MHz                 2054
+    ============================  ===========
+
+    主导因素是**小区数**（多小区要算几何 SINR 与干扰，贵 17 倍）与
+    **天线数 × RB 数**。射线追踪另算，慢一个量级。
+    """
+    cells = int(cfg.get("num_sites", 1) or 1) * int(cfg.get("sectors_per_site", 1) or 1)
+    ants = int(cfg.get("num_bs_tx_ant", 64) or 64)
+    rb = int(cfg.get("num_rb") or _rb_from_bandwidth(cfg))
+
+    # 天线与 RB 的指数取 0.9 / 0.85 而不是 1.0：实测 (64T,273RB) 比
+    # (32T,51RB) 只慢 8.0 倍，而线性外推会给 10.7 倍——有固定开销摊薄。
+    ms = 24.0 * (ants / 32.0) ** 0.9 * (rb / 51.0) ** 0.85
+    if cells > 1:
+        # 多小区的代价不是常数倍：小配置下 17 倍，大配置下 11 倍。
+        # 取折中的 14 倍，四个实测点都落在 ±30% 内——够做调度决策，不求准。
+        ms *= 1.0 + 13.0 * min(1.0, (cells - 1) / 20.0)
+    if str(cfg.get("scenario", "")) in ("munich", "custom_osm", "etoile",
+                                        "florence", "san_francisco"):
+        ms = max(ms, 3000.0)  # 射线追踪慢一个量级
+    return ms * num_samples / 1000.0
+
+
+def _run_parallel(
+    source_name: str,
+    cfg_run: dict[str, Any],
+    *,
+    num_samples: int,
+    n_workers: int,
+    lo: float,
+    hi: float,
+    filtering: bool,
+    base_seed: int,
+    n_ues: int,
+    ask_factor: int,
+    progress: Callable[[int, int], None] | None = None,
+) -> tuple[dict[str, np.ndarray], dict[str, Any], int, int, int, list[float]]:
+    """把样本切成若干块交给进程池，再合并。
+
+    **分块靠给每块不同的 ``seed``**，不是切样本序号——ChannelHub 的
+    ``ue_seed_offset`` 实测对撒点没有影响（同一 offset 与不同 offset 给出
+    逐位相同的路损），只有 ``seed`` 真正换掉随机流。
+
+    因此并行结果与串行结果**不是同一批样本**：串行 seed=S 跑 N 个，
+    并行是 seed=S..S+W-1 各跑 N/W 个。两者统计上等价、各自可复现，
+    但逐样本不同。这一点会写进 summary 的 ``parallel`` 块，别让它成为
+    "换了 workers 结果就对不上"的隐形陷阱。
+    """
+    import tempfile
+    from concurrent.futures import ProcessPoolExecutor
+
+    per = [num_samples // n_workers] * n_workers
+    for i in range(num_samples % n_workers):
+        per[i] += 1
+    per = [p for p in per if p > 0]
+
+    tmpdir = tempfile.mkdtemp(prefix="sw_gen_")
+    jobs = []
+    for k, want in enumerate(per):
+        c = dict(cfg_run)
+        c["seed"] = base_seed + k
+        c["num_samples"] = _align_to_ues(want * ask_factor, n_ues)
+        jobs.append((source_name, c, want, lo, hi, filtering,
+                     os.path.join(tmpdir, f"chunk{k}.npz")))
+
+    paths: list[str] = []
+    first_meta: dict[str, Any] = {}
+    acc = att = rej = 0
+    observed: list[float] = []
+    done = 0
+    with ProcessPoolExecutor(max_workers=len(jobs)) as pool:
+        for path, fm, st in pool.map(_chunk_worker, jobs):
+            if path:
+                paths.append(path)
+            if fm and not first_meta:
+                first_meta = fm
+            acc += st["accepted"]
+            att += st["attempted"]
+            rej += st["rejected"]
+            observed.extend(st["observed_sinr"])
+            done += 1
+            if progress:
+                progress(min(acc, num_samples), num_samples)
+            _dbg(f"  worker {done}/{len(jobs)} 回来，累计 {acc} 个样本")
+
+    payload = _merge_chunks(paths)
+    # 各块可能多给一两个（对齐到 num_ues 的整数倍），统一截到要的数量
+    if payload:
+        n_have = len(next(iter(payload.values())))
+        if n_have > num_samples:
+            payload = {k: v[:num_samples] for k, v in payload.items()}
+            acc = num_samples
+    try:
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    except OSError:
+        pass
+    return payload, first_meta, acc, att, rej, observed
+
+
+def _collect(
+    source_name: str,
+    cfg_run: dict[str, Any],
+    *,
+    want: int,
+    lo: float,
+    hi: float,
+    filtering: bool,
+    progress: Callable[[int, int], None] | None = None,
+) -> tuple[dict[str, np.ndarray], dict[str, Any], dict[str, Any]]:
+    """跑一批样本并打包成落盘用的数组字典。
+
+    串行路径与每个并行 worker 用的都是这一个函数——**共用一份实现**，
+    否则两条路径迟早会漂移，而漂移只在"并行结果和串行对不上"时才暴露。
+
+    返回 ``(payload, first_meta, stats)``。stats 里带尝试数/拒绝数/观察到的
+    信噪比，供上层合并统计与报错。
+    """
+    h_true: list[np.ndarray] = []
+    h_est: list[np.ndarray] = []
+    h_intf: list[np.ndarray] = []
+    positions: list[np.ndarray] = []
+    w_dl: list[np.ndarray] = []
+    scalars: dict[str, list[float]] = {k: [] for k in _SCALAR_SAMPLE_FIELDS}
+    metas: dict[str, list[Any]] = {k: [] for k in _SCALAR_META_FIELDS}
+    ssb_rsrp: list[list[float]] = []
+    ssb_sinr: list[list[float]] = []
+
+    accepted = attempted = rejected = 0
+    observed_sinr: list[float] = []
+    first_meta: dict[str, Any] = {}
+    ask = int(cfg_run.get("num_samples", want))
+
+    for sample in ch.iter_samples(source_name, cfg_run):
+        attempted += 1
+        sinr = _as_float(getattr(sample, "sinr_dB", None))
+        if np.isfinite(sinr):
+            observed_sinr.append(sinr)
+        if filtering and not (lo <= sinr <= hi):
+            rejected += 1
+            if attempted >= ask:
+                break
+            continue
+
+        ht = ch.serving_channel(sample, estimated=False)
+        he = ch.serving_channel(sample, estimated=True)
+        if ht is None:
+            continue
+
+        h_true.append(np.asarray(ht, dtype=np.complex64))
+        h_est.append(np.asarray(he if he is not None else ht, dtype=np.complex64))
+
+        hi_arr = getattr(sample, "h_interferers", None)
+        if hi_arr is not None:
+            h_intf.append(np.asarray(hi_arr, dtype=np.complex64))
+
+        pos = getattr(sample, "ue_position", None)
+        positions.append(
+            np.asarray(pos, dtype=np.float64) if pos is not None else np.full(3, np.nan)
+        )
+
+        w = getattr(sample, "w_dl", None)
+        if w is not None:
+            w_dl.append(np.asarray(w, dtype=np.complex64))
+
+        for k in _SCALAR_SAMPLE_FIELDS:
+            scalars[k].append(_as_float(getattr(sample, k, None)))
+
+        meta = sample.meta if isinstance(sample.meta, dict) else {}
+        if not first_meta:
+            first_meta = {
+                k: v for k, v in meta.items()
+                if isinstance(v, (str, int, float, bool, type(None)))
+            }
+        for k in _SCALAR_META_FIELDS:
+            metas[k].append(meta.get(k))
+
+        ssb_rsrp.append(list(getattr(sample, "ssb_rsrp_dBm", None) or []))
+        ssb_sinr.append(list(getattr(sample, "ssb_sinr_dB", None) or []))
+
+        accepted += 1
+        if progress:
+            progress(accepted, want)
+        if accepted >= want:
+            break
+
+    stats = {
+        "accepted": accepted, "attempted": attempted, "rejected": rejected,
+        "observed_sinr": observed_sinr,
+    }
+    if accepted == 0:
+        return {}, first_meta, stats
+
+    payload: dict[str, np.ndarray] = {
+        "h_true": np.stack(h_true),
+        "h_est": np.stack(h_est),
+        "ue_position": np.stack(positions),
+    }
+    if h_intf and all(a.shape == h_intf[0].shape for a in h_intf):
+        payload["h_interferers"] = np.stack(h_intf)
+    if w_dl and all(a.shape == w_dl[0].shape for a in w_dl):
+        payload["w_dl"] = np.stack(w_dl)
+    for k, vals in scalars.items():
+        payload[f"scalar__{k}"] = np.asarray(vals, dtype=np.float64)
+    for k, vals in metas.items():
+        arr = np.asarray([_as_float(v) for v in vals], dtype=np.float64)
+        if np.all(np.isnan(arr)):  # 非数值字段（如 tdd_slot_direction）存字符串
+            payload[f"metastr__{k}"] = np.asarray([str(v) for v in vals])
+        else:
+            payload[f"meta__{k}"] = arr
+    if ssb_rsrp and all(len(x) == len(ssb_rsrp[0]) for x in ssb_rsrp) and ssb_rsrp[0]:
+        payload["ssb_rsrp_dBm"] = np.asarray(ssb_rsrp, dtype=np.float64)
+        payload["ssb_sinr_dB"] = np.asarray(ssb_sinr, dtype=np.float64)
+    return payload, first_meta, stats
+
+
+def _chunk_worker(args: tuple) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """并行 worker：生成一块、落到临时 npz、回句柄。
+
+    **不把数组通过 pickle 传回主进程**——200 个样本的信道有几百 MB，
+    走 IPC 既慢又容易撞进程间内存上限。落盘再由主进程合并便宜得多。
+
+    子进程必须自己 ``warmup()``：scipy 的 C 扩展在工作线程/新进程里首次
+    加载会撞 import 死锁，这条铁律对子进程同样成立（见 CLAUDE.md）。
+    """
+    source_name, cfg_run, want, lo, hi, filtering, tmp_path = args
+
+    # **必须在 import numpy 之前把 BLAS 线程数压到 1。**
+    # 否则每个 worker 各自开满 CPU 核数的线程：20 个 worker × 20 线程 = 400 个
+    # 线程抢 20 个核，上下文切换的开销吃掉全部并行收益。实测不设的话
+    # 10 个 worker 只有 1.34 倍加速，设了之后才拿到应有的加速比。
+    # 进程级并行 + 单线程 BLAS 是数值计算里的标准组合。
+    for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+               "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ[_v] = "1"
+
+    from . import channelhub as _ch
+
+    _ch.warmup()
+    payload, first_meta, stats = _collect(
+        source_name, cfg_run, want=want, lo=lo, hi=hi, filtering=filtering
+    )
+    if payload:
+        np.savez(tmp_path, **payload)
+    return (tmp_path if payload else "", first_meta, stats)
+
+
+def _merge_chunks(paths: list[str]) -> dict[str, np.ndarray]:
+    """把各 worker 落的 npz 沿样本轴拼起来。
+
+    只保留**所有块都有**的字段：某块缺 h_interferers 而别块有时，拼出来会
+    出现长度不一致的数组，后面读取会错位——宁可丢掉那个字段并在摘要里说明。
+    """
+    if not paths:
+        return {}
+    opened = [np.load(p, allow_pickle=False) for p in paths]
+    try:
+        common = set(opened[0].files)
+        for z in opened[1:]:
+            common &= set(z.files)
+        out: dict[str, np.ndarray] = {}
+        for k in sorted(common):
+            arrs = [z[k] for z in opened]
+            if any(a.shape[1:] != arrs[0].shape[1:] for a in arrs):
+                continue  # 形状不一致的字段直接丢，不做危险的补齐
+            out[k] = np.concatenate(arrs, axis=0)
+        return out
+    finally:
+        for z in opened:
+            z.close()
+
+
 def generate(
     cfg: dict[str, Any],
     *,
@@ -136,6 +452,7 @@ def generate(
     prereg_id: str = "",
     progress: Callable[[int, int], None] | None = None,
     max_attempts_factor: int = 5,
+    workers: int | str = 1,
 ) -> dict[str, Any]:
     """生成数据集并落盘，返回句柄与摘要。
 
@@ -177,60 +494,37 @@ def generate(
     ask = _align_to_ues(ask, n_ues)
     cfg_run = dict(cfg)
     cfg_run["num_samples"] = ask
+    n_workers = _resolve_workers(workers, num_samples, cfg)
 
-    _dbg(f"进入迭代 ask={ask} n_ues={n_ues} source={source_name}")
-    for sample in ch.iter_samples(source_name, cfg_run):
-        attempted += 1
-        if attempted <= 2 or attempted % 20 == 0:
-            _dbg(f"  收到第 {attempted} 个样本")
-        sinr = _as_float(getattr(sample, "sinr_dB", None))
-        if np.isfinite(sinr):
-            observed_sinr.append(sinr)
-        if filtering and not (lo <= sinr <= hi):
-            rejected += 1
-            if attempted >= ask:
-                break
-            continue
+    _dbg(f"进入迭代 ask={ask} n_ues={n_ues} workers={n_workers} source={source_name}")
 
-        ht = ch.serving_channel(sample, estimated=False)
-        he = ch.serving_channel(sample, estimated=True)
-        if ht is None:
-            continue
+    parallel_fallback: str | None = None
+    if n_workers > 1:
+        try:
+            payload, first_meta, accepted, attempted, rejected, observed_sinr = _run_parallel(
+                source_name, cfg_run, num_samples=num_samples, n_workers=n_workers,
+                lo=lo, hi=hi, filtering=filtering, base_seed=int(cfg.get("seed", 0) or 0),
+                n_ues=n_ues, ask_factor=max_attempts_factor if filtering else 1,
+                progress=progress,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 多进程在某些宿主里起不来：Windows spawn 需要可导入的 __main__
+            # （REPL、-c、部分 notebook 里没有），也可能撞上内存或权限限制。
+            # **降级到串行而不是让整次生成失败**，但必须如实报出来，
+            # 否则用户会以为并行生效了、还纳闷为什么没变快。
+            parallel_fallback = f"{type(exc).__name__}: {exc}"
+            _dbg(f"并行失败，降级串行：{parallel_fallback}")
+            n_workers = 1
 
-        h_true.append(np.asarray(ht, dtype=np.complex64))
-        h_est.append(np.asarray(he if he is not None else ht, dtype=np.complex64))
-
-        hi_arr = getattr(sample, "h_interferers", None)
-        if hi_arr is not None:
-            h_intf.append(np.asarray(hi_arr, dtype=np.complex64))
-
-        pos = getattr(sample, "ue_position", None)
-        positions.append(np.asarray(pos, dtype=np.float64) if pos is not None else np.full(3, np.nan))
-
-        w = getattr(sample, "w_dl", None)
-        if w is not None:
-            w_dl.append(np.asarray(w, dtype=np.complex64))
-
-        for k in _SCALAR_SAMPLE_FIELDS:
-            scalars[k].append(_as_float(getattr(sample, k, None)))
-
-        meta = sample.meta if isinstance(sample.meta, dict) else {}
-        if not first_meta:
-            first_meta = {
-                k: v for k, v in meta.items()
-                if isinstance(v, (str, int, float, bool, type(None)))
-            }
-        for k in _SCALAR_META_FIELDS:
-            metas[k].append(meta.get(k))
-
-        ssb_rsrp.append(list(getattr(sample, "ssb_rsrp_dBm", None) or []))
-        ssb_sinr.append(list(getattr(sample, "ssb_sinr_dB", None) or []))
-
-        accepted += 1
-        if progress:
-            progress(accepted, num_samples)
-        if accepted >= num_samples:
-            break
+    if n_workers <= 1:
+        payload, first_meta, st = _collect(
+            source_name, cfg_run, want=num_samples, lo=lo, hi=hi,
+            filtering=filtering, progress=progress,
+        )
+        accepted = st["accepted"]
+        attempted = st["attempted"]
+        rejected = st["rejected"]
+        observed_sinr = st["observed_sinr"]
 
     elapsed = time.perf_counter() - t0
     if accepted == 0:
@@ -249,28 +543,6 @@ def generate(
             "没有生成出任何样本。"
             + (f"信噪比区间 [{lo:g}, {hi:g}] dB 全部被拒。" if filtering else "请检查配置。")
         )
-
-    # ---- 落盘 ----
-    payload: dict[str, np.ndarray] = {
-        "h_true": np.stack(h_true),
-        "h_est": np.stack(h_est),
-        "ue_position": np.stack(positions),
-    }
-    if h_intf and all(a.shape == h_intf[0].shape for a in h_intf):
-        payload["h_interferers"] = np.stack(h_intf)
-    if w_dl and all(a.shape == w_dl[0].shape for a in w_dl):
-        payload["w_dl"] = np.stack(w_dl)
-    for k, vals in scalars.items():
-        payload[f"scalar__{k}"] = np.asarray(vals, dtype=np.float64)
-    for k, vals in metas.items():
-        arr = np.asarray([_as_float(v) for v in vals], dtype=np.float64)
-        if np.all(np.isnan(arr)):  # 非数值字段（如 tdd_slot_direction）存字符串
-            payload[f"metastr__{k}"] = np.asarray([str(v) for v in vals])
-        else:
-            payload[f"meta__{k}"] = arr
-    if ssb_rsrp and all(len(x) == len(ssb_rsrp[0]) for x in ssb_rsrp) and ssb_rsrp[0]:
-        payload["ssb_rsrp_dBm"] = np.asarray(ssb_rsrp, dtype=np.float64)
-        payload["ssb_sinr_dB"] = np.asarray(ssb_sinr, dtype=np.float64)
 
     _dbg(f"迭代结束 accepted={accepted}，开始写盘")
     np.savez_compressed(out_dir / "channels.npz", **payload)
@@ -344,6 +616,21 @@ def generate(
         "topology_note": topology_note,
         "bs_panel": list(panel),
         "bs_panel_derived": bool(panel_derived),
+        # 并行会换掉随机流的分块方式，逐样本结果与串行不同（统计等价、各自可复现）。
+        # 记进摘要，免得"换了 workers 结果对不上"变成隐形陷阱。
+        "parallel": {
+            "workers": int(n_workers),
+            "seed_layout": (
+                f"seed={int(cfg.get('seed', 0) or 0)}"
+                if n_workers <= 1
+                else f"seed={int(cfg.get('seed', 0) or 0)}..{int(cfg.get('seed', 0) or 0) + n_workers - 1}"
+            ),
+            "note": (
+                None if n_workers <= 1
+                else "多进程分块：每块用不同 seed。与 workers=1 的结果统计等价但逐样本不同"
+            ),
+            "fallback_reason": parallel_fallback,
+        },
         "interference_modeled": interference_modeled if cells_cfg > 1 else None,
         "interference_note": interference_note,
         "shape": {

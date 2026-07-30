@@ -282,6 +282,33 @@ class Dataset:
 
         return g.gate_channel(self, **kw)
 
+    def link_adaptation(self, index: int = 0, **kw: Any) -> Any:
+        """单样本的链路自适应：有效 SINR → MCS/CQI → TBS → 真实吞吐。
+
+        与 ``ds.link()`` 的区别：那个给的是香农谱效（上界），这个给的是
+        **调制受限 + 码率离散 + 有限码长之后真正能拿到的吞吐**。
+        """
+        from . import linkadapt as la
+        from . import linklevel as ll
+
+        kw.setdefault("n_prb", int(self.h_true.shape[2]))
+        snr = kw.pop("snr_db", None)
+        if snr is None:
+            snr = float(np.asarray(self.sinr_dB)[index])
+        r = ll.link_performance(self.h_true[index], snr_db=snr,
+                                method=kw.pop("method", "svd"),
+                                receiver=kw.pop("receiver", "mmse"))
+        kw.setdefault("layers", r.rank)
+        # 逐 RB 逐层的后处理 SINR 拉平——链路到系统映射就是要吃掉这个频选起伏
+        return la.link_adaptation(np.asarray(r.sinr_per_rb_db).ravel(), **kw)
+
+    def throughput(self, *, max_samples: int = 500, **kw: Any) -> Any:
+        """整批样本的吞吐分布，含 3GPP 口径的 5% 边缘用户指标。"""
+        from . import linkadapt as la
+
+        n = min(int(self.n), int(max_samples))
+        return la.throughput_stats([self.link_adaptation(i, **kw) for i in range(n)])
+
     def sample_ids(self) -> list[str]:
         """逐样本标识。外部算法注册结果时两个臂都用这一份，顺序不要改。"""
         from . import results as rs

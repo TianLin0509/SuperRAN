@@ -167,15 +167,16 @@ _DESIGN: dict[str, DesignQuestion] = {
                 "各层等功率、总发射功率归一，接收机默认 MMSE。"
             ),
             options=[
-                Option("se", "平均谱效 bit/s/Hz",
+                Option("se", "平均谱效 bit/s/Hz（香农口径）",
                        "最常用。含预编码与接收机全链路，收敛也最快",
                        recommended=True),
+                Option("throughput", "真实吞吐 Mbps（含 MCS/BLER）",
+                       "走链路到系统映射：调制受限 + 码率离散 + 有限码长都算进来。"
+                       "比香农谱效低 25~60%，但那才是系统真能拿到的"),
+                Option("cell_edge", "5% 边缘用户吞吐 / 谱效",
+                       "3GPP 评估里的公平性指标。**方差大得多**，样本数要按均值的 3~5 倍准备"),
                 Option("sinr", "SINR 分布",
                        "不经过预编码，直接看链路质量；适合干扰协调、功控类工作"),
-                Option("both", "谱效 + SINR 都要",
-                       "谱效给结论、SINR 给解释；代价只是多存一个标量，建议默认这个"),
-                Option("cell_edge", "5% 边缘用户谱效",
-                       "看公平性而非平均收益。**方差大得多**，样本数要按平均谱效的 3~5 倍准备"),
             ],
         ),
         DesignQuestion(
