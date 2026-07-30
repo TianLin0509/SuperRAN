@@ -607,6 +607,12 @@ class ComparisonResult:
     paired: PairedResult
     gate2: GateResult
     gate3: GateResult
+    # 指标名与单位。内置预编码对比走谱效；外部结果可以是任何指标，
+    # 所以结论句不能把 "bit/s/Hz" 写死。
+    metric: str = "spectral_efficiency"
+    metric_unit: str = "bit/s/Hz"
+    # 预注册身份（外部结果才有）：primary / secondary / exploratory / unregistered
+    identity: dict[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
@@ -616,6 +622,9 @@ class ComparisonResult:
         return {
             "arm_a": self.arm_a,
             "arm_b": self.arm_b,
+            "metric": self.metric,
+            "metric_unit": self.metric_unit,
+            "identity": self.identity,
             "paired": self.paired.as_dict(),
             "gate_comparison": self.gate2.as_dict(),
             "gate_conclusion": self.gate3.as_dict(),
@@ -626,16 +635,25 @@ class ComparisonResult:
     def statement(self) -> str:
         """一句可以直接写进报告的结论——**过不了门时它会明说不能下结论**。
 
-        必须写清最终用的是哪个检验。只写"p=..."而不说是哪个检验，读者会默认是
-        t 检验；两个检验冲突时这就是误导。
+        必须写清三件事：用的哪个检验、指标是什么、以及这是预注册主结论还是
+        探索性分析。只写"p=..."而不说是哪个检验，读者会默认是 t 检验；
+        不说指标身份，探索性分析就会被当成主结论读。
         """
         p = self.paired
+        if not np.isfinite(p.mean_diff):
+            blockers = [i.name for i in (self.gate2.blockers + self.gate3.blockers)]
+            return (
+                f"{self.arm_a} 与 {self.arm_b} **无法比较**，未过门："
+                f"{'、'.join(blockers)}。统计检验已跳过——错配数据上的 p 值没有意义。"
+            )
         rel = p.mean_diff / p.mean_b if abs(p.mean_b) > _EPS else float("nan")
         test_name = {"wilcoxon": "Wilcoxon 符号秩检验", "paired_t": "配对 t 检验"}[
             p.decision_test
         ]
+        unit = f" {self.metric_unit}" if self.metric_unit else ""
         base = (
-            f"{self.arm_a} 相对 {self.arm_b}：谱效 {p.mean_a:.3f} vs {p.mean_b:.3f} bit/s/Hz，"
+            f"{self.arm_a} 相对 {self.arm_b}：{self.metric} "
+            f"{p.mean_a:.3f} vs {p.mean_b:.3f}{unit}，"
             f"差值 {p.mean_diff:+.3f}（{rel:+.1%}），95% CI "
             f"[{p.ci_low:+.3f}, {p.ci_high:+.3f}]，n={p.n}，"
             f"{test_name} p={p.decision_p_value:.3g}"
@@ -645,13 +663,155 @@ class ComparisonResult:
                 f"（配对 t p={p.p_value:.3g} 与之结论冲突，差值分布偏态，"
                 f"以 Wilcoxon 为准）"
             )
-        if self.passed:
-            return base + "。结论成立。"
-        blockers = [i.name for i in (self.gate2.blockers + self.gate3.blockers)]
-        return base + f"。**结论不成立**，未过门：{'、'.join(blockers)}。"
+        if not self.passed:
+            blockers = [i.name for i in (self.gate2.blockers + self.gate3.blockers)]
+            return base + f"。**结论不成立**，未过门：{'、'.join(blockers)}。"
+
+        # 过门了，但还要说清这是主结论还是探索性的
+        ident = self.identity or {}
+        st = ident.get("status")
+        if st == "primary":
+            return base + f"。结论成立（预注册主指标，{ident.get('prereg_id')}）。"
+        if st in ("exploratory", "secondary"):
+            return (
+                base + f"。统计上成立，但**这是{'探索性' if st == 'exploratory' else '次要指标'}"
+                f"分析，不是预注册主结论**——{ident.get('why', '')}"
+            )
+        if st == "unregistered":
+            return base + "。结论成立（未绑定预注册口径，无法证明主指标是事先定的）。"
+        return base + "。结论成立。"
 
     def text(self) -> str:
         return "\n".join([self.gate2.text(), "", self.gate3.text(), "", self.statement()])
+
+
+def compare_results(
+    result_id_a: str,
+    result_id_b: str,
+    *,
+    claimed_gain: float | None = None,
+) -> ComparisonResult:
+    """比较两个**外部算法**注册回来的结果，连过门 2、门 3。
+
+    这是自研算法进入官方门控的入口。用户在自己的脚本里跑自己的算法
+    （见 ``results.eval_template``），把逐样本指标注册回来，这里做判决。
+
+    与 ``compare_arms`` 的区别只在数值从哪来：那个现场跑内置预编码，
+    这个读已注册的结果。**统计与门控用的是同一套实现**，所以内置基线和
+    自研算法的判决标准完全一致——不存在"自己的算法走宽松通道"。
+
+    校验在 ``results.check_pairable``：数据集摘要、样本 ID 逐个按序比对、
+    指标与单位。任一不成立就拦，因为这时配对检验的 p 值没有意义
+    ——**而它照样会算出一个看起来很显著的数**。
+    """
+    from . import analysis as an
+    from . import results as rs
+
+    a, b = rs.load(result_id_a), rs.load(result_id_b)
+    pair_issues = rs.check_pairable(a, b)
+
+    items: list[GateItem] = [
+        GateItem(
+            i["check"], False, i["detail"], fix=i["fix"],
+        )
+        for i in pair_issues
+    ]
+    if not pair_issues:
+        items.append(
+            GateItem(
+                "两臂可配对",
+                True,
+                f"同为 {a.dataset_id}（摘要 {a.dataset_digest[:12]}…），"
+                f"n={a.n}，样本 ID 序列逐个一致，指标 {a.metric} [{a.metric_unit}]",
+            )
+        )
+
+    # 预注册身份 —— 用的指标是不是当初定的那个
+    pr = None
+    if a.prereg_id:
+        try:
+            pr = an.load(a.prereg_id)
+        except FileNotFoundError:
+            pr = None
+    ident = an.classify(pr, a.metric)
+    items.append(
+        GateItem(
+            "预注册身份",
+            True,  # 不拦，只定性——探索性分析本身是正当的，冒充主结论才不是
+            f"[{ident['status']}] {ident['why']}",
+            severity="warn" if not ident["primary"] else "info",
+            fix=ident.get("how_to_claim", ""),
+        )
+    )
+
+    # CSI 口径：外部结果里 MCP 看不到用户怎么算的，只能查 metadata 有没有声明
+    csi_a = str(a.method_metadata.get("csi", "")).strip()
+    csi_b = str(b.method_metadata.get("csi", "")).strip()
+    if csi_a and csi_b:
+        ok = csi_a == csi_b or "csi" in (a.method_metadata.get("varies") or [])
+        items.append(
+            GateItem(
+                "CSI 口径一致",
+                ok,
+                (
+                    f"两臂都声明 {csi_a}"
+                    if csi_a == csi_b
+                    else f"「{a.arm_name}」{csi_a} vs「{b.arm_name}」{csi_b}"
+                ),
+                fix='两臂统一口径；确实要测 CSI 误差的代价时在 method_metadata 里写 varies=["csi"]',
+            )
+        )
+    else:
+        items.append(
+            GateItem(
+                "CSI 口径一致",
+                True,
+                "两臂的 method_metadata 里没写 csi，无法核对。"
+                "**外部结果是用户自己算的，MCP 看不到里面用了理想还是估计信道**"
+                "——这条得你自己保证：预编码只看 h_est，h_true 只用于评估",
+                severity="warn",
+                fix='在 register 的 method_metadata 里写 {"csi": "estimated"} 便于日后追溯',
+            )
+        )
+
+    g2 = GateResult(
+        gate="门 2 · 比较公平（外部结果）",
+        items=items,
+        context={
+            "arm_a": a.arm_name, "arm_b": b.arm_name,
+            "result_a": a.result_id, "result_b": b.result_id,
+            "dataset_id": a.dataset_id, "metric": a.metric,
+            "prereg": ident,
+        },
+    )
+
+    # 配对不成立时不做统计——算出来的数没有意义，给个空壳并明说
+    if pair_issues:
+        nan = float("nan")
+        paired = PairedResult(0, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan)
+        g3 = GateResult(
+            gate="门 3 · 结论站得住",
+            items=[
+                GateItem(
+                    "前置条件",
+                    False,
+                    "门 2 未通过，两臂不可配对，统计检验跳过——"
+                    "在错配的数据上算出的 p 值毫无意义",
+                    fix="先修门 2 的拦截项",
+                )
+            ],
+        )
+    else:
+        paired = paired_compare(a.values(), b.values())
+        g3 = gate_conclusion(paired, claimed_gain=claimed_gain)
+
+    return ComparisonResult(
+        arm_a=a.arm_name, arm_b=b.arm_name,
+        se_a=np.asarray([a.mean]), se_b=np.asarray([b.mean]),
+        paired=paired, gate2=g2, gate3=g3,
+        metric=a.metric, metric_unit=a.metric_unit,
+        identity=ident,
+    )
 
 
 def compare_arms(

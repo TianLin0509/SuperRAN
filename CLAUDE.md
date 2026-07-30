@@ -22,11 +22,13 @@ python tests/test_mcp_server.py  # MCP 全链路 21 项
 python tests/test_raytracing.py  # 射线追踪与决策层 39 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
+python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 ```
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
 后前三个都要跑；改动 `linklevel.py` / `validate.py` / `calibration.py` /
-`gates.py` / `spec38901.py` 要跑后两个。
+`gates.py` / `spec38901.py` 要跑 test_linklevel + test_gates；
+改动 `results.py` / `analysis.py` / `loader.py` 要跑 test_results。
 
 ## 与 ChannelHub 的边界
 
@@ -61,6 +63,38 @@ python tests/test_gates.py       # 校准、标准表、三道门、统计判决
 `scipy/interpolate/_fitpack_impl.py` 的 `create_module`。
 
 调试时设 `SUPERWIRELESS_DEBUG=1`，会开 faulthandler 并打点到 stderr。
+
+### 配对的有效性靠样本 ID，统计查不出错位
+
+`results.check_pairable` 逐个按序比 sample ID，不只比长度。**这不是多余的谨慎**：
+把两个臂的 ID 顺序打乱一个位置，配对检验算出来的 p 值可以**一模一样**
+（实测 1.63e-11 → 1.63e-11），因为统计只看数值数组，根本不知道第 i 个数
+对应哪个信道实例。错位是统计层面**不可观测**的，只能靠 ID 契约拦。
+
+所以 `register` 默认自动生成 ID，两臂都用默认就一定对齐；只有显式传 `ids=`
+（跳过部分样本）时才可能出错，那时校验就是最后一道防线。
+
+同理 `register` 拒绝含 nan/inf 的 values：配对时非有限值会被整行丢掉，
+两臂样本数悄悄变少，而 p 值照样算得出来。
+
+### 外部结果的 CSI 口径只能靠声明
+
+内置 `compare_arms` 能查两臂用的是 `h_true` 还是 `h_est`，因为预编码是它自己跑的。
+**外部结果是用户在自己进程里算的，MCP 看不到里面用了哪个。** 所以门 2 只能查
+`method_metadata` 里的声明，查不到就给 warn 并说清"这条得你自己保证"——
+不能假装查过了。
+
+这个不对称是设计选择而非缺陷：让 MCP 去 exec 用户代码换取可观测性，
+是把它从"数据供应站"变成任意代码执行面，代价远大于收益。
+
+### 预注册只在生成前绑定才有意义
+
+`sw_generate(prereg_id=...)` 把主指标写进 `summary.json`。**事后补绑没有价值**
+——预注册的全部意义就是"这是看数据之前写下的"。所以没有"给已有数据集补绑"
+的接口，也不要加。
+
+未绑定时 `classify` 返回 `unregistered` 而**不是** `primary`：没登记过就不能
+声称主指标是事先定的。这一条别放松成"默认 primary"。
 
 ### 门 3 的判决必须显式说清用哪个检验
 
@@ -228,6 +262,8 @@ SINR 中位数 35.7 → 18.1 dB。`generate._ensure_bs_panel()` 现在由 `num_b
 
 - 新的 3GPP 校准量 → `calibration.py`，按条款号标注来源
 - 新的门禁判据 → `gates.py`（门 2/门 3）或 `validate.py`（门 1，会自动进门 1）
+- 新的外部结果校验 → `results.check_pairable`，每条都必须是**硬拦截**不是告警
+- 新指标 → `analysis.KNOWN_METRICS` 加单位；自定义指标也支持，单位由调用方给
 - 新的标准查表值 → `spec38901.py`，**必须两条独立路径核对过**才录入
 - 新场景 → `presets/presets.yaml`，不改代码
 - 新射线追踪城市 → ChannelHub 的 `configs/scenes/`，`scenes.py` 自动发现

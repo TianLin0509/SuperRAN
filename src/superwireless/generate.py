@@ -133,6 +133,7 @@ def generate(
     snr_range_dB: list[float] | None = None,
     plan_markdown: str = "",
     draft_id: str = "",
+    prereg_id: str = "",
     progress: Callable[[int, int], None] | None = None,
     max_attempts_factor: int = 5,
 ) -> dict[str, Any]:
@@ -308,9 +309,33 @@ def generate(
             "干扰相关的结论不成立。"
         )
 
+    # 预注册口径随数据一起存档。**必须在生成时绑定，事后补绑没有意义**——
+    # 预注册的全部价值就在于"看数据之前写下的"，事后写的只是记录。
+    prereg_block = None
+    if prereg_id:
+        from . import analysis as an
+
+        try:
+            pr = an.load(prereg_id)
+            prereg_block = {
+                "prereg_id": pr.prereg_id,
+                "digest": pr.digest,
+                "primary_metric": pr.primary_metric,
+                "metric_unit": pr.metric_unit,
+                "baseline": pr.baseline,
+                "csi_basis": pr.csi_basis,
+                "expected_effect": pr.expected_effect,
+                "higher_is_better": pr.higher_is_better,
+                "secondary_metrics": pr.secondary_metrics,
+                "locked_before_generation": True,
+            }
+        except FileNotFoundError:
+            prereg_block = {"prereg_id": prereg_id, "error": "找不到该预注册，未绑定"}
+
     summary = {
         "dataset_id": dataset_id,
         "draft_id": draft_id,
+        "prereg": prereg_block,
         "source": source_name,
         "num_samples": int(accepted),
         "requested": int(num_samples),

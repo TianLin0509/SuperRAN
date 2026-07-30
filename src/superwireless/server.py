@@ -207,6 +207,7 @@ async def sw_generate(
     preset: str | None = None,
     overrides: dict[str, Any] | None = None,
     num_samples: int | None = None,
+    prereg_id: str | None = None,
 ) -> dict[str, Any]:
     """生成信道数据集，返回句柄与统计摘要（不返回数据本身）。
 
@@ -216,6 +217,10 @@ async def sw_generate(
 
     返回里的 auto_decided 列出了替用户做的决定，请转述给用户，
     这样他事后想改也知道改什么。
+
+    prereg_id 是 sw_lock_analysis 返回的预注册句柄。传了它，主指标与基线会
+    随数据存档，之后 sw_compare_results 能判断用的指标是不是事先定的那个。
+    **只能在生成前绑定**——事后补绑没有意义。
     """
     # 仿真是 CPU 密集的，丢到工作线程，别把 MCP 事件循环堵死
     _dbg("sw_generate: 进入，准备切工作线程")
@@ -226,6 +231,7 @@ async def sw_generate(
             intent=intent,
             preset=preset,
             overrides=overrides,
+            prereg_id=prereg_id,
             num_samples=num_samples,
         )
     )
@@ -240,6 +246,7 @@ def _generate_sync(
     preset: str | None,
     overrides: dict[str, Any] | None,
     num_samples: int | None,
+    prereg_id: str | None = None,
 ) -> dict[str, Any]:
     if draft_id:
         draft = pl.load_draft(draft_id)
@@ -282,6 +289,7 @@ def _generate_sync(
         snr_range_dB=own.get("snr_range_dB"),
         plan_markdown=plan_md,
         draft_id=draft.draft_id,
+        prereg_id=prereg_id or "",
     )
     _dbg(f"_generate_sync: 生成完成 {summary['dataset_id']} {summary['elapsed_s']}s")
 
@@ -641,6 +649,122 @@ def sw_missing_slots(
                 "一轮问 2~4 个，每题 3~4 个选项，推荐项放第一位并说明理由。"
                 "允许用户自由作答。用户说「随便 / 默认就行」时立刻停止提问。"
             ),
+        }
+    )
+
+
+@mcp.tool()
+def sw_lock_analysis(
+    primary_metric: str = "spectral_efficiency",
+    baseline: str = "",
+    draft_id: str = "",
+    csi_basis: str = "ideal",
+    expected_effect: float | None = None,
+    metric_unit: str | None = None,
+    higher_is_better: bool = True,
+    secondary_metrics: list[str] | None = None,
+    note: str = "",
+) -> dict[str, Any]:
+    """**在生成数据之前**把主指标与基线定下来（预注册）。
+
+    三道门证明不了一件事：主指标是看数据之前定的，还是跑完之后挑出来的
+    那个最好看的。真实过程往往是——跑完发现平均谱效没提升，顺手换成 5%
+    边缘用户谱效，有提升就报了这个。每一步都合理，合起来是在多个指标里
+    挑赢的那个，假阳性率远高于 5%。
+
+    做法很轻：写一个 JSON、算个 SHA-256、不可原地改。把返回的 ``prereg_id``
+    传给 ``sw_generate``，之后 ``sw_compare_results`` 会判断用的指标是不是
+    当初定的：一致 → ``primary``；不一致 → ``exploratory``，**结论句里会明说
+    这不是预注册主结论**。
+
+    改主意就再调一次，会得到新 ``prereg_id``，旧的不动——"改过口径"这件事
+    本身留了痕。
+    """
+    from . import analysis as an
+
+    pr = an.lock(
+        draft_id=draft_id, primary_metric=primary_metric, baseline=baseline,
+        csi_basis=csi_basis, expected_effect=expected_effect, metric_unit=metric_unit,
+        higher_is_better=higher_is_better, secondary_metrics=secondary_metrics, note=note,
+    )
+    d = pr.as_dict()
+    d["text"] = pr.text()
+    d["next"] = f'把 prereg_id 传给 sw_generate：sw_generate(..., prereg_id="{pr.prereg_id}")'
+    return _jsonable(d)
+
+
+@mcp.tool()
+def sw_export_eval_template(
+    dataset_id: str,
+    metric: str = "spectral_efficiency",
+) -> dict[str, Any]:
+    """给**自研算法**导出一份评测脚本骨架，让它能进门 2 / 门 3。
+
+    内置的 `sw_compare_arms` 只认六种预编码，自研的 CSI 压缩、信道估计、
+    波束管理、调度算法进不来。这个工具补那一层：
+
+    1. 拿到 `code`，写进 .py 文件；
+    2. 把 `my_algorithm` 的函数体换成你的算法（**不改也能跑**，
+       预填的示例是估计 CSI 下的 SVD vs Type I，先确认管道通再换）；
+    3. 运行它，会注册两个臂并打印 `result_id`；
+    4. 把两个 id 交给 `sw_compare_results` 判决。
+
+    **MCP 不执行用户代码**，脚本在用户自己的进程里跑，只把标准化的逐样本
+    结果注册回来。逐样本数值落 .npz，不进 MCP JSON。
+    """
+    from . import results as rs
+
+    return _jsonable(rs.eval_template(dataset_id, metric=metric))
+
+
+@mcp.tool()
+async def sw_compare_results(
+    result_id_a: str,
+    result_id_b: str,
+    claimed_gain: float | None = None,
+) -> dict[str, Any]:
+    """判决两个**外部算法结果**，连过门 2、门 3。
+
+    与 `sw_compare_arms` 用的是**同一套统计与门控实现**，判决标准完全一致
+    ——自研算法不走宽松通道。区别只在数值从哪来：那个现场跑内置预编码，
+    这个读已注册的结果。
+
+    注册时锁死三件事，任一不成立就拦：数据集内容摘要一致、样本 ID 逐个按序
+    一致、指标与单位一致。因为配对检验的全部有效性建立在"第 i 个数对应同一个
+    信道实例"上，**错配时它照样会算出一个看起来很显著的 p 值**。
+
+    返回的 `statement` 会写清用的哪个检验、指标是什么，以及这是预注册主结论
+    还是探索性分析。
+    """
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _compare_results_sync,
+            result_id_a=result_id_a, result_id_b=result_id_b, claimed_gain=claimed_gain,
+        )
+    )
+
+
+def _compare_results_sync(
+    *, result_id_a: str, result_id_b: str, claimed_gain: float | None
+) -> dict[str, Any]:
+    from . import gates as g
+
+    res = g.compare_results(result_id_a, result_id_b, claimed_gain=claimed_gain)
+    out = res.as_dict()
+    out["text"] = res.text()
+    return _jsonable(out)
+
+
+@mcp.tool()
+def sw_list_results(dataset_id: str | None = None) -> dict[str, Any]:
+    """列出已注册的外部算法结果。不给 dataset_id 就列全部。"""
+    from . import analysis as an
+    from . import results as rs
+
+    return _jsonable(
+        {
+            "results": rs.list_results(dataset_id),
+            "pregs": an.list_pregs(),
         }
     )
 

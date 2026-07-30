@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>superwireless 接入自研算法 · 预注册分析口径</title>
+<style>
+  :root{
+    --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
+    --border:#d2d2d7; --accent:#0071e3;
+    --success:#34c759; --warning:#ff9f0a; --danger:#ff3b30;
+    --code-bg:#1d1d1f; --code-ink:#f5f5f7;
+    --tint-blue:#eef5fd; --tint-blue-ink:#0055b3;
+    --tint-green:#eef9f0; --tint-green-ink:#1a7a34;
+    --tint-amber:#fdf5e8; --tint-amber-ink:#8a5a00;
+    --tint-red:#fdeeed; --tint-red-ink:#a32620;
+    --tint-grey:#f2f2f4; --tint-grey-ink:#4a4a4e;
+    --tint-purple:#f3f0fb; --tint-purple-ink:#5a3ec8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#1d1d1f; --card:#2c2c2e; --ink:#f5f5f7; --ink-soft:#aeaeb2;
+      --border:#38383a; --accent:#0a84ff;
+      --success:#30d158; --warning:#ffd60a; --danger:#ff453a;
+      --tint-blue:#12263c; --tint-blue-ink:#8ec2ff;
+      --tint-green:#14301c; --tint-green-ink:#7ee096;
+      --tint-amber:#33280c; --tint-amber-ink:#ffd77a;
+      --tint-red:#3a1a18; --tint-red-ink:#ff9a92;
+      --tint-grey:#333336; --tint-grey-ink:#c8c8cc;
+      --tint-purple:#241d3d; --tint-purple-ink:#b9a6f5;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; padding:40px 20px; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    font-size:15px; line-height:1.75; overflow-x:hidden;}
+  .wrap{max-width:1140px; margin:0 auto;}
+  h1{font-size:34px; font-weight:700; letter-spacing:-0.03em; margin:0 0 10px;}
+  .tagline{font-size:17px; color:var(--ink-soft); margin:0 0 8px;}
+  .meta{color:var(--ink-soft); font-size:13px; margin:0 0 28px; font-family:"SF Mono",Consolas,monospace;}
+  h2{font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:54px 0 8px; padding-top:22px; border-top:1px solid var(--border);}
+  h3{font-size:18px; font-weight:600; margin:32px 0 8px;}
+  h4{font-size:15px; font-weight:600; margin:22px 0 6px;}
+  p{margin:10px 0;}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:24px; margin:20px 0;}
+  .lead{font-size:16px; color:var(--ink-soft); margin:0 0 18px;}
+
+  .toc{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px 24px; margin:24px 0 34px;}
+  .toc ol{margin:6px 0; padding-left:22px; columns:2; column-gap:32px;}
+  .toc li{margin:4px 0; break-inside:avoid;}
+  .toc a{color:var(--accent); text-decoration:none;}
+  .toc a:hover{text-decoration:underline;}
+
+  .callout{border-radius:10px; padding:16px 20px; margin:18px 0; border-left:3px solid;}
+  .callout p:first-child{margin-top:0;} .callout p:last-child{margin-bottom:0;}
+  .c-blue{background:var(--tint-blue); color:var(--tint-blue-ink); border-left-color:var(--accent);}
+  .c-green{background:var(--tint-green); color:var(--tint-green-ink); border-left-color:var(--success);}
+  .c-amber{background:var(--tint-amber); color:var(--tint-amber-ink); border-left-color:var(--warning);}
+  .c-red{background:var(--tint-red); color:var(--tint-red-ink); border-left-color:var(--danger);}
+  .c-purple{background:var(--tint-purple); color:var(--tint-purple-ink); border-left-color:#5a3ec8;}
+
+  .plain{background:var(--tint-grey); color:var(--tint-grey-ink); border-radius:10px; padding:14px 18px; margin:14px 0; font-size:14.5px;}
+  .plain::before{content:"白话讲　"; font-weight:600;}
+  .plain p{margin:8px 0;} .plain p:first-of-type{display:inline;}
+
+  .tbl-wrap{overflow-x:auto; margin:16px 0; border:1px solid var(--border); border-radius:10px;}
+  table{border-collapse:collapse; width:100%; font-size:13.5px; background:var(--card);}
+  th,td{padding:9px 13px; text-align:left; border-bottom:1px solid var(--border); vertical-align:top;}
+  th{background:var(--tint-grey); color:var(--tint-grey-ink); font-weight:600; white-space:nowrap; font-size:13px;}
+  tr:last-child td{border-bottom:none;}
+  code{font-family:"SF Mono",Consolas,Monaco,monospace; background:var(--tint-grey); color:var(--tint-grey-ink);
+       padding:1px 5px; border-radius:4px; font-size:12.5px;}
+  td code,th code{font-size:12px;}
+  .nowrap{white-space:nowrap;}
+  pre{background:var(--code-bg); color:var(--code-ink); padding:16px 20px; border-radius:10px; overflow-x:auto;
+      font-family:"SF Mono",Consolas,Monaco,monospace; font-size:12.5px; line-height:1.62; margin:14px 0;}
+  pre code{background:none; color:inherit; padding:0; font-size:inherit;}
+  .cm{color:#8e8e93;}
+
+  ul,ol{margin:10px 0; padding-left:24px;} li{margin:5px 0;}
+
+  .pill{display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:20px; white-space:nowrap;}
+  .p-ok{background:var(--tint-green); color:var(--tint-green-ink);}
+  .p-no{background:var(--tint-red); color:var(--tint-red-ink);}
+  .p-mid{background:var(--tint-amber); color:var(--tint-amber-ink);}
+  .p-info{background:var(--tint-blue); color:var(--tint-blue-ink);}
+
+  .grid2{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; margin:18px 0;}
+  .mini{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:18px;}
+  .mini h4{margin:0 0 8px; font-size:15px;}
+  .mini p{margin:6px 0; font-size:14px; color:var(--ink-soft);}
+
+  .dims{display:flex; gap:8px; flex-wrap:wrap; margin:14px 0;}
+  .dim{background:var(--tint-purple); color:var(--tint-purple-ink); border-radius:8px; padding:8px 13px; font-size:13px;}
+  .dim b{font-family:"SF Mono",Consolas,monospace;}
+
+  .src{font-family:"SF Mono",Consolas,monospace; font-size:12px; color:var(--ink-soft);}
+  .q{font-size:14px; color:var(--ink-soft); margin:14px 0 0; padding-left:14px; border-left:2px solid var(--border);}
+  footer{margin-top:64px; padding-top:24px; border-top:1px solid var(--border); color:var(--ink-soft); font-size:13px;}
+</style>
+
+<style>
+  .steps{counter-reset:stepn;}
+  .step{counter-increment:stepn; position:relative; padding-left:44px; margin:26px 0;}
+  .step::before{content:counter(stepn); position:absolute; left:0; top:0;
+    width:30px; height:30px; border-radius:50%; background:var(--accent); color:#fff;
+    font-weight:700; font-size:15px; display:flex; align-items:center; justify-content:center;}
+  .step h3{margin:2px 0 8px; font-size:17px;}
+  .who{display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px; margin:18px 0;}
+  .who div{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px;}
+  .who h4{margin:0 0 6px; font-size:14px;}
+  .who p{margin:4px 0; font-size:13.5px; color:var(--ink-soft);}
+  .badge{display:inline-block; font-size:11px; font-weight:600; padding:2px 9px;
+         border-radius:20px; margin-left:6px;}
+  .b-mcp{background:var(--tint-blue); color:var(--tint-blue-ink);}
+  .b-you{background:var(--tint-green); color:var(--tint-green-ink);}
+  .stmt{background:var(--tint-grey); color:var(--tint-grey-ink); border-radius:10px;
+        padding:14px 18px; margin:12px 0; font-size:13.5px; line-height:1.7;
+        border-left:3px solid var(--accent);}
+  .stmt b{color:var(--ink);}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+
+<h1>接入自研算法 · 预注册分析口径</h1>
+<p class="tagline">让你自己的算法进得了门 2 / 门 3 · 生成之前把主指标定下来</p>
+<p class="meta">全部数字来自实跑，非手写 · 2026-07-30 · 测试 300 项全通过</p>
+
+<div class="toc">
+<strong>目录</strong>
+<ol>
+<li><a href="#s1">为什么必须补这一层</a></li>
+<li><a href="#s2">四步接入</a></li>
+<li><a href="#s3">实跑：模板未改一行就跑通</a></li>
+<li><a href="#s4">三道校验，以及为什么统计查不出错位</a></li>
+<li><a href="#s5">预注册：主指标是事先定的还是挑出来的</a></li>
+<li><a href="#s6">谁负责什么（边界）</a></li>
+<li><a href="#s7">新增接口一览</a></li>
+<li><a href="#s8">已知局限</a></li>
+</ol>
+</div>
+
+<h2 id="s1">一、为什么必须补这一层</h2>
+
+<p class="lead">这个项目的定位是"你提一个无线算法优化思路，在可信的信道上跑蒙特卡洛"。
+但在这轮之前，<strong>那个思路的代码进不来</strong>。</p>
+
+<div class="callout c-red">
+<p><code>sw_compare_arms</code> 的 <code>method</code> 只认六个值：
+<code>svd</code> / <code>svd_wideband</code> / <code>type1</code> / <code>dft</code> /
+<code>mrt</code> / <code>identity</code>。</p>
+<p style="margin-top:8px;">也就是说：内置预编码之间能互相比、能过三道门、能拿到可引用的结论句；
+而你自己的 <strong>CSI 压缩、信道估计、波束管理、定位、调度</strong>算法，
+一个都进不去。要用门控就得先把算法改写成内置预编码之一——这显然不成立。</p>
+</div>
+
+<div class="plain">
+<p>换个说法：门控这套东西的价值在于"拦住站不住的结论"，
+可它之前只能拦<strong>内置基线之间</strong>的比较。而真正需要被拦的，
+恰恰是你自己那个新想法——因为对自己的方法，人总是更容易宽松。</p>
+</div>
+
+<h2 id="s2">二、四步接入</h2>
+
+<div class="steps">
+
+<div class="step">
+<h3>生成之前先锁口径 <span class="badge b-mcp">MCP</span></h3>
+<pre><code>sw_lock_analysis(primary_metric="spectral_efficiency",
+                 baseline="type1", csi_basis="estimated",
+                 expected_effect=1.0, secondary_metrics=["sinr_db"])
+<span class="cm"># → prereg_id = "pr_334ba54c"，摘要 6c49cd18513c6fcf…</span>
+
+sw_generate(..., prereg_id="pr_334ba54c")</code></pre>
+<p>为什么必须在生成之前，见<a href="#s5">第五节</a>。</p>
+</div>
+
+<div class="step">
+<h3>导一份评测脚本 <span class="badge b-mcp">MCP</span></h3>
+<pre><code>code = sw_export_eval_template(dataset_id)["code"]</code></pre>
+<p>返回一份可直接运行的 Python。<strong>预填的示例本身就是一个合法对比</strong>
+（估计 CSI 下的 SVD vs Type I），所以不改也能跑通全链路——
+先确认管道通了再换自己的算法，比一上来全套自己写省事得多。</p>
+</div>
+
+<div class="step">
+<h3>把算法写进去，在你自己的进程里跑 <span class="badge b-you">你</span></h3>
+<pre><code>def my_algorithm(h_est, h_true, sinr_db):
+    <span class="cm"># 换成你的算法。h_est 是带导频与噪声的估计信道，</span>
+    <span class="cm"># h_true 只用于评估 —— 拿它算预编码等于提前知道答案</span>
+    ...
+    return float(metric_value)
+
+<span class="cm"># 模板结尾已经写好注册调用</span>
+art_a = results.register(dataset_id, "我的方法", mine,
+                         metric="spectral_efficiency", ids=IDS,
+                         code_path=__file__,
+                         method_metadata={"csi": "estimated"})</code></pre>
+</div>
+
+<div class="step">
+<h3>交给 MCP 判决 <span class="badge b-mcp">MCP</span></h3>
+<pre><code>sw_compare_results("res_xxxxxxxx", "res_yyyyyyyy")</code></pre>
+<p>过门 2、门 3，返回可直接写进报告的 <code>statement</code>。
+<strong>与内置方案用的是同一套统计与门控实现</strong>——自研算法不走宽松通道。</p>
+</div>
+
+</div>
+
+<h2 id="s3">三、实跑：模板未改一行就跑通</h2>
+
+<p class="lead">下面全是实测输出。数据集 <code>ds_29bd7d92</code>，60 样本，
+32T4R，UMa_NLOS + CDL-C。</p>
+
+<h3>锁下来的口径</h3>
+<pre><code>预注册 pr_334ba54c（摘要 6c49cd18513c6fcf…）
+  主指标   spectral_efficiency [bit/s/Hz]（越大越好）
+  基线     type1
+  CSI 口径 estimated
+  期望效应 1 bit/s/Hz
+  次要指标 sinr_db</code></pre>
+
+<h3>门 2 与门 3</h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>门</th><th>判据</th><th>结果</th></tr></thead>
+<tbody>
+<tr><td rowspan="3"><strong>门 2</strong></td><td>两臂可配对</td>
+<td><span class="pill p-ok">PASS</span> 同一数据集、摘要一致、n=60、样本 ID 序列逐个一致、指标与单位一致</td></tr>
+<tr><td>预注册身份</td><td><span class="pill p-ok">primary</span> 与预注册主指标一致</td></tr>
+<tr><td>CSI 口径一致</td><td><span class="pill p-ok">PASS</span> 两臂都声明 estimated</td></tr>
+<tr><td rowspan="3"><strong>门 3</strong></td><td>95% 置信区间不跨零</td>
+<td><span class="pill p-ok">PASS</span> [+1.198, +1.541]</td></tr>
+<tr><td>配对检验显著</td><td><span class="pill p-ok">PASS</span> Wilcoxon p=1.63e-11</td></tr>
+<tr><td>不被单个样本主导</td><td><span class="pill p-ok">PASS</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="stmt">
+<b>statement（可直接引用）：</b><br>
+我的方法 相对 基线：spectral_efficiency 13.329 vs 11.960 bit/s/Hz，
+差值 +1.369（+11.4%），95% CI [+1.198, +1.541]，n=60，
+Wilcoxon 符号秩检验 p=1.63e-11。<b>结论成立（预注册主指标，pr_334ba54c）。</b>
+</div>
+
+<h3>模板原封不动跑 200 样本的那次</h3>
+<div class="measured">
+<p>换成正式数据集 <code>ds_22ecba2e</code>（200 样本、100 MHz、7 站 21 小区），
+模板<strong>一行没改</strong>直接运行，跑出的是"估计 CSI 下 SVD vs Type I"：</p>
+<p style="margin-top:8px;">我的方法 30.406 vs 基线 13.732 bit/s/Hz，差值 <strong>+16.674（+121.4%）</strong>，
+95% CI [+15.494, +17.854]，n=200，Wilcoxon p=1.57e-34，胜率 100%，
+单样本最大贡献 1%。门 2、门 3 全过。</p>
+<p style="margin-top:8px;">这一次身份是 <code>unregistered</code>——那个数据集是上一轮生成的，
+没绑预注册，<strong>结论句会如实写"无法证明主指标是事先定的"</strong>。</p>
+</div>
+
+<h2 id="s4">四、三道校验，以及为什么统计查不出错位</h2>
+
+<p class="lead">注册时锁死三件事，任一不成立就<strong>硬拦截</strong>，不是告警。</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>校验</th><th>比什么</th><th>不成立的后果</th></tr></thead>
+<tbody>
+<tr><td>同一数据集 / 内容一致</td><td><code>dataset_id</code> + <code>channels.npz</code> 的 SHA-256</td>
+<td>数据被重新生成过，两臂其实跑在不同信道上</td></tr>
+<tr><td><strong>样本顺序一致</strong></td><td>sample ID <strong>逐个按序</strong>比，不只比长度</td>
+<td>第 i 个数不对应同一个信道实例，配对前提崩塌</td></tr>
+<tr><td>指标与单位一致</td><td><code>metric</code> + <code>metric_unit</code></td>
+<td>谱效跟 NMSE 比，没有可比性</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="callout c-red">
+<p><strong>把顺序打乱一个位置，p 值一模一样。</strong>实测：</p>
+<div class="tbl-wrap" style="margin:10px 0;">
+<table>
+<thead><tr><th></th><th>差值</th><th>Wilcoxon p</th><th>有效吗</th></tr></thead>
+<tbody>
+<tr><td>ID 对齐</td><td>+1.369</td><td>1.63e-11</td><td><span class="pill p-ok">有效</span></td></tr>
+<tr><td>ID 交换了第 0、1 位</td><td><strong>+1.369</strong></td><td><strong>1.63e-11</strong></td><td><span class="pill p-no">无效</span></td></tr>
+</tbody>
+</table>
+</div>
+<p><strong>统计层面完全不可观测。</strong>检验只看两个数值数组，根本不知道第 i 个数
+对应哪个信道实例。所以错位只能靠 ID 契约拦——这不是多余的谨慎，
+是唯一能拦住它的地方。</p>
+<p style="margin-top:8px;">拦下来之后的输出：</p>
+<pre style="margin:8px 0;"><code>门 2 拦截: ['样本顺序一致']
+  样本数相同但 ID 序列不同，首个差异在第 0 位
+  （ds_29bd7d92#0 vs ds_29bd7d92#1）；集合相同，只是顺序被打乱了
+
+statement: 我的方法 与 顺序乱了 **无法比较**，未过门：样本顺序一致、前置条件。
+           统计检验已跳过——错配数据上的 p 值没有意义。</code></pre>
+</div>
+
+<div class="callout c-amber">
+<p><strong>顺便：<code>register</code> 拒收含 nan/inf 的值。</strong>
+配对检验会把非有限值整行丢掉，两臂样本数悄悄变少，而 p 值照样算得出来。
+所以宁可在注册时当场报错，也不要让它流到统计里。</p>
+<p style="margin-top:8px;">默认情况下 <code>register</code> 自己生成 ID，两臂都用默认就一定对齐。
+只有你显式传 <code>ids=</code>（跳过部分样本）时才可能出错——那时校验就是最后一道防线。</p>
+</div>
+
+<h2 id="s5">五、预注册：主指标是事先定的还是挑出来的</h2>
+
+<p class="lead">三道门证明不了这一件事。</p>
+
+<div class="plain">
+<p>真实过程往往是这样：跑完发现平均谱效没提升，顺手换成 5% 边缘用户谱效，
+发现有提升，于是报了这个。<strong>每一步都合理</strong>——边缘用户谱效本来就是个
+正当指标。但合起来就是在多个指标里挑赢的那个，而挑选本身会把假阳性率
+推高到远超 5%。</p>
+</div>
+
+<h3>做法：生成之前写下来，算个摘要</h3>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>身份</th><th>什么时候</th><th>结论句怎么写</th></tr></thead>
+<tbody>
+<tr><td><code>primary</code></td><td>与预注册主指标一致</td>
+<td>"结论成立（预注册主指标，pr_xxx）"</td></tr>
+<tr><td><code>secondary</code></td><td>预注册时列的次要指标</td>
+<td>可以报，但主结论要用主指标</td></tr>
+<tr><td><code>exploratory</code></td><td>没登记过的指标</td>
+<td><strong>"统计上成立，但这是探索性分析，不是预注册主结论"</strong></td></tr>
+<tr><td><code>unregistered</code></td><td>数据集没绑预注册</td>
+<td>"结论成立（无法证明主指标是事先定的）"</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>实测：同一批数据换指标</h3>
+<p>把上面那次的指标从 <code>spectral_efficiency</code> 换成
+<code>edge_user_se</code>（预注册里没登记），数字完全一样，但结论句变了：</p>
+
+<div class="stmt">
+我的方法(边缘) 相对 基线(边缘)：edge_user_se 13.329 vs 11.960 bit/s/Hz，
+差值 +1.369（+11.4%），95% CI [+1.198, +1.541]，n=60，
+Wilcoxon 符号秩检验 p=1.63e-11。<b>统计上成立，但这是探索性分析，
+不是预注册主结论</b>——预注册的主指标是 spectral_efficiency，这里用的是
+edge_user_se。只能作为探索性分析报告……跑完再换指标等于在多个指标里
+挑赢的那个，假阳性率远高于 5%
+</div>
+
+<div class="callout c-blue">
+<p><strong>探索性不等于不成立。</strong>它统计上可能非常显著——上面这例
+p=1.63e-11。区别只在<strong>能不能当主结论</strong>。</p>
+<p style="margin-top:8px;">想把新指标升为主结论：重新预注册把它定成主指标，
+然后<strong>用新数据</strong>验证。拿同一批数据换指标不算独立验证。</p>
+</div>
+
+<h3>刻意做得很轻</h3>
+<div class="grid2">
+<div class="mini">
+<h4>做了</h4>
+<p>一个 JSON、一个确定性 SHA-256、不可原地改（改主意就新建一个 ID，旧的不动）、
+生成时随数据存档、比较时判身份。</p>
+</div>
+<div class="mini">
+<h4>没做</h4>
+<p>版本树、审批流、不可变存储、多重比较自动校正。那是临床试验的量级，
+个人做算法验证用不上——<strong>加上去只会让人绕过它</strong>。</p>
+</div>
+</div>
+
+<div class="callout c-amber">
+<p><strong>只能在生成前绑定，没有"给已有数据集补绑"的接口。</strong>
+预注册的全部价值就是"这是看数据之前写下的"，事后补绑只是记录，不是预注册。
+所以那个接口不存在，也不该加。</p>
+<p style="margin-top:8px;">未绑定时身份是 <code>unregistered</code> 而<strong>不是</strong>
+<code>primary</code>——没登记过就不能声称主指标是事先定的。</p>
+</div>
+
+<h2 id="s6">六、谁负责什么（边界）</h2>
+
+<div class="who">
+<div>
+<h4>MCP 负责 <span class="badge b-mcp">superwireless</span></h4>
+<p>生成可信信道 · 出观察量 · 校验配对前提 · 跑统计 · 判门 · 判预注册身份 · 写结论句</p>
+</div>
+<div>
+<h4>你负责 <span class="badge b-you">你的脚本</span></h4>
+<p>算法本身 · 在自己进程里跑 · 保证预编码只看 <code>h_est</code> · 在 metadata 里声明口径</p>
+</div>
+</div>
+
+<div class="callout c-red">
+<p><strong>MCP 绝不执行用户代码。</strong>一旦它开始 exec 传进来的字符串，
+就从"数据供应站"变成了任意代码执行面。用户代码在用户自己的进程里跑
+（那本来就是他们的脚本），只把标准化的逐样本结果注册回来。</p>
+</div>
+
+<div class="callout c-amber">
+<p><strong>由此带来一个不对称：外部结果的 CSI 口径只能靠声明。</strong></p>
+<p style="margin-top:8px;">内置 <code>compare_arms</code> 能查两臂用的是 <code>h_true</code>
+还是 <code>h_est</code>，因为预编码是它自己跑的。外部结果不行——MCP 看不到你的
+函数里用了哪个。所以门 2 只能查 <code>method_metadata</code> 里的声明，
+查不到就给 <strong>warn 并说清"这条得你自己保证"</strong>，不假装查过了。</p>
+<p style="margin-top:8px;">两臂声明的口径不同时会被拦；确实要测 CSI 误差的代价，
+在 metadata 里写 <code>varies=["csi"]</code> 声明即可放行。</p>
+</div>
+
+<div class="callout c-blue">
+<p><strong>逐样本值不进 MCP JSON。</strong>值落 <code>.npz</code>，MCP 只回句柄与统计摘要
+——和信道数据同一条规矩。实测 <code>sw_compare_results</code> 的完整响应
+<strong>3768 字符</strong>，不含 <code>values</code> 字段。</p>
+</div>
+
+<h2 id="s7">七、新增接口一览</h2>
+
+<h3>4 个 MCP 工具（总数 16 → 20）</h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>工具</th><th>作用</th></tr></thead>
+<tbody>
+<tr><td><code>sw_lock_analysis</code></td>
+<td>预注册：生成前把主指标、基线、CSI 口径、期望效应写下来，返回 <code>prereg_id</code> 与摘要</td></tr>
+<tr><td><code>sw_export_eval_template</code></td>
+<td>导出评测脚本骨架，替换一个函数即可；不改也能跑</td></tr>
+<tr><td><code>sw_compare_results</code></td>
+<td>判决两个外部结果：配对校验 + 门 2 + 门 3 + 预注册身份 + 结论句</td></tr>
+<tr><td><code>sw_list_results</code></td>
+<td>列出已注册结果与预注册记录</td></tr>
+</tbody>
+</table>
+</div>
+<p class="q"><code>sw_generate</code> 新增可选参数 <code>prereg_id</code>。</p>
+
+<h3>2 个新模块</h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>模块</th><th>行数</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>results.py</code></td><td>~430</td>
+<td><code>ResultArtifact</code>、<code>register</code>、<code>check_pairable</code>、
+<code>dataset_digest</code>、<code>sample_ids</code>、评测脚本模板</td></tr>
+<tr><td><code>analysis.py</code></td><td>~230</td>
+<td><code>Prereg</code>、<code>lock</code>、<code>verify</code>、<code>classify</code>、指标单位表</td></tr>
+</tbody>
+</table>
+</div>
+
+<h3>Dataset 上的新方法</h3>
+<pre><code>ds.digest()                    <span class="cm"># 内容摘要，首次算完缓存进 summary.json</span>
+ds.sample_ids()                <span class="cm"># 逐样本标识，两臂都用这一份</span>
+ds.prereg                      <span class="cm"># 生成时绑定的预注册口径，没绑就是 None</span>
+ds.register_results(name, vals, metric=..., method_metadata=...)
+ds.eval_template()</code></pre>
+
+<h3>落盘位置</h3>
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>路径</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>artifacts/results/res_xxx.npz</code></td><td>逐样本值 + 样本 ID</td></tr>
+<tr><td><code>artifacts/results/res_xxx.json</code></td><td>句柄、摘要、方法信息、各 SHA-256</td></tr>
+<tr><td><code>artifacts/prereg/pr_xxx.json</code></td><td>预注册口径 + 确定性摘要</td></tr>
+<tr><td><code>artifacts/datasets/&lt;id&gt;/summary.json</code></td><td>新增 <code>prereg</code> 与 <code>dataset_digest</code> 字段</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="s8">八、已知局限</h2>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th>局限</th><th>为什么</th><th>怎么应对</th></tr></thead>
+<tbody>
+<tr><td>外部结果的 CSI 口径查不了</td>
+<td>MCP 不执行用户代码，看不到函数内部</td>
+<td>门 2 查 <code>method_metadata</code> 的声明并如实说明查不了；用户自己保证</td></tr>
+<tr><td>算法正确性不查</td>
+<td>MCP 只收指标值，不知道那个值是怎么算出来的</td>
+<td>门控管的是"比较公不公平、统计站不站得住"，不管算法对不对</td></tr>
+<tr><td>没有多重比较校正</td>
+<td>做了会引入一堆需要用户判断的选择（族定义、校正方法）</td>
+<td>预注册限定一个主指标，从设计上减少多重比较；其余标探索性</td></tr>
+<tr><td>预注册不能事后补绑</td>
+<td>这是有意的——事后补绑不是预注册</td>
+<td>下次生成前先锁。已有数据集用 <code>unregistered</code> 身份，如实标注</td></tr>
+<tr><td>样本 ID 只是下标</td>
+<td><code>&lt;dataset_id&gt;#&lt;i&gt;</code>，依赖数组顺序稳定</td>
+<td>配 <code>dataset_digest</code> 一起用：数据变了摘要就变，能查出来</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="plain">
+<p>这轮之后，"我提一个算法思路 → 在可信信道上跑蒙特卡洛 → 拿到经得起推敲的结论"
+这条路对<strong>自研算法</strong>是通的了。门控的标准和内置基线完全一致——
+用的是同一套 <code>paired_compare</code> 与 <code>gate_conclusion</code>。</p>
+</div>
+
+<footer>
+<p><strong>superwireless</strong> · MIT ·
+<a href="https://github.com/TianLin0509/superwireless">github.com/TianLin0509/superwireless</a></p>
+<p>配套文档：<strong>SETUP.html</strong>（组成与安装）·
+<strong>CAPABILITIES.html</strong>（能力边界）·
+<strong>SHOWCASE.html</strong>（三道门与踩过的坑）。</p>
+<p>测试：test_e2e 39 · test_mcp_server 21 · test_raytracing 39 ·
+test_linklevel 35 · test_gates 86 · test_results 80 = <strong>300 项</strong>。</p>
+</footer>
+
+</div>
+</body>
+</html>

@@ -10,7 +10,7 @@
 配套的 `channel-sim` skill 提供 superpowers 式工作流：
 **头脑风暴 → 计划书 → 生成 → 门 1 体检 → 跑实验 → 门 2/门 3 → 结论**。
 
-## 四件事
+## 五件事
 
 **一、信道可信。** 19 项体检，分四类：对 3GPP 标准（路损逐点对 38.901、
 **CDL 剖面逐簇对 Table 7.7.1-x**、Annex A.1 角度扩展）、对物理定律（时频能量守恒、
@@ -58,6 +58,29 @@ print(r.statement())
 **样本量需求常比非配对少一个数量级**。门 2 拦口径不公平，门 3 拦统计站不住，
 过不了门时 `statement` 自己会写"结论不成立"及原因。
 
+**五、自研算法也进得来。** 上面的 `method` 只认六种内置预编码。你自己的
+CSI 压缩、信道估计、波束管理、调度算法走结果契约：
+
+```python
+# 1. 生成前锁口径（预注册），生成时绑上
+pr = sw_lock_analysis(primary_metric="spectral_efficiency", baseline="type1")
+ds = sw_generate(..., prereg_id=pr.prereg_id)
+
+# 2. 导一份评测脚本，把 my_algorithm 换成你的算法（不改也能跑）
+code = sw_export_eval_template(dataset_id)["code"]
+
+# 3. 你的脚本里注册结果 —— MCP 不执行你的代码，只收标准化的逐样本值
+art = ds.register_results("我的方法", values, metric="spectral_efficiency",
+                          method_metadata={"csi": "estimated"})
+
+# 4. 交给 MCP 判决，与内置方案用同一套统计与门控
+sw_compare_results(art_a.result_id, art_b.result_id)
+```
+
+注册时锁死数据集内容摘要、样本 ID **逐个按序**比对、指标与单位——
+配对检验的有效性全靠"第 i 个数对应同一个信道实例"，**错配时它照样会算出
+一个看起来很显著的 p 值**。
+
 样本数是**算出来的**，不是问用户的：
 
 ```python
@@ -97,6 +120,7 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 - **[`INSTALL_AGENT.md`](INSTALL_AGENT.md)** —— 写给 AI agent 看的安装步骤，丢给它自己装
 - **[能力手册 `CAPABILITIES.html`](CAPABILITIES.html)** —— 能产生哪些信道、能拿到哪些观察量（含形状与单位）、参数全表、能力边界
 - **[实测场景演示 `SHOWCASE.html`](SHOWCASE.html)** —— 真实跑过的场景对话、三道门、踩过的坑
+- **[接入自研算法 `EXTERNAL_ALGO.html`](EXTERNAL_ALGO.html)** —— 让你自己的算法进门 2/门 3、预注册分析口径、边界与局限
 
 ## 四条设计铁律
 
@@ -193,6 +217,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 | **门 1 · 信道可信** | 生成之后 | 19 项体检，硬性项不通过即拦截 |
 | **门 2 · 比较公平** | 跑对比时 | 两臂不同数据集、配置漂移、**CSI 口径不一致** |
 | **门 3 · 结论站得住** | 写结论前 | 置信区间跨零、检验不显著、单样本主导、声称值超出区间 |
+| **预注册身份** | 写结论时 | 用的指标不是事先定的 → 标 `exploratory`，不许冒充主结论 |
 
 门 3 的显著性**以 Wilcoxon 符号秩检验判决**，配对 t 只作参考——谱效的逐样本差值
 分布常是偏的，t 检验的正态假设不成立、小样本下偏乐观。两个检验冲突时 `statement`
@@ -206,7 +231,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 （§7.8.2 指标3，Annex A.1 圆周定义）、PRB 奇异值最大/次大/比值三条 CDF
 （指标4，10log10 尺度）。参考曲线在 R1-165974 / R1-165975 / R1-1909704。
 
-## MCP 工具（16 个）
+## MCP 工具（20 个）
 
 | 工具 | 作用 |
 |---|---|
@@ -220,6 +245,10 @@ cp -r skills/channel-sim ~/.codex/skills/
 | `sw_link_performance` | **算谱效**：预编码 → SINR → 谱效，多方案横向对比 |
 | `sw_compare_arms` | **配对比较 + 门 2 + 门 3**，返回可直接引用的结论句 |
 | `sw_sample_size` | **功效分析**：样本数 ↔ 最小可检出效应 |
+| `sw_lock_analysis` | **预注册**：生成前把主指标与基线定下来 |
+| `sw_export_eval_template` | **自研算法评测脚本骨架**，替换一个函数即可 |
+| `sw_compare_results` | **判决外部算法结果** + 门 2 + 门 3 + 预注册身份 |
+| `sw_list_results` | 已注册的结果与预注册记录 |
 | `sw_describe_dataset` / `sw_list_datasets` | 数据集信息 |
 
 ## 观察量（12 类）
@@ -298,9 +327,10 @@ python tests/test_mcp_server.py  # MCP 全链路 21 项
 python tests/test_raytracing.py  # 射线追踪与决策层 39 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
+python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 ```
 
-共 **220 项**。
+共 **300 项**。
 
 ## 致谢
 

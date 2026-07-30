@@ -36,5 +36,19 @@ def presets_file() -> Path:
     )
 
 
+def results_dir() -> Path:
+    """外部算法注册回来的结果。逐样本数值落 .npz，绝不进 MCP JSON。"""
+    p = artifacts_root() / "results"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def prereg_dir() -> Path:
+    """预注册的分析口径。一旦写下就不再原地改，改动一律新建。"""
+    p = artifacts_root() / "prereg"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def dataset_dir(dataset_id: str) -> Path:
     return datasets_dir() / dataset_id

@@ -282,6 +282,39 @@ class Dataset:
 
         return g.gate_channel(self, **kw)
 
+    def sample_ids(self) -> list[str]:
+        """逐样本标识。外部算法注册结果时两个臂都用这一份，顺序不要改。"""
+        from . import results as rs
+
+        return rs.sample_ids(self.dataset_id, self.n)
+
+    def digest(self) -> str:
+        """数据集内容摘要（channels.npz 的 SHA-256），首次计算后缓存进 summary。"""
+        from . import results as rs
+
+        d = rs.dataset_digest(self.dataset_id)
+        # 缓存写的是磁盘上的 summary.json，内存里这份是构造时读的，会变旧。
+        # 不同步的话 ds.summary["dataset_digest"] 取不到刚算出来的值。
+        self.summary["dataset_digest"] = d
+        return d
+
+    @property
+    def prereg(self) -> dict[str, Any] | None:
+        """生成时绑定的预注册口径。没绑就是 None。"""
+        return self.summary.get("prereg")
+
+    def register_results(self, arm_name: str, values: Any, **kw: Any) -> Any:
+        """把外部算法的逐样本结果注册进来。见 ``results.register``。"""
+        from . import results as rs
+
+        return rs.register(self.dataset_id, arm_name, values, **kw)
+
+    def eval_template(self, **kw: Any) -> dict[str, Any]:
+        """生成外部算法评测脚本骨架。见 ``results.eval_template``。"""
+        from . import results as rs
+
+        return rs.eval_template(self.dataset_id, **kw)
+
     def compare_arms(self, arm_a: dict, arm_b: dict, **kw: Any) -> Any:
         """在这批信道上跑两个方案，配对比较并连过门 2、门 3。
 
