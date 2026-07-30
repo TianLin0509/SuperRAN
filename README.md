@@ -93,8 +93,9 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 
 ## 文档
 
+- **[安装说明 `SETUP.html`](SETUP.html)** —— 由哪几块拼成、要装什么、怎么装、装完先跑什么、排错
 - **[能力手册 `CAPABILITIES.html`](CAPABILITIES.html)** —— 能产生哪些信道、能拿到哪些观察量（含形状与单位）、参数全表、能力边界
-- **[实测场景演示 `SHOWCASE.html`](SHOWCASE.html)** —— 六个真实跑过的场景对话，含扩展性分析
+- **[实测场景演示 `SHOWCASE.html`](SHOWCASE.html)** —— 真实跑过的场景对话、三道门、踩过的坑
 
 ## 四条设计铁律
 
