@@ -791,3 +791,117 @@ massive_mimo_256t:
     carrier_freq_hz: 3500000000.0
     link: DL
     channel_est_mode: ls_linear
+
+# ===========================================================================
+# 高铁沿线（linear 拓扑）
+# ===========================================================================
+# ChannelHub 的 topology_layout: linear 把站点沿一条直线轨道**两侧交错**摆放，
+# track_offset_m 是站点到轨道的垂距，isd_m 沿轨道量。
+# mobility_mode 为 linear/track 时进入高铁模式：UE 在车厢内按
+# train_length_m x train_width_m 撒点，整列车沿轨道移动，
+# train_penetration_loss_db 是车体穿透损耗。
+#
+# **这不是 38.104 HST-SFN 的一致性测试配置**（那套用 D_s=580 m、D_min=5 m、
+# 单频网合并），只是一个参数取值合理的高铁沿线场景。
+
+hst_350kmh:
+  group: 高铁
+  label: 高铁沿线 · 350 km/h · 车体穿透 20 dB
+  summary: 站点沿轨道两侧交错、间距 580 m、垂距 30 m。UE 在 400 m 长的车厢内撒点，
+    整列车 350 km/h 移动。车体穿透损耗 20 dB 是高铁场景与普通高速移动最大的区别——
+    它把链路预算整体压低 20 dB，很多在开阔地成立的结论到车厢里就不成立了。
+  typical_for: [高铁, 切换, 多普勒补偿, 车体穿透, 沿线覆盖]
+  verify: sw_probe_scenario 看多普勒中位数与路损；路损应明显高于同距离的开阔场景
+  caveat: 不是 38.104 HST-SFN 一致性配置（那套是单频网合并）。
+    穿透损耗是配置项不是模型，改 train_penetration_loss_db 直接平移路损。
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 1.92      # 轻载
+    iot_ul_db: 0.99
+    sinr_db: 22.96
+    sir_db: 23.23
+    pathloss_db: 101.76
+    distance_m: 125.37
+    los_ratio: 0.333
+    doppler_hz: 817.95
+    snr_clamped_out: 3   # 探测口径下撞 +50 dB 夹逼，SNR 分布已剔除这些样本
+    ms_per_sample: 548
+  config:
+    source: internal_sim
+    scenario: UMa_LOS
+    channel_model: CDL-D
+    topology_layout: linear
+    mobility_mode: linear
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 580.0
+    track_offset_m: 30.0
+    train_length_m: 400.0
+    train_width_m: 3.4
+    train_penetration_loss_db: 20.0
+    ue_speed_kmh: 350.0
+    num_slots_per_sample: 4
+    num_ues: 21
+    num_interfering_ues: 4
+    num_bs_tx_ant: 32
+    num_bs_rx_ant: 32
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 2600000000.0
+    tx_power_dbm: 46.0
+    link: DL
+    channel_est_mode: ls_linear
+
+hst_hypercell_comp:
+  group: 高铁
+  label: 高铁超级小区 · 3 站同 PCI 联合发送
+  summary: 与 hst_350kmh 同一条线，但把相邻 3 个站编成同一个 PCI（超级小区），
+    并让最强的 2 个 TRP 联合发送。沿线切换次数大幅减少，代价是小区变大、
+    小区内干扰变成同频叠加。
+  typical_for: [超级小区, CoMP 联合发送, 切换优化, 单频网]
+  verify: 与 hst_350kmh 并排 sw_compare_scenarios，看 IoT 与 SINR 的变化方向
+  caveat: 联合发送在这套引擎里是把多个 TRP 的信道按天线维拼接、接收功率相加，
+    不含相位对齐误差与时延差建模。
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 2.13      # 轻载
+    iot_ul_db: 2.53
+    sinr_db: 23.52
+    sir_db: 24.91
+    pathloss_db: 101.76
+    distance_m: 125.37
+    los_ratio: 0.333
+    doppler_hz: 817.95
+    snr_clamped_out: 3   # 探测口径下撞 +50 dB 夹逼，SNR 分布已剔除这些样本
+    ms_per_sample: 567
+  config:
+    source: internal_sim
+    scenario: UMa_LOS
+    channel_model: CDL-D
+    topology_layout: linear
+    mobility_mode: linear
+    hypercell_size: 3
+    joint_trp_count: 2
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 580.0
+    track_offset_m: 30.0
+    train_length_m: 400.0
+    train_width_m: 3.4
+    train_penetration_loss_db: 20.0
+    ue_speed_kmh: 350.0
+    num_slots_per_sample: 4
+    num_ues: 21
+    num_interfering_ues: 4
+    num_bs_tx_ant: 32
+    num_bs_rx_ant: 32
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 2600000000.0
+    tx_power_dbm: 46.0
+    link: DL
+    channel_est_mode: ls_linear

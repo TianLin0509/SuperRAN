@@ -23,9 +23,23 @@ snr_dB                        差 ``10log10(RB_full/RB_probe)``
 ``10log10(273/24)=10.559`` 吻合到小数点后两位——所以这一项**可以精确还原**，
 不是近似。
 
-于是探测模式成立：把 ``num_rb`` 压到 24、关掉 SSB 测量，几何量一个不差，
-耗时降到 1/8。用途是**下单之前先看货**：确认场景确实是想要的干扰水平、
-覆盖水平，再花时间跑全带宽。
+``num_ofdm_symbols`` 同理：14 降到 7 / 4 / 2 时上面那张表里的量**同样逐位
+相同**，但降到 1 会让 ``sir_dB`` 偏 16.1 dB（见 ``PROBE_NUM_SYM`` 的注释）。
+
+于是探测模式成立：``num_rb`` 压到 24、``num_ofdm_symbols`` 压到 4、
+关掉 SSB 测量，几何量一个不差。实测（21 小区 64T 100 MHz、交错重测 3 轮取
+中位数、基准自身波动 17.7%）：
+
+===================================  ==========  =========
+配置                                  毫秒/样本    相对
+===================================  ==========  =========
+全量（263 RB、14 符号、SSB 开）              2602      1.00x
+只压 RB + 关 SSB                            374      6.95x
+再压符号数                                   226     **11.51x**
+===================================  ==========  =========
+
+用途是**下单之前先看货**：确认场景确实是想要的干扰水平、覆盖水平，
+再花时间跑全带宽。
 
 **探测模式不能用来看什么**：任何从信道矩阵算出来的量。24 个 RB 只覆盖
 8.64 MHz（不是稀疏采样 100 MHz），频率选择性、时延扩展估计、宽带预编码、
@@ -43,6 +57,22 @@ import numpy as np
 # 探测用的 RB 数。24 个 RB 已经够 ChannelHub 内部的插值与 SRS 逻辑正常工作，
 # 再往下压收益递减（12 RB 实测只快一点点，却更容易撞上各种最小尺寸假设）。
 PROBE_NUM_RB = 24
+
+# 探测用的 OFDM 符号数（默认 14）。**这个旋钮有一道悬崖，位置是 1。**
+#
+# 实测同一 seed 下把 num_ofdm_symbols 从 14 降到 7 / 4 / 2，几何量（sinr / sir /
+# 路损 / 距离 / 视距 / 多普勒 / UE 位置 / 上行几何 SIR）**全部逐位相同**；
+# 降到 1 时 sir_dB 直接偏 16.1 dB。所以 2 是安全的，1 不是。
+#
+# 取 4 而不是 2：**离悬崖两格，不贴着边站**。2 已经验证过没问题，但只要
+# ChannelHub 内部任何一处对符号数的假设动一动，2 就可能跟着塌，而这种塌陷
+# 不报错——它只是给出一组看起来正常的错数。4 换来的是同一量级的加速。
+#
+# 注意：这个旋钮**只对探测模式安全**。正式生成里它会实打实地改变信道矩阵
+# （14→7 时 h_true 相对差 2.5e-2，14→1 时差 4.3），因为存下来的单快照是在
+# 这些符号上平均出来的。所以它不在 generate() 里，只在 probe() 里。
+PROBE_NUM_SYM = 4
+PROBE_NUM_SYM_CLIFF = 1  # 实测在此处几何量失真，别把 PROBE_NUM_SYM 降到这里
 
 # 探测模式下会被跳过或失真的量。列出来是为了让调用方**看得见**缺什么，
 # 而不是拿到一份看起来完整、实际少了一半的报告。
@@ -77,13 +107,28 @@ def _dist(a: np.ndarray) -> dict[str, Any]:
 
 
 def probe_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], int, int]:
-    """把一份配置改造成探测配置。返回 ``(cfg, rb_probe, rb_full)``。"""
-    from .generate import _rb_from_bandwidth  # noqa: PLC0415
+    """把一份配置改造成探测配置。返回 ``(cfg, rb_probe, rb_full)``。
+
+    **必须先补上 ``bs_panel``，探测模式的正确性依赖它。** 没有 panel 时
+    ChannelHub 建不出 DFT 码本，几何 SINR 整条路径被跳过，``sinr_dB`` 退化成
+    ``snr_dB``——而 ``snr_dB`` 的定义里带 ``-10log10(RB)``，于是压 num_rb 会让
+    "SINR" 整体平移 10.56 dB。
+
+    这个坑很隐蔽：`sir_dB` 那时是 49.9 哨兵、逐位相同，路损/距离/多普勒也
+    逐位相同，**只有 sinr_dB 一个字段偏**，看起来像是探测模式本身有问题。
+    实际是配置缺 panel 导致连全量跑出来的 SINR 都不是真 SINR。
+    """
+    from .generate import _ensure_bs_panel, _rb_from_bandwidth  # noqa: PLC0415
 
     out = dict(cfg)
+    _ensure_bs_panel(out)
     rb_full = int(out.get("num_rb") or _rb_from_bandwidth(out))
     rb_probe = min(PROBE_NUM_RB, rb_full)
     out["num_rb"] = rb_probe
+
+    # 符号数只往下压，不往上抬 —— 调用方要是显式给了更小的值，尊重它。
+    sym_full = int(out.get("num_ofdm_symbols") or 14)
+    out["num_ofdm_symbols"] = max(min(PROBE_NUM_SYM, sym_full), PROBE_NUM_SYM_CLIFF + 1)
 
     meas = dict(out.get("measurements") or {})
     meas["ssb_rsrp"] = False
@@ -139,6 +184,19 @@ def probe(
     panel, panel_derived = _ensure_bs_panel(cfg_p)
     n_ues = int(cfg_p.get("num_ues", 1) or 1)
     ask = _align_to_ues(int(num_samples), n_ues)
+
+    # **每个 UE 至少要有 2 个样本，否则多普勒恒为 0。**
+    # ChannelHub 的 doppler_hz 来自同一个 UE 相邻样本之间的位移，
+    # samples_per_ue == 1 时没有位移可算。实测 hst_350kmh（21 个 UE）：
+    #   num_samples=21 -> 每 UE 1 个 -> 多普勒中位 0.0 Hz
+    #   num_samples=42 -> 每 UE 2 个 -> 多普勒中位 817.94 Hz
+    # 一个 350 km/h 的场景探测出"多普勒 0"，任谁都会以为移动配置没生效。
+    # 与其给个带脚注的 0，不如把样本数补够——探测本来就便宜。
+    bumped_from = None
+    speed = float(cfg_p.get("ue_speed_kmh", 0.0) or 0.0)
+    moving = speed > 3.0 or str(cfg_p.get("mobility_mode", "static")) != "static"
+    if moving and ask // max(n_ues, 1) < 2:
+        bumped_from, ask = ask, n_ues * 2
     cfg_p["num_samples"] = ask
 
     itf.install_geometry_capture()
@@ -169,7 +227,7 @@ def probe(
             v = m.get(k)
             metas[k].append(float("nan") if v is None else float(v))
         n += 1
-        if n >= num_samples:
+        if n >= ask:
             break
     elapsed = time.perf_counter() - t0
 
@@ -206,6 +264,9 @@ def probe(
         "num_rb": {"probe": rb_probe, "full": rb_full,
                    "snr_correction_db": round(corr, 2),
                    "snr_clamped_out": n_snr_clamped},
+        "num_ofdm_symbols": {"probe": cfg_p.get("num_ofdm_symbols"),
+                             "full": int(cfg.get("num_ofdm_symbols") or 14)},
+        "samples_per_ue": ask // max(n_ues, 1),
         "geometry": {
             "pathloss_dB": _dist(marr["pathloss_dB"]),
             "distance_3d_m": _dist(marr["distance_3d_m"]),
@@ -229,11 +290,22 @@ def probe(
         },
         "not_available": list(PROBE_NOT_AVAILABLE),
         "note": (
-            f"探测模式：num_rb {rb_full} -> {rb_probe}，几何量与全带宽**逐位相同**"
-            f"（实测），仅 snr_dB 需要 {corr:+.2f} dB 修正、已修正。"
+            f"探测模式：num_rb {rb_full}->{rb_probe}、"
+            f"num_ofdm_symbols {int(cfg.get('num_ofdm_symbols') or 14)}"
+            f"->{cfg_p.get('num_ofdm_symbols')}、关 SSB，"
+            "几何量与全量**逐位相同**（实测），"
+            f"仅 snr_dB 需要 {corr:+.2f} dB 修正、已修正。整体约 11.5 倍速。"
             "要谱效/吞吐/时延扩展请跑正式生成。"
         ),
     }
+    if bumped_from is not None:
+        out["num_samples_note"] = (
+            f"样本数从 {bumped_from} 提到 {ask}：这个场景配了移动"
+            f"（{speed:g} km/h / {cfg_p.get('mobility_mode', 'static')}），"
+            f"而多普勒来自同一个 UE 相邻样本之间的位移——每个 UE 只有 1 个样本时"
+            f"它恒为 0。实测 hst_350kmh：21 样本报 0.0 Hz，42 样本报 817.94 Hz。"
+        )
+
     if n_snr_clamped:
         out["link_budget"]["snr_note"] = (
             f"{n_snr_clamped}/{n} 个样本的 snr_dB 在探测口径下撞上了 ChannelHub 的 "

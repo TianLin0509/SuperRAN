@@ -463,9 +463,9 @@ the spec review step was being skipped entirely.</em>
 <tr><td><code>sw_describe_dataset</code></td><td>看维度、分布、可用字段</td></tr>
 <tr><td><code>sw_list_datasets</code></td><td>本机已生成的数据集</td></tr>
 
-<tr><td rowspan="3"><strong>场景探测</strong></td><td><code>sw_probe_scenario</code></td><td><strong>下单前先看货</strong>：几十秒探清干扰、覆盖、几何特征。num_rb 压到 24，几何量与全带宽<strong>逐位相同</strong>（实测），耗时约 1/8</td></tr>
+<tr><td rowspan="3"><strong>场景探测</strong></td><td><code>sw_probe_scenario</code></td><td><strong>下单前先看货</strong>：几十秒探清干扰、覆盖、几何特征。num_rb 压到 24、num_ofdm_symbols 压到 4，几何量与全量<strong>逐位相同</strong>（实测），<strong>11.5 倍速</strong></td></tr>
 <tr><td><code>sw_compare_scenarios</code></td><td>几个候选场景并排比一张表</td></tr>
-<tr><td><code>sw_list_presets(group=…)</code></td><td>按 9 个分组浏览 21 个场景预设，每个都带实测特征</td></tr>
+<tr><td><code>sw_list_presets(group=…)</code></td><td>按 10 个分组浏览 23 个场景预设，每个都带实测特征</td></tr>
 
 <tr><td rowspan="3"><strong>干扰量化</strong></td><td><code>sw_interference_report</code></td><td><strong>业务域 IoT + 测量域导频 SIR</strong>。IoT 由几何 SIR 与 SINR 精确推出，含等效小区负载与估计 NMSE 下限</td></tr>
 <tr><td><code>sw_design_interference</code></td><td>要造某个 IoT 该动哪些旋钮，每条带实测值（其中两条与直觉相反）</td></tr>

@@ -24,7 +24,7 @@ python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 102 项
-python tests/test_interference.py # IoT、测量域、场景预设、文档计数 109 项
+python tests/test_interference.py # IoT、测量域、场景预设、探测模式、文档计数 145 项
 ```
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
@@ -366,6 +366,43 @@ tx_power +16 dB 则 IoT +16 dB（SIR 一动不动）；NF 与带宽按噪声底�
 得到一个看起来正常的假值。实测 InF 与密集城区两个完全不同的场景，
 探测出的 SNR 都是 39.5 dB（= 49.9 - 10.4）。`scenario.probe` 现在剔除并计数。
 SINR / SIR / IoT 不受影响，它们不含 `10log10(RB)` 项。
+
+`num_ofdm_symbols` 同样可压，但**有一道悬崖，位置是 1**：14 降到 7 / 4 / 2 时
+几何量逐位相同，降到 1 时 `sir_dB` 直接偏 16.1 dB。`PROBE_NUM_SYM` 取 4 而不是 2
+是有意的——离悬崖两格，不贴着边站。这个旋钮**只对探测模式安全**，正式生成里
+它实打实地改信道矩阵（14→7 时 `h_true` 相对差 2.5e-2，14→1 差 4.3），
+因为存下来的单快照是在这些符号上平均出来的。所以它只在 `probe()` 里，不在
+`generate()` 里。
+
+发货参数（num_rb 24 + num_ofdm_symbols 4 + 关 SSB）实测 **11.5 倍速**
+（2602 → 226 ms/样本，交错重测 3 轮取中位数，基准自身波动 17.7%）。
+
+### 探测模式的正确性依赖 bs_panel
+
+**没有 `bs_panel` 时，压 num_rb 会让 `sinr_dB` 平移 10.56 dB。** 原因是缺 panel
+时 ChannelHub 建不出 DFT 码本，几何 SINR 整条路径被跳过、`sinr_dB` 退化成
+`snr_dB`，而后者带 `-10log10(RB)`。
+
+这个坑极其隐蔽：那时 `sir_dB` 是 49.9 哨兵、逐位相同，路损/距离/多普勒也逐位
+相同，**只有 sinr_dB 一个字段偏**，看起来像探测模式本身不可靠。实际是配置缺
+panel 导致连全量跑出来的"SINR"都不是真 SINR（见前面 bs_panel 那一条）。
+
+`probe_config` 现在自己调 `_ensure_bs_panel`。写探测相关的测试时，
+**对照组也必须补 panel**，否则比的是两个都错的东西。
+
+### 多普勒需要每个 UE 至少 2 个样本
+
+ChannelHub 的 `doppler_hz` 来自**同一个 UE 相邻样本之间的位移**，
+`samples_per_ue == 1` 时没有位移可算，恒为 0。实测 `hst_350kmh`（21 个 UE）：
+`num_samples=21` 报 **0.0 Hz**，`num_samples=42` 报 **817.94 Hz**。
+
+一个 350 km/h 的场景探测出"多普勒 0"，任谁都会以为移动配置没生效。
+`scenario.probe` 现在检测到配了移动（`ue_speed_kmh > 3` 或
+`mobility_mode != static`）而每 UE 不足 2 个样本时**自动补到 2 倍并写进
+`num_samples_note`**——补，但不静默地补。静止场景不补，不白花时间。
+
+同理，`num_samples` 恰好等于 `num_ues` 是个很自然的写法，
+所以这个坑很容易撞上。
 
 ### 比耗时必须交错重测
 

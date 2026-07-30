@@ -196,6 +196,24 @@ for name in groups.get("大站间距", []):
     check("RMa" in (presets[name].get("caveat") or ""),
           f"{name} 注明了用的不是 RMa 路损公式")
 
+# 高铁场景必须走 linear 拓扑 + 移动模型，否则 train_* 参数根本不生效
+for name in groups.get("高铁", []):
+    c = presets[name]["config"]
+    check(c.get("topology_layout") == "linear" and
+          c.get("mobility_mode") in ("linear", "track"),
+          f"{name} 是 linear 拓扑 + 移动模型（否则进不了高铁模式）")
+    check(float(c.get("train_penetration_loss_db", 0)) > 0,
+          f"{name} 设了车体穿透损耗")
+
+# expect 里的实测值必须自洽：iot_dl_db 与它标注的等级对得上
+for name, body in presets.items():
+    e = body.get("expect") or {}
+    if e.get("iot_dl_db") is None:
+        continue
+    want = itf.classify_iot(float(e["iot_dl_db"]))["band"]
+    check(want == (e.get("iot_dl_band") or want),
+          f"{name} 的 expect.iot_dl_db 与标注等级一致")
+
 summaries = pl.preset_summaries()
 check(all("group" in s for s in summaries), "preset_summaries 带 group")
 check(all(("expect" not in s) or s["expect"] for s in summaries),
@@ -253,6 +271,93 @@ for name in ("ul_sir_dB", "dl_sir_dB", "num_interfering_ues", "ul_sir_geo_dB"):
         check(arr.shape[0] == summ["num_samples"], f"{name} 每样本一个值")
     except KeyError:
         check(False, f"{name} 落盘了")
+
+# ---------------------------------------------------------------------------
+sect("8.5  探测模式：几何量必须与全量逐位相同")
+
+from superwireless import scenario as sc  # noqa: E402
+
+# 探测模式压 num_rb 和 num_ofdm_symbols 换速度，前提是几何量一个不差。
+# **这一节比对的是实际发货的那组参数**，不是外推——num_ofdm_symbols 在 1 处
+# 有一道悬崖（实测 sir_dB 偏 16.1 dB），所以只能逐个验证、不能"2 行那 4 也行"。
+probe_cfg = dict(pl.load_presets()["multicell_7site"]["config"])
+probe_cfg["num_ues"] = 7
+probe_cfg["seed"] = 4242
+# **参照组也必须带 bs_panel。** 缺 panel 时 ChannelHub 建不出 DFT 码本，
+# 几何 SINR 整条路径被跳过、sinr_dB 退化成含 -10log10(RB) 的 snr_dB，
+# 于是压 num_rb 会看到 10.56 dB 的"偏差"——那是配置缺陷，不是探测模式的问题。
+# probe_config 现在自己补 panel，这里对照组也补，两边才可比。
+gen._ensure_bs_panel(probe_cfg)
+
+
+def _geom(**over):
+    cfg = dict(probe_cfg, **over, num_samples=7)
+    cfg.pop("source", None)
+    itf.install_geometry_capture()
+    out = []
+    n = 0
+    for smp in ch.iter_samples("internal_sim", cfg):
+        mm = smp.meta if isinstance(smp.meta, dict) else {}
+        out.append((
+            float(smp.sinr_dB), float(smp.sir_dB or np.nan),
+            float(mm.get("pathloss_dB", np.nan)),
+            float(mm.get("distance_3d_m", np.nan)),
+            float(mm.get("doppler_hz", np.nan)),
+            itf.take_ul_geometry_sir(smp),
+        ))
+        n += 1
+        if n >= 7:
+            break
+    return np.asarray(out)
+
+
+ref_geom = _geom()
+shipped, _rb, _rbf = sc.probe_config(dict(probe_cfg))
+cut_geom = _geom(num_rb=shipped["num_rb"],
+                 num_ofdm_symbols=shipped["num_ofdm_symbols"])
+both = np.isfinite(ref_geom) & np.isfinite(cut_geom)
+worst_geom = float(np.max(np.abs(ref_geom[both] - cut_geom[both])))
+print(f"  发货参数 num_rb={shipped['num_rb']} "
+      f"num_ofdm_symbols={shipped['num_ofdm_symbols']}，"
+      f"几何量最大偏差 {worst_geom:.3e}")
+check(worst_geom == 0.0, "探测模式的几何量与全量逐位相同（不是近似）")
+
+# 缺 bs_panel 时探测会失真——probe_config 必须自己把它补上
+_no_panel = dict(pl.load_presets()["multicell_7site"]["config"])
+_no_panel.pop("bs_panel", None)
+check("bs_panel" not in _no_panel, "预设本身不带 bs_panel（所以补齐这步不能省）")
+check("bs_panel" in sc.probe_config(_no_panel)[0],
+      "probe_config 自动补 bs_panel（否则 sinr_dB 会退化成 RB 相关的 snr_dB）")
+
+# 悬崖回归：符号数降到 1 会让几何量失真，PROBE_NUM_SYM 绝不能滑到这里
+cliff_geom = _geom(num_rb=shipped["num_rb"], num_ofdm_symbols=1)
+both_c = np.isfinite(ref_geom) & np.isfinite(cliff_geom)
+worst_cliff = float(np.max(np.abs(ref_geom[both_c] - cliff_geom[both_c])))
+print(f"  num_ofdm_symbols=1 时几何量最大偏差 {worst_cliff:.2f} dB")
+check(worst_cliff > 1.0,
+      "num_ofdm_symbols=1 确实会破坏几何量（所以 PROBE_NUM_SYM 不能取 1）")
+check(sc.PROBE_NUM_SYM > sc.PROBE_NUM_SYM_CLIFF,
+      "PROBE_NUM_SYM 在悬崖之上")
+
+# 移动场景每个 UE 至少要 2 个样本，否则多普勒恒为 0
+_hst = sc.probe(dict(pl.load_presets()["hst_350kmh"]["config"]), num_samples=21)
+print(f"  hst 探测 21 样本 -> 实跑 {_hst['num_samples']} 个"
+      f"（每 UE {_hst['samples_per_ue']} 个），"
+      f"多普勒中位 {_hst['geometry']['doppler_hz']['median']} Hz")
+check(_hst["samples_per_ue"] >= 2, "移动场景自动把样本数补到每 UE >= 2")
+check((_hst["geometry"]["doppler_hz"]["median"] or 0) > 100,
+      "补够之后多普勒不再是 0（350 km/h @ 2.6 GHz 应有几百 Hz）")
+check("num_samples_note" in _hst, "补样本这件事写进了报告，不是静默发生")
+
+_static = sc.probe(dict(probe_cfg), num_samples=21)
+check("num_samples_note" not in _static, "静止场景不做补样本（不白花时间）")
+
+# 探测模式不支持射线追踪，必须直说而不是给一份假的探测报告
+try:
+    sc.probe({"source": "sionna_rt", "scene": "munich"}, num_samples=1)
+    check(False, "射线追踪配置应当被拒绝")
+except ValueError as exc:
+    check("internal_sim" in str(exc), "射线追踪配置被明确拒绝并说明原因")
 
 # ---------------------------------------------------------------------------
 sect("9  端到端：paired 模式下的测量域 SIR")

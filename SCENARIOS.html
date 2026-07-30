@@ -122,7 +122,7 @@
 
 <h1>场景拓展与干扰量化</h1>
 <p class="tagline">IoT 噪声抬升 · 测量域干扰 · 场景探测 · 运行速度</p>
-<p class="meta">全部数字来自实跑 · 2026-07-31 · 21 个场景预设逐个探测过</p>
+<p class="meta">全部数字来自实跑 · 2026-07-31 · 23 个场景预设逐个探测过</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -130,7 +130,7 @@
 <li><a href="#s1">干扰强度怎么量化：IoT</a></li>
 <li><a href="#s2">一个必须分清的边界：业务域 vs 测量域</a></li>
 <li><a href="#s3">哪些旋钮真的能动 IoT</a></li>
-<li><a href="#s4">21 个场景的实测画像</a></li>
+<li><a href="#s4">23 个场景的实测画像</a></li>
 <li><a href="#s5">场景探测：下单前先看货</a></li>
 <li><a href="#s6">运行速度：哪些"优化"是真的</a></li>
 <li><a href="#s7">新增接口</a></li>
@@ -253,9 +253,9 @@
 建议的扫描维度也已经从 <code>prb_utilization</code> 改成 <code>isd_m</code>。</p>
 </div>
 
-<h2 id="s4">四、21 个场景的实测画像</h2>
+<h2 id="s4">四、23 个场景的实测画像</h2>
 
-<p class="lead">从 8 个预设扩到 <b>21 个</b>，分 9 组。每一行的数字都是
+<p class="lead">从 8 个预设扩到 <b>23 个</b>，分 10 组。每一行的数字都是
 <code>sw_probe_scenario</code> 实跑 63 个样本得到的，不是设计意图。</p>
 
 <h3>基线</h3>
@@ -288,6 +288,9 @@
 <div class='tbl-wrap'><table><tr><th>预设</th><th>小区</th><th>ISD</th><th>下行 IoT</th><th>SINR 中位</th><th>路损中位</th><th>视距比</th><th>SRS 测量 SIR</th><th>耗时/样本</th></tr><tr><td><code>umi_los_canyon</code><br><span class='src'>街道峡谷视距 · UMi_LOS</span></td><td class='nowrap'>21</td><td class='nowrap'>200 m</td><td class='nowrap'>38.6 dB <span class="pill p-no">极高干扰</span></td><td class='nowrap'>11.4 dB</td><td class='nowrap'>83.6 dB</td><td class='nowrap'>0.46</td><td class='nowrap'><span class=src>-</span> </td><td class='nowrap'>643 ms</td></tr>
 <tr><td><code>hotspot_cluster</code><br><span class='src'>热点聚集 · UE 非均匀分布</span></td><td class='nowrap'>21</td><td class='nowrap'>200 m</td><td class='nowrap'>26.0 dB <span class="pill p-no">高干扰</span></td><td class='nowrap'>12.8 dB</td><td class='nowrap'>93.2 dB</td><td class='nowrap'>0.43</td><td class='nowrap'><span class=src>-</span> </td><td class='nowrap'>494 ms</td></tr>
 <tr><td><code>massive_mimo_256t</code><br><span class='src'>大规模天线 · 256T</span></td><td class='nowrap'>21</td><td class='nowrap'>200 m</td><td class='nowrap'>44.7 dB <span class="pill p-no">极高干扰</span></td><td class='nowrap'>20.6 dB</td><td class='nowrap'>83.9 dB</td><td class='nowrap'>0.59</td><td class='nowrap'><span class=src>-</span> </td><td class='nowrap'>874 ms</td></tr></table></div>
+<h3>高铁</h3>
+<div class='tbl-wrap'><table><tr><th>预设</th><th>小区</th><th>ISD</th><th>下行 IoT</th><th>SINR 中位</th><th>路损中位</th><th>视距比</th><th>SRS 测量 SIR</th><th>耗时/样本</th></tr><tr><td><code>hst_350kmh</code><br><span class='src'>高铁沿线 · 350 km/h · 车体穿透 20 dB</span></td><td class='nowrap'>21</td><td class='nowrap'>580 m</td><td class='nowrap'>1.9 dB <span class="pill p-ok">轻载</span></td><td class='nowrap'>23.0 dB</td><td class='nowrap'>101.8 dB</td><td class='nowrap'>0.33</td><td class='nowrap'><span class=src>-</span> </td><td class='nowrap'>548 ms</td></tr>
+<tr><td><code>hst_hypercell_comp</code><br><span class='src'>高铁超级小区 · 3 站同 PCI 联合发送</span></td><td class='nowrap'>21</td><td class='nowrap'>580 m</td><td class='nowrap'>2.1 dB <span class="pill p-ok">轻载</span></td><td class='nowrap'>23.5 dB</td><td class='nowrap'>101.8 dB</td><td class='nowrap'>0.33</td><td class='nowrap'><span class=src>-</span> </td><td class='nowrap'>567 ms</td></tr></table></div>
 
 <div class="callout c-amber">
 <p><b>两件实测出来、原本没料到的事：</b></p>
@@ -348,6 +351,41 @@ ChannelHub 把 <code>snr_dB</code> 夹到 ±50 dB。探测口径下 snr 高了 1
 <code>10log10(RB)</code> 项。</p>
 </div>
 
+<h3>符号数也能压，但有一道悬崖</h3>
+
+<p><code>num_ofdm_symbols</code>（默认 14）同样只在内部用于导频栅格与平均，
+存下来的信道是 <code>[1, RB, BS, UE]</code> 一个快照。实测降到 7 / 4 / 2 时
+上面那张表里的量<b>同样逐位相同</b>——但降到 <b>1</b> 时 <code>sir_dB</code>
+直接偏 <b>16.1 dB</b>。</p>
+
+<div class="callout c-amber">
+<p>所以 <code>PROBE_NUM_SYM</code> 取 <b>4 而不是 2</b>：<b>离悬崖两格，不贴着边站。</b>
+2 已经验证过没问题，但只要 ChannelHub 内部任何一处对符号数的假设动一动，
+2 就可能跟着塌——而这种塌陷不报错，它只是给出一组看起来正常的错数。</p>
+<p>这个旋钮<b>只对探测模式安全</b>。正式生成里它实打实地改信道矩阵
+（14→7 时 <code>h_true</code> 相对差 2.5×10<sup>−2</sup>，14→1 差 4.3），
+所以它只在 <code>probe()</code> 里，不在 <code>generate()</code> 里。</p>
+</div>
+
+<div class="tbl-wrap"><table>
+<tr><th>配置</th><th>毫秒/样本</th><th>相对</th></tr>
+<tr><td>全量（263 RB、14 符号、SSB 开）</td><td>2602</td><td>1.00×</td></tr>
+<tr><td>只压 RB + 关 SSB</td><td>374</td><td>6.95×</td></tr>
+<tr><td><b>再压符号数（发货配置）</b></td><td><b>226</b></td><td><b>11.51×</b></td></tr>
+</table></div>
+
+<p class="src">交错重测 3 轮取中位数；全量自身轮间波动 17.7%。</p>
+
+<div class="callout c-red">
+<p><b>探测模式的正确性依赖 <code>bs_panel</code>。</b> 缺 panel 时 ChannelHub 建不出
+DFT 码本，几何 SINR 整条路径被跳过、<code>sinr_dB</code> 退化成 <code>snr_dB</code>，
+而后者带 <code>−10log10(RB)</code>——于是压 num_rb 会让"SINR"整体平移 10.56 dB。</p>
+<p>这个坑极其隐蔽：那时 <code>sir_dB</code> 是 49.9 哨兵、逐位相同，路损/距离/多普勒
+也逐位相同，<b>只有一个字段偏</b>，看起来像探测模式本身不可靠。
+写这一节的测试时就先踩了一次——参照组没补 panel，比的是两个都错的东西。
+<code>probe_config</code> 现在自己补齐。</p>
+</div>
+
 <p><b>探测给不了</b>谱效、吞吐、时延扩展估计、宽带预编码——24 个 RB 只覆盖
 8.64 MHz（不是稀疏采样 100 MHz）。返回里的 <code>not_available</code> 会列清楚。</p>
 
@@ -371,7 +409,7 @@ ChannelHub 把 <code>snr_dB</code> 夹到 ±50 dB。探测口径下 snr 高了 1
 <tr><td>num_interfering_ues=0</td><td class='nowrap'>2131 ms</td><td class='nowrap'>1.62×  <span class="pill p-ok">真加速</span></td><td class='src'>上行干扰整个消失，<b>改变物理</b></td></tr>
 <tr><td>num_interfering_ues=2</td><td class='nowrap'>2466 ms</td><td class='nowrap'>1.40×  <span class="pill p-ok">真加速</span></td><td class='src'>干扰 UE 池变小，测量域干扰减弱</td></tr>
 <tr><td>理想信道估计</td><td class='nowrap'>3255 ms</td><td class='nowrap'>1.06×  <span class="pill p-info">在噪声内</span></td><td class='src'>没有估计误差，多数课题不适用</td></tr>
-<tr><td>num_rb 273 → 24（探测模式）</td><td class='nowrap'>551 ms</td><td class='nowrap'>6.28×  <span class="pill p-ok">真加速</span></td><td class='src'>几何量逐位相同；<b>谱效/吞吐失效</b></td></tr>
+<tr><td>num_rb 273 → 24</td><td class='nowrap'>551 ms</td><td class='nowrap'>6.28×  <span class="pill p-ok">真加速</span></td><td class='src'>几何量逐位相同；<b>谱效/吞吐失效</b>。探测模式在此之上再压符号数</td></tr>
 </table></div>
 
 <p>验证代码读得对不对：<code>internal_sim</code> 只读
@@ -386,7 +424,7 @@ ChannelHub 把 <code>snr_dB</code> 夹到 ±50 dB。探测口径下 snr 高了 1
 <div class="dim">关 SSB <b>1.40×</b></div>
 <div class="dim">多进程 <b>3.4×</b></div>
 <div class="dim">合计约 <b>4.8×</b></div>
-<div class="dim">探测模式 <b>6.3×</b>（仅几何量）</div>
+<div class="dim">探测模式 <b>11.5×</b>（仅几何量）</div>
 </div>
 
 <h2 id="s7">七、新增接口</h2>
