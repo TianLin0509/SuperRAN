@@ -654,11 +654,34 @@ _ANTENNA_SWEEP = Sweep(
     why="维度变化会改变压缩率与码本搜索开销，只测一种规模难说方法可扩展。",
 )
 
+# **别用 prb_utilization 扫干扰强度。** 实测（42 样本、21 小区、num_ues=21）
+# 0.2 与 1.0 两组的 SINR/SIR/IoT **逐位相同** —— 几何模型里调度 UE 数是
+# max(1, round(num_ues/K x load))，每小区只有 1 个 UE 时恒为 1。
+# 真正能改下行干扰强度的是站间距，实测 IoT：
+#     ISD 100 m -> 38.3 dB，200 m -> 24.9 dB，500 m -> 4.4 dB，1732 m -> 0.2 dB
 _LOAD_SWEEP = Sweep(
-    key="prb_utilization",
-    values=[0.3, 1.0],
-    label="轻载 vs 满载",
-    why="轻载下干扰问题被掩盖，容易低估干扰协调算法的价值。",
+    key="isd_m",
+    values=[150.0, 500.0],
+    label="强干扰 vs 弱干扰（靠站间距）",
+    why=(
+        "站间距是这套几何模型里唯一能大范围改变干扰强度的旋钮，"
+        "实测 IoT 从 38 dB 一路降到 4 dB。"
+        "轻载下干扰问题被掩盖，容易低估干扰协调算法的价值——"
+        "但**别用 prb_utilization 来造这个对比**：每小区 UE 数不足 2 时它完全无效，"
+        "两组会生成一模一样的数据（sw_plan 的 guards 会拦）。"
+        "生成后用 sw_interference_report 复核两组的 IoT 确实拉开了。"
+    ),
+)
+
+_UL_LOAD_SWEEP = Sweep(
+    key="pusch_load",
+    values=[0.2, 1.0],
+    label="上行轻载 vs 满载",
+    why=(
+        "上行干扰按同时发射的邻区 UE 数线性叠加，pusch_load 是有效旋钮——"
+        "**但前提是每小区 UE 数 >= 2**。实测 21 小区 105 UE（每小区 5 个）时，"
+        "满载让上行 IoT 从 1.8 dB 抬到 5.4 dB；21 UE（每小区 1 个）时毫无变化。"
+    ),
 )
 
 TASK_PROFILES: tuple[TaskProfile, ...] = (
@@ -739,11 +762,16 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         keywords=("干扰", "interference", "协调", "调度", "schedul", "comp", "协作", "icic", "功控"),
         design_keys=("baseline", "metric", "scope"),
         decision_keys=("num_sites", "ue_distribution", "prb_utilization", "tdd_pattern", "num_samples"),
-        sweeps=(_LOAD_SWEEP,),
+        sweeps=(_LOAD_SWEEP, _UL_LOAD_SWEEP),
         pitfalls=(
             "轻载场景下干扰问题被掩盖，容易得出「算法没用」的结论。",
             "边缘用户（5% 分位）才是干扰协调的目标，只看平均吞吐看不出效果。",
             "单小区场景没有干扰源，这类课题必须多站。",
+            "**下行的 pdsch_load / prb_utilization 改不动干扰强度**：几何模型里每个"
+            "邻区都无条件贡献泄漏，负载只改变对几个波束取平均。要造强弱干扰对比请动 "
+            "isd_m（实测 IoT：100 m 38.3 dB / 200 m 24.9 / 500 m 4.4 / 1732 m 0.2）。",
+            "上行负载是有效旋钮，但每小区 UE 数必须 >= 2，否则取整后恒为 1、完全无效。",
+            "先用 sw_probe_scenario 确认 IoT 真的拉开了，再花时间跑正式对比。",
         ),
         # ChannelHub 默认不保存干扰小区的信道矩阵（只把干扰体现在 SINR 里），
         # 但干扰协调算法必须拿到干扰信道本身，所以这里显式打开。
@@ -1185,6 +1213,48 @@ def check_guards(profile: TaskProfile, cfg: dict[str, Any]) -> list[dict[str, st
                 "key": "link",
                 "message": "互易性课题需要成对的上下行信道，只取单向无法对比。",
                 "suggestion": 'link 设为 "both"',
+            }
+        )
+
+    # 负载类旋钮在小区内 UE 数不足时**完全不起作用**。
+    # ChannelHub 的几何 SINR 里调度 UE 数是 max(1, round(num_ues/K x load))，
+    # num_ues/K == 1 时不管 load 取 0.2 还是 1.0 都等于 1。实测（42 样本，
+    # 21 小区 21 UE）两个极端的 SINR/SIR/IoT **逐位相同**。
+    # 不拦的话，用户会拿两批一模一样的数据做"轻载 vs 满载"对比，
+    # 得出"负载不影响性能"——这个错误结论完全是工具造成的。
+    n_cells = n_sites * int(cfg.get("sectors_per_site", 1) or 1)
+    load_keys = [k for k in ("prb_utilization", "pusch_load", "pdsch_load") if k in cfg]
+    if load_keys and n_cells > 1:
+        per_cell = int(cfg.get("num_ues", 1) or 1) // max(n_cells, 1)
+        if per_cell < 2:
+            issues.append(
+                {
+                    "severity": "warn",
+                    "key": load_keys[0],
+                    "message": (
+                        f"设了 {'/'.join(load_keys)}，但每小区只有 {per_cell} 个 UE"
+                        f"（num_ues={cfg.get('num_ues')} / {n_cells} 小区）。"
+                        "调度 UE 数是 max(1, 每小区UE数 x 负载)，取整后恒为 1，"
+                        "**这个旋钮在当前配置下没有任何效果**——不同负载会生成完全相同的数据。"
+                    ),
+                    "suggestion": f"num_ues 至少设成 {n_cells * 4}（每小区 4 个 UE）再调负载",
+                }
+            )
+
+    # 下行负载在这套几何模型里**始终**不改变期望干扰功率：每个非服务小区
+    # 都无条件贡献一份泄漏，负载只改变对多少个波束取平均（均值不变、方差变小）。
+    if "pdsch_load" in cfg and str(cfg.get("link", "DL")).upper() == "DL":
+        issues.append(
+            {
+                "severity": "warn",
+                "key": "pdsch_load",
+                "message": (
+                    "下行几何模型里每个邻区都无条件贡献干扰，pdsch_load 只影响"
+                    "对几个波束取平均，**不改变干扰功率的期望**。想调下行干扰强度请动"
+                    "isd_m（实测 100/200/500/1732 m 对应 IoT 38.3/24.9/4.4/0.2 dB）、"
+                    "num_sites、tx_power_dbm 或 noise_figure_db。"
+                ),
+                "suggestion": "用 sw_design_interference 看各旋钮的实测作用方向",
             }
         )
 

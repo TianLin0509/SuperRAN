@@ -2,11 +2,26 @@
 #
 # 每个 preset 只给"场景骨架"（站点规模、传播场景、天线规模），
 # 具体参数由决策点协商决定。preset 里没写的键一律走 ChannelHub 默认值。
+#
+# 可选字段：
+#   group    分组名，sw_list_presets 按它归类
+#   expect   这个场景**实测**出来的特征量（IoT、SINR 中位数等）。
+#            填进来的必须是真跑过的数，不是设计意图——写错了比不写更糟。
+#   verify   怎么复核这个场景确实是它声称的样子
 
 single_cell_64t4r:
+  group: 基线
   label: 单小区 · 64T4R 宏站
   summary: 最常用的算法验证基线。城区宏站非视距，64 发 4 收，100 MHz。
   typical_for: [CSI 压缩, 预编码, 码本设计, 信道估计]
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 1
+    sinr_db: 27.12
+    pathloss_db: 113.52
+    distance_m: 178.13
+    los_ratio: 0.143
+    doppler_hz: 9.72
+    ms_per_sample: 22
   config:
     source: internal_sim
     scenario: UMa_NLOS
@@ -25,9 +40,18 @@ single_cell_64t4r:
     channel_est_mode: ls_linear
 
 single_cell_4t4r:
+  group: 基线
   label: 单小区 · 4T4R 最小配置
   summary: 维度最小、跑得最快，适合先把流程跑通再放大。
   typical_for: [冒烟测试, 流程验证]
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 1
+    sinr_db: 27.5
+    pathloss_db: 113.13
+    distance_m: 178.13
+    los_ratio: 0.127
+    doppler_hz: 9.72
+    ms_per_sample: 7
   config:
     source: internal_sim
     scenario: UMa_NLOS
@@ -46,9 +70,21 @@ single_cell_4t4r:
     channel_est_mode: ls_linear
 
 multicell_7site:
+  group: 多小区干扰
   label: 多小区 · 7 站 21 扇区
   summary: 密集城区，中心小区被一圈邻区包围，干扰环境完整。
   typical_for: [干扰协调, 调度, 切换]
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 27.16      # 高干扰
+    iot_ul_db: 0.89
+    sinr_db: 14.75
+    sir_db: 14.84
+    pathloss_db: 92.76
+    distance_m: 86.21
+    los_ratio: 0.46
+    doppler_hz: 9.72
+    ms_per_sample: 444
   config:
     source: internal_sim
     scenario: UMi_NLOS
@@ -69,9 +105,21 @@ multicell_7site:
     channel_est_mode: ls_linear
 
 multicell_19site:
+  group: 多小区干扰
   label: 多小区 · 19 站 57 扇区（38.901 Case 1）
   summary: 两圈邻区的标准宏站基准，中心小区干扰最完整。耗时约为 7 站的三倍。
   typical_for: [干扰协调, 系统级评估, 论文对标]
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 57
+    iot_dl_db: 14.68      # 较高干扰
+    iot_ul_db: 0.14
+    sinr_db: 16.56
+    sir_db: 18.06
+    pathloss_db: 116.71
+    distance_m: 213.09
+    los_ratio: 0.159
+    doppler_hz: 9.72
+    ms_per_sample: 920
   config:
     source: internal_sim
     scenario: UMa_NLOS
@@ -97,6 +145,7 @@ multicell_19site:
 # 场景清单用 sw_list_scenes 查，或直接在 overrides 里换 scene。
 
 rt_munich:
+  group: 射线追踪
   label: 射线追踪 · 慕尼黑老城
   summary: Sionna 自带场景，开箱即用。真实建筑几何下的反射与绕射。
   typical_for: [site-specific 验证, 波束管理, 定位]
@@ -116,6 +165,7 @@ rt_munich:
     device: cpu
 
 rt_shanghai_lujiazui:
+  group: 射线追踪
   label: 射线追踪 · 上海陆家嘴
   summary: 真实 OSM 建筑，中国一线城市 CBD 超高层密集区。首次使用自动准备资产。
   typical_for: [密集城区验证, 覆盖分析, 干扰研究]
@@ -135,6 +185,7 @@ rt_shanghai_lujiazui:
     device: cpu
 
 rt_shenzhen_futian:
+  group: 射线追踪
   label: 射线追踪 · 深圳福田 CBD
   summary: 真实 OSM 建筑，6 站 18 小区，130 栋楼平均 41.5 m。首次使用自动准备资产。
   typical_for: [密集城区验证, 覆盖分析, 干扰研究]
@@ -154,9 +205,21 @@ rt_shenzhen_futian:
     device: cpu
 
 indoor_factory:
+  group: 室内与专网
   label: 室内工厂 · InF
   summary: 38.901 §7.2 室内工厂场景，时延扩展与城区差别明显。
   typical_for: [室内定位, 工业物联]
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 4
+    iot_dl_db: 46.94      # 极高干扰
+    iot_ul_db: 45.45
+    sinr_db: 6.45
+    sir_db: 6.45
+    pathloss_db: 70.16
+    distance_m: 29.97
+    los_ratio: 0.206
+    doppler_hz: 5.56
+    ms_per_sample: 179
   config:
     source: internal_sim
     scenario: InF
@@ -172,5 +235,559 @@ indoor_factory:
     bandwidth_hz: 100000000.0
     subcarrier_spacing: 30000
     carrier_freq_hz: 2000000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+# ===========================================================================
+# 干扰场景
+# ===========================================================================
+# 用 IoT（噪声抬升，(I+N)/N）刻画干扰强度，20 dB 以上算高干扰。
+# 生成后用 sw_interference_report 复核，别用配置意图代替实测。
+#
+# **哪些旋钮真的能动 IoT，是按 ChannelHub 几何模型实测过的**，
+# 不是照搬教科书直觉——细节见 interference.py 与 SCENARIOS.md。
+
+high_iot_dense:
+  group: 干扰场景
+  label: 高干扰 · 密集城区 21 小区 · ISD 150 m
+  summary: 密集城区微站，站间距 150 m，21 个小区互相干扰。发射功率走 UMi 的
+    33 dBm 默认值——**不要为了凑高 IoT 去堆 46 dBm**，那是宏站功率，
+    配 150 m 站距在物理上讲不通（实测会把 IoT 推到 48.8 dB，等效负载 0.99999）。
+  typical_for: [干扰抑制, 干扰协调, 链路自适应鲁棒性, 边缘用户]
+  verify: sw_probe_scenario 看 interference.dl_iot.median_db，应落在高干扰档
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 35.76      # 极高干扰
+    iot_ul_db: 2.89
+    sinr_db: 13.01
+    sir_db: 13.01
+    pathloss_db: 86.78
+    distance_m: 70.51
+    los_ratio: 0.587
+    doppler_hz: 9.72
+    snr_clamped_out: 3   # 探测口径下撞 +50 dB 夹逼，SNR 分布已剔除这些样本
+    ms_per_sample: 847
+  config:
+    source: internal_sim
+    scenario: UMi_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 150.0
+    num_ues: 21
+    num_interfering_ues: 16
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+low_iot_reference:
+  group: 干扰场景
+  label: 去邻站对照 · 同小区尺寸（SNR 对齐的干扰消融）
+  summary: high_iot_dense 的干净对照：**只改一件事——把 7 站减成 1 站**。
+    小区半径、功率、天线、频点全部不变。实测两组 SNR 中位数 30.5 vs 29.4 dB
+    （只差 1.1 dB），IoT 20.3 vs 35.8 dB（差 15.5 dB）——**变量分离得很干净**。
+    作为对照：早先那版用 ISD 800 m 拉低干扰，两组 SNR 差了 45 dB，根本不是同一个工况。
+    注意剩下的 2 个同站扇区仍会互扰，IoT 不归零，20.3 dB 按现场口径**仍算高干扰**。
+  typical_for: [干扰场景对照, 消融实验]
+  verify: 与 high_iot_dense 并排 sw_compare_scenarios，看 IoT 拉开而 SNR 基本齐平
+  caveat: 在这套模型里 **IoT 与 SNR 无法完全解耦** —— 两者都含热噪声 N。
+    靠拉大站间距来降 IoT 会同时把 SNR 拉低（实测 ISD 800 m 时 SNR 中位数 -5.9 dB），
+    那样的"对照组"混了两个变量。减站数是能想到的最干净的做法。
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 3
+    iot_dl_db: 20.31      # 高干扰
+    iot_ul_db: 16.71
+    sinr_db: 26.95
+    sir_db: 28.81
+    pathloss_db: 83.76
+    distance_m: 65.35
+    los_ratio: 0.556
+    doppler_hz: 9.72
+    snr_clamped_out: 8   # 探测口径下撞 +50 dB 夹逼，SNR 分布已剔除这些样本
+    ms_per_sample: 345
+  config:
+    source: internal_sim
+    scenario: UMi_NLOS
+    channel_model: CDL-C
+    num_sites: 1
+    sectors_per_site: 3
+    isd_m: 150.0
+    num_ues: 21
+    num_interfering_ues: 16
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+high_iot_uplink:
+  group: 干扰场景
+  label: 上行高干扰 · 邻区满调度
+  summary: 上行 IoT 是干扰抬升的经典口径（基站侧噪声抬升）。邻区每小区多个 UE 满负载同发。
+  typical_for: [上行干扰, 功控, 上行调度, 接收机算法]
+  verify: sw_interference_report 看 traffic_domain.ul.iot；上行 IoT 由 pusch_load 乘每小区 UE 数决定
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 23.68      # 高干扰
+    iot_ul_db: 6.25
+    sinr_db: 13.99
+    sir_db: 14.14
+    pathloss_db: 94.36
+    distance_m: 86.94
+    los_ratio: 0.413
+    doppler_hz: 9.72
+    srs_meas_sir_db: -9.88   # 测量已失效
+    ms_per_sample: 1150
+  config:
+    source: internal_sim
+    scenario: UMi_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 200.0
+    num_ues: 105
+    num_interfering_ues: 24
+    pusch_load: 1.0
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: BOTH
+    channel_est_mode: ls_linear
+
+# ===========================================================================
+# 测量干扰场景（SRS / CSI-RS 导频域）
+# ===========================================================================
+# 这一组和上面那组是**两回事**：业务域 SINR 还过得去、测量域已经崩了，
+# 是实网里最常见也最难查的一类问题——预编码用的是被污染的信道估计。
+# 必须 link: BOTH（paired）才会产生 ul_sir_dB / dl_sir_dB 两列。
+
+srs_congested:
+  group: 测量干扰
+  label: SRS 测量拥塞 · 邻区多 UE 同发、无序列跳变
+  summary: 每个邻区 24 个 UE 同时发 SRS，comb=2、关掉组跳与序列跳，导频碰撞最严重。
+  typical_for: [信道估计鲁棒性, SRS 容量, 导频污染, 上行 CSI 获取]
+  verify: sw_interference_report 看 measurement_domain.ul_srs.sir_dB 中位数与 nmse_floor_db
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 29.08      # 高干扰
+    iot_ul_db: 1.06
+    sinr_db: 15.57
+    sir_db: 15.7
+    pathloss_db: 92.76
+    distance_m: 86.21
+    los_ratio: 0.46
+    doppler_hz: 9.72
+    srs_meas_sir_db: -10.5   # 测量已失效
+    ms_per_sample: 1333
+  config:
+    source: internal_sim
+    scenario: UMi_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 200.0
+    num_ues: 21
+    num_interfering_ues: 24
+    srs_comb: 2
+    srs_group_hopping: false
+    srs_sequence_hopping: false
+    srs_periodicity: 2
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: BOTH
+    channel_est_mode: ls_linear
+
+srs_clean_reference:
+  group: 测量干扰
+  label: SRS 测量干净对照 · 少 UE、comb 4、开组跳
+  summary: 与 srs_congested 配对。邻区只有 2 个 UE 发 SRS，comb=4 并开组跳变。
+  typical_for: [测量干扰对照, 消融实验]
+  verify: 与 srs_congested 只差导频配置，两者 measurement_domain 之差就是导频方案的净效应
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 29.02      # 高干扰
+    iot_ul_db: 1.44
+    sinr_db: 14.6
+    sir_db: 14.6
+    pathloss_db: 92.76
+    distance_m: 86.21
+    los_ratio: 0.46
+    doppler_hz: 9.72
+    srs_meas_sir_db: 7.37   # 测量严重受损
+    ms_per_sample: 594
+  config:
+    source: internal_sim
+    scenario: UMi_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 200.0
+    num_ues: 21
+    num_interfering_ues: 2
+    srs_comb: 4
+    srs_group_hopping: true
+    srs_sequence_hopping: false
+    srs_periodicity: 10
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: BOTH
+    channel_est_mode: ls_linear
+
+srs_hopping_partial_band:
+  group: 测量干扰
+  label: SRS 跳频 · 单次只测部分带宽
+  summary: 打开 SRS 频域跳变，每个 SRS 时机只覆盖一部分 RB，整带信道靠多次拼接。
+    低功率 UE 的常规做法，代价是拼出的信道跨越多个时刻、动了就不准。
+  typical_for: [SRS 跳频, 信道老化, 时变信道估计, TDD 互易性]
+  verify: 与 srs_clean_reference 比 h_est 的 NMSE；跳频的损失随速度放大
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 26.66      # 高干扰
+    iot_ul_db: 1.57
+    sinr_db: 14.37
+    sir_db: 14.39
+    pathloss_db: 92.76
+    distance_m: 86.21
+    los_ratio: 0.46
+    doppler_hz: 97.22
+    srs_meas_sir_db: -20.13   # 测量已失效
+    ms_per_sample: 2109
+  config:
+    source: internal_sim
+    scenario: UMi_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 200.0
+    num_ues: 21
+    num_interfering_ues: 8
+    srs_hopping_enabled: true
+    srs_comb: 2
+    srs_periodicity: 5
+    ue_speed_kmh: 30.0
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: BOTH
+    channel_est_mode: ls_hop_concat
+
+# ===========================================================================
+# 大站间距 / 覆盖受限
+# ===========================================================================
+# ChannelHub 只实现了 UMa / UMi / InF 三套 38.901 路损公式，**没有 RMa**。
+# 下面这两个用 UMa_NLOS 公式配农村的站间距，属于"大站间距宏站"，
+# 不能叫"3GPP 农村场景"——RMa 的路损、阴影标准差、视距概率都不一样。
+
+large_isd_1732m:
+  group: 大站间距
+  label: 大站间距 · ISD 1732 m
+  summary: 3GPP 农村 eMBB 的标准站间距，配 UMa 路损与 35 m 站高、2.1 GHz。
+    小区边缘路损大、信噪比低，干扰反而弱——覆盖受限而非干扰受限。
+  typical_for: [覆盖分析, 边缘用户, 低信噪比算法, 上行受限]
+  verify: sw_interference_report 的 IoT 应当明显低于密集城区；SNR 分布左移
+  caveat: 用的是 UMa_NLOS 路损公式，不是 RMa。站间距是农村口径，传播模型不是。
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 2.47      # 轻载
+    iot_ul_db: 0.03
+    sinr_db: 15.57
+    sir_db: 20.98
+    pathloss_db: 128.92
+    distance_m: 709.46
+    los_ratio: 0.032
+    doppler_hz: 5.83
+    ms_per_sample: 413
+  config:
+    source: internal_sim
+    scenario: UMa_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 1732.0
+    tx_height_m: 35.0
+    num_ues: 21
+    num_interfering_ues: 4
+    num_bs_tx_ant: 32
+    num_bs_rx_ant: 32
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 4
+    bandwidth_hz: 20000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 2100000000.0
+    tx_power_dbm: 46.0
+    link: DL
+    channel_est_mode: ls_linear
+
+large_isd_5km:
+  group: 大站间距
+  label: 超大站间距 · ISD 5 km、700 MHz
+  summary: 农村覆盖场景的极限站间距，配低频段换覆盖。带宽 10 MHz。
+  typical_for: [极限覆盖, 低频段, 广域物联]
+  verify: 路损分布与距离分布；这个场景多数样本是噪声受限的
+  caveat: 同 large_isd_1732m —— 用的是 UMa_NLOS 路损公式，不是 RMa。
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 3.55      # 低干扰
+    iot_ul_db: 0.01
+    sinr_db: 11.69
+    sir_db: 16.3
+    pathloss_db: 136.93
+    distance_m: 2046.08
+    los_ratio: 0.0
+    doppler_hz: 1.94
+    ms_per_sample: 293
+  config:
+    source: internal_sim
+    scenario: UMa_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 5000.0
+    tx_height_m: 35.0
+    num_ues: 21
+    num_interfering_ues: 2
+    num_bs_tx_ant: 16
+    num_bs_rx_ant: 16
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 2
+    bandwidth_hz: 10000000.0
+    subcarrier_spacing: 15000
+    carrier_freq_hz: 700000000.0
+    tx_power_dbm: 49.0
+    link: DL
+    channel_est_mode: ls_linear
+
+# ===========================================================================
+# 移动性
+# ===========================================================================
+
+vehicular_120kmh:
+  group: 移动性
+  label: 车载移动 · 120 km/h
+  summary: 3.5 GHz 下多普勒约 389 Hz，相干时间约 1 ms。CSI 老化开始明显。
+  typical_for: [信道预测, CSI 老化, 多普勒鲁棒性, 波束跟踪]
+  verify: meta__doppler_hz 分布；与静止场景比 h_est 的 NMSE
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 2.59      # 轻载
+    iot_ul_db: 0.14
+    sinr_db: 19.06
+    sir_db: 20.84
+    pathloss_db: 112.55
+    distance_m: 205.93
+    los_ratio: 0.19
+    doppler_hz: 265.11
+    ms_per_sample: 1031
+  config:
+    source: internal_sim
+    scenario: UMa_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 500.0
+    num_ues: 21
+    num_interfering_ues: 8
+    ue_speed_kmh: 120.0
+    mobility_mode: linear
+    num_slots_per_sample: 4
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+highspeed_350kmh:
+  group: 移动性
+  label: 高速移动 · 350 km/h
+  summary: 高铁量级速度，3.5 GHz 下多普勒约 1134 Hz。相干时间不足 0.4 ms，
+    一个时隙内信道已经变了。用来压测预测与跟踪类算法。
+  typical_for: [高铁, 信道预测极限, 多普勒补偿]
+  verify: meta__doppler_hz 中位数应接近 1100 Hz
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 0.59      # 轻载
+    iot_ul_db: 0.02
+    sinr_db: 13.78
+    sir_db: 22.17
+    pathloss_db: 124.96
+    distance_m: 409.86
+    los_ratio: 0.048
+    doppler_hz: 773.28
+    ms_per_sample: 581
+  config:
+    source: internal_sim
+    scenario: UMa_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 1000.0
+    num_ues: 21
+    num_interfering_ues: 4
+    ue_speed_kmh: 350.0
+    mobility_mode: linear
+    num_slots_per_sample: 4
+    num_bs_tx_ant: 32
+    num_bs_rx_ant: 32
+    num_ue_tx_ant: 2
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+# ===========================================================================
+# 传播条件与部署形态
+# ===========================================================================
+
+umi_los_canyon:
+  group: 传播条件
+  label: 街道峡谷视距 · UMi_LOS
+  summary: 视距主导，莱斯因子高、时延扩展小、信道秩低。低秩信道上码本类算法的表现
+    和非视距完全不同——只用 NLOS 验证过的结论在这里往往不成立。
+  typical_for: [低秩信道, 码本设计, 秩自适应, 视距非视距对比]
+  verify: dl_rank 分布应明显低于 NLOS 场景；时延扩展更小
+  caveat: >-
+    **别拿 los_ratio 当判据**。scenario 设成 *_LOS 时所有链路一律走 LOS
+    路损公式（不看逐链路的 is_los），但数据里的 is_los 仍按几何视距概率抽样——
+    实测 los_ratio 是 0.46 而不是 1。判断这批数据是不是视距的，看 scenario 字段，
+    不看 los_ratio。
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 38.57      # 极高干扰
+    iot_ul_db: 14.83
+    sinr_db: 11.45
+    sir_db: 11.45
+    pathloss_db: 83.56
+    distance_m: 86.21
+    los_ratio: 0.46
+    doppler_hz: 9.72
+    ms_per_sample: 643
+  config:
+    source: internal_sim
+    scenario: UMi_LOS
+    channel_model: CDL-D
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 200.0
+    num_ues: 21
+    num_interfering_ues: 8
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+hotspot_cluster:
+  group: 传播条件
+  label: 热点聚集 · UE 非均匀分布
+  summary: UE 聚成热点而非均匀撒点，同一小区内用户信道高度相关。
+    均匀撒点会高估空分复用的收益，这个场景是它的对照。
+  typical_for: [MU-MIMO 配对, 用户相关性, 调度公平性]
+  verify: ue_position 的空间分布；同小区用户信道相关性
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 26.03      # 高干扰
+    iot_ul_db: 1.26
+    sinr_db: 12.78
+    sir_db: 12.87
+    pathloss_db: 93.21
+    distance_m: 88.82
+    los_ratio: 0.429
+    doppler_hz: 9.72
+    ms_per_sample: 494
+  config:
+    source: internal_sim
+    scenario: UMi_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 200.0
+    num_ues: 21
+    num_interfering_ues: 10
+    ue_distribution: hotspot
+    num_bs_tx_ant: 64
+    num_bs_rx_ant: 64
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
+    link: DL
+    channel_est_mode: ls_linear
+
+massive_mimo_256t:
+  group: 传播条件
+  label: 大规模天线 · 256T
+  summary: 16x8x2 面板，波束更窄、空间分辨力更强，干扰泄漏更低。
+    单样本耗时按天线数近似线性增长，做蒙特卡洛前先估时间。
+  typical_for: [大规模天线, 波束赋形增益, 高维 CSI 压缩]
+  verify: sw_interference_report 复核 IoT。**别想当然认为天线多了干扰就小**——
+    几何模型里旁瓣泄漏约为 1/n_h，256T 的 (16,8,2) 面板 n_v*n_p=16、64T 的 (8,4,2) 是 8，
+    干扰功率反而更高。实测 16T 的 IoT 比 64T 低约 1 dB，方向与此一致。
+  expect:   # 实测，63 样本 · sw_probe_scenario
+    cells: 21
+    iot_dl_db: 44.68      # 极高干扰
+    iot_ul_db: 2.02
+    sinr_db: 20.56
+    sir_db: 20.56
+    pathloss_db: 83.91
+    distance_m: 86.21
+    los_ratio: 0.587
+    doppler_hz: 9.72
+    ms_per_sample: 874
+  config:
+    source: internal_sim
+    scenario: UMa_NLOS
+    channel_model: CDL-C
+    num_sites: 7
+    sectors_per_site: 3
+    isd_m: 200.0
+    num_ues: 21
+    num_interfering_ues: 8
+    num_bs_tx_ant: 256
+    num_bs_rx_ant: 256
+    num_ue_tx_ant: 4
+    num_ue_rx_ant: 4
+    bs_panel: [16, 8, 2]
+    bandwidth_hz: 100000000.0
+    subcarrier_spacing: 30000
+    carrier_freq_hz: 3500000000.0
     link: DL
     channel_est_mode: ls_linear

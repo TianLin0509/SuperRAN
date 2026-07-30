@@ -70,7 +70,7 @@ def _pam_mi(order: int, snr_lin: np.ndarray, n_gh: int = 80) -> np.ndarray:
     return out
 
 
-# MI 表的信噪比栅格。−30~45 dB 覆盖了所有实际工作点，0.25 dB 步长够插值。
+# MI 表的信噪比栅格。-30~45 dB 覆盖了所有实际工作点，0.25 dB 步长够插值。
 _MI_GRID_DB = np.arange(-30.0, 45.01, 0.25)
 
 
@@ -316,7 +316,7 @@ def re_per_slot(n_prb: int, n_symbols: int = 12, n_dmrs_per_prb: int = 12,
                 overhead_per_prb: int = 0) -> int:
     """一个时隙内分配给 PDSCH 的 RE 数（38.214 §5.1.3.2 步骤 1）。
 
-    每 PRB 的 RE 数 = 12·符号数 − DM-RS − 开销，且**上限 156**（标准明写），
+    每 PRB 的 RE 数 = 12·符号数 - DM-RS - 开销，且**上限 156**（标准明写），
     再乘 PRB 数。忘掉那个 156 上限会让大带宽下的 TBS 偏大。
     """
     per_prb = min(156, 12 * int(n_symbols) - int(n_dmrs_per_prb) - int(overhead_per_prb))
@@ -358,8 +358,8 @@ class BlerModel:
 
     形式（正态近似的有限码长界，按**信道使用次数**即调制符号数）::
 
-        码块 BLER = Q( (I(γ) − R·q_m) · sqrt(n_sym_per_cb) / c )
-        TB   BLER = 1 − (1 − 码块BLER)^C
+        码块 BLER = Q( (I(γ) - R·q_m) · sqrt(n_sym_per_cb) / c )
+        TB   BLER = 1 - (1 - 码块BLER)^C
 
     * ``I(γ)`` —— 调制受限互信息，bit/符号，**这一项是精确算的**
     * ``R·q_m`` —— 实际信息率，同单位。两者之差就是"富余"
@@ -370,7 +370,7 @@ class BlerModel:
     **参数怎么来的**：``implementation_loss_db`` 默认 1.0 dB，是 5G LDPC 在
     BLER=10%、中等码长下距容量的常见量级；``c`` 默认 2.2 由"瀑布区
     10%→1% 约 0.6~1 dB"反推，并使各 MCS 的 10% 门限落在公开 NR 曲线的
-    常见区间（MCS0 约 −6 dB、MCS28 约 21 dB）。两者都可覆盖。
+    常见区间（MCS0 约 -6 dB、MCS28 约 21 dB）。两者都可覆盖。
 
     **它不是什么**：不是实测 BLER 曲线，没有 3GPP 参考数据兜底。
     要严格的 BLER 请跑真正的链路级仿真（Sionna PHY / MATLAB 5G Toolbox）。
@@ -452,7 +452,7 @@ class BlerModel:
             "span_db": [rows[0]["required_sinr_db"], rows[-1]["required_sinr_db"]],
             "rows": rows,
             "expected_span_note": (
-                "公开 NR 链路级曲线的常见量级：MCS0 约 −5~−7 dB，MCS28 约 20~23 dB。"
+                "公开 NR 链路级曲线的常见量级：MCS0 约 -5~-7 dB，MCS28 约 20~23 dB。"
                 "落在区间外说明模型参数需要重新标定。"
             ),
             "caveat": (

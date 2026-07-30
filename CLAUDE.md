@@ -24,13 +24,14 @@ python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 102 项
-python tests/test_results.py     # 外部算法结果契约、预注册 80 项
+python tests/test_interference.py # IoT、测量域、场景预设、文档计数 109 项
 ```
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
 后前三个都要跑；改动 `linklevel.py` / `validate.py` / `calibration.py` /
 `gates.py` / `spec38901.py` 要跑 test_linklevel + test_gates；
-改动 `results.py` / `analysis.py` / `loader.py` 要跑 test_results。
+改动 `results.py` / `analysis.py` / `loader.py` 要跑 test_results；
+改动 `interference.py` / `scenario.py` / `presets.yaml` 要跑 test_interference。
 
 ## 与 ChannelHub 的边界
 
@@ -295,6 +296,108 @@ SINR 中位数 35.7 → 18.1 dB。`generate._ensure_bs_panel()` 现在由 `num_b
 套用 CDL 标准剖面会得到一组与数据无关的假角度——所以 `loader.paths()`
 在这种数据上直接抛 `NotImplementedError`，不返回错误结果。
 
+### IoT 不是 snr_dB 减 sinr_dB
+
+教科书上 IoT = SNR/SINR 成立，但 ChannelHub 这两个字段**口径不同**：
+`snr_dB`（`internal_sim.py:2441`）不含阵列增益、还额外减了 `10log10(RB)`；
+几何 `sinr_dB` 的信号项含 `N_ant·|w^H a|^2`。273 RB、64 天线时差**约 40 dB**。
+
+相减得到的数形状对、随场景变化的趋势也对，**只是整体偏了几十 dB**——
+拿它当 IoT 会把中等干扰场景报成"极高干扰"。
+
+正确算法只用同口径的两个量（都出自 `compute_geometry_sinr_single_ue`）：
+
+    IoT = SIR / (SIR - SINR)      （线性域）
+
+`validate.check_interference_modeled` 的 `measured` 因此**只报"相同/不同"
+而不报差值**——放个数字进去就会有人把它读成干扰强度。
+
+`num_slots_per_sample > 1` 时这个式子只是近似：`sinr_dB` 是各 slot 的 dB 均值，
+`sir_dB` 取最后一个 slot。`interference_report` 会把 `iot_exact` 标成 false。
+
+### 业务域与测量域是两个量，别混
+
+`sir_dB` 是**业务域**几何 SIR（决定吞吐）；`ul_sir_dB` / `dl_sir_dB` 是
+**测量域**导频 SIR（决定信道估计精度）。两者可以差十几个 dB。
+
+实测一组对照：`srs_congested` 与 `srs_clean_reference` 只差导频配置，
+业务域 IoT 差 0.06 dB（噪声），SRS 测量域 SIR 差 **17.9 dB**（-10.50 vs +7.37）。
+只看业务域会认为这两个场景是同一件事。
+
+测量域两列**只在 `link="BOTH"`（paired）时才产生**，单向链路的数据里根本没有。
+
+### 上行几何 SIR 只能靠钩子取，且必须自检
+
+`compute_geometry_sinr_single_ue` 同时算出上下行几何 SIR，但 `internal_sim`
+只把下行那个存进 `ChannelSample.sir_dB`，上行的在函数返回后就丢了
+（`ChannelSample.ul_sir_dB` 存的是测量域的，完全是另一个量）。
+
+`interference.install_geometry_capture()` 包一层暂存，`take_ul_geometry_sir(sample)`
+取走。**包装函数自带自检**：把暂存里的 `dl_sinr_avg` / `sir_dl_db` 与样本自己的
+`sinr_dB` / `sir_dB` 对一遍，对不上就返回 nan——一次调用对一个样本的假设一旦破了
+（比如 ChannelHub 改成批量算），宁可没有上行 IoT 也不给错的。
+
+取值必须**紧跟在 `_SCALAR_SAMPLE_FIELDS` 循环之后**，隔一个样本就串了。
+
+### 负载类旋钮在下行完全不起作用
+
+几何模型里每个非服务小区都**无条件**贡献一份波束泄漏，`pdsch_load` 只决定
+对几个波束取平均——均值不变，只是方差变小。实测 0.2 与 1.0 两组的
+SINR / SIR / IoT **逐位相同**。
+
+上行的 `pusch_load` 是有效的，但调度 UE 数是 `max(1, round(num_ues/K x load))`，
+每小区 UE 数不足 2 时取整后恒为 1，同样无效。
+
+后果很具体：拿它做"轻载 vs 满载"对比会生成两批一模一样的数据，然后得出
+「负载不影响性能」。`decisions.check_guards` 现在会拦，`_LOAD_SWEEP` 也已经
+从 `prb_utilization` 改成 `isd_m`。**真正能动下行 IoT 的实测值**：
+ISD 100 m 38.3 dB / 200 m 24.9 / 500 m 4.4 / 1732 m 0.2；
+tx_power +16 dB 则 IoT +16 dB（SIR 一动不动）；NF 与带宽按噪声底精确换算。
+
+### 压 num_rb 探测场景是安全的，但 snr_dB 会撞夹逼
+
+同一 seed 下 `num_rb` 取 273 / 24 / 12，几何量**逐位相同**：sinr / sir / 路损 /
+距离 / 视距 / 多普勒 / UE 位置 / 上行几何 SIR 全部零差异。唯一变的是 `snr_dB`，
+因为它的定义里显式带 `-10log10(RB)`，273→24 实测差 10.56 dB，
+与 `10log10(273/24)=10.559` 吻合——**可以精确还原**。
+
+**但修正只对没被夹逼的样本成立。** ChannelHub 把 `snr_dB` 夹到 ±50 dB，
+探测口径下 snr 高了 10.4 dB，高信噪比场景会**先撞天花板再被减回去**，
+得到一个看起来正常的假值。实测 InF 与密集城区两个完全不同的场景，
+探测出的 SNR 都是 39.5 dB（= 49.9 - 10.4）。`scenario.probe` 现在剔除并计数。
+SINR / SIR / IoT 不受影响，它们不含 `10log10(RB)` 项。
+
+### 比耗时必须交错重测
+
+第一版性能基准把变体一个接一个顺序跑，耗时单调下降（4830→4054→…→1591 ms），
+得出"关掉 measurements 里的可选项能快 2.55 倍"。**全是预热与缓存的假象**——
+代码层面 `internal_sim` 只读 `ssb_rsrp` 与 `interferer_channels` 两个开关，
+其余四个根本没被引用。
+
+正确方法：每轮把所有变体各跑一次、轮转多轮取中位数，并把基准自身的轮间波动
+一起报出来。本机基准波动 **11.9%**，低于这个量级的"加速"就是噪声。
+交错重测后只剩两条是真的：关 SSB **1.40×**、`num_interfering_ues` 设小
+（0 → 1.62×、2 → 1.40×，但它改变物理）。
+
+### 文档里的计数要和代码绑死
+
+"19 项体检"这句话在 README / SKILL.md / 两份 HTML 里写了八处，
+而 `full_report` 从第一版（f44b46a）起就只有 16 项——数字凭印象写的，从没对过账。
+`test_interference` 第 10 节现在用正则从四份文档里抽计数，与
+`len(full_report(ds).checks)` 和 `sw_` 工具数比对。加检查/加工具时会红。
+
+### YAML 里以 `*` 开头的值是别名
+
+`caveat: **别拿 los_ratio 当判据**` 会被 YAML 当成别名解析并报
+"expected alphabetic or numeric character"。以 `*` 或 `&` 开头的值必须用
+`>-` 折叠块或引号包起来。
+
+### scenario 设成 *_LOS 不会让 los_ratio 变成 1
+
+所有链路一律走 LOS 路损公式（不看逐链路的 `is_los`），但数据里的 `is_los`
+仍按几何视距概率抽样——`umi_los_canyon` 实测 `los_ratio` 是 **0.46** 而不是 1。
+判断一批数据是不是视距的看 `scenario` 字段，不看 `los_ratio`。
+
 ## 加东西的地方
 
 - 新的 3GPP 校准量 → `calibration.py`，按条款号标注来源
@@ -304,7 +407,8 @@ SINR 中位数 35.7 → 18.1 dB。`generate._ensure_bs_panel()` 现在由 `num_b
 - 新的外部结果校验 → `results.check_pairable`，每条都必须是**硬拦截**不是告警
 - 新指标 → `analysis.KNOWN_METRICS` 加单位；自定义指标也支持，单位由调用方给
 - 新的标准查表值 → `spec38901.py`，**必须两条独立路径核对过**才录入
-- 新场景 → `presets/presets.yaml`，不改代码
+- 新场景 → `presets/presets.yaml`，不改代码。**加完必须跑一遍 `sw_probe_scenario` 把实测值写进 `expect`**——preset 里的 label 是设计意图，写着「高干扰」实际只有 2 dB 的事发生过
+- 新的干扰量或分级 → `interference.py`，门限改动等于改现场约定，先和用户对齐
 - 新射线追踪城市 → ChannelHub 的 `configs/scenes/`，`scenes.py` 自动发现
 - 新任务类型 / 新决策点 / 新对比组 / 新陷阱 → `decisions.py` 的
   `ALL_DECISIONS`、`_DESIGN`、`TASK_PROFILES`

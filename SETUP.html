@@ -463,8 +463,16 @@ the spec review step was being skipped entirely.</em>
 <tr><td><code>sw_describe_dataset</code></td><td>看维度、分布、可用字段</td></tr>
 <tr><td><code>sw_list_datasets</code></td><td>本机已生成的数据集</td></tr>
 
-<tr><td rowspan="3"><strong>体检校准</strong></td><td><code>sw_validate</code></td><td>19 项可信度检查</td></tr>
-<tr><td><code>sw_gate</code></td><td><strong>门 1</strong>：同样 19 项，但翻译成门禁语言——硬性项不通过即拦截</td></tr>
+<tr><td rowspan="3"><strong>场景探测</strong></td><td><code>sw_probe_scenario</code></td><td><strong>下单前先看货</strong>：几十秒探清干扰、覆盖、几何特征。num_rb 压到 24，几何量与全带宽<strong>逐位相同</strong>（实测），耗时约 1/8</td></tr>
+<tr><td><code>sw_compare_scenarios</code></td><td>几个候选场景并排比一张表</td></tr>
+<tr><td><code>sw_list_presets(group=…)</code></td><td>按 9 个分组浏览 21 个场景预设，每个都带实测特征</td></tr>
+
+<tr><td rowspan="3"><strong>干扰量化</strong></td><td><code>sw_interference_report</code></td><td><strong>业务域 IoT + 测量域导频 SIR</strong>。IoT 由几何 SIR 与 SINR 精确推出，含等效小区负载与估计 NMSE 下限</td></tr>
+<tr><td><code>sw_design_interference</code></td><td>要造某个 IoT 该动哪些旋钮，每条带实测值（其中两条与直觉相反）</td></tr>
+<tr><td><code>sw_iot_convert</code></td><td>IoT / 等效负载 / 分级之间换算</td></tr>
+
+<tr><td rowspan="3"><strong>体检校准</strong></td><td><code>sw_validate</code></td><td>17 项可信度检查</td></tr>
+<tr><td><code>sw_gate</code></td><td><strong>门 1</strong>：同样 17 项，但翻译成门禁语言——硬性项不通过即拦截。含 <strong>IoT 自洽性</strong>：逐样本 SIR &gt; SINR、IoT ≥ 0 dB、不可信样本不过半</td></tr>
 <tr><td><code>sw_calibrate</code></td><td><strong>3GPP 38.901 §7.8 校准量</strong>：耦合损耗、几何量（含噪/不含噪）、时延与角度扩展、PRB 奇异值三条 CDF</td></tr>
 
 <tr><td rowspan="3"><strong>下结论</strong></td><td><code>sw_link_performance</code></td><td>预编码 → 逐层 SINR → 谱效，四种预编码横向对比</td></tr>
@@ -506,7 +514,7 @@ the spec review step was being skipped entirely.</em>
 <tr><td><code>measure.py</code></td><td>542</td><td>物理测量量：PDP、协方差、特征谱、PMI、多径结构</td></tr>
 <tr><td><code>deliver.py</code></td><td>186</td><td>自然语言点单 → 可运行的取货代码</td></tr>
 <tr><td><code>linklevel.py</code></td><td>491</td><td>谱效链路：预编码 → 有效信道 → 后处理 SINR → 谱效 → 蒙特卡洛</td></tr>
-<tr><td><code>validate.py</code></td><td>844</td><td>19 项可信度检查</td></tr>
+<tr><td><code>validate.py</code></td><td>844</td><td>17 项可信度检查</td></tr>
 <tr><td><code>calibration.py</code></td><td>522</td><td>3GPP 38.901 §7.8 校准量 + 跨引擎 KS 比较</td></tr>
 <tr><td><code>gates.py</code></td><td>636</td><td>三道门、功效分析、配对检验、配置差分</td></tr>
 <tr><td><code>spec38901.py</code></td><td>245</td><td><strong>标准查表值</strong>：CDL-A/B/C 原表，逐字核对过；灌回仿真器</td></tr>

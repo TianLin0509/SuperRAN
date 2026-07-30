@@ -660,15 +660,76 @@ def check_interference_modeled(ds: Any) -> Check:
         if ok
         else (
             f"{cells} 小区但 " + "、".join(why) + "。报出的 SINR 实为单小区 SNR，"
-            f"干扰相关结论不成立。生成时需给 bs_panel（superwireless 会由 "
-            f"num_bs_tx_ant 自动推导，旧数据集没有这一步）"
+            "干扰相关结论不成立。生成时需给 bs_panel（superwireless 会由 "
+            "num_bs_tx_ant 自动推导，旧数据集没有这一步）"
         )
     )
     return Check(
         "干扰是否进入 SINR", ok, detail,
-        measured=round(float(np.nanmedian(sinr) - np.nanmedian(snr)), 2),
-        expected="SINR < SNR（干扰使其下降）",
+        # 这里**只报是否相同，不报差值**。`snr_dB` 与 `sinr_dB` 口径不同
+        # （前者不含阵列增益、多减了 10log10(RB)），相减既不是 IoT 也没有
+        # 别的物理含义，放进 measured 只会被当成干扰强度读。真正的 IoT
+        # 见 check_iot_sane 与 interference.iot_stats。
+        measured=("SINR == SNR" if same else "SINR != SNR"),
+        expected="SINR != SNR（干扰使其下降）",
         tolerance="SINR 与 SNR 不得逐点相同",
+    )
+
+
+def check_iot_sane(ds: Any) -> Check:
+    """IoT（噪声抬升）的物理自洽性。
+
+    三条硬约束，每条都是物理上必须成立的：
+
+    1. 逐样本 ``SIR > SINR``——SINR = S/(I+N) 一定比 SIR = S/I 小，因为分母多了
+       热噪声。反过来只可能是夹逼或口径错配。
+    2. ``IoT >= 0 dB``——噪声抬升不可能为负。
+    3. 不可信样本（贴 ±50 dB 边界、49.9 哨兵）占比不能过半，否则这批数据的
+       干扰结论建立在夹逼过的数上。
+
+    通过之后顺带把 IoT 中位数与等级报出来，省得再调一次报告。
+    """
+    from . import interference as itf  # noqa: PLC0415
+
+    cells = int(ds.config.get("num_sites", 1) or 1) * int(
+        ds.config.get("sectors_per_site", 1) or 1
+    )
+    if cells <= 1:
+        return Check("IoT 自洽性", True, f"单小区配置（{cells} 小区），无 IoT 可言",
+                     severity="info")
+    try:
+        sinr = np.asarray(ds.sinr_dB, dtype=float)
+        sir = np.asarray(ds.scalar("sir_dB"), dtype=float)
+    except KeyError:
+        return Check("IoT 自洽性", False, "数据集缺 sir_dB，算不出 IoT", severity="warn")
+
+    st = itf.iot_stats(sinr, sir)
+    both = np.isfinite(sinr) & np.isfinite(sir)
+    violations = int(np.sum(both & (sir <= sinr)))
+    untrusted = st.n_clamped + st.n_no_interferer
+    frac_untrusted = untrusted / max(st.n_total, 1)
+
+    ok = violations == 0 and st.n_valid > 0 and frac_untrusted <= 0.5
+    if st.n_valid:
+        ok = ok and st.median_db >= -1e-6
+
+    parts = [f"{st.n_valid}/{st.n_total} 个样本可算 IoT"]
+    if st.n_valid:
+        cls = itf.classify_iot(st.median_db)
+        parts.append(
+            f"中位数 {st.median_db:.1f} dB（{cls['band']}，等效负载 {cls['equivalent_load']}）"
+        )
+        parts.append(f"5%~95% {st.p5_db:.1f}~{st.p95_db:.1f} dB")
+    if violations:
+        parts.append(f"**{violations} 个样本 SIR <= SINR，物理上不可能**")
+    if untrusted:
+        parts.append(f"{untrusted} 个样本不可信（贴边 {st.n_clamped} / 无干扰源 {st.n_no_interferer}）")
+
+    return Check(
+        "IoT 自洽性", ok, "；".join(parts),
+        measured=round(st.median_db, 2) if st.n_valid else None,
+        expected="SIR > SINR 逐样本成立，IoT >= 0 dB",
+        tolerance="不可信样本 <= 50%",
     )
 
 
@@ -830,6 +891,7 @@ def full_report(ds: Any, *, snr_db: float = 20.0) -> ValidationReport:
         check_scenario_model_consistency(ds),
         check_cell_count(ds),
         check_interference_modeled(ds),
+        check_iot_sane(ds),
         check_pathloss_range(ds),
         check_pathloss_above_free_space(ds),
         check_delay_spread_vs_profile(ds),

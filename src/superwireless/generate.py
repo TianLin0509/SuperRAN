@@ -39,11 +39,19 @@ _SCALAR_META_FIELDS = (
 )
 
 # 逐样本收集的顶层标量字段
+#
+# ``ul_sir_dB`` / ``dl_sir_dB`` 是**测量域**的量（导频上的信干比），和业务域的
+# ``sir_dB``（几何 SIR）完全不是一回事——前者决定信道估计准不准，后者决定吞吐。
+# 早先只收了业务域那个，于是"SRS 被邻区 UE 打穿"这类场景在数据里完全看不见。
 _SCALAR_SAMPLE_FIELDS = (
     "snr_dB", "sinr_dB", "sir_dB", "noise_power_dBm",
     "serving_cell_id", "dl_rank", "slot_duration_s",
     "ul_pre_sinr_dB", "ul_snr_dB", "ul_sinr_dB",
+    "ul_sir_dB", "dl_sir_dB", "num_interfering_ues",
 )
+
+# 靠钩子采集、ChannelSample 里没有的字段。见 interference.install_geometry_capture。
+_HOOKED_SAMPLE_FIELDS = ("ul_sir_geo_dB",)
 
 
 def _as_float(v: Any) -> float:
@@ -189,6 +197,9 @@ def estimate_seconds(cfg: dict[str, Any], num_samples: int) -> float:
     if str(cfg.get("scenario", "")) in ("munich", "custom_osm", "etoile",
                                         "florence", "san_francisco"):
         ms = max(ms, 3000.0)  # 射线追踪慢一个量级
+    # 关掉 SSB 测量省约 30%（交错重测：3456 → 2475 ms，基准轮间波动 11.9%）。
+    if cells > 1 and not (cfg.get("measurements") or {}).get("ssb_rsrp", True):
+        ms *= 0.72
     return ms * num_samples / 1000.0
 
 
@@ -288,12 +299,20 @@ def _collect(
     返回 ``(payload, first_meta, stats)``。stats 里带尝试数/拒绝数/观察到的
     信噪比，供上层合并统计与报错。
     """
+    from . import interference as intf_mod  # noqa: PLC0415
+
+    # 上行几何 SIR 在 ChannelSample 里没有位置，只能靠钩子从 ChannelHub 内部取。
+    # 挂不上就少这一列，不影响其余流程（钩子内部吞异常并回 False）。
+    intf_mod.install_geometry_capture()
+
     h_true: list[np.ndarray] = []
     h_est: list[np.ndarray] = []
     h_intf: list[np.ndarray] = []
     positions: list[np.ndarray] = []
     w_dl: list[np.ndarray] = []
-    scalars: dict[str, list[float]] = {k: [] for k in _SCALAR_SAMPLE_FIELDS}
+    scalars: dict[str, list[float]] = {
+        k: [] for k in (*_SCALAR_SAMPLE_FIELDS, *_HOOKED_SAMPLE_FIELDS)
+    }
     metas: dict[str, list[Any]] = {k: [] for k in _SCALAR_META_FIELDS}
     ssb_rsrp: list[list[float]] = []
     ssb_sinr: list[list[float]] = []
@@ -337,6 +356,9 @@ def _collect(
 
         for k in _SCALAR_SAMPLE_FIELDS:
             scalars[k].append(_as_float(getattr(sample, k, None)))
+        # 必须紧跟着取：钩子里存的是"上一次几何 SINR 计算"的结果，
+        # 隔一个样本就串了。take_ 会拿下行量与本样本核对，对不上回 nan。
+        scalars["ul_sir_geo_dB"].append(intf_mod.take_ul_geometry_sir(sample))
 
         meta = sample.meta if isinstance(sample.meta, dict) else {}
         if not first_meta:
@@ -453,16 +475,29 @@ def generate(
     progress: Callable[[int, int], None] | None = None,
     max_attempts_factor: int = 5,
     workers: int | str = 1,
+    collect_ssb: bool | None = None,
 ) -> dict[str, Any]:
     """生成数据集并落盘，返回句柄与摘要。
 
     snr_range_dB 用拒绝采样实现——internal_sim 没有直接设定信噪比的参数，
     信噪比由路损、发射功率和噪声共同决定，只能生成后筛。接受率会如实报告。
+
+    collect_ssb 控制要不要算每小区的 SSB RSRP/SINR。**关掉能省约 30% 时间**
+    （交错重测的中位数：3456 → 2475 ms/样本，基准自身的轮间波动 11.9%，
+    所以这个差是真的）。代价是 ``Dataset.ssb`` 为空，小区选择、切换、
+    波束管理类课题用不了。默认 None = 跟随配置里的 ``measurements.ssb_rsrp``，
+    都没给就保留（**不静默减少数据**）。
     """
     cfg = dict(cfg)
     source_name = str(cfg.pop("source", "internal_sim"))
     cfg["num_samples"] = int(num_samples)
     panel, panel_derived = _ensure_bs_panel(cfg)
+
+    if collect_ssb is not None:
+        meas = dict(cfg.get("measurements") or {})
+        meas["ssb_rsrp"] = bool(collect_ssb)
+        cfg["measurements"] = meas
+    ssb_on = bool((cfg.get("measurements") or {}).get("ssb_rsrp", True))
 
     dataset_id = "ds_" + uuid.uuid4().hex[:8]
     out_dir = dataset_dir(dataset_id)
@@ -470,16 +505,6 @@ def generate(
 
     lo, hi = (float(snr_range_dB[0]), float(snr_range_dB[1])) if snr_range_dB else (-np.inf, np.inf)
     filtering = np.isfinite(lo) or np.isfinite(hi)
-
-    h_true: list[np.ndarray] = []
-    h_est: list[np.ndarray] = []
-    h_intf: list[np.ndarray] = []
-    positions: list[np.ndarray] = []
-    w_dl: list[np.ndarray] = []
-    scalars: dict[str, list[float]] = {k: [] for k in _SCALAR_SAMPLE_FIELDS}
-    metas: dict[str, list[Any]] = {k: [] for k in _SCALAR_META_FIELDS}
-    ssb_rsrp: list[list[float]] = []
-    ssb_sinr: list[list[float]] = []
 
     accepted = 0
     attempted = 0
@@ -581,6 +606,19 @@ def generate(
             "干扰相关的结论不成立。"
         )
 
+    # IoT（噪声抬升）。由几何 SIR 与 SINR 精确推出——**不是** snr - sinr，
+    # 那两个字段口径不同，相减差几十 dB（见 interference.py 模块文档）。
+    iot_block: dict[str, Any] | None = None
+    if interference_modeled and sir_arr is not None and sir_arr.size:
+        from . import interference as _intf  # noqa: PLC0415
+
+        st = _intf.iot_stats(sinr_arr, sir_arr)
+        iot_block = {"dl": st.as_dict()}
+        ul_geo = payload.get("scalar__ul_sir_geo_dB")
+        ul_sinr = payload.get("scalar__ul_sinr_dB")
+        if ul_geo is not None and ul_sinr is not None and np.isfinite(ul_geo).any():
+            iot_block["ul"] = _intf.iot_stats(ul_sinr, ul_geo).as_dict()
+
     # 预注册口径随数据一起存档。**必须在生成时绑定，事后补绑没有意义**——
     # 预注册的全部价值就在于"看数据之前写下的"，事后写的只是记录。
     prereg_block = None
@@ -633,6 +671,8 @@ def generate(
         },
         "interference_modeled": interference_modeled if cells_cfg > 1 else None,
         "interference_note": interference_note,
+        "iot": iot_block,
+        "collect_ssb": ssb_on,
         "shape": {
             "N": int(shape[0]), "T": int(shape[1]), "RB": int(shape[2]),
             "BS_ant": int(shape[3]), "UE_ant": int(shape[4]),

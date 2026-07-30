@@ -119,15 +119,35 @@ def load_presets() -> dict[str, dict[str, Any]]:
 def preset_summaries() -> list[dict[str, Any]]:
     out = []
     for name, body in load_presets().items():
-        out.append(
-            {
-                "preset": name,
-                "label": body.get("label", name),
-                "summary": body.get("summary", ""),
-                "typical_for": body.get("typical_for", []),
-                "num_sites": body.get("config", {}).get("num_sites"),
-            }
-        )
+        cfg = body.get("config", {}) or {}
+        item = {
+            "preset": name,
+            "group": body.get("group", "其他"),
+            "label": body.get("label", name),
+            "summary": body.get("summary", ""),
+            "typical_for": body.get("typical_for", []),
+            "num_sites": cfg.get("num_sites"),
+            "num_cells": (
+                (cfg.get("num_sites") or 1) * (cfg.get("sectors_per_site") or 1)
+                if cfg.get("num_sites") else None
+            ),
+            "isd_m": cfg.get("isd_m"),
+            "link": cfg.get("link", "DL"),
+        }
+        # 只有真跑过、把实测值写回 preset 的场景才有 expect；没有就不给，
+        # 不用"设计意图"冒充实测。
+        for key in ("expect", "verify", "caveat"):
+            if body.get(key):
+                item[key] = body[key]
+        out.append(item)
+    return out
+
+
+def preset_groups() -> dict[str, list[str]]:
+    """按 group 归类的预设名清单。"""
+    out: dict[str, list[str]] = {}
+    for name, body in load_presets().items():
+        out.setdefault(body.get("group", "其他"), []).append(name)
     return out
 
 

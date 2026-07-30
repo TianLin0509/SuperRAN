@@ -90,14 +90,28 @@ def sw_capabilities() -> dict[str, Any]:
 
 
 @mcp.tool()
-def sw_list_presets() -> dict[str, Any]:
-    """列出场景预设。预设只提供场景骨架，具体参数由 sw_plan 协商决定。"""
+def sw_list_presets(group: str | None = None) -> dict[str, Any]:
+    """列出场景预设。预设只提供场景骨架，具体参数由 sw_plan 协商决定。
+
+    参数
+    ----
+    group : 只看某一组（干扰场景 / 测量干扰 / 大站间距 / 移动性 / 传播条件 /
+            多小区干扰 / 基线 / 射线追踪 / 室内与专网）。不给则全给。
+    """
+    items = pl.preset_summaries()
+    if group:
+        items = [x for x in items if x.get("group") == group]
     return {
-        "presets": pl.preset_summaries(),
+        "groups": pl.preset_groups(),
+        "presets": items,
         "tasks": [
             {"task": p.task, "label": p.label, "asks": list(p.decision_keys)}
             for p in dec.TASK_PROFILES
         ],
+        "note": (
+            "干扰类场景的 IoT 必须生成后用 sw_interference_report 复核 —— "
+            "preset 里写的是设计意图，不是保证达标的实测值。"
+        ),
     }
 
 
@@ -209,6 +223,7 @@ async def sw_generate(
     num_samples: int | None = None,
     prereg_id: str | None = None,
     workers: int | str = "auto",
+    collect_ssb: bool | None = None,
 ) -> dict[str, Any]:
     """生成信道数据集，返回句柄与统计摘要（不返回数据本身）。
 
@@ -226,6 +241,11 @@ async def sw_generate(
     workers 默认 "auto"：按配置预估耗时决定要不要起多进程。多小区大带宽的
     配置能快 3 倍以上；轻配置起进程反而更慢，会自动走串行。
     并行时各块用不同 seed，结果与串行统计等价但逐样本不同（摘要里会写明）。
+
+    collect_ssb=False 关掉每小区 SSB RSRP/SINR 的计算，**多小区场景省约 30%**
+    （交错重测中位数 3456 -> 2475 ms/样本，基准自身轮间波动 11.9%）。
+    代价是 Dataset.ssb 为空——小区选择、切换、波束管理类课题需要它，别乱关。
+    默认 None = 保留，不静默减少数据。
     """
     # 仿真是 CPU 密集的，丢到工作线程，别把 MCP 事件循环堵死
     _dbg("sw_generate: 进入，准备切工作线程")
@@ -239,6 +259,7 @@ async def sw_generate(
             prereg_id=prereg_id,
             workers=workers,
             num_samples=num_samples,
+            collect_ssb=collect_ssb,
         )
     )
     _dbg("sw_generate: 工作线程返回，准备序列化响应")
@@ -254,6 +275,7 @@ def _generate_sync(
     num_samples: int | None,
     prereg_id: str | None = None,
     workers: int | str = "auto",
+    collect_ssb: bool | None = None,
 ) -> dict[str, Any]:
     if draft_id:
         draft = pl.load_draft(draft_id)
@@ -298,6 +320,7 @@ def _generate_sync(
         draft_id=draft.draft_id,
         prereg_id=prereg_id or "",
         workers=workers,
+        collect_ssb=collect_ssb,
     )
     _dbg(f"_generate_sync: 生成完成 {summary['dataset_id']} {summary['elapsed_s']}s")
 
@@ -845,7 +868,7 @@ def sw_mcs_info(
 
     `show_bler_anchors=true` 时给出各 MCS 达到 10% BLER 所需的有效 SINR，
     以及它距同频谱效率的香农极限有多远。**这是模型预测，摆出来供人工对照
-    公开的 NR 链路级曲线**——常见量级是 MCS0 约 −5~−7 dB、MCS28 约 20~23 dB。
+    公开的 NR 链路级曲线**——常见量级是 MCS0 约 -5~-7 dB、MCS28 约 20~23 dB。
 
     表格本身是逐字录入的标准值，`verify_tables` 用"SE == q_m·R/1024"这条
     表内蕴关系做过自检。
@@ -880,7 +903,7 @@ async def sw_sweep_snr(
     吞吐、选中的 MCS。**同一批信道**意味着各点之间是配对的，曲线不会被
     信道抽样噪声搅乱。
 
-    默认扫 −5 ~ 35 dB。返回里 `efficiency_vs_shannon` 的走势最有信息量：
+    默认扫 -5 ~ 35 dB。返回里 `efficiency_vs_shannon` 的走势最有信息量：
     低信噪比处接近 1（受噪声限），高信噪比处掉下来（受 MCS 表封顶限）。
     """
     return await anyio.to_thread.run_sync(
@@ -928,6 +951,171 @@ def _sweep_sync(*, dataset_id: str, snr_db_list: list[float] | None,
             "不是信道或算法的问题。"
         ),
     })
+
+
+# ---------------------------------------------------------------------------
+# 干扰强度
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def sw_interference_report(dataset_id: str) -> dict[str, Any]:
+    """一个数据集的干扰画像：业务域 IoT + 测量域导频 SIR。只读已落盘的标量。
+
+    **业务域和测量域是两回事**，报告分开给：
+
+    * ``traffic_domain``——PDSCH/PUSCH 受到的干扰，用 IoT（噪声抬升 (I+N)/N）
+      刻画。20 dB 以上算高干扰，同时给出等效小区负载。
+    * ``measurement_domain``——SRS / CSI-RS 导频受到的干扰，决定信道估计精度。
+      给出估计 NMSE 的下限。这两列只在 ``link="BOTH"`` 生成的数据里有。
+
+    IoT 由几何 SIR 与 SINR 精确推出（``IoT = SIR/(SIR-SINR)``，线性域），
+    **不是 snr_dB 减 sinr_dB**——那两个字段口径不同，相减会差几十 dB。
+
+    贴在 ±50 dB 契约边界上的样本、以及没有干扰源的哨兵样本会单独计数而不是
+    混进统计，``notes`` 里会说明。
+    """
+    from . import interference as itf
+
+    return _jsonable(itf.interference_report(dataset_id))
+
+
+@mcp.tool()
+def sw_iot_convert(
+    iot_db: float | None = None,
+    load: float | None = None,
+    sinr_db: float | None = None,
+    sir_db: float | None = None,
+) -> dict[str, Any]:
+    """IoT 相关的换算与分级。三种用法，给哪组参数就算哪个。
+
+    * 给 ``sinr_db`` + ``sir_db``：算这一点的 IoT（两者必须同口径，
+      即都来自几何 SINR 计算，不能拿 snr_dB 凑）。
+    * 给 ``iot_db``：分级 + 换成等效小区负载。
+    * 给 ``load``：由等效负载反推 IoT。
+
+    等效负载用的是上行极点容量关系 ``IoT = 1/(1-load)``，是**解释性**换算，
+    帮助把 "IoT 20 dB" 读成 "等效 99% 负载"，不代表仿真真按这个负载调度。
+    """
+    from . import interference as itf
+
+    out: dict[str, Any] = {}
+    if sinr_db is not None and sir_db is not None:
+        v = float(itf.iot_db(sinr_db, sir_db))
+        out["from_sinr_sir"] = {"sinr_db": sinr_db, "sir_db": sir_db, **itf.classify_iot(v)}
+        if iot_db is None:
+            iot_db = v
+    if iot_db is not None:
+        out["classification"] = itf.classify_iot(float(iot_db))
+    if load is not None:
+        out["from_load"] = {
+            "load": load,
+            **itf.classify_iot(itf.iot_from_load(float(load))),
+        }
+    if not out:
+        out["error"] = "至少要给 iot_db、load，或者 sinr_db + sir_db 这一对。"
+    out["bands"] = [
+        {"upper_db": (None if h == float("inf") else h), "band": b, "meaning": w}
+        for h, b, w in itf.IOT_BANDS
+    ]
+    return _jsonable(out)
+
+
+@mcp.tool()
+def sw_design_interference(target_iot_db: float = 20.0) -> dict[str, Any]:
+    """要构造某个干扰强度的场景，该动哪些旋钮。
+
+    **不返回保证达标的配置。** IoT 由几何、负载、功率共同决定，唯一可靠的
+    确认方式是生成一批再用 ``sw_interference_report`` 复核。这里给的是方向与
+    量级，以及各旋钮在 ChannelHub 几何模型里的**实际**作用——有几个和教科书
+    直觉不一样，写在每条的 note 里。
+    """
+    from . import interference as itf
+
+    return _jsonable(itf.design_hint(target_iot_db))
+
+
+# ---------------------------------------------------------------------------
+# 场景探测
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def sw_probe_scenario(
+    preset: str | None = None,
+    config: dict[str, Any] | None = None,
+    num_samples: int = 30,
+) -> dict[str, Any]:
+    """花几十秒看清一个场景长什么样，再决定要不要花几十分钟正式跑。
+
+    **下单之前先看货。** 把 ``num_rb`` 压到 24、关掉 SSB 测量，几何量与全带宽
+    **逐位相同**（实测 273 / 24 / 12 三档，sinr / sir / 路损 / 距离 / 视距 /
+    多普勒 / UE 位置全部零差异），唯一变的 ``snr_dB`` 有解析修正且已修正。
+    耗时降到约 1/8。
+
+    回的是：干扰画像（IoT，多小区才有）、链路预算（SNR/SINR/SIR 分布）、
+    几何量（路损、距离、视距比例、多普勒）、测量域导频 SIR（link=BOTH 才有）。
+
+    ``not_available`` 里明确列出探测模式**给不了**的量——谱效、吞吐、时延扩展
+    估计、宽带预编码。这些必须跑正式生成，别拿探测结果替代。
+
+    参数
+    ----
+    preset : 预设名（sw_list_presets 查）。与 config 二选一。
+    config : 直接给配置。给了 preset 时作为覆盖项。
+    num_samples : 探测样本数。30 看中位数够用，看 5% 分位建议 100 以上。
+    """
+    from . import scenario as sc
+
+    cfg: dict[str, Any] = {}
+    if preset:
+        presets = pl.load_presets()
+        if preset not in presets:
+            return {"error": f"未知预设 {preset!r}", "available": sorted(presets)}
+        cfg = dict(presets[preset]["config"])
+    if config:
+        cfg.update(config)
+    if not cfg:
+        return {"error": "preset 与 config 至少给一个。"}
+
+    out = sc.probe(cfg, num_samples=num_samples)
+    out["preset"] = preset
+    return _jsonable(out)
+
+
+@mcp.tool()
+def sw_compare_scenarios(
+    presets: list[str],
+    num_samples: int = 30,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """并排探测几个场景，回一张对照表。用来在候选场景里选。
+
+    每个场景各跑一次探测（见 ``sw_probe_scenario`` 的口径说明），
+    表里给 IoT 中位数与等级、SINR/SNR 中位数、路损中位数、视距比例、单样本耗时。
+
+    典型用法：确认"高干扰"预设确实比"低干扰"对照高出足够的 IoT，
+    再拿这两个去跑正式对比——**别在没验证过干扰水平的两批数据上做消融**。
+    """
+    from . import scenario as sc
+
+    all_presets = pl.load_presets()
+    named: dict[str, dict[str, Any]] = {}
+    unknown = []
+    for name in presets:
+        if name not in all_presets:
+            unknown.append(name)
+            continue
+        cfg = dict(all_presets[name]["config"])
+        if overrides:
+            cfg.update(overrides)
+        named[name] = cfg
+    if unknown:
+        return {"error": f"未知预设：{unknown}", "available": sorted(all_presets)}
+    if not named:
+        return {"error": "presets 不能为空。"}
+
+    return _jsonable(sc.compare_probes(named, num_samples=num_samples))
 
 
 def main() -> None:
