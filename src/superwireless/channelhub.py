@@ -120,16 +120,28 @@ def probe_capabilities() -> tuple[Capability, ...]:
     """启动时探测各引擎依赖，缺什么如实报出来，不等到调用时才崩。"""
     root = channelhub_root()
     if not _looks_like_channelhub(root):
+        # **三个引擎都要报，不能只报 internal_sim。** 早先这里只返回一个条目，
+        # 于是没装 ChannelHub 时 sionna_rt / quadriga_real 从清单里整个消失——
+        # 调用方写 engines["sionna_rt"] 会 KeyError，看起来像工具坏了。
+        # 清单的长度不该随环境变化，变的只是 available 与 missing。
+        why = (
+            f"未找到 ChannelHub 源码（试过 {root}）。"
+            "请先 clone https://github.com/wangxz0803-lab/ChannelHub_main ，"
+            f"放在本项目同级或上级目录，或设环境变量 {_ENV_KEY} 指向它。"
+            "判据是该目录下存在 src/msg_embedding/data/contract.py。"
+        )
+        rt_missing = [m for m in ("sionna.rt", "mitsuba", "drjit") if not _probe_module(m)]
         return (
+            Capability("internal_sim", False, why, ["ChannelHub"]),
             Capability(
-                "internal_sim",
-                False,
-                (
-                    f"未找到 ChannelHub 源码（试过 {root}）。"
-                    "请先 clone https://github.com/wangxz0803-lab/ChannelHub_main ，"
-                    f"放在本项目同级目录，或设环境变量 {_ENV_KEY} 指向它。"
-                ),
-                ["ChannelHub"],
+                "sionna_rt", False,
+                why if not rt_missing else why + f" 另外还缺 {', '.join(rt_missing)}。",
+                ["ChannelHub", *rt_missing],
+            ),
+            Capability(
+                "quadriga_real", False,
+                "需要 MATLAB 或 Octave 运行时，本方案未纳入；且同样依赖 ChannelHub。",
+                ["ChannelHub", "octave"],
             ),
         )
 

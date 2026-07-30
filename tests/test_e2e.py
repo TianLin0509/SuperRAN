@@ -4,12 +4,17 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+# Windows 中文控制台是 GBK：print 含 U+FFFD 等字符时会炸 UnicodeEncodeError，
+# 把测试输出吓成"失败"。统一 reconfigure，本文件的 print 全部 replace 兜底。
+sys.stdout.reconfigure(errors="replace")
 
 from superwireless import decisions as dec  # noqa: E402
 from superwireless import deliver as dlv  # noqa: E402
@@ -137,18 +142,30 @@ sect("8  真的把取货代码跑一遍")
 with tempfile.TemporaryDirectory() as td:
     script = Path(td) / "fetch.py"
     script.write_text(res["code"], encoding="utf-8")
+    # 子进程的编码要**显式统一成 UTF-8**，不能只在父进程按 UTF-8 解码。
+    # Windows 默认 GBK：子进程按 GBK 输出中文，父进程按 UTF-8 解码 → 乱码 →
+    # `errors="replace"` 把乱码换成 U+FFFD → 测试照样"通过"，
+    # 然后父进程再把 U+FFFD 打到 GBK 控制台时才炸，而且报的是父进程的错。
+    # PYTHONIOENCODING 管子进程的 stdout/stderr 编码，PYTHONUTF8 管其内部默认编码。
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     proc = subprocess.run(
         [sys.executable, str(script)],
         capture_output=True,
         text=True,
         encoding="utf-8",
-        errors="replace",
+        errors="strict",  # 出乱码就抛，不许静默替换
         timeout=300,
+        env=env,
     )
-    print((proc.stdout or "").strip()[:1400])
+    out = (proc.stdout or "").strip()
+    print(out[:1400])
     if proc.returncode != 0:
         print("STDERR:\n" + (proc.stderr or "")[-2500:])
     check(proc.returncode == 0, "取货代码可直接运行")
+    # 光看返回码抓不到编码问题，必须断言输出内容。
+    # 上面已断言 measurements 含 pdp，取货代码里 PDP 那段会打印"RMS 时延扩展 … ns"。
+    check("�" not in out, "子进程输出无替换字符 U+FFFD（编码链路正确）")
+    check("时延扩展" in out, "子进程输出的中文正确传回")
 
 # ---------------------------------------------------------------------------
 sect("9  测量量物理正确性抽查")

@@ -17,11 +17,11 @@
 ## 测试
 
 ```bash
-python tests/test_e2e.py         # 端到端 37 项
+python tests/test_e2e.py         # 端到端 39 项
 python tests/test_mcp_server.py  # MCP 全链路 21 项
 python tests/test_raytracing.py  # 射线追踪与决策层 39 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
-python tests/test_gates.py       # 校准、标准表、三道门 62 项
+python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 ```
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
@@ -61,6 +61,55 @@ python tests/test_gates.py       # 校准、标准表、三道门 62 项
 `scipy/interpolate/_fitpack_impl.py` 的 `create_module`。
 
 调试时设 `SUPERWIRELESS_DEBUG=1`，会开 faulthandler 并打点到 stderr。
+
+### 门 3 的判决必须显式说清用哪个检验
+
+`PairedResult` 曾有个叫 `significant` 的属性，只看配对 t 检验；而文档写着
+"两检验冲突时以 Wilcoxon 为准"。门 3 用的是前者，于是 t 显著、Wilcoxon 不显著的
+样本被直接放行——**承诺的判据和代码实际用的判据是两回事**，这比判据宽松更危险。
+
+现在 `significant` 已删除，改为 `t_significant` / `wilcoxon_significant` /
+`tests_agree` / `decision_test` / `decision_p_value` / `decision_significant`。
+判决以 Wilcoxon 为准（谱效差值分布常偏态，t 的正态假设不成立、小样本偏乐观），
+Wilcoxon 算不出来才退回 t。`statement` 必须写出用的是哪个检验。
+
+回归样本记在 `tests/test_gates.py` 第 6.5 节，别删：
+`d = [-0.0811, 1.5561, 0.5308, 1.9896, 3.2605, -0.1125, 1.6908, -0.2045]`
+（n=8，t p=0.044 显著、Wilcoxon p=0.109 不显著）。
+
+### 零方差差值要分两种情况
+
+`paired_compare` 里 `se <= _EPS` 时不能一律 `p = 0`：差值恒为 0（两臂完全相同）
+应当 p=1，差值恒为非零常数才是 p=0。早先一律写 0，于是"自己跟自己比"得到
+p=0（最显著），只是碰巧被"置信区间不跨零"拦住——靠运气拦住的不算拦住。
+另外 `float("inf") * np.sign(0)` 是 nan，还会抛 RuntimeWarning。
+
+### 子进程编码要在子进程侧统一，不能只在父进程解码
+
+`test_e2e.py` 起子进程跑取货代码。只在父进程写 `encoding="utf-8",
+errors="replace"` 是不够的：Windows 默认 GBK 时子进程按 GBK 输出中文，
+父进程按 UTF-8 解码得到乱码，`errors="replace"` 把它换成 U+FFFD，
+**测试照样"通过"**，等父进程把 U+FFFD 打到 GBK 控制台时才炸，且报的是父进程的错。
+
+正确做法：给子进程设 `PYTHONIOENCODING=utf-8` + `PYTHONUTF8=1`，父进程用
+`errors="strict"`，并断言输出里没有 U+FFFD、且预期中文短语在。
+
+### 引擎清单长度不能随环境变化
+
+`probe_capabilities()` 早先在找不到 ChannelHub 时只返回 `internal_sim` 一条，
+于是调用方写 `engines["sionna_rt"]` 会 KeyError，看起来像工具坏了。
+清单必须恒为三条，变的只是 `available` 与 `missing`。
+
+### 离线包默认必须是完整包
+
+`pip install -e .` 会起隔离构建环境去装 `build-system.requires`，离线时这一步
+也得有轮子。早先的轻量包不含 `setuptools`，在全新 venv 里直接失败，而 pip 只说
+"install build dependencies did not run successfully"，**完全看不出缺什么**。
+
+现在默认打完整包（含 numpy/scipy + 构建后端），轻量包必须显式 `--thin`，
+包型写进文件名和 `bundle-manifest.json` 的 `bundle_kind` / `self_contained` /
+`requires_preinstalled`。改打包脚本前先想清楚：**接收方拿到包时没有网络，
+所有"顺手 pip 一下"的假设都不成立。**
 
 ### mcp 1.x 与 2.x 的服务端类换了位置
 

@@ -34,7 +34,9 @@ def sect(t: str) -> None:
 # ---------------------------------------------------------------------------
 sect("1  射线追踪引擎可用性")
 caps = {c.name: c for c in ch.probe_capabilities()}
-rt = caps["sionna_rt"]
+rt = caps.get("sionna_rt")
+if rt is None:  # 兼容旧版 probe 的提前返回；恒报三引擎后不会再触发
+    rt = ch.Capability("sionna_rt", False, "引擎探测未报告 sionna_rt", ["sionna.rt"])
 print(f"  sionna_rt: {'可用' if rt.available else '不可用'}  {rt.detail}")
 # sionna-rt 是可选依赖。没装时本文件后半段会自动跳过实跑，但前半段的场景发现、
 # 决策层、陷阱拦截都不依赖它，仍然要测。硬断言"可用"会让没装的人看到假失败。
@@ -43,6 +45,14 @@ check(
     "sionna_rt 可用性报告与事实一致" + ("（已装）" if rt.available else "（未装，已列出缺失项）"),
 )
 RT_OK = bool(rt.available)
+
+# 无 ChannelHub 时，场景清单/决策/陷阱/实跑各节全部依赖内核——如实跳过，不算失败。
+# （INSTALL_AGENT.md 第 7 步承诺"缺依赖自动跳过"，离线包环境正是这种情况。）
+if any("ChannelHub" in c.missing for c in caps.values()):
+    sect("2~5  依赖 ChannelHub —— 跳过")
+    print("  未找到 ChannelHub 源码，后续各节依赖内核，全部跳过（不算失败）。")
+    print("  补齐方式见 INSTALL_AGENT.md 第 2 步。")
+    raise SystemExit(0)
 
 # ---------------------------------------------------------------------------
 sect("2  场景清单")

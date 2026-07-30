@@ -253,10 +253,10 @@ https://github.com/TianLin0509/superwireless/blob/main/INSTALL_AGENT.md
 <h4>② 内网用户：离线 .zip</h4>
 <p>在能联网的机器上打包：</p>
 <pre style="margin:8px 0; font-size:11.5px;"><code>python scripts/make_offline_bundle.py
-<span class="cm"># → dist/superwireless-offline-win_amd64-py3.12.zip  15.6 MB</span>
+<span class="cm"># → …-full-win_amd64-py3.12.zip  65 MB  全新 venv 可全程离线装</span>
 
-python scripts/make_offline_bundle.py --with-numpy
-<span class="cm"># → 62 MB，连 numpy/scipy 的 wheel 一起带</span></code></pre>
+python scripts/make_offline_bundle.py --thin
+<span class="cm"># → …-thin-win_amd64-py3.12.zip  17 MB  要求目标机已有 numpy/scipy</span></code></pre>
 <p>接收方解压后，把 <code>开始安装.txt</code> 里那句话发给自己的 agent 即可，
 全程不需要联网。</p>
 </div>
@@ -271,6 +271,7 @@ python scripts/make_offline_bundle.py --with-numpy
 <tr><td><code>INSTALL_AGENT.md</code></td><td>给 agent 看的安装步骤，自动识别离线模式</td></tr>
 <tr><td><code>wheels/</code></td><td>依赖的 wheel。装的时候 <code>pip install --no-index --find-links wheels -e .</code></td></tr>
 <tr><td>源码 + skill + presets + tests</td><td>与仓库一致，去掉了 <code>__pycache__</code> 与 <code>artifacts/</code></td></tr>
+<tr><td><code>bundle-manifest.json</code></td><td>包型、commit、平台、各 wheel 与关键文件的 SHA-256。<code>requires_preinstalled</code> 直接列出需自备什么</td></tr>
 <tr><td>三份 HTML 文档</td><td>SETUP / CAPABILITIES / SHOWCASE，离线可开</td></tr>
 </tbody>
 </table>
@@ -295,15 +296,27 @@ python scripts/make_offline_bundle.py --with-numpy
 </div>
 
 <div class="plain">
-<p>默认只打 <code>mcp pydantic pyyaml structlog</code>（15 MB），
-<strong>假设目标机器已经有 numpy/scipy</strong>——做无线仿真的机器基本都有，
-而这两个占了 47 MB。目标机器是纯净环境就加 <code>--with-numpy</code>。</p>
+<p><strong>默认打完整包。</strong>早先默认打的是轻量包（不含 numpy/scipy），
+实测它在全新 venv 里连 <code>pip install --no-index -e .</code> 都起不来——
+先卡在缺构建后端 <code>setuptools</code>，而 pip 只说
+"install build dependencies did not run successfully"，完全看不出缺什么。</p>
+<p>现在完整包连构建后端一起带（37 个 wheel、65 MB），
+<strong>实测全新 venv 里只有 pip 也能装上，35 个包全离线</strong>。
+轻量包必须显式 <code>--thin</code>，包型写进文件名与 manifest。</p>
 </div>
 
 <div class="callout c-green">
-<p><strong>整条链路是实测过的</strong>，不是照着文档写的：解压 zip → 建干净 venv →
-<code>pip install --no-index</code> 装完 31 个包（全程离线）→ 用该 venv 跑
-<code>tests/test_e2e.py</code> 与 <code>test_mcp_server.py</code> → 全部通过。</p>
+<p><strong>整条链路是实测过的</strong>，而且按环境分开报：</p>
+<p style="margin-top:8px;"><strong>full 包</strong> —— 全新 venv（安装前只有 pip）→
+<code>pip install --no-index --find-links wheels -e .</code> 装上 35 个包（含
+superwireless 自身）→ manifest 里 10 个文件 + 37 个 wheel 的 SHA-256 逐一核对，
+零不一致 → 无 ChannelHub 时三个引擎都如实报 unavailable、MCP 仍能 list 出 16 个工具 →
+放入 ChannelHub 后 test_e2e 39 / test_mcp_server 21 / test_gates 86 全通过
+（mcp <strong>2.0</strong>、无 sionna-rt）。</p>
+<p style="margin-top:8px;"><strong>thin 包</strong> —— 按文档不加 <code>-e .</code>
+装上 31 个运行时依赖；<code>import numpy</code> 明确报
+<code>ModuleNotFoundError</code>，<code>开始安装.txt</code> 首屏就写明"本包为轻量包、
+要求目标机已有 numpy/scipy"。<strong>不伪装成自包含。</strong></p>
 <p style="margin-top:8px;">这一跑还抓到一个真 bug：<code>mcp 2.0</code> 删掉了
 <code>mcp.server.fastmcp</code>，新装的用户会在 import 阶段就崩。
 开发机上装的是 1.27 所以一直没暴露。现已兼容两个版本。</p>
@@ -629,6 +642,7 @@ sw_deliver(dataset_id="ds_xxxx", want="信道 + PDP + PMI")</code></pre>
 <tr><td>门 1 老是不过</td><td>多半是真的有问题，不是误报</td>
 <td>看 <code>detail</code> 字段——它会写清偏差多少、容差依据、怎么改。
 最常见是场景与信道剖面的视距类别不匹配</td></tr>
+<tr><td>离线装报 <code>install build dependencies did not run successfully</code></td><td>用 thin 包做了 <code>pip install -e .</code>，缺构建后端 setuptools</td><td>thin 包别加 <code>-e .</code>，直接装依赖；或改用 full 包</td></tr>
 <tr><td>服务端报 <code>No module named 'mcp.server.fastmcp'</code></td><td>装到了 mcp 2.x，该模块已被删除</td><td>升级 superwireless 到含兼容层的版本；或退回 <code>pip install "mcp&lt;2"</code></td></tr>
 <tr><td>生成很慢</td><td>射线追踪比统计信道慢一个量级</td>
 <td>统计信道约 0.2 秒/样本，射线追踪 2~6 秒/样本。先跑 20 个探路</td></tr>

@@ -1,4 +1,4 @@
-﻿"""可信度验证：这批信道能不能拿来下结论。
+"""可信度验证：这批信道能不能拿来下结论。
 
 蒙特卡洛仿真的结论只有在信道可信时才有意义。这里实现三类检查，
 都是业界标定仿真器时的常规做法：
@@ -64,7 +64,7 @@ def pathloss_38901_uma_nlos(
 
     标准给的是 ``PL_NLOS = max(PL_LOS, PL'_NLOS)``，其中
 
-        PL'_NLOS = 13.54 + 39.08·log10(d_3D) + 20·log10(fc_GHz) − 0.6·(h_UT − 1.5)
+        PL'_NLOS = 13.54 + 39.08·log10(d_3D) + 20·log10(fc_GHz) - 0.6·(h_UT - 1.5)
         PL_LOS   = 28.0  + 22.0 ·log10(d_3D) + 20·log10(fc_GHz)
 
     **那个 max 不是可选项。** NLOS 项的距离指数（39.08）比 LOS 项（22.0）大，
@@ -313,7 +313,7 @@ def check_pathloss_above_free_space(ds: Any, *, max_deficit_db: float = 5.0) -> 
     """去阴影后的路损与自由空间的关系是否在合理范围。
 
     这里**不能**硬性要求"≥ 自由空间"。38.901 的 LOS 公式是拟合式，不是严格
-    物理下界：断点内 ``PL_LOS − FSPL = 2·log10(d) − 4.45``，所以 d < 168 m 时
+    物理下界：断点内 ``PL_LOS - FSPL = 2·log10(d) - 4.45``，所以 d < 168 m 时
     公式值必然低于自由空间，最多低 4.45 dB。这是标准本身的特性。
 
     真正该报警的是低得离谱（超过 ``max_deficit_db``），那才说明路损模型有问题。
@@ -361,7 +361,7 @@ def check_pathloss_above_free_space(ds: Any, *, max_deficit_db: float = 5.0) -> 
         n_excess == 0,
         detail,
         measured=round(worst, 2),
-        expected=f"≥ −{max_deficit_db:g} dB",
+        expected=f"≥ -{max_deficit_db:g} dB",
         tolerance=f"去阴影后不低于自由空间 {max_deficit_db:g} dB 以上",
     )
 
@@ -538,7 +538,7 @@ def check_precoder_ordering(ds: Any, *, snr_db: float = 20.0, n: int = 24) -> Ch
 
 
 def check_estimation_error_sane(ds: Any) -> Check:
-    """信道估计误差应为负 dB（有误差但不离谱），理想模式下应趋近 −∞。"""
+    """信道估计误差应为负 dB（有误差但不离谱），理想模式下应趋近 -∞。"""
     nmse = np.asarray(ds.estimation_error_nmse_db(), dtype=float)
     finite = nmse[np.isfinite(nmse)]
     mode = str(ds.config.get("channel_est_mode", "?"))
@@ -556,7 +556,7 @@ def check_estimation_error_sane(ds: Any) -> Check:
         ok,
         f"估计模式 {mode}，NMSE 中位数 {med:.1f} dB",
         measured=round(med, 1),
-        expected="−60 ~ 0 dB",
+        expected="-60 ~ 0 dB",
         tolerance="估计误差应存在但不失控",
     )
 
@@ -579,7 +579,7 @@ def check_monte_carlo_convergence(
     r = monte_carlo(ds.h_true[:k], snr_db=snr_db, method="svd", ci_target=ci_target)
     need = None
     if not r.converged and r.se_mean > 0:
-        # n ∝ 1/宽度²，据此外推所需样本量
+        # n ∝ 1/宽度^2，据此外推所需样本量
         need = int(math.ceil(k * (r.relative_ci_width / ci_target) ** 2))
     return Check(
         "蒙特卡洛收敛",

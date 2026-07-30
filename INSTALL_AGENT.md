@@ -17,11 +17,22 @@
 ## 第 0 步：判断走哪条路
 
 ```
-仓库里有 wheels/ 目录  →  离线模式（这是从 .zip 解出来的包）
-没有                   →  联网模式
+有 wheels/ 目录  →  离线模式（这是从 .zip 解出来的包）
+没有             →  联网模式
 ```
 
-两条路的差别只在"依赖从哪来"和"ChannelHub 从哪来"，其余相同。
+离线模式再看包型 —— **先读 `bundle-manifest.json`**：
+
+| `bundle_kind` | `self_contained` | 含义 |
+|---|---|---|
+| `full` | true | wheels 里有 numpy/scipy 与构建后端，**全新 venv 也能装** |
+| `thin` | false | 没有 numpy/scipy，**要求目标机器已有科学计算栈** |
+| `nodeps` | false | 只有源码，依赖得另外想办法 |
+
+manifest 里的 `requires_preinstalled` 直接列出需要目标机器自备什么。
+拿不到 manifest 就自己看：`ls wheels/ | grep -i -E "numpy|scipy"` 有没有命中。
+
+三条路的差别只在"依赖从哪来"和"ChannelHub 从哪来"，其余相同。
 
 ---
 
@@ -109,31 +120,51 @@ cd superwireless
 <PYTHON> -m pip install -e .
 ```
 
-### 离线模式
+### 离线模式 · full 包
 
 ```bash
 cd superwireless
 <PYTHON> -m pip install --no-index --find-links wheels -e .
 ```
 
-`wheels/` 里可能只有轻量依赖（`mcp pydantic pyyaml structlog`）而没有
-numpy/scipy——打包时假设目标机器已经有了。装的时候报缺 numpy/scipy 就
-**【问用户】** 怎么补（公司内网 pip 源 / 另找 wheel）。
+已实测：全新 venv（只有 pip）里全程 `--no-index` 装成功，35 个包含
+superwireless 自身。
 
-**验证：**
+### 离线模式 · thin 包
+
+**不要加 `-e .`。** 可编辑安装会起一个隔离的构建环境去拉 `setuptools`，
+thin 包里没有它，`--no-index` 下也无处可拉——而且报错只说
+`pip subprocess to install build dependencies did not run successfully`，
+完全看不出缺的是什么。改成直接装依赖：
+
+```bash
+cd superwireless
+<PYTHON> -m pip install --no-index --find-links wheels mcp pydantic pyyaml structlog
+```
+
+thin 包**不含 numpy/scipy**，靠目标机器自带。装完先验：
+
+```bash
+<PYTHON> -c "import numpy, scipy; print(numpy.__version__, scipy.__version__)"
+```
+
+报缺就停下来 **【问用户】** 怎么补（公司内网 pip 源 / 另找 wheel /
+换成 full 包重打）。**不要自己去联网装**——离线环境里那也不会成功。
+
+### 关于 `pip install -e .` 到底要不要做
+
+**可以不做。** `scripts/mcp_server.py` 和 `sw_deliver` 生成的取货代码都会自己把
+`src/` 加进 `sys.path`。它的真正作用只有两个：把依赖装齐、让任意目录下能
+`import superwireless`。
+
+依赖已经齐了又不想动 site-packages 时跳过是可以的——
+**但要在最终报告里说清楚你跳过了，以及后果**。
+
+**验证依赖：**
 
 ```bash
 <PYTHON> -c "import numpy,scipy,pydantic,yaml,structlog,mcp; print('deps ok')"
 ```
-
-### 关于 `pip install -e .`
-
-其实**可以不装**。`scripts/mcp_server.py` 会自己把 `src/` 加进 `sys.path`，
-`sw_deliver` 生成的取货代码也会。`pip install -e .` 的真正作用是把那六个
-依赖装齐 + 让任意目录下能 `import superwireless`。
-
-依赖已经齐了、又不想动用户的 site-packages 时，跳过这一步是可以的——
-**但要在最终报告里说清楚你跳过了，以及后果**。
 
 ---
 
@@ -220,21 +251,43 @@ Copy-Item -Recurse -Force skills\channel-sim $HOME\.codex\skills\
 
 ```bash
 cd <仓库>
-<PYTHON> tests/test_e2e.py         # 端到端 37 项
+<PYTHON> tests/test_e2e.py         # 端到端 39 项
 <PYTHON> tests/test_mcp_server.py  # MCP 全链路 21 项
 <PYTHON> tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
-<PYTHON> tests/test_gates.py       # 校准、标准表、三道门 62 项
+<PYTHON> tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 <PYTHON> tests/test_raytracing.py  # 射线追踪与决策层 39 项
 ```
 
-共 **195 项**。测试会真跑仿真，全跑一遍约 5~8 分钟。
+共 **220 项**。测试会真跑仿真，全跑一遍约 6~10 分钟。
 每个文件最后一行会写"全部通过"或列出失败项，退出码非 0 表示失败。
 
 **时间紧就只跑前两个**（`test_e2e` + `test_mcp_server`，约 1 分钟），
 它们已经覆盖生成、取货、MCP 全链路。
 
-没装 sionna-rt 时 `test_raytracing.py` 里射线追踪相关的项会自动跳过并说明原因，
+没装 sionna-rt 时 `test_raytracing.py` 的射线追踪实跑段会自动跳过并说明原因，
 **这不算失败**。
+
+**没有 ChannelHub 时所有测试都会失败**，这是正常的——它是物理内核。
+这时至少要能验证降级行为正确：
+
+```bash
+<PYTHON> -c "
+from superwireless import channelhub as ch
+for c in ch.probe_capabilities():
+    print(c.name, c.available, c.missing)
+"
+# 期望：三个引擎都列出，都是 False，missing 里含 'ChannelHub'
+```
+
+MCP 冒烟（无 ChannelHub 也应当能起）：
+
+```bash
+<PYTHON> -c "
+import asyncio; from superwireless import server
+print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.MCP_MAJOR)
+"
+# 期望：tools: 16
+```
 
 ---
 

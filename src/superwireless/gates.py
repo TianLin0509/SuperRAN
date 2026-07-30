@@ -108,7 +108,7 @@ def required_samples(
 
     ::
 
-        N ≥ ( (z_{α/2} + z_β) · σ_d / Δ )²
+        N ≥ ( (z_{α/2} + z_β) · σ_d / Δ )^2
 
     ``std_diff`` 是**逐样本差值**的标准差，不是任一方的标准差。配对设计里
     两组共用同一批信道，共同的场景起伏会被差分抵消，σ_d 通常远小于单组标准差
@@ -163,9 +163,45 @@ class PairedResult:
     win_rate: float
     max_single_contribution: float
 
+    # ---- 两个检验各自的结论 --------------------------------------------
     @property
-    def significant(self) -> bool:
+    def t_significant(self) -> bool:
         return bool(np.isfinite(self.p_value) and self.p_value < 0.05)
+
+    @property
+    def wilcoxon_significant(self) -> bool:
+        return bool(np.isfinite(self.wilcoxon_p) and self.wilcoxon_p < 0.05)
+
+    @property
+    def tests_agree(self) -> bool:
+        """两个检验是否给出同一结论。Wilcoxon 不可用时视为一致（无从冲突）。"""
+        if not np.isfinite(self.wilcoxon_p):
+            return True
+        return self.t_significant == self.wilcoxon_significant
+
+    # ---- 最终判决 --------------------------------------------------------
+    # **判决以 Wilcoxon 为准**，这不是随便定的：
+    #   · 谱效的逐样本差值分布常是偏的（少数用户位置贡献了大部分差异），
+    #     t 检验的正态假设不成立，小样本下它会偏乐观；
+    #   · 符号秩检验只用秩，对偏态与离群点稳健。
+    # 只有 Wilcoxon 算不出来时（全零差值等退化情形）才退回配对 t。
+    #
+    # 这里曾经有个真漏洞：文档写着"以 Wilcoxon 为准"，但门 3 用的是只看
+    # t 检验的 significant 属性。n=8、t p=0.044、Wilcoxon p=0.109 的样本
+    # 会被直接放行——文档承诺的判据和代码实际用的判据是两回事。
+    # 所以 significant 这个含混的名字被删掉了，改为必须显式说清用的是哪个检验。
+    @property
+    def decision_test(self) -> str:
+        return "wilcoxon" if np.isfinite(self.wilcoxon_p) else "paired_t"
+
+    @property
+    def decision_p_value(self) -> float:
+        return self.wilcoxon_p if self.decision_test == "wilcoxon" else self.p_value
+
+    @property
+    def decision_significant(self) -> bool:
+        p = self.decision_p_value
+        return bool(np.isfinite(p) and p < 0.05)
 
     @property
     def ci_excludes_zero(self) -> bool:
@@ -183,12 +219,21 @@ class PairedResult:
             "std_diff": round(self.std_diff, 4),
             "ci95": [round(self.ci_low, 4), round(self.ci_high, 4)],
             "ci_excludes_zero": self.ci_excludes_zero,
-            "t_stat": round(self.t_stat, 3),
+            "t_stat": (round(self.t_stat, 3) if np.isfinite(self.t_stat) else None),
             "p_value": float(f"{self.p_value:.3g}") if np.isfinite(self.p_value) else None,
             "wilcoxon_p": (
                 float(f"{self.wilcoxon_p:.3g}") if np.isfinite(self.wilcoxon_p) else None
             ),
-            "significant_0.05": self.significant,
+            "t_significant": self.t_significant,
+            "wilcoxon_significant": self.wilcoxon_significant,
+            "tests_agree": self.tests_agree,
+            "decision_test": self.decision_test,
+            "decision_p_value": (
+                float(f"{self.decision_p_value:.3g}")
+                if np.isfinite(self.decision_p_value)
+                else None
+            ),
+            "decision_significant": self.decision_significant,
             "win_rate": round(self.win_rate, 3),
             "max_single_contribution": round(self.max_single_contribution, 3),
         }
@@ -222,9 +267,23 @@ def paired_compare(a: np.ndarray, b: np.ndarray) -> PairedResult:
     from scipy import stats  # noqa: PLC0415
 
     tcrit = float(stats.t.ppf(0.975, n - 1))
-    t_stat = mean_d / se if se > _EPS else float("inf") * np.sign(mean_d)
-    p = float(2 * stats.t.sf(abs(t_stat), n - 1)) if se > _EPS else 0.0
+
+    # 零方差要分两种情况，不能一律当成"无穷显著"。
+    #   · 差值恒为 0（两臂完全相同）→ 没有差异，p = 1；
+    #   · 差值恒为同一个非零常数 → 方向确定，p = 0。
+    # 早先这里一律写 p = 0.0，于是"自己跟自己比"会得到 p=0（最显著），
+    # 只是碰巧被"置信区间不跨零"那条拦住——靠运气拦住的不算拦住。
+    # 另外 float("inf") * np.sign(0) = nan，还会抛一个 RuntimeWarning。
+    if se > _EPS:
+        t_stat = mean_d / se
+        p = float(2 * stats.t.sf(abs(t_stat), n - 1))
+    elif abs(mean_d) <= _EPS:
+        t_stat, p = 0.0, 1.0
+    else:
+        t_stat, p = math.copysign(float("inf"), mean_d), 0.0
+
     try:
+        # scipy 在全零差值上会报错或给出无意义结果，显式短路成 p = 1。
         wp = float(stats.wilcoxon(d).pvalue) if np.any(d != 0) else 1.0
     except ValueError:
         wp = float("nan")
@@ -478,19 +537,29 @@ def gate_conclusion(
         )
     )
 
-    agree = (
-        np.isfinite(paired.p_value)
-        and np.isfinite(paired.wilcoxon_p)
-        and (paired.p_value < 0.05) == (paired.wilcoxon_p < 0.05)
+    # 判决用 paired.decision_significant（以 Wilcoxon 为准，不可用时退 t），
+    # 不是只看 t 检验的 t_significant——两者不一致时后者会放行不该放行的结论。
+    detail = (
+        f"判决检验 {paired.decision_test}（p={paired.decision_p_value:.3g}）；"
+        f"配对 t p={paired.p_value:.3g}，Wilcoxon p={paired.wilcoxon_p:.3g}，"
+        f"胜率 {paired.win_rate:.0%}"
     )
+    if not paired.tests_agree:
+        detail += (
+            f" —— **两个检验结论冲突**（t {'显著' if paired.t_significant else '不显著'}、"
+            f"Wilcoxon {'显著' if paired.wilcoxon_significant else '不显著'}）。"
+            f"差值分布偏态时 t 检验的正态假设不成立，以 Wilcoxon 为准"
+        )
     items.append(
         GateItem(
             "配对检验显著",
-            paired.significant,
-            f"配对 t 检验 p={paired.p_value:.3g}，Wilcoxon p={paired.wilcoxon_p:.3g}，"
-            f"胜率 {paired.win_rate:.0%}"
-            + ("" if agree else " —— 两个检验结论不一致，差值分布偏态，以 Wilcoxon 为准"),
-            fix="加样本，或换一个方差更小的指标",
+            paired.decision_significant,
+            detail,
+            fix=(
+                "加样本，或换一个方差更小的指标"
+                if not paired.tests_agree
+                else "加样本，或换一个方差更小的指标"
+            ),
         )
     )
 
@@ -555,14 +624,27 @@ class ComparisonResult:
         }
 
     def statement(self) -> str:
-        """一句可以直接写进报告的结论——**过不了门时它会明说不能下结论**。"""
+        """一句可以直接写进报告的结论——**过不了门时它会明说不能下结论**。
+
+        必须写清最终用的是哪个检验。只写"p=..."而不说是哪个检验，读者会默认是
+        t 检验；两个检验冲突时这就是误导。
+        """
         p = self.paired
         rel = p.mean_diff / p.mean_b if abs(p.mean_b) > _EPS else float("nan")
+        test_name = {"wilcoxon": "Wilcoxon 符号秩检验", "paired_t": "配对 t 检验"}[
+            p.decision_test
+        ]
         base = (
             f"{self.arm_a} 相对 {self.arm_b}：谱效 {p.mean_a:.3f} vs {p.mean_b:.3f} bit/s/Hz，"
             f"差值 {p.mean_diff:+.3f}（{rel:+.1%}），95% CI "
-            f"[{p.ci_low:+.3f}, {p.ci_high:+.3f}]，n={p.n}，配对 t 检验 p={p.p_value:.3g}"
+            f"[{p.ci_low:+.3f}, {p.ci_high:+.3f}]，n={p.n}，"
+            f"{test_name} p={p.decision_p_value:.3g}"
         )
+        if not p.tests_agree:
+            base += (
+                f"（配对 t p={p.p_value:.3g} 与之结论冲突，差值分布偏态，"
+                f"以 Wilcoxon 为准）"
+            )
         if self.passed:
             return base + "。结论成立。"
         blockers = [i.name for i in (self.gate2.blockers + self.gate3.blockers)]

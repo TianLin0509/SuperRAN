@@ -24,7 +24,7 @@
 
 角度扩展按 Annex A.1 的**圆周标准差**定义（不是普通标准差）::
 
-    AS = sqrt( −2·ln| Σ_n Σ_m P_{n,m}·exp(j·φ_{n,m}) / Σ_n Σ_m P_{n,m} | )
+    AS = sqrt( -2·ln| Σ_n Σ_m P_{n,m}·exp(j·φ_{n,m}) / Σ_n Σ_m P_{n,m} | )
 
 这里实现的是"按标准口径把数算出来"。**参考曲线本身是 3GPP 的会议文稿（R1-…），
 不在本模块内**——所以除了少数能自洽判定的项，其余只出数并标注该对哪份文稿，
@@ -104,7 +104,7 @@ class Metric:
 def coupling_loss_db(ds: Any) -> Metric:
     """服务小区耦合损耗（dB），38.901 §7.8.1/§7.8.2 指标 1。
 
-    耦合损耗 = 发射功率 − 接收功率 = 路损 − 天线增益（收发两端）。
+    耦合损耗 = 发射功率 - 接收功率 = 路损 - 天线增益（收发两端）。
     它把路损模型、天线方向图、下倾角、小区选择规则**串起来一起考**，
     所以是最基础也最灵敏的一项：任何一环错了这条 CDF 都会整体平移。
     """
@@ -116,7 +116,7 @@ def coupling_loss_db(ds: Any) -> Metric:
         unit="dB",
         values=tx - rx,
         reference="R1-165974（大尺度）/ R1-165975（全校准）",
-        note="= 发射功率 − 接收功率 = 路损 − 天线增益。串联检验路损模型 + 天线方向图 + 小区选择。",
+        note="= 发射功率 - 接收功率 = 路损 - 天线增益。串联检验路损模型 + 天线方向图 + 小区选择。",
     )
 
 
@@ -214,7 +214,7 @@ def circular_angular_spread_rad(angles_rad: np.ndarray, powers_linear: np.ndarra
 
     ::
 
-        AS = sqrt( −2·ln| Σ P_{n,m}·exp(j·φ_{n,m}) / Σ P_{n,m} | )
+        AS = sqrt( -2·ln| Σ P_{n,m}·exp(j·φ_{n,m}) / Σ P_{n,m} | )
 
     **不是**角度的普通标准差。普通标准差在角度绕回 0/360° 时会算出荒谬的大值；
     圆周定义把角度放到单位圆上做功率加权矢量和，天然免疫绕回。这也是标准
@@ -227,8 +227,8 @@ def circular_angular_spread_rad(angles_rad: np.ndarray, powers_linear: np.ndarra
         return float("nan")
     r = np.abs(np.sum(p * np.exp(1j * a)) / p.sum())
     r = min(max(r, _EPS), 1.0)
-    # sqrt(−2·ln r) 在 r→1 附近会放大浮点误差：r 差 ε，结果差 √(2ε)——
-    # 平方根放大。角度完全集中时 r 本该恰为 1，实际会是 1−1e-16，
+    # sqrt(-2·ln r) 在 r→1 附近会放大浮点误差：r 差 ε，结果差 √(2ε)——
+    # 平方根放大。角度完全集中时 r 本该恰为 1，实际会是 1-1e-16，
     # 于是算出 ~1e-8 rad 而不是 0。判据别写成"等于 0"，写成"小于 1e-6 rad"。
     return float(math.sqrt(-2.0 * math.log(r)))
 

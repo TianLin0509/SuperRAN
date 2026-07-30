@@ -11,6 +11,10 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+# Windows 中文控制台是 GBK：print 含 U+2212/U+FFFD 等字符时会炸 UnicodeEncodeError，
+# 把测试输出吓成"失败"。统一 reconfigure，本文件的 print 全部 replace 兜底。
+sys.stdout.reconfigure(errors="replace")
+
 from superwireless import calibration as cal  # noqa: E402
 from superwireless import channelhub as ch  # noqa: E402
 from superwireless import decisions as dec  # noqa: E402
@@ -183,7 +187,7 @@ a = base + rng.normal(0.5, 0.4, 200)  # A 系统性高 0.5
 b = base + rng.normal(0.0, 0.4, 200)
 pr = g.paired_compare(a, b)
 print(f"  配对：差值 {pr.mean_diff:+.3f}，CI [{pr.ci_low:+.3f}, {pr.ci_high:+.3f}]，p={pr.p_value:.2e}")
-check(pr.significant, "真实差异被检出")
+check(pr.decision_significant, "真实差异被检出")
 check(pr.ci_excludes_zero, "置信区间不跨零")
 check(pr.std_diff < base.std(), "配对后的差值标准差远小于单组标准差")
 
@@ -191,13 +195,73 @@ check(pr.std_diff < base.std(), "配对后的差值标准差远小于单组标�
 c = base + rng.normal(0.0, 0.4, 200)
 pr0 = g.paired_compare(c, b)
 print(f"  无差异：差值 {pr0.mean_diff:+.3f}，p={pr0.p_value:.3f}")
-check(not pr0.significant, "无差异时不报显著")
+check(not pr0.decision_significant, "无差异时不报显著")
 
 # 单个极端样本主导要被识别出来
 d = b.copy()
 d[0] += 500.0
 prx = g.paired_compare(d, b)
 check(prx.max_single_contribution > 0.5, "识别出单样本主导")
+
+# ---------------------------------------------------------------------------
+sect("6.5  统计判决：t 与 Wilcoxon 冲突、零方差退化")
+
+# 这一节全是回归测试。曾经有个真漏洞：文档写着"两个检验冲突时以 Wilcoxon 为准"，
+# 但门 3 用的是只看 t 检验的属性，于是 t 显著、Wilcoxon 不显著的样本被直接放行。
+# 承诺的判据与代码实际用的判据是两回事，这种不一致比判据本身宽松更危险。
+
+# ① t 显著 / Wilcoxon 不显著 —— 必须按 Wilcoxon 判为不显著并拦截
+d_conflict = np.array([-0.0811, 1.5561, 0.5308, 1.9896, 3.2605, -0.1125, 1.6908, -0.2045])
+pc = g.paired_compare(d_conflict, np.zeros_like(d_conflict))
+print(f"  n={pc.n}  t p={pc.p_value:.5f}  Wilcoxon p={pc.wilcoxon_p:.5f}")
+print(f"  判决检验={pc.decision_test}  显著={pc.decision_significant}")
+check(pc.t_significant, "该样本 t 检验确实显著（构造正确）")
+check(not pc.wilcoxon_significant, "该样本 Wilcoxon 不显著（构造正确）")
+check(not pc.tests_agree, "识别出两检验冲突")
+check(pc.decision_test == "wilcoxon", "冲突时判决用 Wilcoxon")
+check(not pc.decision_significant, "按 Wilcoxon 判为不显著")
+gc_ = g.gate_conclusion(pc)
+check(not gc_.passed, "门 3 拦住 t/Wilcoxon 冲突样本（回归：曾被错误放行）")
+check(any("检验" in i.name for i in gc_.blockers), "拦截原因指向检验项")
+
+# ② 反向冲突：t 不显著 / Wilcoxon 显著 —— 行为要与文档一致（以 Wilcoxon 为准）
+d_rev = np.array([0.5, 0.6, 0.4, 0.7, 0.55, 0.45, 0.65, 0.5, 0.6, 0.5, 0.55, -40.0])
+pr_rev = g.paired_compare(d_rev, np.zeros_like(d_rev))
+print(f"  反向：t p={pr_rev.p_value:.4f}  Wilcoxon p={pr_rev.wilcoxon_p:.4f}"
+      f"  判决={pr_rev.decision_test}")
+check(not pr_rev.tests_agree, "反向冲突也被识别")
+check(pr_rev.decision_significant == pr_rev.wilcoxon_significant, "反向冲突同样以 Wilcoxon 为准")
+
+# ③ 全零差值：不能报成"无穷显著"，也不能抛 RuntimeWarning
+import warnings  # noqa: E402
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    pz = g.paired_compare(np.full(20, 5.0), np.full(20, 5.0))
+    n_rw = sum(1 for w in caught if issubclass(w.category, RuntimeWarning))
+print(f"  全零：t={pz.t_stat}  p={pz.p_value}  wilcoxon={pz.wilcoxon_p}  RuntimeWarning={n_rw}")
+check(pz.p_value == 1.0, "全零差值 t 检验 p=1（回归：曾为 0）")
+check(pz.wilcoxon_p == 1.0, "全零差值 Wilcoxon p=1")
+check(pz.t_stat == 0.0, "全零差值 t 统计量为 0（回归：曾为 nan）")
+check(not pz.decision_significant, "全零差值判为不显著")
+check((pz.ci_low, pz.ci_high) == (0.0, 0.0), "全零差值置信区间为 [0, 0]")
+check(n_rw == 0, "全零差值不产生 RuntimeWarning（回归）")
+check(not g.gate_conclusion(pz).passed, "全零差值不过门 3")
+
+# ④ 恒定非零差值：方向确定，应当显著
+pk = g.paired_compare(np.full(20, 5.5), np.full(20, 5.0))
+print(f"  恒定 +0.5：t={pk.t_stat}  p={pk.p_value}  显著={pk.decision_significant}")
+check(pk.decision_significant, "恒定非零差值判为显著")
+
+# ⑤ statement 与 gate3.passed 不得矛盾
+for name, pp in (("冲突", pc), ("全零", pz)):
+    res_dict = g.gate_conclusion(pp).as_dict()
+    check(not res_dict["passed"], f"{name}样本门 3 结论为不通过")
+check(
+    all(k in pc.as_dict() for k in
+        ("decision_test", "decision_p_value", "decision_significant", "tests_agree")),
+    "as_dict 导出判决字段（供 MCP 与报告引用）",
+)
 
 # ---------------------------------------------------------------------------
 sect("7  配置差分")
@@ -340,6 +404,21 @@ from superwireless import validate as va  # noqa: E402
 c = va.check_interference_modeled(multi)
 print(f"  检查：{c.detail}")
 check(c.passed, "干扰检查放行正确配置")
+
+# ---------------------------------------------------------------------------
+sect("14  引擎清单的稳定性")
+
+# 清单长度不该随环境变化，变的只是 available 与 missing。
+# 早先没装 ChannelHub 时只返回 internal_sim 一条，调用方写
+# engines["sionna_rt"] 会 KeyError，看起来像工具坏了。
+caps = {x.name: x for x in ch.probe_capabilities()}
+print(f"  引擎 {len(caps)} 个：" + "  ".join(
+    f"{k}={'可用' if v.available else '不可用'}" for k, v in caps.items()))
+check(set(caps) == {"internal_sim", "sionna_rt", "quadriga_real"},
+      "三个引擎恒在清单中（不随 ChannelHub / sionna-rt 是否存在而消失）")
+check(all(v.available or v.missing for v in caps.values()),
+      "不可用的引擎必须列出缺失项，不能只说不可用")
+check(all(v.detail for v in caps.values()), "每个引擎都有可读说明")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)

@@ -50,8 +50,8 @@ for name, v in ds.compare_precoders().items():
 r = ds.compare_arms({"name": "我的方法", "method": "svd_wideband", "csi": "estimated"},
                     {"name": "基线",     "method": "type1",        "csi": "estimated"})
 print(r.statement())
-# 我的方法 相对 基线：谱效 20.44 vs 17.41 bit/s/Hz，差值 +3.03（+17.4%），
-# 95% CI [+2.11, +3.95]，n=200，配对 t 检验 p=2.1e-10。结论成立。
+# 我的方法 相对 基线：谱效 20.932 vs 13.177 bit/s/Hz，差值 +7.755（+58.9%），
+# 95% CI [+6.989, +8.521]，n=200，Wilcoxon 符号秩检验 p=2.72e-31。结论成立。
 ```
 
 两臂跑在同一批信道上 → 天然配对，共同的场景起伏被差分抵消，
@@ -144,15 +144,20 @@ PMI 给码本索引而非嵌入向量。
 在一台能联网的机器上打包，拷进去：
 
 ```bash
-python scripts/make_offline_bundle.py              # 15 MB，含轻量依赖的 wheel
-python scripts/make_offline_bundle.py --with-numpy # 62 MB，连 numpy/scipy 一起带
+python scripts/make_offline_bundle.py          # 完整包 65 MB，全新 venv 可全程离线装
+python scripts/make_offline_bundle.py --thin   # 轻量包 17 MB，要求目标机已有 numpy/scipy
 ```
 
-产出 `dist/superwireless-offline-<平台>-py<版本>.zip`,里面有源码、skill、
-依赖 wheel、`INSTALL_AGENT.md` 和给人看的 `开始安装.txt`。
-接收方解压后把那句话发给自己的 agent 即可。
+产出 `dist/superwireless-offline-<包型>-<平台>-py<版本>.zip`，里面有源码、skill、
+依赖 wheel、`bundle-manifest.json`（各文件 SHA-256）、`INSTALL_AGENT.md`
+和给人看的 `开始安装.txt`。接收方解压后把那句话发给自己的 agent 即可。
 
-**wheel 是平台相关的**,必须在与目标机器同平台、同 Python 大版本的机器上打包。
+**默认打完整包。** 轻量包不含 numpy/scipy 与构建后端，在全新 venv 里
+`pip install --no-index -e .` 会失败（先卡在缺 setuptools，而报错只说
+"install build dependencies did not run successfully"，看不出缺什么）。
+包型写进了文件名和 manifest，`requires_preinstalled` 直接列出需自备什么。
+
+**wheel 是平台相关的**，必须在与目标机器同平台、同 Python 大版本的机器上打包。
 
 > 包里**不含 ChannelHub** —— 该仓库没有开源许可证，默认保留所有权利，
 > 随包转发有法律风险。接收方需自备一份含 `src/msg_embedding/data/contract.py`
@@ -188,6 +193,10 @@ cp -r skills/channel-sim ~/.codex/skills/
 | **门 1 · 信道可信** | 生成之后 | 19 项体检，硬性项不通过即拦截 |
 | **门 2 · 比较公平** | 跑对比时 | 两臂不同数据集、配置漂移、**CSI 口径不一致** |
 | **门 3 · 结论站得住** | 写结论前 | 置信区间跨零、检验不显著、单样本主导、声称值超出区间 |
+
+门 3 的显著性**以 Wilcoxon 符号秩检验判决**，配对 t 只作参考——谱效的逐样本差值
+分布常是偏的，t 检验的正态假设不成立、小样本下偏乐观。两个检验冲突时 `statement`
+会把冲突明写出来。
 
 门 2 的 CSI 口径检查是无线论文评审最常抓的一条——自己的方法用理想信道预编码、
 基线用估计信道，测出来的"增益"里混着"提前知道答案"的部分。
@@ -284,14 +293,14 @@ ph.project_interference(...)       # 干扰投影：不投影会高估干扰
 ## 测试
 
 ```bash
-python tests/test_e2e.py         # 端到端 37 项
+python tests/test_e2e.py         # 端到端 39 项
 python tests/test_mcp_server.py  # MCP 全链路 21 项
 python tests/test_raytracing.py  # 射线追踪与决策层 39 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
-python tests/test_gates.py       # 校准、标准表、三道门 62 项
+python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 ```
 
-共 **194 项**。
+共 **220 项**。
 
 ## 致谢
 

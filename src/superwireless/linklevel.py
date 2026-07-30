@@ -185,7 +185,7 @@ class LinkPerformance:
 def _noise_from_snr(h: np.ndarray, snr_db: float) -> float:
     """由信道平均增益和目标信噪比反推噪声功率。
 
-    约定：SNR = E[|h|²]·P_tx / N0，取 P_tx = 1。这样同一批信道在不同
+    约定：SNR = E[|h|^2]·P_tx / N0，取 P_tx = 1。这样同一批信道在不同
     信噪比下的对比是干净的——只有噪声在变。
     """
     sig = float(np.mean(np.abs(np.asarray(h)) ** 2))
@@ -206,7 +206,7 @@ def post_equalizer_sinr(
     设某个 RB 上有效信道 ``G = H_eff^H``（形状 ``[UE_ant, rank]``），
     每层等分发射功率 ``P/rank``（P=1），噪声加干扰协方差 ``R_n``：
 
-    * **MMSE**：``SINR_k = 1 / [ (I + (P/rank)·G^H R_n^{-1} G)^{-1} ]_kk − 1``
+    * **MMSE**：``SINR_k = 1 / [ (I + (P/rank)·G^H R_n^{-1} G)^{-1} ]_kk - 1``
       这是线性 MMSE 接收机的标准结果，也是最常用的口径。
     * **ZF**：``SINR_k = (P/rank) / [ (G^H R_n^{-1} G)^{-1} ]_kk``
       迫零，完全消除层间干扰但放大噪声。
