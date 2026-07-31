@@ -429,7 +429,7 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 <tr><td><code>ds.link(i, method=, receiver=)</code></td><td>LinkPerformance</td><td>单样本：逐层 SINR、谱效、容量上界、达成率</td></tr>
 <tr><td><code>ds.monte_carlo(method=)</code></td><td>MonteCarloResult</td><td>均值 + 95% 置信区间 + <strong>收敛判断</strong> + 分位数 + rank 分布</td></tr>
 <tr><td><code>ds.compare_precoders()</code></td><td>dict</td><td>SVD / 宽带SVD / TypeI / DFT 横向对比</td></tr>
-<tr><td><code>ds.validate()</code></td><td>ValidationReport</td><td><strong>17 项可信度检查</strong></td></tr>
+<tr><td><code>ds.validate()</code></td><td>ValidationReport</td><td><strong>18 项可信度检查</strong></td></tr>
 </tbody>
 </table>
 </div>
@@ -571,7 +571,7 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 <thead><tr><th>访问方式</th><th>返回</th><th>说明</th></tr></thead>
 <tbody>
 <tr><td><code>ds.gate()</code> / <code>sw_gate</code></td><td>GateResult</td>
-<td><strong>门 1</strong>：17 项体检翻译成门禁语言，硬性项不通过即拦截</td></tr>
+<td><strong>门 1</strong>：18 项体检翻译成门禁语言，硬性项不通过即拦截</td></tr>
 <tr><td><code>ds.calibrate()</code> / <code>sw_calibrate</code></td><td>CalibrationReport</td>
 <td><strong>3GPP §7.8 校准量</strong>：耦合损耗、几何量（含噪/不含噪）、时延与角度扩展、PRB 奇异值三条 CDF</td></tr>
 <tr><td><code>ds.compare_arms(a, b)</code> / <code>sw_compare_arms</code></td><td>ComparisonResult</td>

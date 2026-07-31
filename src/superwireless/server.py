@@ -78,10 +78,14 @@ def sw_capabilities() -> dict[str, Any]:
         models = ch.list_channel_models()
     except Exception as exc:  # noqa: BLE001
         models = {"error": str(exc)}
+    from . import hardware as hw
+
     return {
         "channelhub_root": str(ch.channelhub_root()),
         "engines": caps,
         "channel_models": models,
+        # 本地默认硬件与载波。**面板是 8x4x2 时自动生效**，不需要调用方写。
+        "default_hardware": hw.describe(),
         "note": (
             "CDL 系列含每条径的角度（AoD/AoA/ZoD/ZoA），TDL 系列没有。"
             "凡是依赖角度的课题（波束管理、定位）必须用 CDL。"

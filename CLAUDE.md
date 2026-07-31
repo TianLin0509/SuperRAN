@@ -19,7 +19,7 @@
 ```bash
 python tests/test_e2e.py         # 端到端 39 项
 python tests/test_mcp_server.py  # MCP 全链路 33 项
-python tests/test_raytracing.py  # 射线追踪与决策层 39 项
+python tests/test_raytracing.py  # 射线追踪与决策层 40 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
@@ -286,6 +286,56 @@ CDL-C 有 23/24 簇有出入、占总功率 93.8%，按 Annex A.1 算 ASA 偏 14
 `SUPERWIRELESS_CDL_SPEC=0` 可关闭。CDL-D/E 未覆盖——表结构含 `Cluster PAS` 列、
 首簇拆成镜面与 Laplacian 两行，没逐字核对过的表宁可不放。
 
+### 默认阵列是 1 驱 3，不是 64 个独立阵元
+
+真实 AAU：**64 个 RF 端口（8H x 4V x 2pol），每端口固定驱动垂直相邻 3 个阵子，
+共 192 个物理阵子；水平 0.5λ、垂直 0.67λ**（RF 端口垂直相位中心 2.01λ > λ，
+垂直方向有栅瓣）。载波 n41 2.6 GHz / 30 kHz / 100 MHz / **272 RB**
+（17 RBG x 16 RB；38.104 标准表是 273，口径不同），终端默认 **4R 下行**，
+仿真粒度到 RB 为止。
+
+ChannelHub 的 `phy_sim/effective_array.py` 就是照这套硬件写的（模块文档
+"Target AAU" 一节逐条对得上），但默认没启用——`antenna_model_mode` 默认
+`legacy_64`，把 64 个端口当成 64 个**独立**阵元、间距一律 0.5λ。
+`hardware.apply_array_defaults()` 现在在面板是 8x4x2 时自动切到
+`effective_subarray`。
+
+**实测差距（同 seed、单小区 30 样本）**：
+
+| | 真实 AAU | legacy_64 |
+|---|---|---|
+| SVD 谱效 | 28.20 | 33.23 |
+| 吞吐均值 | 1055.5 Mbps | 1337.5 Mbps |
+| 边缘用户 | 582.4 Mbps | 940.0 Mbps |
+
+**legacy 把吞吐高估 27%、边缘用户高估 61%**——2026-07-31 之前生成的所有
+谱效/吞吐数字都偏乐观。`validate.check_antenna_model` 会把它标出来。
+
+三条边界：
+
+* `h_serving_true` 与 legacy 的**相对差 4.03**，完全是另一个信道。
+* `effective_subarray` 与 `physical_reference`（真跑 192 阵子再用 F 投影）
+  相对差 **4.8e-7**，快路径复现了参考路径，放心用快的。
+* **几何 SINR / SIR / IoT 逐位不变**。ChannelHub 的几何 SINR 走
+  `_system_sinr.py` 自己那套简化模型（水平 0.5λ DFT 码本、垂直完全平坦），
+  **不读阵列模型**。所以换阵列只改信道矩阵，不改干扰画像——
+  预设里的 `expect`（IoT/SINR/路损）不用重测。
+
+垂直 0.67λ 是用户实测纠正过的值（早期按 0.5λ 算，全盘产物失真），
+见记忆 `project_reconfig_mimo_sim` 方法论教训第 4 条。**别改回 0.5。**
+
+1 驱 3 是**这一款 AAU 的硬件事实，不是通用规律**，所以只对 8x4x2 生效；
+16T/256T 之类的面板保持 legacy。
+
+### preset 里不要写死 bs_panel
+
+写死会让天线覆盖失效：用户传 `bs_antenna="4T4R"` 时 `num_bs_tx_ant` 变成 4，
+而 `bs_panel` 还是 `[8,4,2]`（64 口），两者矛盾，生成出来的 `BS_ant` 不是 4。
+`test_mcp_server` 的"用户指定的 4T4R 生效"当场抓到过。
+
+让 `_ensure_bs_panel` 从 `num_bs_tx_ant` 推：64 -> `[8,4,2]` 正是要的，
+4 -> `[2,1,2]` 也自动落回 legacy（4T 没有 1 驱 3）。
+
 ### 没有 bs_panel 时干扰根本不进 SINR
 
 `internal_sim.py:1436` 只在 `bs_panel is not None` 时才建 DFT 码本，
@@ -465,6 +515,7 @@ ChannelHub 的 `doppler_hz` 来自**同一个 UE 相邻样本之间的位移**�
 - 新的外部结果校验 → `results.check_pairable`，每条都必须是**硬拦截**不是告警
 - 新指标 → `analysis.KNOWN_METRICS` 加单位；自定义指标也支持，单位由调用方给
 - 新的标准查表值 → `spec38901.py`，**必须两条独立路径核对过**才录入
+- 新的默认硬件/载波口径 → `hardware.py`，它是**默认配置的唯一真相源**
 - 新场景 → `presets/presets.yaml`，不改代码。**加完必须跑一遍 `sw_probe_scenario` 把实测值写进 `expect`**——preset 里的 label 是设计意图，写着「高干扰」实际只有 2 dB 的事发生过
 - 新的干扰量或分级 → `interference.py`，门限改动等于改现场约定，先和用户对齐
 - 新射线追踪城市 → ChannelHub 的 `configs/scenes/`，`scenes.py` 自动发现

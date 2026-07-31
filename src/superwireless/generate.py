@@ -493,6 +493,15 @@ def generate(
     cfg["num_samples"] = int(num_samples)
     panel, panel_derived = _ensure_bs_panel(cfg)
 
+    # 真实阵列模型：64T 面板自动切到 1 驱 3 / 192 阵子 / 垂直 0.67λ。
+    # 不切的话走 ChannelHub 默认的 legacy_64（64 个独立阵元、一律 0.5λ），
+    # 那不是本地硬件——实测两者的 h_true 相对差 4.03，完全是另一个信道。
+    from . import hardware as hw  # noqa: PLC0415
+
+    hw.apply_array_defaults(cfg)
+    array_applied = hw.strip_markers(cfg)
+    array_block = hw.array_summary(cfg, array_applied)
+
     if collect_ssb is not None:
         meas = dict(cfg.get("measurements") or {})
         meas["ssb_rsrp"] = bool(collect_ssb)
@@ -654,6 +663,7 @@ def generate(
         "topology_note": topology_note,
         "bs_panel": list(panel),
         "bs_panel_derived": bool(panel_derived),
+        "antenna_model": array_block,
         # 并行会换掉随机流的分块方式，逐样本结果与串行不同（统计等价、各自可复现）。
         # 记进摘要，免得"换了 workers 结果对不上"变成隐形陷阱。
         "parallel": {

@@ -389,6 +389,78 @@ if "ul_srs" in md and rep2["traffic_domain"].get("dl"):
           f"测量域 SIR({a}) 与业务域 SIR({b}) 是不同的量")
 
 # ---------------------------------------------------------------------------
+sect("9.5  本地默认硬件：64T 1驱3 / 192 阵子 / 0.67λ")
+
+from superwireless import hardware as hw  # noqa: E402
+
+check(hw.COMPANY_RF_PANEL == [8, 4, 2], "RF 面板是 8H x 4V x 2pol")
+check(hw.COMPANY_NUM_PORTS == 64, "RF 端口 64")
+check(hw.COMPANY_ELEMENTS_PER_PORT == 3, "1 驱 3")
+check(hw.COMPANY_NUM_ELEMENTS == 192, "物理阵子 192")
+check(hw.COMPANY_H_SPACING_LAMBDA == 0.5, "水平间距 0.5λ")
+# 这一条是实测纠正过的硬件值，写错会让全盘产物失真（见记忆 reconfig_mimo_sim）
+check(hw.COMPANY_V_SPACING_LAMBDA == 0.67, "垂直间距 0.67λ（**不是 0.5**）")
+check(abs(hw.COMPANY_ELEMENTS_PER_PORT * hw.COMPANY_V_SPACING_LAMBDA - 2.01) < 1e-9,
+      "RF 端口垂直相位中心间距 2.01λ")
+check(hw.COMPANY_CARRIER_HZ == 2.6e9, "载波 2.6 GHz (n41)")
+check(hw.COMPANY_SCS_HZ == 30000, "子载波间隔 30 kHz")
+check(hw.COMPANY_NUM_RB == 272 == hw.COMPANY_NUM_RBG * hw.COMPANY_RB_PER_RBG,
+      "272 RB = 17 RBG x 16 RB")
+check(hw.NR_TABLE_NUM_RB_100M_30K == 273,
+      "同时记住 38.104 标准表是 273（口径不同，不是笔误）")
+check(hw.COMPANY_UE_RX_ANT == 4 and hw.COMPANY_LINK == "DL", "默认 4R 下行")
+
+# 自动挂载规则：只对 64T 面板生效，显式指定一律尊重
+c1 = {"bs_panel": [8, 4, 2]}
+hw.apply_array_defaults(c1)
+check(hw.strip_markers(c1) == "company_1to3_192ae", "64T 面板自动切真实阵列")
+check(c1["antenna_model_mode"] == "effective_subarray", "模式为 effective_subarray")
+check(c1["bs_antenna"]["fixed_vertical_subarray"]["ae_vertical_spacing_lambda"] == 0.67,
+      "挂上去的垂直间距是 0.67λ")
+
+c2 = {"bs_panel": [16, 8, 2]}
+hw.apply_array_defaults(c2)
+check(hw.strip_markers(c2) == "skipped_non_64t", "非 64T 面板不套 1 驱 3（它是这款硬件的事实，不是通用规律）")
+check("antenna_model_mode" not in c2, "非 64T 面板保持 ChannelHub 默认")
+
+c3 = {"bs_panel": [8, 4, 2], "antenna_model_mode": "legacy_64"}
+hw.apply_array_defaults(c3)
+check(hw.strip_markers(c3) == "explicit" and c3["antenna_model_mode"] == "legacy_64",
+      "显式指定 legacy_64 时不被覆盖（对照实验要用）")
+
+# 预设：默认组必须真的走真实阵列
+_pg = pl.preset_groups()
+check("本地默认" in _pg, "有「本地默认」分组")
+for name in _pg.get("本地默认", []):
+    c = dict(pl.load_presets()[name]["config"])
+    check(int(c.get("num_rb", 0)) == 272, f"{name} 用 272 RB")
+    check(float(c.get("carrier_freq_hz", 0)) == 2.6e9, f"{name} 用 2.6 GHz")
+    check(int(c.get("num_ue_rx_ant", 0)) == 4, f"{name} 默认 4R 接收")
+    # **不在 preset 里写死 bs_panel**：写死会让 4T4R 这类天线覆盖失效
+    # （num_bs_tx_ant 改了、panel 还是 64 口，两者矛盾）。让它由
+    # _ensure_bs_panel 从 num_bs_tx_ant 推导，64 -> [8,4,2] 正是要的。
+    check("bs_panel" not in c, f"{name} 不写死 bs_panel（由端口数推导）")
+
+# sw_plan 的兜底预设应当是本地默认配置
+_d, _prof = pl.create_draft("验证一个 CSI 压缩的想法")
+check(_d.preset == "company_64t4r", f"通用意图默认挑 company_64t4r（实得 {_d.preset}）")
+
+# 端到端：summary 必须带阵列口径
+_cfg = dict(pl.load_presets()["company_64t4r"]["config"])
+_cfg["num_rb"] = 24
+_cfg["num_ues"] = 4
+_s = gen.generate(_cfg, num_samples=8, workers=1)
+_am = _s.get("antenna_model") or {}
+print(f"  summary.antenna_model: mode={_am.get('antenna_model_mode')} "
+      f"AE={_am.get('physical_elements')} dv={_am.get('ae_vertical_spacing_lambda')}")
+check(_am.get("antenna_model_mode") == "effective_subarray", "summary 记录了真实阵列模式")
+check(_am.get("physical_elements") == 192, "summary 记录了 192 物理阵子")
+check(_am.get("element_pattern_is_measured") is False,
+      "明示阵元方向图不是实测的（是 3GPP 式参数化模型）")
+check("几何 SINR / IoT 不受它影响" in (_am.get("note") or ""),
+      "明示阵列模型不影响几何 SINR/IoT")
+
+# ---------------------------------------------------------------------------
 sect("10  文档里的数字必须和代码对得上")
 
 # "19 项体检"这句话在 README / SKILL.md / 两份 HTML 里写了八处，而 full_report
