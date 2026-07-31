@@ -24,11 +24,16 @@
 | 有效 SINR（MIESM/EESM） | **标准口径** | 互信息平均 / 指数平均 |
 | MCS / CQI 表 | **标准查表** | 38.214 Table 5.1.3.1-1/-2、5.2.2.1-2/-3/-4 |
 | TBS | **标准算法** | 38.214 §5.1.3.2，逐步复刻 |
-| BLER | **模型** | 有限码长形状 + 可配的实现损失。**不是实测曲线** |
+| BLER（默认） | **分析模型** | 有限码长形状 + 可配的实现损失。**不是实测曲线** |
+| BLER（表 3） | **用户曲线** | 20B 256QAM NewTx/ReTx 解调曲线；源横轴名为 Es/No |
 
-BLER 那一行是唯一的模型项。它没有 3GPP 参考曲线兜底，所以：
+默认 BLER 模型没有 3GPP 参考曲线兜底，所以：
 参数全部可配、默认值有出处、`anchor_check()` 会报出各 MCS 的 10% BLER 门限
 供人工对照公开的 NR 链路级曲线。**别把它当成实测 BLER 用。**
+
+`mcs_table=3` 改用用户提供的 28 档 NewTx/ReTx 表驱动曲线。它比分析模型多了
+真实曲线形状和重传口径，但**仍不是 3GPP 标准曲线**；源脚本横轴叫 `Es/No`，
+在本模块中按有效 SINR 使用时会把这一解释写进结果，绝不静默改名。
 """
 from __future__ import annotations
 
@@ -38,6 +43,8 @@ from functools import lru_cache
 from typing import Any
 
 import numpy as np
+
+from . import bler_curves as bc
 
 _EPS = 1e-30
 
@@ -207,7 +214,21 @@ MCS_TABLE_2: tuple[Mcs, ...] = tuple(
     ]
 )
 
-MCS_TABLES = {1: MCS_TABLE_1, 2: MCS_TABLE_2}
+# 用户提供的 20B 256QAM MCS profile。码率是源表的小数值，不冒充 38.214。
+MCS_TABLE_3: tuple[Mcs, ...] = tuple(
+    Mcs(
+        int(row["index"]), int(row["q_m"]), float(row["newtx_code_rate"]) * 1024.0,
+        float(row["q_m"]) * float(row["newtx_code_rate"]),
+    )
+    for row in bc.mcs_profile_rows()
+)
+
+MCS_TABLES = {1: MCS_TABLE_1, 2: MCS_TABLE_2, 3: MCS_TABLE_3}
+MCS_TABLE_SOURCES = {
+    1: "3GPP TS 38.214 Table 5.1.3.1-1",
+    2: "3GPP TS 38.214 Table 5.1.3.1-2",
+    3: "user-provided company_20b_256qam profile",
+}
 
 
 @dataclass(frozen=True)
@@ -462,7 +483,102 @@ class BlerModel:
         }
 
 
+@dataclass(frozen=True)
+class CurveBlerModel:
+    """BLER provider backed by the user-supplied NewTx/ReTx demodulation curves.
+
+    ``n_coded_bits`` and ``n_code_blocks`` remain in the method signature so this
+    provider can share the analytic model's pipeline. They do not reshape a tabulated
+    curve: the source data already embodies its own, currently undocumented, block-size
+    and receiver assumptions.
+    """
+
+    tx_mode: str = "newtx"
+    source_id: str = "company_20b_256qam"
+
+    def _curve(self, mcs: Mcs) -> bc.DemodCurve:
+        curve = bc.get_curve(mcs.index, self.tx_mode)
+        if curve.q_m != mcs.q_m:
+            raise ValueError(
+                f"curve MCS {mcs.index} uses Qm={curve.q_m}, but table uses Qm={mcs.q_m}"
+            )
+        if self.tx_mode == "newtx" and abs(curve.code_rate - mcs.rate) > 5e-4:
+            raise ValueError(
+                f"curve MCS {mcs.index} uses R={curve.code_rate}, but table uses R={mcs.rate}"
+            )
+        return curve
+
+    def bler(self, sinr_eff_db: Any, mcs: Mcs, n_coded_bits: int,
+             n_code_blocks: int = 1) -> np.ndarray:
+        del n_coded_bits, n_code_blocks
+        return self._curve(mcs).evaluate(sinr_eff_db)
+
+    def required_sinr_db(self, mcs: Mcs, n_coded_bits: int,
+                         target_bler: float = 0.1, n_code_blocks: int = 1) -> float:
+        del n_coded_bits, n_code_blocks
+        return self._curve(mcs).required_sinr_db(target_bler)
+
+
 DEFAULT_BLER = BlerModel()
+DEFAULT_CURVE_BLER = CurveBlerModel("newtx")
+DEFAULT_CURVE_RETX_BLER = CurveBlerModel("retx")
+
+
+def _default_bler_model(table: int) -> BlerModel | CurveBlerModel:
+    if table not in MCS_TABLES:
+        raise ValueError(f"mcs table must be one of {sorted(MCS_TABLES)}, got {table}")
+    return DEFAULT_CURVE_BLER if table == 3 else DEFAULT_BLER
+
+
+def curve_anchor_check(target_bler: float = 0.1) -> dict[str, Any]:
+    """Return NewTx/ReTx thresholds for every MCS in the tabulated profile."""
+    rows = []
+    for mcs in MCS_TABLE_3:
+        new = bc.get_curve(mcs.index, "newtx")
+        retx = bc.get_curve(mcs.index, "retx")
+        new_thr = new.required_sinr_db(target_bler)
+        retx_thr = retx.required_sinr_db(target_bler)
+        shannon_db = 10.0 * math.log10(2.0 ** mcs.se - 1.0) if mcs.se > 0 else -np.inf
+        rows.append({
+            "mcs": mcs.index,
+            "modulation": _MOD_NAME[mcs.q_m],
+            "newtx_code_rate": round(new.code_rate, 4),
+            "retx_code_rate": round(retx.code_rate, 4),
+            "newtx_required_sinr_db": round(new_thr, 3),
+            "retx_required_sinr_db": round(retx_thr, 3),
+            "retx_gain_db": round(new_thr - retx_thr, 3),
+            "shannon_limit_db": round(shannon_db, 3),
+            "newtx_gap_to_shannon_db": round(new_thr - shannon_db, 3),
+        })
+    return {
+        "source_id": bc.data.SOURCE_ID,
+        "target_bler": target_bler,
+        "axis_source_name": bc.data.SOURCE_AXIS_NAME,
+        "axis_interpretation": bc.data.SOURCE_AXIS_USAGE,
+        "verify": bc.verify_curves(target_bler),
+        "rows": rows,
+        "caveat": (
+            "These are user-provided demodulation curves, not 3GPP reference BLER. "
+            "The source axis is Es/No; superwireless uses it as effective SINR only "
+            "when table 3 is explicitly selected."
+        ),
+    }
+
+
+def bler_curve(mcs: int, tx_mode: str = "newtx", target_bler: float = 0.1,
+               sinr_db: Any | None = None) -> dict[str, Any]:
+    """Return a raw curve plus an optional interpolated BLER query."""
+    curve = bc.get_curve(mcs, tx_mode)
+    out = curve.as_dict(include_points=True)
+    out["target_bler"] = float(target_bler)
+    out["required_sinr_db"] = round(curve.required_sinr_db(target_bler), 4)
+    if sinr_db is not None:
+        query = np.atleast_1d(np.asarray(sinr_db, dtype=float))
+        out["query"] = {
+            "sinr_db": [float(v) for v in query],
+            "bler": [float(v) for v in curve.evaluate(query)],
+        }
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -481,23 +597,35 @@ class LinkAdaptResult:
     se_mcs: float                 # 选中 MCS 的标称频谱效率
     layers: int
     bler: float
+    retx_bler: float | None
+    target_bler: float
+    bler_source: str
+    bler_axis_source: str
+    harq_model: str
     tbs_bits: int
     n_re: int
     throughput_bps: float         # 计入 BLER 与 HARQ 后的有效吞吐
     throughput_ideal_bps: float   # 不计 BLER 的名义吞吐
     cqi: int
+    cqi_source: str
     se_shannon: float             # 同 SINR 下的香农谱效（上界）
     se_achieved: float            # 实际达到的谱效
     efficiency_vs_shannon: float  # 达成率
     harq_tx: float                # 平均传输次数
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "sinr_eff_db": round(self.sinr_eff_db, 2),
             "mcs": self.mcs_index, "modulation": self.modulation,
             "code_rate": round(self.code_rate, 4), "layers": self.layers,
             "cqi": self.cqi,
             "bler": round(self.bler, 5),
+            "retx_bler": None if self.retx_bler is None else round(self.retx_bler, 5),
+            "target_bler": self.target_bler,
+            "bler_source": self.bler_source,
+            "bler_axis_source": self.bler_axis_source,
+            "harq_model": self.harq_model,
+            "cqi_source": self.cqi_source,
             "tbs_bits": self.tbs_bits, "n_re": self.n_re,
             "throughput_mbps": round(self.throughput_bps / 1e6, 3),
             "throughput_ideal_mbps": round(self.throughput_ideal_bps / 1e6, 3),
@@ -506,21 +634,31 @@ class LinkAdaptResult:
             "efficiency_vs_shannon": round(self.efficiency_vs_shannon, 3),
             "harq_avg_tx": round(self.harq_tx, 3),
         }
+        out["bler_note"] = (
+            "User-provided demodulation curve; not a 3GPP reference. Source axis Es/No "
+            "is interpreted as effective SINR for table 3."
+            if self.bler_source == bc.data.SOURCE_ID
+            else "Finite-blocklength analytic BLER model; not measured BLER."
+        )
+        return out
 
     def text(self) -> str:
         return (
             f"有效 SINR {self.sinr_eff_db:.2f} dB → MCS {self.mcs_index}"
             f"（{self.modulation}, R={self.code_rate:.3f}）× {self.layers} 层，CQI {self.cqi}\n"
-            f"  BLER {self.bler:.2%}  TBS {self.tbs_bits} bit  "
+            f"  NewTx BLER {self.bler:.2%}"
+            + (f" / ReTx {self.retx_bler:.2%}" if self.retx_bler is not None else "")
+            + f"  TBS {self.tbs_bits} bit  "
             f"吞吐 {self.throughput_bps/1e6:.2f} Mbps（名义 {self.throughput_ideal_bps/1e6:.2f}）\n"
             f"  谱效 {self.se_achieved:.3f} vs 香农 {self.se_shannon:.3f} "
-            f"bit/s/Hz —— 达成 {self.efficiency_vs_shannon:.1%}"
+            f"bit/s/Hz —— 达成 {self.efficiency_vs_shannon:.1%}\n"
+            f"  BLER 来源 {self.bler_source}，HARQ {self.harq_model}"
         )
 
 
 def select_cqi(sinr_eff_db: float, *, table: int = 1, target_bler: float = 0.1,
                n_coded_bits: int = 20000, n_code_blocks: int = 1,
-               model: BlerModel | None = None) -> int:
+               model: Any | None = None) -> int:
     """按 38.214 的口径选 CQI：满足目标 BLER 的最高档。0 表示超出范围。"""
     mdl = model or DEFAULT_BLER
     best = 0
@@ -533,9 +671,9 @@ def select_cqi(sinr_eff_db: float, *, table: int = 1, target_bler: float = 0.1,
 
 def select_mcs(sinr_eff_db: float, *, table: int = 1, target_bler: float = 0.1,
                n_coded_bits: int = 20000, n_code_blocks: int = 1,
-               model: BlerModel | None = None) -> Mcs:
+               model: Any | None = None) -> Mcs:
     """选满足目标 BLER 的最高 MCS。全都不满足时退回 MCS 0（并留下高 BLER）。"""
-    mdl = model or DEFAULT_BLER
+    mdl = model or _default_bler_model(table)
     tbl = MCS_TABLES[table]
     best = tbl[0]
     for m in tbl:
@@ -550,24 +688,33 @@ def link_adaptation(
     n_prb: int = 273,
     layers: int = 1,
     mcs_table: int = 1,
-    cqi_table: int = 1,
+    cqi_table: int | None = None,
     target_bler: float = 0.1,
     slot_duration_s: float = 0.5e-3,
     n_symbols: int = 12,
     esm: str = "miesm",
     max_harq_tx: int = 4,
-    model: BlerModel | None = None,
+    model: Any | None = None,
+    retx_model: Any | None = None,
 ) -> LinkAdaptResult:
     """从逐 RB 的 SINR 到真实吞吐，走完整条链路到系统映射。
 
     步骤：逐 RB SINR → 有效 SINR（MIESM）→ 选 MCS（满足目标 BLER）→
     算 TBS（38.214 §5.1.3.2）→ 计入 BLER 与 HARQ 得有效吞吐。
 
-    **HARQ 用的是理想合并的简化模型**：平均传输次数
-    ``Σ_{k<K} BLER^k``，即每次重传相互独立、成功即停。真实 HARQ 有合并增益，
-    重传的成功率更高，所以这个模型**偏保守**。
+    表 1/2 的 HARQ 沿用 i.i.d. BLER 简化。表 3 用源数据的 NewTx 曲线选 MCS，
+    首传失败后使用同 MCS 的 ReTx 曲线；若有多次重传，当前只有一条 ReTx 曲线，
+    因而重复使用它并在结果的 ``harq_model`` 中明示这一假设。
     """
-    mdl = model or DEFAULT_BLER
+    use_default_curve_pair = model is None and retx_model is None and mcs_table == 3
+    mdl = model or _default_bler_model(mcs_table)
+    resolved_cqi_table = int(cqi_table if cqi_table is not None else
+                             (2 if mcs_table in (2, 3) else 1))
+    if resolved_cqi_table not in CQI_TABLES:
+        raise ValueError(f"cqi table must be one of {sorted(CQI_TABLES)}, got {cqi_table}")
+    if int(max_harq_tx) < 1:
+        raise ValueError(f"max_harq_tx must be >= 1, got {max_harq_tx}")
+    max_harq_tx = int(max_harq_tx)
     g = np.asarray(sinr_per_rb_db, dtype=float).ravel()
     g = g[np.isfinite(g)]
     if g.size == 0:
@@ -593,9 +740,18 @@ def link_adaptation(
     n_cb, _ = code_blocks(tbs, mcs.rate)
     bler = float(mdl.bler(eff, mcs, n_coded, n_cb)[0])
 
-    # HARQ：平均传输次数与最终残余错误
-    p_fail_final = bler ** max_harq_tx
-    avg_tx = sum(bler ** k for k in range(max_harq_tx))
+    # HARQ：表 3 有独立 ReTx 曲线；表 1/2 保留原来的 i.i.d. BLER 简化。
+    resolved_retx_model = DEFAULT_CURVE_RETX_BLER if use_default_curve_pair else retx_model
+    if resolved_retx_model is not None:
+        retx_bler = float(resolved_retx_model.bler(eff, mcs, n_coded, n_cb)[0])
+        p_fail_final = bler * retx_bler ** (max_harq_tx - 1)
+        avg_tx = 1.0 + bler * sum(retx_bler ** k for k in range(max_harq_tx - 1))
+        harq_model = "newtx_then_retx_curve_reused"
+    else:
+        retx_bler = None
+        p_fail_final = bler ** max_harq_tx
+        avg_tx = sum(bler ** k for k in range(max_harq_tx))
+        harq_model = "iid_same_bler"
     tput_ideal = tbs / slot_duration_s
     tput = tbs * (1.0 - p_fail_final) / (avg_tx * slot_duration_s)
 
@@ -604,13 +760,28 @@ def link_adaptation(
     se_achieved = tbs * (1.0 - p_fail_final) / (avg_tx * n_re)
     se_shannon = float(np.mean(np.log2(1.0 + 10.0 ** (g / 10.0)))) * n_layers
 
+    bler_source = getattr(mdl, "source_id", "analytic_finite_blocklength")
+    bler_axis_source = (
+        f"{bc.data.SOURCE_AXIS_NAME}; interpreted as effective SINR"
+        if bler_source == bc.data.SOURCE_ID else "effective SINR from MIESM/EESM"
+    )
+    cqi_model = DEFAULT_BLER if mcs_table == 3 else mdl
+    cqi_source = (
+        "38.214 CQI table with analytic finite-blocklength BLER"
+        if mcs_table == 3 else bler_source
+    )
+
     return LinkAdaptResult(
         sinr_eff_db=eff, mcs_index=mcs.index, modulation=_MOD_NAME[mcs.q_m],
         code_rate=mcs.rate, se_mcs=mcs.se, layers=n_layers, bler=bler,
+        retx_bler=retx_bler, target_bler=float(target_bler),
+        bler_source=bler_source, bler_axis_source=bler_axis_source,
+        harq_model=harq_model,
         tbs_bits=tbs, n_re=n_re, throughput_bps=tput,
         throughput_ideal_bps=tput_ideal,
-        cqi=select_cqi(eff, table=cqi_table, target_bler=target_bler,
-                       n_coded_bits=n_coded, n_code_blocks=n_cb, model=mdl),
+        cqi=select_cqi(eff, table=resolved_cqi_table, target_bler=target_bler,
+                       n_coded_bits=n_coded, n_code_blocks=n_cb, model=cqi_model),
+        cqi_source=cqi_source,
         se_shannon=se_shannon, se_achieved=se_achieved,
         efficiency_vs_shannon=se_achieved / max(se_shannon, _EPS),
         harq_tx=avg_tx,
@@ -633,7 +804,11 @@ class ThroughputStats:
     cell_edge_se: float
     mcs_distribution: dict[int, int] = field(default_factory=dict)
     mean_bler: float = 0.0
+    mean_retx_bler: float | None = None
     outage_ratio: float = 0.0  # 连 MCS 0 都达不到目标 BLER 的比例
+    bler_source: str = "analytic_finite_blocklength"
+    bler_axis_source: str = "effective SINR from MIESM/EESM"
+    harq_model: str = "iid_same_bler"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -645,14 +820,26 @@ class ThroughputStats:
             "mean_se": round(self.mean_se, 3),
             "cell_edge_se_5pct": round(self.cell_edge_se, 3),
             "mean_bler": round(self.mean_bler, 4),
+            "mean_retx_bler": (
+                None if self.mean_retx_bler is None else round(self.mean_retx_bler, 4)
+            ),
             "outage_ratio": round(self.outage_ratio, 4),
+            "bler_source": self.bler_source,
+            "bler_axis_source": self.bler_axis_source,
+            "harq_model": self.harq_model,
             "mcs_distribution": {int(k): int(v) for k, v in
                                  sorted(self.mcs_distribution.items())},
-            "note": (
-                "5% 分位是 3GPP 评估里的边缘用户指标，比均值更能反映公平性。"
-                "BLER 来自模型而非实测，见 linkadapt 模块文档。"
-            ),
+            "note": self._note(),
         }
+
+    def _note(self) -> str:
+        base = "5% 分位是 3GPP 评估里的边缘用户指标，比均值更能反映公平性。"
+        if self.bler_source == bc.data.SOURCE_ID:
+            return (
+                base + "BLER 来自用户提供的 20B NewTx/ReTx 解调曲线，不是 3GPP "
+                "标准曲线；源横轴名为 Es/No，本次按有效 SINR 使用。"
+            )
+        return base + "BLER 来自有限码长分析模型而非实测，见 linkadapt 模块文档。"
 
     def text(self) -> str:
         return (
@@ -660,7 +847,8 @@ class ThroughputStats:
             f"边缘用户(5%) {self.cell_edge_mbps:.2f} / 峰值(95%) {self.peak_mbps:.2f} Mbps\n"
             f"  谱效 均值 {self.mean_se:.3f}，边缘 {self.cell_edge_se:.3f} bit/s/Hz\n"
             f"  平均 BLER {self.mean_bler:.2%}，中断比例 {self.outage_ratio:.2%}\n"
-            f"  MCS 分布 {dict(sorted(self.mcs_distribution.items()))}"
+            f"  MCS 分布 {dict(sorted(self.mcs_distribution.items()))}\n"
+            f"  BLER 来源 {self.bler_source}，HARQ {self.harq_model}"
         )
 
 
@@ -673,6 +861,10 @@ def throughput_stats(results: list[LinkAdaptResult]) -> ThroughputStats:
     dist: dict[int, int] = {}
     for r in results:
         dist[r.mcs_index] = dist.get(r.mcs_index, 0) + 1
+    retx = [r.retx_bler for r in results if r.retx_bler is not None]
+    sources = {r.bler_source for r in results}
+    axes = {r.bler_axis_source for r in results}
+    harq_models = {r.harq_model for r in results}
     return ThroughputStats(
         n=len(results),
         mean_mbps=float(t.mean()), median_mbps=float(np.median(t)),
@@ -681,5 +873,11 @@ def throughput_stats(results: list[LinkAdaptResult]) -> ThroughputStats:
         mean_se=float(se.mean()), cell_edge_se=float(np.percentile(se, 5)),
         mcs_distribution=dist,
         mean_bler=float(np.mean([r.bler for r in results])),
-        outage_ratio=float(np.mean([r.mcs_index == 0 and r.bler > 0.1 for r in results])),
+        mean_retx_bler=float(np.mean(retx)) if retx else None,
+        outage_ratio=float(np.mean([
+            r.mcs_index == 0 and r.bler > r.target_bler for r in results
+        ])),
+        bler_source=next(iter(sources)) if len(sources) == 1 else "mixed",
+        bler_axis_source=next(iter(axes)) if len(axes) == 1 else "mixed",
+        harq_model=next(iter(harq_models)) if len(harq_models) == 1 else "mixed",
     )

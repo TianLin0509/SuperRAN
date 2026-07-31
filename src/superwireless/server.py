@@ -822,12 +822,14 @@ async def sw_throughput(
     边缘用户吞吐是 3GPP 评估里的公平性指标，比均值更能说明问题。
 
     `mcs_table`：1 = 最高 64QAM（38.214 Table 5.1.3.1-1），
-    2 = 含 256QAM（Table 5.1.3.1-2）。**MCS 分布里大量样本压在最高档时，
+    2 = 含 256QAM（Table 5.1.3.1-2），3 = 用户提供的 20B 256QAM MCS +
+    NewTx/ReTx 解调曲线。**MCS 分布里大量样本压在最高档时，
     说明限制来自 MCS 表而不是信道**，换表 2 通常能明显提升。
 
-    **BLER 是模型不是实测**：MCS/CQI/TBS 都按 38.214 精确算，QAM 约束容量
-    精确求积，但 BLER 用的是有限码长模型（没有 3GPP 参考曲线兜底）。
-    严格 BLER 结论请跑真正的链路级仿真。
+    表 1/2 的 BLER 是有限码长分析模型，不是实测。表 3 的 BLER 来自用户提供的
+    解调曲线，也不是 3GPP 标准曲线；源横轴名为 Es/No，这里显式按有效 SINR 使用。
+    表 3 的 HARQ 首传用 NewTx、后续用 ReTx 曲线；多次重传复用同一 ReTx 曲线。
+    表 3 没有 CQI 曲线，CQI 仍用 38.214 Table 2 + 分析 BLER，并在结果中标明来源。
     """
     return await anyio.to_thread.run_sync(
         functools.partial(
@@ -839,6 +841,7 @@ async def sw_throughput(
 
 def _throughput_sync(*, dataset_id: str, mcs_table: int, target_bler: float,
                      max_samples: int, method: str) -> dict[str, Any]:
+    from . import linkadapt as la
     from . import loader as ld
 
     ds = ld.load(dataset_id)
@@ -848,6 +851,7 @@ def _throughput_sync(*, dataset_id: str, mcs_table: int, target_bler: float,
     out = st.as_dict()
     out["dataset_id"] = dataset_id
     out["mcs_table"] = mcs_table
+    out["mcs_source"] = la.MCS_TABLE_SOURCES[mcs_table]
     out["text"] = st.text()
     top = max(st.mcs_distribution) if st.mcs_distribution else 0
     capped = st.mcs_distribution.get(top, 0) / max(st.n, 1)
@@ -864,30 +868,66 @@ def sw_mcs_info(
     table: int = 1,
     show_bler_anchors: bool = False,
 ) -> dict[str, Any]:
-    """查 38.214 的 MCS / CQI 表，以及 BLER 模型各档的门限。
+    """查 MCS / CQI 表，以及分析模型或表驱动 BLER 的门限。
 
     `show_bler_anchors=true` 时给出各 MCS 达到 10% BLER 所需的有效 SINR，
     以及它距同频谱效率的香农极限有多远。**这是模型预测，摆出来供人工对照
     公开的 NR 链路级曲线**——常见量级是 MCS0 约 -5~-7 dB、MCS28 约 20~23 dB。
 
-    表格本身是逐字录入的标准值，`verify_tables` 用"SE == q_m·R/1024"这条
-    表内蕴关系做过自检。
+    `table=1/2` 是逐字录入的 38.214 标准值，BLER 是分析模型。
+    `table=3` 是用户提供的 20B 256QAM MCS 与 NewTx/ReTx 曲线：返回两套码率、
+    10% BLER 门限和数据哈希自检。它不是 3GPP 标准表，源横轴名为 Es/No。
     """
     from . import linkadapt as la
 
+    if table not in la.MCS_TABLES:
+        raise ValueError(f"table 应为 {sorted(la.MCS_TABLES)}，收到 {table}")
+
+    mcs_rows = (
+        la.bc.mcs_profile_rows() if table == 3
+        else [m.as_dict() for m in la.MCS_TABLES[table]]
+    )
     out: dict[str, Any] = {
-        "mcs_table": [m.as_dict() for m in la.MCS_TABLES[table]],
+        "mcs_table": mcs_rows,
         "cqi_table": [
             {"index": c.index, "modulation": la._MOD_NAME[c.q_m],
              "code_rate": round(c.r_1024 / 1024, 4), "se": c.se}
             for c in la.CQI_TABLES[min(table, 2)]
         ],
-        "verify": la.verify_tables(),
-        "source": "3GPP TS 38.214 V17.5.0 Table 5.1.3.1-1/-2、5.2.2.1-2/-3",
+        "verify": la.bc.verify_curves() if table == 3 else la.verify_tables(),
+        "source": la.MCS_TABLE_SOURCES[table],
+        "cqi_source": "3GPP TS 38.214 CQI Table 2" if table == 3 else "same table family",
     }
     if show_bler_anchors:
-        out["bler_anchors"] = la.DEFAULT_BLER.anchor_check(table=table)
+        out["bler_anchors"] = (
+            la.curve_anchor_check() if table == 3
+            else la.DEFAULT_BLER.anchor_check(table=table)
+        )
     return _jsonable(out)
+
+
+@mcp.tool()
+def sw_bler_curve(
+    mcs: int,
+    tx_mode: str = "newtx",
+    sinr_db_list: list[float] | None = None,
+    target_bler: float = 0.1,
+) -> dict[str, Any]:
+    """查用户提供的单档 BLER 曲线，并可在任意 SINR 点插值。
+
+    `mcs` 为 0..27；`tx_mode` 为 `newtx` 或 `retx`。默认返回完整原始点、码率、
+    10% BLER 门限和来源口径。传 `sinr_db_list` 时额外返回查询点的 BLER。
+
+    插值在 log10(BLER) 域线性完成；低于曲线范围钳到 1，高于范围钳到最后一个
+    实测点，绝不外推一条看似精确的尾巴。源脚本横轴叫 Es/No，本工具沿用户习惯
+    暴露 `sinr_db`，同时在 `axis_source_name` / `axis_interpretation` 中明示转换。
+    """
+    from . import linkadapt as la
+
+    return _jsonable(la.bler_curve(
+        mcs=mcs, tx_mode=tx_mode, target_bler=target_bler,
+        sinr_db=sinr_db_list,
+    ))
 
 
 @mcp.tool()
@@ -941,9 +981,15 @@ def _sweep_sync(*, dataset_id: str, snr_db_list: list[float] | None,
             "cell_edge_mbps": round(st.cell_edge_mbps, 2),
             "mcs_median": int(np.median([r.mcs_index for r in res])),
             "mean_bler": round(st.mean_bler, 4),
+            "mean_retx_bler": (
+                None if st.mean_retx_bler is None else round(st.mean_retx_bler, 4)
+            ),
         })
     return _jsonable({
         "dataset_id": dataset_id, "n_samples": n, "mcs_table": mcs_table,
+        "mcs_source": la.MCS_TABLE_SOURCES[mcs_table],
+        "bler_source": st.bler_source,
+        "harq_model": st.harq_model,
         "curve": rows,
         "note": (
             "各点跑在同一批信道上，彼此配对，曲线不含信道抽样噪声。"

@@ -59,9 +59,29 @@ async def main() -> None:
             expected = {
                 "sw_capabilities", "sw_list_presets", "sw_list_scenes", "sw_plan",
                 "sw_revise", "sw_generate", "sw_deliver",
-                "sw_describe_dataset", "sw_list_datasets",
+                "sw_describe_dataset", "sw_list_datasets", "sw_mcs_info", "sw_bler_curve",
             }
-            check(expected.issubset(set(names)), f"9 个工具全部注册（实际 {len(names)} 个）")
+            check(expected.issubset(set(names)), f"11 个核心工具全部注册（实际 {len(names)} 个）")
+
+            print("\n" + "=" * 68 + "\n1.5  表驱动 BLER 查询\n" + "=" * 68)
+            curve = _payload(await session.call_tool(
+                "sw_bler_curve",
+                {"mcs": 15, "tx_mode": "newtx", "sinr_db_list": [14.0, 14.05]},
+            ))
+            check(curve.get("source_id") == "company_20b_256qam", "MCP 返回曲线来源")
+            check(abs(curve.get("required_sinr_db", 0.0) - 14.0421) < 1e-3,
+                  "MCP 返回 MCS15 NewTx 10% BLER 门限")
+            queried = curve.get("query", {}).get("bler", [])
+            check(len(queried) == 2 and abs(queried[0] - 0.132) < 1e-12 and
+                  abs(queried[1] - 0.0949) < 1e-12,
+                  "MCP 在原始 SINR 网格点逐值返回 BLER")
+
+            mcs3 = _payload(await session.call_tool(
+                "sw_mcs_info", {"table": 3, "show_bler_anchors": True}
+            ))
+            check(len(mcs3.get("mcs_table", [])) == 28 and
+                  mcs3.get("verify", {}).get("consistent") is True,
+                  "MCP 表 3 覆盖 28 档且完整性自检通过")
 
             print("\n" + "=" * 68 + "\n2  sw_capabilities\n" + "=" * 68)
             caps = _payload(await session.call_tool("sw_capabilities", {}))
@@ -141,7 +161,7 @@ async def main() -> None:
                     },
                 )
             )
-            print(f"  改动：")
+            print("  改动：")
             for c in rev["changes"]:
                 print(f"    {c}")
             check(len(rev["changes"]) >= 4, "差分修正生效")
@@ -154,7 +174,7 @@ async def main() -> None:
             print(f"  形状       {s['shape']}")
             print(f"  耗时       {s['elapsed_s']}s")
             print(f"  SINR       中位数 {s['sinr_dB']['median']} dB")
-            print(f"\n  替用户做的决定（会转述给用户）：")
+            print("\n  替用户做的决定（会转述给用户）：")
             for a in gen["auto_decided"][:6]:
                 print(f"    · {a}")
             check(bool(gen["auto_decided"]), "列出了自动决定的项")

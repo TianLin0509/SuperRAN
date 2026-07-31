@@ -18,12 +18,12 @@
 
 ```bash
 python tests/test_e2e.py         # 端到端 39 项
-python tests/test_mcp_server.py  # MCP 全链路 21 项
+python tests/test_mcp_server.py  # MCP 全链路 25 项
 python tests/test_raytracing.py  # 射线追踪与决策层 39 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
-python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 102 项
+python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 117 项
 python tests/test_interference.py # IoT、测量域、场景预设、探测模式、文档计数 145 项
 ```
 
@@ -109,12 +109,22 @@ python tests/test_interference.py # IoT、测量域、场景预设、探测模�
 抓它的办法是低信噪比处对香农：约束容量在 γ→0 时必须与 `log2(1+γ)` 重合。
 这条自检在 `test_linkadapt` 第 1 节里。
 
-### BLER 是模型，MCS/TBS 不是
+### BLER 有分析模型和用户曲线两条后端，别混成一种证据
 
-`linkadapt` 里只有 `BlerModel` 是模型（有限码长形状 + 可配实现损失，
-没有 3GPP 参考曲线兜底）。MCS/CQI 表逐字录自 38.214、TBS 按 §5.1.3.2 复刻、
-QAM 约束容量精确求积——**这三样不能和 BLER 混为一谈**。
-对外说明必须分清，否则用户会把模型当实测用。
+表 1/2 使用 `BlerModel`（有限码长形状 + 可配实现损失，没有 3GPP 参考曲线
+兜底）；MCS/CQI 表逐字录自 38.214、TBS 按 §5.1.3.2 复刻、QAM 约束容量精确
+求积。**这三样不能和分析 BLER 混为一谈。**
+
+表 3 使用用户提供的 `company_20b_256qam`：28 档 MCS、56 条 NewTx/ReTx 曲线、
+1824 个点。原始数据在 `bler_data_20b.py`，查询/哈希/单调性/插值在
+`bler_curves.py`。它比分析模型更贴近该接收机配置，但**仍不是 3GPP 标准曲线**；
+源横轴叫 `Es/No`，当作有效 SINR 使用必须把解释写进结果。曲线范围外只能保守
+钳位，不能外推一条假精确尾巴。
+
+表 3 的 HARQ：首传用 NewTx；失败后用 ReTx。源数据每档只有一条 ReTx 曲线，
+多次重传会复用它，结果必须保留 `harq_model=newtx_then_retx_curve_reused`。
+表 3 没有 CQI 曲线，所以 CQI 仍用 38.214 Table 2 + 分析 BLER，并通过
+`cqi_source` 明示，不能谎称 CQI 也来自公司曲线。
 
 `anchor_check` 的单调性**只能在同一调制阶数内部要求**：标准表在调制切换点上
 故意让 SE 重叠（MCS9 QPSK SE=1.3262 → MCS10 16QAM SE=1.3281，但码率只有 0.332），
@@ -438,8 +448,10 @@ ChannelHub 的 `doppler_hz` 来自**同一个 UE 相邻样本之间的位移**�
 ## 加东西的地方
 
 - 新的 3GPP 校准量 → `calibration.py`，按条款号标注来源
-- 新的 MCS/CQI 表或 TBS 分支 → `linkadapt.py`，**必须过 `verify_tables` 的内蕴自检**
-- 改 BLER 模型参数 → 跑 `anchor_check`，门限要落在公开 NR 曲线的常见区间
+- 新的 MCS/CQI 表或 TBS 分支 → `linkadapt.py`，**标准表必须过 `verify_tables` 的内蕴自检**
+- 改分析 BLER 参数 → 跑 `anchor_check`，门限要落在公开 NR 曲线的常见区间
+- 新的表驱动 BLER → 原始常量放独立数据模块，必须有 SHA-256、全 MCS 覆盖、
+  横轴/BLER 单调、目标门限覆盖检查；来源不是标准就不能塞进 `verify_tables`
 - 新的门禁判据 → `gates.py`（门 2/门 3）或 `validate.py`（门 1，会自动进门 1）
 - 新的外部结果校验 → `results.check_pairable`，每条都必须是**硬拦截**不是告警
 - 新指标 → `analysis.KNOWN_METRICS` 加单位；自定义指标也支持，单位由调用方给

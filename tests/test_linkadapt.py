@@ -158,6 +158,42 @@ def main() -> None:
     check(b24 > b1, "码块越多 TB 级 BLER 越高（任一块错则整块错）")
 
     # -----------------------------------------------------------------------
+    sect("6.5  用户提供的表驱动 NewTx/ReTx BLER 曲线")
+
+    cv = la.bc.verify_curves()
+    print(f"  {cv['n_mcs']} 个 MCS / {cv['n_curves']} 条曲线 / {cv['n_points']} 个点")
+    check(cv["consistent"], "曲线哈希、覆盖、单调性和 10% 门限全部自洽")
+    check(cv["hash_matches"], "曲线数据与导入时 SHA-256 一致")
+    check(len(la.MCS_TABLE_3) == 28, "表 3 共 28 档，覆盖 MCS 0..27")
+    check(max(m.q_m for m in la.MCS_TABLE_3) == 8, "表 3 含 256QAM")
+
+    c15n = la.bc.get_curve(15, "newtx")
+    c15r = la.bc.get_curve(15, "retx")
+    check(c15n.q_m == 6 and abs(c15n.code_rate - 0.650) < 1e-12,
+          "MCS15 NewTx 映射到 64QAM R=0.650")
+    check(abs(c15r.code_rate - 0.333) < 1e-12,
+          "MCS15 ReTx 映射到 R=0.333")
+    check(abs(float(c15n.evaluate(14.00)[0]) - 0.132) < 1e-12 and
+          abs(float(c15n.evaluate(14.05)[0]) - 0.0949) < 1e-12,
+          "MCS15 NewTx 在原始网格点逐值还原")
+    check(abs(c15n.required_sinr_db(0.1) - 14.0421) < 1e-3,
+          "MCS15 NewTx 10% BLER 门限为 14.042 dB")
+    check(abs(c15r.required_sinr_db(0.1) - 7.7429) < 1e-3,
+          "MCS15 ReTx 10% BLER 门限为 7.743 dB")
+    check(float(c15n.evaluate(0.0)[0]) == 1.0 and
+          abs(float(c15n.evaluate(30.0)[0]) - c15n.bler_points[-1]) < 1e-12,
+          "曲线范围外保守钳位，不伪造外推尾部")
+
+    tab = la.link_adaptation(np.full(273, 14.2), n_prb=273, layers=1, mcs_table=3)
+    check(tab.mcs_index == 15, "表 3 在 14.2 dB 选择 MCS15")
+    check(tab.bler_source == "company_20b_256qam", "结果显式标出表驱动 BLER 来源")
+    check(tab.retx_bler is not None and tab.retx_bler < tab.bler,
+          "HARQ 首传后使用独立 ReTx 曲线")
+    check(tab.harq_model == "newtx_then_retx_curve_reused",
+          "结果显式标出多次重传复用 ReTx 曲线的假设")
+    check("Es/No" in tab.bler_axis_source, "结果保留源横轴 Es/No 口径")
+
+    # -----------------------------------------------------------------------
     sect("7  链路自适应端到端")
 
     rng = np.random.default_rng(3)

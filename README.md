@@ -110,8 +110,21 @@ print(st.text())
 
 三项损失：**调制受限**（20 dB 时香农 6.66，64QAM 只给 5.80）、**码率离散**
 （MCS 只有 29 档）、**有限码长 + 实现损失**（LDPC 距容量 1~2 dB）。
-QAM 约束容量用 Gauss-Hermite 求积**精确算**，MCS/CQI/TBS 按 38.214 精确复刻，
-**只有 BLER 是模型**（没有 3GPP 参考曲线兜底，`sw_mcs_info` 会把门限摆出来对照）。
+QAM 约束容量用 Gauss-Hermite 求积**精确算**，表 1/2 的 MCS/CQI 与 TBS 按
+38.214 精确复刻；默认 BLER 是有限码长分析模型（没有 3GPP 参考曲线兜底）。
+
+现在另有显式可选的 `mcs_table=3`：28 档用户 MCS profile + 56 条 NewTx/ReTx
+解调曲线（1824 点）。它用曲线选 MCS，HARQ 首传后切到 ReTx 曲线：
+
+```python
+st = ds.throughput(mcs_table=3)
+sw_bler_curve(mcs=15, tx_mode="newtx", sinr_db_list=[14.0, 14.05])
+# BLER = [0.132, 0.0949]，10% 门限 14.042 dB
+```
+
+表 3 **不是 3GPP 标准表**；源脚本横轴名为 `Es/No`，本工具按有效 SINR 使用时
+会在返回值里明示。`sw_mcs_info(table=3, show_bler_anchors=true)` 可查看全部门限、
+码率和数据哈希自检。
 
 `sw_sweep_snr` 出谱效/吞吐 vs SNR 曲线——实测低信噪比达成 77%、
 高信噪比因 MCS 封顶掉到 38%。
@@ -215,7 +228,7 @@ PMI 给码本索引而非嵌入向量。
 | 一臂理想 CSI、另一臂估计 CSI | 增益里混着"提前知道答案"的部分 |
 | 置信区间跨零却说"有提升" | 方向都不能确定 |
 | 把香农谱效当吞吐报 | 真实系统要打 4~6 折，差的是调制受限+码率离散+码长 |
-| 声称实测 BLER | BLER 是模型，没有 3GPP 参考曲线兜底 |
+| 声称实测 BLER | 表 1/2 是分析模型；表 3 是用户曲线插值，二者都不是 3GPP 实测 |
 
 ## 安装
 
@@ -297,7 +310,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 （§7.8.2 指标3，Annex A.1 圆周定义）、PRB 奇异值最大/次大/比值三条 CDF
 （指标4，10log10 尺度）。参考曲线在 R1-165974 / R1-165975 / R1-1909704。
 
-## MCP 工具（28 个）
+## MCP 工具（29 个）
 
 | 工具 | 作用 |
 |---|---|
@@ -317,7 +330,8 @@ cp -r skills/channel-sim ~/.codex/skills/
 | `sw_list_results` | 已注册的结果与预注册记录 |
 | `sw_throughput` | **真实吞吐 Mbps** + 5% 边缘用户（链路到系统映射） |
 | `sw_sweep_snr` | **谱效/吞吐 vs SNR 曲线**，各点配对无抽样噪声 |
-| `sw_mcs_info` | 38.214 MCS/CQI 表 + BLER 模型门限锚点 |
+| `sw_mcs_info` | 表 1/2：38.214 + 分析模型；表 3：用户 MCS + NewTx/ReTx 门限 |
+| `sw_bler_curve` | 查单档原始 BLER 曲线、10% 门限，并在任意 SINR 点做对数域插值 |
 | `sw_describe_dataset` / `sw_list_datasets` | 数据集信息 |
 
 ## 观察量（12 类）
@@ -392,15 +406,16 @@ ph.project_interference(...)       # 干扰投影：不投影会高估干扰
 
 ```bash
 python tests/test_e2e.py         # 端到端 39 项
-python tests/test_mcp_server.py  # MCP 全链路 21 项
+python tests/test_mcp_server.py  # MCP 全链路 25 项
 python tests/test_raytracing.py  # 射线追踪与决策层 39 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
-python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 102 项
+python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 117 项
+python tests/test_interference.py # IoT、测量域、场景预设、探测模式、文档计数 145 项
 ```
 
-共 **402 项**。
+共 **566 项**。
 
 ## 致谢
 
