@@ -122,9 +122,9 @@ sw_bler_curve(mcs=15, tx_mode="newtx", sinr_db_list=[14.0, 14.05])
 # BLER = [0.132, 0.0949]，10% 门限 14.042 dB
 ```
 
-表 3 **不是 3GPP 标准表**；源脚本横轴名为 `Es/No`，本工具按有效 SINR 使用时
-会在返回值里明示。`sw_mcs_info(table=3, show_bler_anchors=true)` 可查看全部门限、
-码率和数据哈希自检。
+表 3 **不是 3GPP 标准表**；源脚本标签 `Es/No` 已确认表示经典 MMSE 接收机
+的 SINR。TB/CB、块长、信道模型、MIMO 层数和译码器细节暂不参数化。
+`sw_mcs_info(table=3, show_bler_anchors=true)` 可查看全部门限、码率和哈希自检。
 
 `sw_sweep_snr` 出谱效/吞吐 vs SNR 曲线——实测低信噪比达成 77%、
 高信噪比因 MCS 封顶掉到 38%。

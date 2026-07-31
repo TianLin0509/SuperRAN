@@ -117,14 +117,18 @@ python tests/test_interference.py # IoT、测量域、场景预设、探测模�
 
 表 3 使用用户提供的 `company_20b_256qam`：28 档 MCS、56 条 NewTx/ReTx 曲线、
 1824 个点。原始数据在 `bler_data_20b.py`，查询/哈希/单调性/插值在
-`bler_curves.py`。它比分析模型更贴近该接收机配置，但**仍不是 3GPP 标准曲线**；
-源横轴叫 `Es/No`，当作有效 SINR 使用必须把解释写进结果。曲线范围外只能保守
-钳位，不能外推一条假精确尾巴。
+`bler_curves.py`。它比分析模型更贴近该接收机配置，但**仍不是 3GPP 标准曲线**。
+数据所有者确认：源标签 `Es/No` 就是经典 MMSE 接收机的 SINR；TB/CB、块长、
+信道模型、MIMO 层数和译码器细节暂不参数化。曲线范围外只能保守钳位，不能外推。
 
 表 3 的 HARQ：首传用 NewTx；失败后用 ReTx。源数据每档只有一条 ReTx 曲线，
 多次重传会复用它，结果必须保留 `harq_model=newtx_then_retx_curve_reused`。
 表 3 没有 CQI 曲线，所以 CQI 仍用 38.214 Table 2 + 分析 BLER，并通过
 `cqi_source` 明示，不能谎称 CQI 也来自公司曲线。
+
+下一步 TDD AMC 的口径锁定为：先把 `CQI index` 映射到其基准 SINR 门限，再算
+`sinr_for_mcs_db = cqi_sinr_db + bf_gain_db + olla_offset_db`。CQI 不是 dB，不能
+直接与两个 dB 量相加；还必须记录 CQI 是 pre-BF 还是 post-BF，避免 BF Gain 重复计入。
 
 `anchor_check` 的单调性**只能在同一调制阶数内部要求**：标准表在调制切换点上
 故意让 SE 重叠（MCS9 QPSK SE=1.3262 → MCS10 16QAM SE=1.3281，但码率只有 0.332），

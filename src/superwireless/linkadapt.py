@@ -25,15 +25,15 @@
 | MCS / CQI 表 | **标准查表** | 38.214 Table 5.1.3.1-1/-2、5.2.2.1-2/-3/-4 |
 | TBS | **标准算法** | 38.214 §5.1.3.2，逐步复刻 |
 | BLER（默认） | **分析模型** | 有限码长形状 + 可配的实现损失。**不是实测曲线** |
-| BLER（表 3） | **用户曲线** | 20B 256QAM NewTx/ReTx 解调曲线；源横轴名为 Es/No |
+| BLER（表 3） | **用户曲线** | 20B 256QAM NewTx/ReTx 曲线；横轴为经典 MMSE 接收机 SINR |
 
 默认 BLER 模型没有 3GPP 参考曲线兜底，所以：
 参数全部可配、默认值有出处、`anchor_check()` 会报出各 MCS 的 10% BLER 门限
 供人工对照公开的 NR 链路级曲线。**别把它当成实测 BLER 用。**
 
 `mcs_table=3` 改用用户提供的 28 档 NewTx/ReTx 表驱动曲线。它比分析模型多了
-真实曲线形状和重传口径，但**仍不是 3GPP 标准曲线**；源脚本横轴叫 `Es/No`，
-在本模块中按有效 SINR 使用时会把这一解释写进结果，绝不静默改名。
+真实曲线形状和重传口径，但**仍不是 3GPP 标准曲线**。源脚本虽写 `Es/No`，
+数据所有者已确认它就是经典 MMSE 接收机的 SINR；其他链路维度暂不参数化。
 """
 from __future__ import annotations
 
@@ -489,8 +489,8 @@ class CurveBlerModel:
 
     ``n_coded_bits`` and ``n_code_blocks`` remain in the method signature so this
     provider can share the analytic model's pipeline. They do not reshape a tabulated
-    curve: the source data already embodies its own, currently undocumented, block-size
-    and receiver assumptions.
+    curve: this profile is defined directly versus SINR for a classic MMSE receiver,
+    while TB/CB granularity and block length are intentionally not parameterized.
     """
 
     tx_mode: str = "newtx"
@@ -554,13 +554,16 @@ def curve_anchor_check(target_bler: float = 0.1) -> dict[str, Any]:
         "source_id": bc.data.SOURCE_ID,
         "target_bler": target_bler,
         "axis_source_name": bc.data.SOURCE_AXIS_NAME,
+        "axis_original_label": bc.data.SOURCE_AXIS_ORIGINAL_LABEL,
         "axis_interpretation": bc.data.SOURCE_AXIS_USAGE,
+        "receiver_model": bc.data.RECEIVER_MODEL,
+        "profile_scope": bc.data.PROFILE_SCOPE,
         "verify": bc.verify_curves(target_bler),
         "rows": rows,
         "caveat": (
             "These are user-provided demodulation curves, not 3GPP reference BLER. "
-            "The source axis is Es/No; superwireless uses it as effective SINR only "
-            "when table 3 is explicitly selected."
+            "The source label Es/No denotes SINR for a classic MMSE receiver; other "
+            "link dimensions are intentionally not parameterized."
         ),
     }
 
@@ -635,8 +638,8 @@ class LinkAdaptResult:
             "harq_avg_tx": round(self.harq_tx, 3),
         }
         out["bler_note"] = (
-            "User-provided demodulation curve; not a 3GPP reference. Source axis Es/No "
-            "is interpreted as effective SINR for table 3."
+            "User-provided demodulation curve; not a 3GPP reference. The source label "
+            "Es/No denotes SINR for a classic MMSE receiver."
             if self.bler_source == bc.data.SOURCE_ID
             else "Finite-blocklength analytic BLER model; not measured BLER."
         )
@@ -762,7 +765,7 @@ def link_adaptation(
 
     bler_source = getattr(mdl, "source_id", "analytic_finite_blocklength")
     bler_axis_source = (
-        f"{bc.data.SOURCE_AXIS_NAME}; interpreted as effective SINR"
+        f"{bc.data.SOURCE_AXIS_NAME}; receiver={bc.data.RECEIVER_MODEL}"
         if bler_source == bc.data.SOURCE_ID else "effective SINR from MIESM/EESM"
     )
     cqi_model = DEFAULT_BLER if mcs_table == 3 else mdl
@@ -837,7 +840,7 @@ class ThroughputStats:
         if self.bler_source == bc.data.SOURCE_ID:
             return (
                 base + "BLER 来自用户提供的 20B NewTx/ReTx 解调曲线，不是 3GPP "
-                "标准曲线；源横轴名为 Es/No，本次按有效 SINR 使用。"
+                "标准曲线；源标签 Es/No 表示经典 MMSE 接收机 SINR。"
             )
         return base + "BLER 来自有限码长分析模型而非实测，见 linkadapt 模块文档。"
 

@@ -1,9 +1,9 @@
 """Table-driven BLER curves and integrity checks.
 
-The first profile is the user-provided ``company_20b_256qam`` data set.  The source
-script calls its horizontal axis ``Es/No``.  This module preserves that provenance;
-the link-adaptation layer may use the grid as effective SINR only when it also reports
-the interpretation to callers.
+The first profile is the user-provided ``company_20b_256qam`` data set. The source
+script labels its horizontal axis ``Es/No``; the data owner confirmed that it denotes
+SINR for a classic MMSE receiver. This module preserves both the original label and
+the confirmed physical meaning.
 """
 from __future__ import annotations
 
@@ -89,7 +89,10 @@ class DemodCurve:
             "q_m": self.q_m,
             "code_rate": self.code_rate,
             "axis_source_name": data.SOURCE_AXIS_NAME,
+            "axis_original_label": data.SOURCE_AXIS_ORIGINAL_LABEL,
             "axis_interpretation": data.SOURCE_AXIS_USAGE,
+            "receiver_model": data.RECEIVER_MODEL,
+            "profile_scope": data.PROFILE_SCOPE,
             "start_db": self.start_db,
             "end_db": self.end_db,
             "step_db": self.step_db,
@@ -195,6 +198,7 @@ def verify_curves(target_bler: float = 0.1) -> dict[str, Any]:
         "issues": issues,
         "caveat": (
             "User-provided demodulation curves, not a 3GPP reference table. "
-            "The source axis is Es/No and is used as effective SINR only by explicit choice."
+            "The source label Es/No denotes post-MMSE SINR. Other link dimensions are "
+            "intentionally not parameterized."
         ),
     }

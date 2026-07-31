@@ -291,8 +291,8 @@ MCS10 是 16QAM R=0.332（SE 1.3281）——同样的 SE，后者码率低得多
 <p><strong>新增表 3：company_20b_256qam。</strong>公司侧提供的 28 档 MCS、
 NewTx/ReTx 两套解调曲线已经作为独立后端接入。以 MCS 15 为例：64QAM，
 NewTx R=0.650 的 10% BLER 门限为 <strong>14.042 dB</strong>，ReTx R=0.333
-为 <strong>7.743 dB</strong>。原始脚本横轴写的是 Es/No；superwireless 只有在
-显式选择 <code>mcs_table=3</code> 时才按有效 SINR 使用，并在返回值保留这一口径。</p>
+为 <strong>7.743 dB</strong>。数据所有者已确认原始标签 Es/No 就是经典 MMSE
+接收机的 SINR；TB/CB、块长、信道模型、MIMO 层数和译码器细节暂不参数化。</p>
 <p style="margin-top:8px;">曲线逐点哈希、56 条覆盖、横轴递增、BLER 单调下降、
 10% 门限覆盖都会自检。范围外保守钳位，不外推假尾部。</p>
 </div>
@@ -452,8 +452,8 @@ ds.throughput(mcs_table=3)           <span class="cm"># 用户 NewTx/ReTx 曲线
 <thead><tr><th>局限</th><th>为什么</th><th>怎么应对</th></tr></thead>
 <tbody>
 <tr><td><strong>BLER 证据依赖后端</strong></td>
-<td>表 1/2 是分析模型；表 3 是用户曲线，但源配置的块长/接收机假设尚未文档化</td>
-<td>结果保留 <code>bler_source</code> 与横轴口径；跨配置严格结论跑 Sionna PHY / MATLAB</td></tr>
+<td>表 1/2 是分析模型；表 3 是经典 MMSE 接收机的用户 SINR 曲线，其他维度暂不参数化</td>
+<td>结果保留 <code>bler_source</code>、接收机与横轴口径；不额外推断块长等影响</td></tr>
 <tr><td>EESM 的 β 未逐 MCS 标定</td>
 <td>β 要拿自己的链路级曲线标定</td>
 <td>默认走 MIESM（不需要 β）；用 EESM 请自行标定后覆盖</td></tr>

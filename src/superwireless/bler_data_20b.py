@@ -2,8 +2,9 @@
 
 Only the NewTx/ReTx curves directly mapped by MCS 0..27 are retained here.
 Additional code-rate curves present in the source script are intentionally omitted.
-The source axis is named ``Es/No``. Callers that use it as effective SINR must expose
-that interpretation explicitly.
+The source script labels the horizontal axis ``Es/No``; the data owner confirmed that
+this quantity is SINR for a classic MMSE receiver. TB/CB granularity, block length,
+channel model, MIMO layers, and decoder details are intentionally not parameterized.
 
 This is not a 3GPP standard table and has not been independently checked against a
 public reference. Never label these points as 3GPP reference BLER curves.
@@ -12,8 +13,14 @@ from __future__ import annotations
 
 SOURCE_ID = "company_20b_256qam"
 SOURCE_PROVENANCE = "user-provided company demodulation curves, imported 2026-07-31"
-SOURCE_AXIS_NAME = "Es/No"
-SOURCE_AXIS_USAGE = "used as effective SINR (dB) by explicit caller choice"
+SOURCE_AXIS_NAME = "SINR"
+SOURCE_AXIS_ORIGINAL_LABEL = "Es/No"
+SOURCE_AXIS_USAGE = "post-MMSE SINR (dB); the source label Es/No denotes SINR"
+RECEIVER_MODEL = "classic MMSE"
+PROFILE_SCOPE = (
+    "TB/CB granularity, block length, channel model, MIMO layers, and decoder details "
+    "are intentionally not parameterized"
+)
 DATA_SHA256 = "12fd4f3de4f1c47678331f7ebcbbd65013434dbb4d909e904210c4bca17e3d4e"
 
 # Row layout:

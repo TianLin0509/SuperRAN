@@ -191,7 +191,8 @@ def main() -> None:
           "HARQ 首传后使用独立 ReTx 曲线")
     check(tab.harq_model == "newtx_then_retx_curve_reused",
           "结果显式标出多次重传复用 ReTx 曲线的假设")
-    check("Es/No" in tab.bler_axis_source, "结果保留源横轴 Es/No 口径")
+    check("SINR" in tab.bler_axis_source and "MMSE" in tab.bler_axis_source,
+          "结果明确曲线横轴为经典 MMSE 接收机 SINR")
 
     # -----------------------------------------------------------------------
     sect("7  链路自适应端到端")

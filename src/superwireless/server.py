@@ -827,7 +827,7 @@ async def sw_throughput(
     说明限制来自 MCS 表而不是信道**，换表 2 通常能明显提升。
 
     表 1/2 的 BLER 是有限码长分析模型，不是实测。表 3 的 BLER 来自用户提供的
-    解调曲线，也不是 3GPP 标准曲线；源横轴名为 Es/No，这里显式按有效 SINR 使用。
+    解调曲线，也不是 3GPP 标准曲线；源标签 Es/No 表示经典 MMSE 接收机 SINR。
     表 3 的 HARQ 首传用 NewTx、后续用 ReTx 曲线；多次重传复用同一 ReTx 曲线。
     表 3 没有 CQI 曲线，CQI 仍用 38.214 Table 2 + 分析 BLER，并在结果中标明来源。
     """
@@ -876,7 +876,8 @@ def sw_mcs_info(
 
     `table=1/2` 是逐字录入的 38.214 标准值，BLER 是分析模型。
     `table=3` 是用户提供的 20B 256QAM MCS 与 NewTx/ReTx 曲线：返回两套码率、
-    10% BLER 门限和数据哈希自检。它不是 3GPP 标准表，源横轴名为 Es/No。
+    10% BLER 门限和数据哈希自检。它不是 3GPP 标准表；接收机为经典 MMSE，
+    源标签 Es/No 表示 SINR，其他链路维度暂不参数化。
     """
     from . import linkadapt as la
 
@@ -919,8 +920,8 @@ def sw_bler_curve(
     10% BLER 门限和来源口径。传 `sinr_db_list` 时额外返回查询点的 BLER。
 
     插值在 log10(BLER) 域线性完成；低于曲线范围钳到 1，高于范围钳到最后一个
-    实测点，绝不外推一条看似精确的尾巴。源脚本横轴叫 Es/No，本工具沿用户习惯
-    暴露 `sinr_db`，同时在 `axis_source_name` / `axis_interpretation` 中明示转换。
+    实测点，绝不外推一条看似精确的尾巴。源脚本标签 Es/No 已确认表示 SINR，
+    接收机为经典 MMSE；返回值同时保留原始标签和物理口径。
     """
     from . import linkadapt as la
 
