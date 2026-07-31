@@ -637,6 +637,7 @@ superwireless 启动时会用逐字核对过的标准表覆盖。
 <table>
 <thead><tr><th>能力</th><th>条件</th><th>不满足时</th></tr></thead>
 <tbody>
+<tr><td>TDD CQI/BF Gain/OLLA 选 MCS</td><td>CQI 来自 PMI 权；SVD/PMI 使用同一信道、CSI、rank、功率、干扰和经典 MMSE 接收机</td><td>工况或 rank 不一致时拒绝计算；CQI0 返回不调度</td></tr>
 <tr><td>每条径的角度</td><td>必须用 CDL 模型</td><td>TDL 下角度字段为 <code>None</code>；射线追踪数据直接报错</td></tr>
 <tr><td>干扰小区信道</td><td>多小区 + 打开 <code>interferer_channels</code></td><td><code>h_interferers</code> 为 <code>None</code>，干扰只体现在 SINR 里<br><span class="src">干扰协调类任务会自动打开</span></td></tr>
 <tr><td>下行预编码矩阵</td><td>视配置而定</td><td>实测单小区为 <code>None</code>，多小区/多时隙有值。<strong>用前判空</strong></td></tr>

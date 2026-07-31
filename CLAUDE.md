@@ -18,12 +18,12 @@
 
 ```bash
 python tests/test_e2e.py         # 端到端 39 项
-python tests/test_mcp_server.py  # MCP 全链路 25 项
+python tests/test_mcp_server.py  # MCP 全链路 33 项
 python tests/test_raytracing.py  # 射线追踪与决策层 39 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
-python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 117 项
+python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
 python tests/test_interference.py # IoT、测量域、场景预设、探测模式、文档计数 145 项
 ```
 
@@ -126,11 +126,14 @@ python tests/test_interference.py # IoT、测量域、场景预设、探测模�
 表 3 没有 CQI 曲线，所以 CQI 仍用 38.214 Table 2 + 分析 BLER，并通过
 `cqi_source` 明示，不能谎称 CQI 也来自公司曲线。
 
-下一步 TDD AMC 的顺序锁定为：`CQI index → 初始 MCS → 该 MCS 的 SINR 门限
+TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sw_tdd_mcs` 实现：
+`CQI index → 按谱效映射初始 MCS → 该 MCS 的 NewTx 目标 BLER SINR 门限
 → + BF Gain → 按 SINR 重映射 MCS → + OLLA MCS offset → floor → 最终 MCS`。
-OLLA 的单位是连续 MCS 档位，不是 dB；最终结果向下取整并钳位到表范围。仍须记录
-CQI 是 pre-BF 还是 post-BF，避免 BF Gain 重复计入。CQI→MCS 查表、MCS→SINR
-采用的目标 BLER、OLLA 的 ACK/NACK 更新规则必须作为显式配置，不能暗藏默认口径。
+CQI 是 PMI 权测得的 pre-BF 值。BF Gain 逐 RB、逐流计算为同一信道、CSI、rank、
+功率、噪声、干扰与经典 MMSE 接收机下 `SINR_SVD - SINR_PMI`；用户 SINR 对全部
+RB×流在 dB 域做算术平均。OLLA 的单位是连续 MCS 档位，不是 dB；正值更激进，
+最终结果严格向下取整并钳位到 0..27。默认 10% 首传 BLER 下 ACK +0.1、NACK -0.9，
+反馈只作用于下一调度时刻。所有中间量与口径必须保留在结果中，不能只返回最终 MCS。
 
 `anchor_check` 的单调性**只能在同一调制阶数内部要求**：标准表在调制切换点上
 故意让 SE 重叠（MCS9 QPSK SE=1.3262 → MCS10 16QAM SE=1.3281，但码率只有 0.332），

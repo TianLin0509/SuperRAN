@@ -144,7 +144,7 @@
 <li><a href="#s25">分发给别人：两条路</a></li>
 <li><a href="#s3">完整安装步骤</a></li>
 <li><a href="#s4">skill 只有一个：channel-sim</a></li>
-<li><a href="#s5">MCP 的 29 个工具</a></li>
+<li><a href="#s5">MCP 的 30 个工具</a></li>
 <li><a href="#s6">仓库里有什么</a></li>
 <li><a href="#s7">跑起来会产生什么、放在哪</a></li>
 <li><a href="#s8">三种用法：按需取用</a></li>
@@ -171,7 +171,7 @@
 <div class="down">▲</div>
 <div class="layer">
 <h4>superwireless MCP 服务 <span class="tag t-install">要装</span></h4>
-<p>29 个工具，stdio 传输。管<strong>能力</strong>：生成信道、出观察量、跑校准、过门、算样本数。
+<p>30 个工具，stdio 传输。管<strong>能力</strong>：生成信道、出观察量、跑校准、过门、算样本数。
 <strong>自包含</strong>——每个工具的文档字符串里写清了口径与陷阱，不依赖 skill 也能被正确调用。</p>
 </div>
 <div class="down">▲</div>
@@ -310,7 +310,7 @@ python scripts/make_offline_bundle.py --thin
 <p style="margin-top:8px;"><strong>full 包</strong> —— 全新 venv（安装前只有 pip）→
 <code>pip install --no-index --find-links wheels -e .</code> 装上 35 个包（含
 superwireless 自身）→ manifest 里 10 个文件 + 37 个 wheel 的 SHA-256 逐一核对，
-零不一致 → 无 ChannelHub 时三个引擎都如实报 unavailable、MCP 仍能 list 出 29 个工具 →
+零不一致 → 无 ChannelHub 时三个引擎都如实报 unavailable、MCP 仍能 list 出 30 个工具 →
 放入 ChannelHub 后 test_e2e 39 / test_mcp_server 25 / test_gates 86 全通过
 （mcp <strong>2.0</strong>、无 sionna-rt）。</p>
 <p style="margin-top:8px;"><strong>thin 包</strong> —— 按文档不加 <code>-e .</code>
@@ -395,14 +395,14 @@ Copy-Item -Recurse skills\channel-sim $HOME\.codex\skills\</code></pre>
 
 cd superwireless
 python tests/test_e2e.py         <span class="cm"># 端到端 39 项</span>
-python tests/test_mcp_server.py  <span class="cm"># MCP 全链路 25 项</span>
+python tests/test_mcp_server.py  <span class="cm"># MCP 全链路 33 项</span>
 python tests/test_raytracing.py  <span class="cm"># 射线追踪与决策层 39 项</span>
 python tests/test_linklevel.py   <span class="cm"># 谱效、可信度、物理层 35 项</span>
 python tests/test_gates.py       <span class="cm"># 校准、标准表、三道门 86 项</span>
 python tests/test_results.py     <span class="cm"># 结果索引与取货 80 项</span>
-python tests/test_linkadapt.py   <span class="cm"># 链路自适应、吞吐、并行生成 117 项</span>
+python tests/test_linkadapt.py   <span class="cm"># 链路自适应、吞吐、并行生成 135 项</span>
 python tests/test_interference.py <span class="cm"># IoT、测量域、场景预设、探测模式、文档计数 145 项</span></code></pre>
-<p>共 <strong>566 项</strong>。测试会真的跑仿真；当前开发环境全跑一遍约 2 分钟，安装环境不同会有波动。
+<p>共 <strong>592 项</strong>。测试会真的跑仿真；当前开发环境全跑一遍约 2 分钟，安装环境不同会有波动。
 没装 sionna-rt 时 <code>test_raytracing.py</code> 里的射线追踪部分会自动跳过并说明原因。</p>
 </div>
 
@@ -446,7 +446,7 @@ the spec review step was being skipped entirely.</em>
 <strong>写在散文里的步骤会被跳过，写进 checklist 和流程图里的才会被执行。</strong></p>
 </div>
 
-<h2 id="s5">五、MCP 的 29 个工具</h2>
+<h2 id="s5">五、MCP 的 30 个工具</h2>
 <p class="lead">下面按使用顺序列核心入口。每个工具的文档字符串里都写了口径与已知陷阱，agent 读得到。</p>
 
 <div class="tbl-wrap">
@@ -478,10 +478,11 @@ the spec review step was being skipped entirely.</em>
 <tr><td><code>sw_gate</code></td><td><strong>门 1</strong>：同样 17 项，但翻译成门禁语言——硬性项不通过即拦截。含 <strong>IoT 自洽性</strong>：逐样本 SIR &gt; SINR、IoT ≥ 0 dB、不可信样本不过半</td></tr>
 <tr><td><code>sw_calibrate</code></td><td><strong>3GPP 38.901 §7.8 校准量</strong>：耦合损耗、几何量（含噪/不含噪）、时延与角度扩展、PRB 奇异值三条 CDF</td></tr>
 
-<tr><td rowspan="4"><strong>链路自适应</strong></td><td><code>sw_throughput</code></td><td>真实吞吐、5% 边缘用户；<code>mcs_table=3</code> 使用用户 NewTx/ReTx BLER 曲线</td></tr>
+<tr><td rowspan="5"><strong>链路自适应</strong></td><td><code>sw_throughput</code></td><td>真实吞吐、5% 边缘用户；<code>mcs_table=3</code> 使用用户 NewTx/ReTx BLER 曲线</td></tr>
 <tr><td><code>sw_sweep_snr</code></td><td>谱效/吞吐 vs SNR 曲线</td></tr>
 <tr><td><code>sw_mcs_info</code></td><td>标准表或用户表、BLER 门限与完整性自检</td></tr>
 <tr><td><code>sw_bler_curve</code></td><td>单档原始 BLER 曲线、门限与插值查询</td></tr>
+<tr><td><code>sw_tdd_mcs</code></td><td>TDD CQI → PMI/SVD BF Gain → MCS → OLLA；返回逐 RB、逐流审计链</td></tr>
 
 <tr><td rowspan="3"><strong>下结论</strong></td><td><code>sw_link_performance</code></td><td>预编码 → 逐层 SINR → 谱效，四种预编码横向对比</td></tr>
 <tr><td><code>sw_compare_arms</code></td><td><strong>配对比较 + 门 2 + 门 3</strong>，返回可直接写进报告的结论句</td></tr>
@@ -513,7 +514,7 @@ the spec review step was being skipped entirely.</em>
 <table>
 <thead><tr><th>模块</th><th class="nowrap">行数</th><th>职责</th></tr></thead>
 <tbody>
-<tr><td><code>server.py</code></td><td>—</td><td>MCP 服务端，29 个工具的注册与线程调度</td></tr>
+<tr><td><code>server.py</code></td><td>—</td><td>MCP 服务端，30 个工具的注册与线程调度</td></tr>
 <tr><td><code>channelhub.py</code></td><td>307</td><td>ChannelHub 适配层：路径发现、能力探测、<strong>启动预热</strong></td></tr>
 <tr><td><code>plan.py</code></td><td>453</td><td>意图 → 配置提案；草稿的创建与差分修正</td></tr>
 <tr><td><code>decisions.py</code></td><td>1190</td><td>决策知识库：19 个决策点、12 类任务画像、结论模板空槽、样本量建议</td></tr>
@@ -575,7 +576,7 @@ the spec review step was being skipped entirely.</em>
 </div>
 <div class="mini">
 <h4>② 只装 MCP</h4>
-<p>29 个工具全都在，只是没人提醒流程。agent 仍然读得到每个工具文档里的口径说明，
+<p>30 个工具全都在，只是没人提醒流程。agent 仍然读得到每个工具文档里的口径说明，
 <code>sw_gate</code> 也照样会拦。</p>
 <p><strong>适合</strong>：你自己清楚要什么，或者用的 agent 不支持 skill。</p>
 </div>

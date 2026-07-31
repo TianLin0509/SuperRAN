@@ -160,6 +160,7 @@ class LinkPerformance:
     rank: int
     method: str
     receiver: str
+    precoder_indices: list[int] | None
     capacity_bound: float  # 同信道的容量上界，用于看离天花板多远
     sinr_per_rb_db: np.ndarray  # [RB, rank] 逐 RB 逐层
     noise_power: float
@@ -173,6 +174,7 @@ class LinkPerformance:
             "rank": self.rank,
             "method": self.method,
             "receiver": self.receiver,
+            "precoder_indices": self.precoder_indices,
             "capacity_bound": round(float(self.capacity_bound), 4),
             "efficiency_vs_bound": round(
                 float(self.spectral_efficiency / max(self.capacity_bound, _EPS)), 3
@@ -287,6 +289,7 @@ def link_performance(
     method: PrecoderMethod = "svd",
     receiver: ReceiverType = "mmse",
     max_rank: int = 4,
+    rank_threshold: float = 0.1,
     h_for_precoding: np.ndarray | None = None,
     h_interferers: np.ndarray | None = None,
     n_h: int | None = None,
@@ -313,7 +316,10 @@ def link_performance(
         noise_power = _noise_from_snr(h, snr_db)
 
     h_p = np.asarray(h_for_precoding) if h_for_precoding is not None else h
-    prec = compute_precoder(h_p, method=method, max_rank=max_rank, n_h=n_h, n_v=n_v)
+    prec = compute_precoder(
+        h_p, method=method, max_rank=max_rank, rank_threshold=rank_threshold,
+        n_h=n_h, n_v=n_v,
+    )
     h_eff = effective_channel(h, prec.w)
 
     intf_cov = None
@@ -346,6 +352,7 @@ def link_performance(
         rank=prec.rank,
         method=prec.method,
         receiver=receiver,
+        precoder_indices=prec.indices,
         capacity_bound=capacity_upper_bound(h, noise_power),
         sinr_per_rb_db=10.0 * np.log10(np.maximum(sinr_lin, _EPS)),
         noise_power=float(noise_power),

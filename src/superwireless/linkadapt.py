@@ -585,6 +585,233 @@ def bler_curve(mcs: int, tx_mode: str = "newtx", target_bler: float = 0.1,
 
 
 # ---------------------------------------------------------------------------
+# 六 · A、TDD AMC：CQI → PMI/SVD BF Gain → MCS → OLLA
+# ---------------------------------------------------------------------------
+
+
+def cqi_to_mcs_by_se(
+    cqi_index: int,
+    *,
+    cqi_table: int = 2,
+    mcs_table: int = 3,
+) -> dict[str, Any]:
+    """Map CQI to the highest MCS whose spectral efficiency does not exceed CQI.
+
+    CQI 0 means out of range and is never silently converted to MCS 0.  If CQI 1/2
+    falls below the lowest company-profile MCS, the mapping clamps to MCS 0 and marks
+    ``clamped_low`` so the caller can see that the tables do not overlap there.
+    """
+    if cqi_table not in CQI_TABLES:
+        raise ValueError(f"cqi table must be one of {sorted(CQI_TABLES)}, got {cqi_table}")
+    if mcs_table not in MCS_TABLES:
+        raise ValueError(f"mcs table must be one of {sorted(MCS_TABLES)}, got {mcs_table}")
+    idx = int(cqi_index)
+    if idx < 0 or idx > 15:
+        raise ValueError(f"CQI must be 0..15, got {cqi_index}")
+    if idx == 0:
+        return {
+            "scheduled": False,
+            "cqi": 0,
+            "mcs": None,
+            "reason": "CQI 0 is out of range; no transmission is scheduled",
+        }
+
+    cqi = next((c for c in CQI_TABLES[cqi_table] if c.index == idx), None)
+    if cqi is None:
+        raise ValueError(f"CQI {idx} is not present in table {cqi_table}")
+    table = MCS_TABLES[mcs_table]
+    candidates = [m for m in table if m.se <= cqi.se + 1e-12]
+    clamped_low = not candidates
+    mcs = max(candidates, key=lambda m: m.index) if candidates else table[0]
+    return {
+        "scheduled": True,
+        "cqi": idx,
+        "cqi_table": cqi_table,
+        "cqi_spectral_efficiency": cqi.se,
+        "mcs_table": mcs_table,
+        "mcs": mcs.index,
+        "mcs_spectral_efficiency": mcs.se,
+        "clamped_low": clamped_low,
+        "mapping": "highest MCS spectral efficiency <= CQI spectral efficiency",
+    }
+
+
+def update_olla_mcs(
+    current_offset_mcs: float,
+    feedback_ack: bool,
+    *,
+    target_bler: float = 0.1,
+    ack_step_mcs: float = 0.1,
+) -> dict[str, float | str | bool]:
+    """Advance an OLLA state expressed in continuous MCS-index units.
+
+    A positive offset is aggressive. ACK raises it by ``ack_step_mcs``; NACK lowers
+    it by ``ack_step_mcs * (1-target)/target`` so the zero-drift point is the target
+    first-transmission BLER. The returned value is for the *next* scheduling decision.
+    """
+    target = float(target_bler)
+    step_up = float(ack_step_mcs)
+    current = float(current_offset_mcs)
+    if not (0.0 < target < 1.0):
+        raise ValueError(f"target_bler must be in (0, 1), got {target_bler}")
+    if not math.isfinite(current):
+        raise ValueError("current_offset_mcs must be finite")
+    if not math.isfinite(step_up) or step_up <= 0.0:
+        raise ValueError(f"ack_step_mcs must be finite and > 0, got {ack_step_mcs}")
+    step_down = step_up * (1.0 - target) / target
+    delta = step_up if bool(feedback_ack) else -step_down
+    return {
+        "feedback_ack": bool(feedback_ack),
+        "current_offset_mcs": current,
+        "delta_mcs": delta,
+        "next_offset_mcs": current + delta,
+        "ack_step_mcs": step_up,
+        "nack_step_mcs": step_down,
+        "target_bler": target,
+        "sign_convention": "positive offset is more aggressive",
+    }
+
+
+def _sinr_grid_db(values: Any, name: str) -> np.ndarray:
+    grid = np.asarray(values, dtype=float)
+    if grid.ndim == 1:
+        grid = grid[:, None]
+    if grid.ndim != 2 or grid.size == 0:
+        raise ValueError(f"{name} must have shape [RB, layer], got {grid.shape}")
+    if not np.all(np.isfinite(grid)):
+        raise ValueError(f"{name} must contain only finite values")
+    return grid
+
+
+def tdd_mcs_adaptation(
+    cqi_index: int,
+    svd_sinr_per_rb_db: Any,
+    pmi_sinr_per_rb_db: Any,
+    *,
+    olla_mcs_offset: float = 0.0,
+    target_bler: float = 0.1,
+    cqi_table: int = 2,
+    mcs_table: int = 3,
+    feedback_ack: bool | None = None,
+    olla_ack_step_mcs: float = 0.1,
+) -> dict[str, Any]:
+    """Run the agreed TDD CQI/BF-gain/OLLA MCS decision with a full audit trail.
+
+    ``BF Gain[rb,layer] = SINR_SVD - SINR_PMI`` under the same channel, rank,
+    power allocation, noise/interference, CSI and classic MMSE receiver. The CQI is
+    first mapped to MCS by spectral efficiency, then to that MCS's NewTx target-BLER
+    SINR. The per-RB/per-layer BF deltas are added and arithmetically averaged in dB.
+    Finally the SINR is remapped to MCS and the continuous MCS-domain OLLA offset is
+    added, floored, and clipped to the table range.
+    """
+    if mcs_table != 3:
+        raise ValueError("TDD company-curve adaptation currently requires mcs_table=3")
+    mapping = cqi_to_mcs_by_se(
+        cqi_index, cqi_table=cqi_table, mcs_table=mcs_table
+    )
+    olla = float(olla_mcs_offset)
+    if not math.isfinite(olla):
+        raise ValueError("olla_mcs_offset must be finite")
+    if not mapping["scheduled"]:
+        return {
+            **mapping,
+            "olla_mcs_offset": olla,
+            "olla_next_offset_mcs": olla,
+            "target_bler": float(target_bler),
+            "final_mcs": None,
+        }
+
+    svd = _sinr_grid_db(svd_sinr_per_rb_db, "svd_sinr_per_rb_db")
+    pmi = _sinr_grid_db(pmi_sinr_per_rb_db, "pmi_sinr_per_rb_db")
+    if svd.shape != pmi.shape:
+        raise ValueError(
+            "SVD and PMI SINR grids must have identical [RB, layer] shape; "
+            f"got {svd.shape} and {pmi.shape}"
+        )
+
+    # Pair strongest stream with strongest stream for diagnostics. The user-level mean
+    # is invariant to this permutation, but the per-stream audit is easier to interpret.
+    svd_order = np.argsort(-np.mean(svd, axis=0))
+    pmi_order = np.argsort(-np.mean(pmi, axis=0))
+    svd = svd[:, svd_order]
+    pmi = pmi[:, pmi_order]
+    bf_delta = svd - pmi
+
+    initial_mcs = int(mapping["mcs"])
+    initial_curve = bc.get_curve(initial_mcs, "newtx")
+    cqi_mcs_sinr_db = initial_curve.required_sinr_db(target_bler)
+    estimated_svd = cqi_mcs_sinr_db + bf_delta
+    bf_gain_user_db = float(np.mean(bf_delta))
+    user_sinr_db = float(np.mean(estimated_svd))
+
+    thresholds = [
+        (m.index, bc.get_curve(m.index, "newtx").required_sinr_db(target_bler))
+        for m in MCS_TABLE_3
+    ]
+    feasible = [idx for idx, threshold in thresholds if threshold <= user_sinr_db]
+    below_mcs0 = not feasible
+    mcs_after_bf = max(feasible) if feasible else MCS_TABLE_3[0].index
+
+    mcs_before_floor = float(mcs_after_bf) + olla
+    mcs_floored = math.floor(mcs_before_floor)
+    lo, hi = MCS_TABLE_3[0].index, MCS_TABLE_3[-1].index
+    final_mcs = min(max(mcs_floored, lo), hi)
+    final_curve = bc.get_curve(final_mcs, "newtx")
+
+    olla_update = (
+        update_olla_mcs(
+            olla, feedback_ack, target_bler=target_bler,
+            ack_step_mcs=olla_ack_step_mcs,
+        )
+        if feedback_ack is not None else None
+    )
+    return {
+        **mapping,
+        "scheduled": True,
+        "receiver": bc.data.RECEIVER_MODEL,
+        "rank": int(svd.shape[1]),
+        "n_rb": int(svd.shape[0]),
+        "target_bler": float(target_bler),
+        "cqi_initial_mcs": initial_mcs,
+        "cqi_mcs_sinr_db": round(float(cqi_mcs_sinr_db), 4),
+        "pmi_stream_sinr_db": [round(float(x), 4) for x in np.mean(pmi, axis=0)],
+        "svd_stream_sinr_db": [round(float(x), 4) for x in np.mean(svd, axis=0)],
+        "bf_gain_per_stream_db": [
+            round(float(x), 4) for x in np.mean(bf_delta, axis=0)
+        ],
+        "bf_gain_user_db": round(bf_gain_user_db, 4),
+        "estimated_svd_stream_sinr_db": [
+            round(float(x), 4) for x in np.mean(estimated_svd, axis=0)
+        ],
+        "user_sinr_db": round(user_sinr_db, 4),
+        "sinr_aggregation": "arithmetic mean over all RB x layers in dB domain",
+        "stream_pairing": "descending dB-domain mean SINR",
+        "bf_gain_definition": "SVD post-MMSE SINR minus PMI post-MMSE SINR",
+        "mcs_after_bf": int(mcs_after_bf),
+        "below_mcs0_after_bf": below_mcs0,
+        "olla_mcs_offset": olla,
+        "mcs_before_floor": mcs_before_floor,
+        "mcs_after_floor": int(mcs_floored),
+        "final_mcs": int(final_mcs),
+        "mcs_clipped": final_mcs != mcs_floored,
+        "final_mcs_required_sinr_db": round(
+            final_curve.required_sinr_db(target_bler), 4
+        ),
+        "final_mcs_newtx_bler": round(
+            float(final_curve.evaluate(user_sinr_db)[0]), 6
+        ),
+        "olla_update": olla_update,
+        "olla_next_offset_mcs": (
+            olla_update["next_offset_mcs"] if olla_update is not None else olla
+        ),
+        "fairness_contract": (
+            "same channel, CSI, rank, total/per-layer power, noise, interference and "
+            "classic MMSE receiver; only precoding weight changes from PMI to SVD"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # 六、链路自适应：选 MCS / 选 CQI
 # ---------------------------------------------------------------------------
 

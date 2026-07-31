@@ -932,6 +932,75 @@ def sw_bler_curve(
 
 
 @mcp.tool()
+async def sw_tdd_mcs(
+    dataset_id: str,
+    cqi: int,
+    sample_index: int = 0,
+    olla_mcs_offset: float = 0.0,
+    target_bler: float = 0.1,
+    max_rank: int = 4,
+    use_estimated_csi: bool = True,
+    feedback_ack: bool | None = None,
+    olla_ack_step_mcs: float = 0.1,
+) -> dict[str, Any]:
+    """TDD 下按 CQI、SVD-vs-PMI BF Gain 和 OLLA 选择最终 MCS。
+
+    真实调用链是：CQI → 按频谱效率映射表 3 初始 MCS → 该 MCS 的 NewTx 目标
+    BLER SINR 门限 → 在同一信道/CSI/rank/功率/干扰/MMSE 接收机下逐 RB、逐流计算
+    ``SINR_SVD - SINR_PMI`` → 在 dB 域对全部 RB×流求算术平均 → 按表 3 重映射
+    MCS → 加连续的 ``olla_mcs_offset`` → ``floor`` → 钳位到 0..27。
+
+    `CQI=0` 表示 out-of-range，不调度。`feedback_ack` 可选：给出时按目标首传
+    BLER 更新下一时刻的 OLLA；10% 默认对应 ACK +0.1、NACK -0.9 MCS。当前时刻
+    使用传入的 OLLA，反馈只影响返回的 `olla_next_offset_mcs`。
+
+    返回每个中间量，包括初始 MCS/门限、逐流 PMI/SVD SINR、BF Gain、用户 SINR、
+    BF 后 MCS、OLLA 取整前后值和最终 BLER，便于 Agent 逐步审计。
+    """
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _tdd_mcs_sync,
+            dataset_id=dataset_id,
+            cqi=cqi,
+            sample_index=sample_index,
+            olla_mcs_offset=olla_mcs_offset,
+            target_bler=target_bler,
+            max_rank=max_rank,
+            use_estimated_csi=use_estimated_csi,
+            feedback_ack=feedback_ack,
+            olla_ack_step_mcs=olla_ack_step_mcs,
+        )
+    )
+
+
+def _tdd_mcs_sync(
+    *,
+    dataset_id: str,
+    cqi: int,
+    sample_index: int,
+    olla_mcs_offset: float,
+    target_bler: float,
+    max_rank: int,
+    use_estimated_csi: bool,
+    feedback_ack: bool | None,
+    olla_ack_step_mcs: float,
+) -> dict[str, Any]:
+    from . import loader as ld
+
+    ds = ld.load(dataset_id)
+    return _jsonable(ds.tdd_mcs(
+        sample_index,
+        cqi_index=cqi,
+        olla_mcs_offset=olla_mcs_offset,
+        target_bler=target_bler,
+        max_rank=max_rank,
+        use_estimated_csi=use_estimated_csi,
+        feedback_ack=feedback_ack,
+        olla_ack_step_mcs=olla_ack_step_mcs,
+    ))
+
+
+@mcp.tool()
 async def sw_sweep_snr(
     dataset_id: str,
     snr_db_list: list[float] | None = None,

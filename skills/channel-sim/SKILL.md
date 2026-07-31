@@ -322,9 +322,27 @@ digraph channel_sim {
 - `sw_mcs_info(table=1/2, show_bler_anchors=true)` —— 看分析模型门限
 - `sw_mcs_info(table=3, show_bler_anchors=true)` —— 看用户曲线两套门限与哈希自检
 - `sw_bler_curve(mcs=..., tx_mode="newtx"/"retx")` —— 取单档原始曲线或插值
+- `sw_tdd_mcs(dataset_id=..., cqi=..., olla_mcs_offset=...)` —— TDD 最终 MCS 与逐流审计链
 
 表 3 的 HARQ 首传用 NewTx、后续用 ReTx；只有一条 ReTx 曲线，因此多次重传会
 复用它并显式标成假设。不要额外推断 TB/CB、块长、信道、层数或译码器的影响。
+
+### TDD 的 CQI、BF Gain 与 OLLA
+
+用户要求 TDD MCS 或提到 CQI/BF Gain/OLLA 时，调用 `sw_tdd_mcs`，不要在对话里
+手算。固定顺序是：`CQI → 按谱效映射初始 MCS → 该 MCS 的 NewTx 目标 BLER
+SINR 门限 → + BF Gain → 重映射 MCS → + OLLA → floor → 钳位 0..27`。
+
+- CQI 是 PMI 权测得的 pre-BF 索引；CQI0 不调度，不能当 MCS0
+- BF Gain 逐 RB、逐流计算 `post-MMSE SINR_SVD - post-MMSE SINR_PMI`
+- 两条链路必须共用信道、CSI、rank、功率、噪声、干扰和经典 MMSE 接收机，
+  只改变预编码权；rank 不同不是 BF Gain
+- 用户 SINR 对全部 RB×流在 **dB 域做算术平均**，不做线性域平均或 MIESM
+- OLLA 单位是连续 MCS 档位，正值更激进；先相加再严格向下取整
+- 默认目标首传 BLER 10%，ACK +0.1、NACK -0.9；反馈只更新下一调度时刻
+
+转述结果时至少给出初始 MCS/门限、逐流 BF Gain、用户 SINR、BF 后 MCS、
+OLLA offset 和最终 MCS；若 `clamped_low` / `mcs_clipped` 为真也必须说明。
 
 ### 跑得慢就开并行
 

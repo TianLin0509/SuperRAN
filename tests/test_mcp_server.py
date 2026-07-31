@@ -60,8 +60,9 @@ async def main() -> None:
                 "sw_capabilities", "sw_list_presets", "sw_list_scenes", "sw_plan",
                 "sw_revise", "sw_generate", "sw_deliver",
                 "sw_describe_dataset", "sw_list_datasets", "sw_mcs_info", "sw_bler_curve",
+                "sw_tdd_mcs",
             }
-            check(expected.issubset(set(names)), f"11 个核心工具全部注册（实际 {len(names)} 个）")
+            check(expected.issubset(set(names)), f"12 个核心工具全部注册（实际 {len(names)} 个）")
 
             print("\n" + "=" * 68 + "\n1.5  表驱动 BLER 查询\n" + "=" * 68)
             curve = _payload(await session.call_tool(
@@ -181,6 +182,43 @@ async def main() -> None:
             check(s["shape"]["BS_ant"] == 4, "用户指定的 4T4R 生效")
 
             ds_id = gen["dataset_id"]
+
+            print("\n" + "=" * 68 + "\n5.5  sw_tdd_mcs —— TDD CQI/BF Gain/OLLA\n" + "=" * 68)
+            tdd = _payload(await session.call_tool(
+                "sw_tdd_mcs",
+                {
+                    "dataset_id": ds_id,
+                    "cqi": 9,
+                    "olla_mcs_offset": -0.2,
+                    "feedback_ack": False,
+                },
+            ))
+            check(tdd.get("scheduled") is True and tdd.get("rank", 0) >= 1,
+                  "真实数据上完成 TDD MCS 决策并保留 rank")
+            check(tdd.get("cqi_initial_mcs") == 15 and
+                  abs(tdd.get("cqi_mcs_sinr_db", 0.0) - 14.0421) < 1e-3,
+                  "MCP 将 CQI9 映射到 MCS15 NewTx 门限")
+            check(len(tdd.get("pmi_stream_sinr_db", [])) == tdd.get("rank") and
+                  len(tdd.get("svd_stream_sinr_db", [])) == tdd.get("rank") and
+                  len(tdd.get("bf_gain_per_stream_db", [])) == tdd.get("rank"),
+                  "MCP 返回逐流 PMI/SVD SINR 与 BF Gain 审计量")
+            check(abs(tdd.get("user_sinr_db", 0.0) -
+                      (tdd.get("cqi_mcs_sinr_db", 0.0) + tdd.get("bf_gain_user_db", 0.0))) < 2e-4,
+                  "用户 SINR 等于 CQI 门限与 BF Gain 的 dB 域叠加")
+            check(tdd.get("final_mcs") == max(
+                      0, min(27, int((tdd.get("mcs_after_bf", 0) - 0.2) // 1))),
+                  "MCP 最终 MCS 遵循加 OLLA、floor、钳位顺序")
+            check(tdd.get("receiver") == "classic MMSE" and
+                  "only precoding weight changes" in tdd.get("fairness_contract", ""),
+                  "MCP 结果钉住 MMSE 与同工况预编码对照")
+            check(abs(tdd.get("olla_next_offset_mcs", 0.0) + 1.1) < 1e-12,
+                  "NACK 只更新下一时刻 OLLA 状态")
+
+            cqi0 = _payload(await session.call_tool(
+                "sw_tdd_mcs", {"dataset_id": ds_id, "cqi": 0},
+            ))
+            check(cqi0.get("scheduled") is False and cqi0.get("final_mcs") is None,
+                  "MCP 对 CQI0 返回不调度")
 
             print("\n" + "=" * 68 + "\n6  sw_deliver —— 取货代码\n" + "=" * 68)
             d1 = _payload(await session.call_tool("sw_deliver", {"dataset_id": ds_id, "want": "信道"}))

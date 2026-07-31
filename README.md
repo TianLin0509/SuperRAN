@@ -126,6 +126,21 @@ sw_bler_curve(mcs=15, tx_mode="newtx", sinr_db_list=[14.0, 14.05])
 的 SINR。TB/CB、块长、信道模型、MIMO 层数和译码器细节暂不参数化。
 `sw_mcs_info(table=3, show_bler_anchors=true)` 可查看全部门限、码率和哈希自检。
 
+TDD AMC 已支持完整的 `CQI → 初始 MCS → NewTx SINR 门限 → BF Gain →
+重映射 MCS → OLLA → floor` 链路。BF Gain 是同一信道、CSI、rank、功率、
+干扰和经典 MMSE 接收机下，SVD 权相对 PMI 权的逐 RB、逐流 post-MMSE SINR
+差值；用户 SINR 对全部 RB×流在 dB 域做算术平均：
+
+```python
+sw_tdd_mcs(dataset_id="ds_xxxxxxxx", cqi=9, olla_mcs_offset=-0.2,
+           feedback_ack=False)
+```
+
+在 Claude Code / Codex CLI 里不需要自己写 Python，直接告诉 Agent：
+“请调用 superwireless 的 `sw_tdd_mcs`，对数据集 `ds_xxxxxxxx`、CQI 9、
+OLLA -0.2 MCS 计算最终 MCS，并解释逐流 BF Gain。”Agent 会调用 MCP 并返回
+完整中间量。`CQI=0` 明确不调度；反馈只更新下一时刻 OLLA，当前决策不回写。
+
 `sw_sweep_snr` 出谱效/吞吐 vs SNR 曲线——实测低信噪比达成 77%、
 高信噪比因 MCS 封顶掉到 38%。
 
@@ -310,7 +325,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 （§7.8.2 指标3，Annex A.1 圆周定义）、PRB 奇异值最大/次大/比值三条 CDF
 （指标4，10log10 尺度）。参考曲线在 R1-165974 / R1-165975 / R1-1909704。
 
-## MCP 工具（29 个）
+## MCP 工具（30 个）
 
 | 工具 | 作用 |
 |---|---|
@@ -332,6 +347,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 | `sw_sweep_snr` | **谱效/吞吐 vs SNR 曲线**，各点配对无抽样噪声 |
 | `sw_mcs_info` | 表 1/2：38.214 + 分析模型；表 3：用户 MCS + NewTx/ReTx 门限 |
 | `sw_bler_curve` | 查单档原始 BLER 曲线、10% 门限，并在任意 SINR 点做对数域插值 |
+| `sw_tdd_mcs` | **TDD AMC**：CQI → PMI/SVD BF Gain → MCS → OLLA，返回逐 RB/流审计链 |
 | `sw_describe_dataset` / `sw_list_datasets` | 数据集信息 |
 
 ## 观察量（12 类）
@@ -406,16 +422,16 @@ ph.project_interference(...)       # 干扰投影：不投影会高估干扰
 
 ```bash
 python tests/test_e2e.py         # 端到端 39 项
-python tests/test_mcp_server.py  # MCP 全链路 25 项
+python tests/test_mcp_server.py  # MCP 全链路 33 项
 python tests/test_raytracing.py  # 射线追踪与决策层 39 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
-python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 117 项
+python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
 python tests/test_interference.py # IoT、测量域、场景预设、探测模式、文档计数 145 项
 ```
 
-共 **566 项**。
+共 **592 项**。
 
 ## 致谢
 
