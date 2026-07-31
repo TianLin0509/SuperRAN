@@ -126,9 +126,11 @@ python tests/test_interference.py # IoT、测量域、场景预设、探测模�
 表 3 没有 CQI 曲线，所以 CQI 仍用 38.214 Table 2 + 分析 BLER，并通过
 `cqi_source` 明示，不能谎称 CQI 也来自公司曲线。
 
-下一步 TDD AMC 的口径锁定为：先把 `CQI index` 映射到其基准 SINR 门限，再算
-`sinr_for_mcs_db = cqi_sinr_db + bf_gain_db + olla_offset_db`。CQI 不是 dB，不能
-直接与两个 dB 量相加；还必须记录 CQI 是 pre-BF 还是 post-BF，避免 BF Gain 重复计入。
+下一步 TDD AMC 的顺序锁定为：`CQI index → 初始 MCS → 该 MCS 的 SINR 门限
+→ + BF Gain → 按 SINR 重映射 MCS → + OLLA MCS offset → floor → 最终 MCS`。
+OLLA 的单位是连续 MCS 档位，不是 dB；最终结果向下取整并钳位到表范围。仍须记录
+CQI 是 pre-BF 还是 post-BF，避免 BF Gain 重复计入。CQI→MCS 查表、MCS→SINR
+采用的目标 BLER、OLLA 的 ACK/NACK 更新规则必须作为显式配置，不能暗藏默认口径。
 
 `anchor_check` 的单调性**只能在同一调制阶数内部要求**：标准表在调制切换点上
 故意让 SE 重叠（MCS9 QPSK SE=1.3262 → MCS10 16QAM SE=1.3281，但码率只有 0.332），
