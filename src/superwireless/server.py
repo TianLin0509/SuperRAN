@@ -1251,9 +1251,9 @@ def sw_spec_sheet(
     config: dict[str, Any] | None = None,
     title: str = "",
     highlight: list[str] | None = None,
-    open_browser: bool = True,
+    open_browser: bool = False,
 ) -> dict[str, Any]:
-    """把敲定的仿真配置画成一份说明书并**直接弹到用户面前**（含示意图、可调参）。
+    """把敲定的仿真配置画成一份说明书（含示意图、可调参），返回可点开的地址。
 
     **配置定下来之后、正式跑之前调一次**，让用户看清楚这次到底在仿什么：
 
@@ -1271,21 +1271,21 @@ def sw_spec_sheet(
     ``sw_generate`` 会自动生成一份（带真实撒点），句柄在 ``summary.spec_sheet``；
     这个工具用于**生成之前**先看一眼。
 
-    **默认会自己在浏览器里打开**（``open_browser=False`` 可关）。页面还带一个
-    调参面板：用户改完点「应用到仿真」，改动**直接回到这个 MCP 进程**，
+    **默认不替用户弹窗**，只把 ``url`` 给他，他自己在浏览器或 AI HUB 里点开。
+    页面带一个调参面板：改完点「应用到仿真」，改动**直接回到这个 MCP 进程**，
     你随后调 ``sw_await_config`` 就能拿到——不用他复制粘贴。
 
     所以敲定配置那一步的标准动作是：
 
-        sw_spec_sheet(...)  →  告诉用户"页面已经打开，看一眼；要改就在上面改，
+        sw_spec_sheet(...)  →  把 url 发给用户，说"点开看一眼；要改就在上面改，
                                改完点应用"  →  sw_await_config()
 
     ``writeback`` 字段告诉你这次是哪条路：``post`` 表示回传通道通了、
     可以去 ``sw_await_config`` 等；``clipboard`` 表示服务没起来（原因在
     ``serve_error``），得让用户复制粘贴。
 
-    **返回的是文件路径和摘要，不要把 HTML 内容贴回对话。**
-    把 ``headline`` 和 ``notes`` 转述给用户。
+    **返回的是地址和摘要，不要把 HTML 内容贴回对话。**
+    把 ``headline`` 和 ``notes`` 转述给用户，并把 ``url`` 发给他。
 
     参数
     ----
@@ -1297,7 +1297,8 @@ def sw_spec_sheet(
         ``["isd_m", "num_interfering_ues"]``。它们会被顶到首屏关键信息卡最前面
         并高亮。首屏因此既覆盖"做仿真通常最关心的"，也覆盖"这次特别在意的"——
         用户点名过什么就把什么传进来。
-    open_browser : 默认 True。同一轮里连出好几份说明书时可以关掉，别刷屏。
+    open_browser : 默认 **False**——给地址，不替他弹窗。只有用户明确说
+        "帮我打开"时才传 True。
     """
     from . import spec as sp
 
@@ -1335,16 +1336,16 @@ def sw_spec_sheet(
         title=title or "仿真说明书", ue_xy=ue_xy, highlight=highlight,
         open_browser=open_browser,
     )
-    if out.get("writeback") == "post" and out.get("opened_in_browser"):
+    if out.get("writeback") == "post":
         out["hint"] = (
-            "页面已经在用户浏览器里打开了——转述 headline 和 notes，"
+            "把 url 发给用户让他自己点开（别替他弹窗），转述 headline 和 notes，"
             "然后告诉他「要调参就在页面上改，改完点『应用到仿真』」，"
             "接着调 sw_await_config 等他。**不要把 HTML 内容或图贴回对话。**"
         )
     else:
         out["hint"] = (
             "把 headline 和 notes 转述给用户，并给出 html_path 让他自己打开；"
-            f"回传走复制粘贴（{out.get('serve_error') or '未开浏览器'}）。"
+            f"回传只能走复制粘贴（{out.get('serve_error')}）。"
             "**不要把 HTML 内容或图贴回对话。**"
         )
     return _jsonable(out)

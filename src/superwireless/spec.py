@@ -90,7 +90,9 @@ _KEY_LABELS: dict[str, tuple[str, str]] = {
     "mobility_mode": ("移动模型", ""),
     "topology_layout": ("拓扑布局", ""),
     "link": ("链路方向", ""),
-    "channel_est_mode": ("信道估计", ""),
+    # 这个键本来就在表里，但从没进过调参面板——ChannelHub 的三档估计器
+    # 一直可用，superwireless 只是没提，于是数据集全默默走了默认的 ls_linear。
+    "channel_est_mode": ("信道估计模式", ""),
     "tdd_pattern": ("TDD 图案", ""),
     "num_slots_per_sample": ("每样本时隙数", ""),
     "num_ofdm_symbols": ("每时隙符号数", ""),
@@ -554,6 +556,9 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
     ("tx_power_dbm", "发射功率 dBm", "number", (10, 55, 1), "UMi 默认 33、UMa 默认 43"),
     ("ue_speed_kmh", "终端速度 km/h", "number", (0, 500, 1), ""),
     ("link", "链路方向", "select", ["DL", "UL", "BOTH"], "测量域 SIR 只在 BOTH 下产生"),
+    ("channel_est_mode", "信道估计", "select",
+     ["ideal", "ls_linear", "ls_mmse"],
+     "ideal=拿真值；ls_mmse 比 ls_linear 实测好 0.7~4.6 dB，导频越挤差距越大"),
     ("num_samples", "样本数", "number", (1, 5000, 1), "由 sw_sample_size 算，别拍脑袋"),
 )
 
@@ -1179,9 +1184,12 @@ def write_spec(
     ue_xy: list[tuple[float, float]] | None = None,
     highlight: list[str] | None = None,
     serve: bool = True,
-    open_browser: bool = True,
+    open_browser: bool = False,
 ) -> dict[str, Any]:
-    """生成说明书并落盘（默认顺手打开浏览器），返回结构化摘要 + 文件路径。
+    """生成说明书并落盘，返回结构化摘要 + 可点开的地址。
+
+    **默认不替用户弹窗。** 给地址，他自己在浏览器或 AI HUB 里点开——
+    自动弹窗对一部分人是打断而不是便利。要弹显式传 ``open_browser=True``。
 
     HTML 落到 ``artifacts/specs/``；**对话里只回路径与摘要**，
     不要把图或整份 HTML 贴回去。

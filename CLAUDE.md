@@ -20,7 +20,7 @@
 python tests/test_e2e.py         # 端到端 39 项
 python tests/test_mcp_server.py  # MCP 全链路 37 项
 python tests/test_raytracing.py  # 射线追踪与决策层 40 项
-python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
+python tests/test_linklevel.py   # 谱效、可信度、物理层、IRC 62 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
@@ -365,6 +365,64 @@ ChannelHub 的 `phy_sim/effective_array.py` 就是照这套硬件写的（模块
 跨图共享的东西（渐变、marker）用**写在元素上的 presentation attribute**
 （`fill="url(#sg)"`），别走 class。id 也要各用各的（`sg` / `sg2`）。
 
+### MMSE 与 IRC 的区别全在 R_n，不在公式
+
+两者用**同一个**后处理 SINR 公式。`receiver="irc"` 把干扰的完整空间协方差
+`R_uu` 放进 `R_n`；`receiver="mmse"` 只取 `tr(R_uu)/N_rx` 摊成白噪声。
+所以 IRC 的增益**只能**来自 `R_uu` 的非白性——白干扰下两者必须逐位重合，
+`test_linklevel` 第 10 节有这条反向自检。不写它的话，实现里多算了什么
+（比如把干扰功率漏掉一半）会表现成"IRC 就是更好"，看不出来。
+
+**这是一次语义变更。** 2026-08-01 之前 `receiver="mmse"` 传了 `h_interferers`
+时用的是完整有色协方差——那其实就是 IRC，只是叫 MMSE。实测同配置
+26.15（新 mmse）vs 28.52（=旧 mmse=新 irc）bit/s/Hz，**旧数字偏乐观 2.37**。
+之前所有"MMSE 基线"的谱效都要按新口径重算才能和 IRC 比。
+
+### ChannelHub 的干扰小区信道是秩 1 的
+
+单个干扰小区的 `[BS, UE]` 切片奇异值是 `[1, 0, 0, 0]`——实测 96 个抽样
+σ₂/σ₁ 中位 4.0e-8、最大 5.9e-8，而服务小区是满秩（归一奇异值
+1 / 0.63 / 0.32 / 0.093）。
+
+后果有两个方向：
+
+* **IRC 处在最有利工况。** 3 个干扰小区、4 根接收天线，刚好全部零陷得掉。
+  实测 IRC 增益 +2.37 bit/s/Hz（约 9%）。真实干扰不会这么干净，
+  **这个数偏乐观**，引用时必须带上 `interference_rank`。
+* **`interference_model="precoded"` 目前是个空转旋钮。** 干扰已经是秩 1 了，
+  再过一次主特征波束还是同一个子空间，与 `isotropic` 逐位相同。
+  留着它是为了信道模型哪天变了能立刻切；**但别声称它现在有用**。
+
+`effective_rank(R_uu)` 会把有效秩报出来，逼近 `N_rx` 时 IRC 增益必然趋近 0。
+
+### ChannelHub 早就有三档信道估计器，只是没暴露
+
+`msg_embedding/channel_est/` 提供 `ideal` / `ls_linear` / `ls_mmse`
+（LS + 线性插值 / LS + 频域 MMSE 用指数 PDP 先验 + 线性时域插值），
+`internal_sim` 还多两档 `ls_hop_concat` / `ls_hop_sequential`（SRS 跳频，仅上行）。
+默认 `ls_linear`。**配置是整个 dict 直通的，所以这个键一直可用**，
+只是 superwireless 从没提过它——2026-08-01 之前的数据集全部默默走了默认档。
+
+实测（company_64t4r_multicell，24 样本）：
+
+| | 干扰 UE=0 | 干扰 UE=16 |
+|---|---|---|
+| `ls_linear` DL NMSE | −7.14 dB | −10.96 dB |
+| `ls_mmse` DL NMSE | −9.79 dB | **−14.54 dB** |
+
+**导频越挤，MMSE 赢得越多**（0.7 → 3.6 dB）——它靠 PDP 先验把被污染的部分压掉。
+
+### num_interfering_ues 是上行旋钮，下行不读它
+
+`_interference_estimation.py:604` 的 DL 分支按**小区**遍历
+（`elif K_minus_1 > 0 and direction == "DL"`），全程不读 `num_interfering_ues`；
+UL 分支才按 UE 数展开。实测 `ul_sir_dB` 49.90 → 9.43 → −2.61（0/4/16 个 UE），
+而 `dl_sir_dB` 在 4 与 16 之间只差 0.13 dB（噪声）。
+
+所以 `srs_congested` 这类"高测量干扰场景"**本质是上行场景**。
+项目已明确只做下行，这些预设要么改用别的机制（下行 CSI-RS 复用同一图案的小区数），
+要么标成上行专用。
+
 ### 回执要先于落盘发出，而且必须幂等
 
 说明书页面点「应用到仿真」是一次 POST。`do_POST` 的顺序是**先进内存收件箱、
@@ -381,17 +439,16 @@ ChannelHub 的 `phy_sim/effective_array.py` 就是照这套硬件写的（模块
 连不上时页面说的是"连不上 agent（服务可能已退出）。**先看对话框**，
 它收到就会复述改动"——不是"失败了，请重发"。**结果不确定时就别断言结果。**
 
-### 说明书默认会弹浏览器，测试里必须关掉
+### 说明书默认不弹浏览器，只给地址
 
-`write_spec(open_browser=True)` 是默认值。跑一次 `test_interference` 会调十几次
-`write_spec`，不关就是十几个浏览器窗口糊满屏幕。测试文件在 **import spec 之前**
-设 `SUPERWIRELESS_NO_BROWSER=1`。
+`write_spec` / `sw_spec_sheet` 的 `open_browser` 默认 **False**——把 `url`
+给用户，他自己在浏览器或 AI HUB 里点开。**自动弹窗对一部分人是打断而不是便利**，
+这是用户明确要求的（2026-08-01）。只有他说"帮我打开"时才传 True。
 
-`generate.py` 里生成后的那份说明书显式传 `open_browser=False`：它是**存档**不是
-交互点。批量跑 20 个配置时不该弹 20 个窗口。要交互的那次在 `sw_spec_sheet`
-（配置敲定、开跑之前）。
+测试文件仍在 **import spec 之前**设 `SUPERWIRELESS_NO_BROWSER=1` 兜底，
+防止哪天有人把默认改回去、或某条路径显式传了 True。
 
-打开浏览器走 `os.startfile` 而不是 `webbrowser.open`：后者在没有 DISPLAY 或被
+真要打开时走 `os.startfile` 而不是 `webbrowser.open`：后者在没有 DISPLAY 或被
 沙箱限制时会挨个试一串命令行浏览器，其中有些会往 **stdout** 写东西，
 而 stdio 传输下 stdout 是 JSON-RPC 通道，一个字节杂音就能让会话崩掉。
 
