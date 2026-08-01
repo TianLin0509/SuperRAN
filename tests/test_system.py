@@ -232,6 +232,35 @@ check(_p10 > _p40 * 2.5, f"用户数翻 4 倍，每用户吞吐大致降到 1/4�
 check(abs(_r10.cell["cell_served_mbps"] - _r40.cell["cell_served_mbps"])
       / max(_r10.cell["cell_served_mbps"], 1) < 0.15,
       "小区总吞吐基本不变——变的只是分给几个人")
+
+# ---------------------------------------------------------------------------
+sect("9  MU 增益：实测比值，不是拍脑袋的常数")
+
+_hm = [((np.random.default_rng(50 + u).standard_normal((4, 12, 32, 4))
+         + 1j * np.random.default_rng(80 + u).standard_normal((4, 12, 32, 4)))
+        / np.sqrt(2)) for u in range(8)]
+_g = sysm.measure_mu_gain(_hm, [15.0] * 8)
+print(f"  MU/SU 比值 {_g['ratio']:.3f}  逐快照 {_g.get('per_snapshot')}  "
+      f"离散度 {_g.get('relative_spread')}")
+check(_g["measured"] is True, "确实测出来了而不是回落到默认值")
+check(_g["ratio"] > 0, "比值为正")
+check(len(_g["per_snapshot"]) >= 2, "多个快照各测一次")
+check("标量近似" in _g["note"], "把这是个近似说清楚了")
+check("relative_spread" in _g, "离散度一起返回——它就是这个近似的可信度")
+
+# 比值 <= 1 时调度器不该切 MU（SU 无干扰且可到 rank4）
+_r_su = sysm.simulate(_T, sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=12),
+                      traffic=sysm.TrafficConfig(model="full_buffer"),
+                      sched=sysm.SchedulerConfig(mu_enabled=True), mu_se_ratio=0.8)
+check(_r_su.cell["mu_share"] == 0.0, "MU 不划算时（比值<1）自适应选 SU，不强行配对")
+_r_mu = sysm.simulate(_T, sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=12),
+                      traffic=sysm.TrafficConfig(model="full_buffer"),
+                      sched=sysm.SchedulerConfig(mu_enabled=True), mu_se_ratio=1.6)
+print(f"  比值 0.8 -> MU 占比 {_r_su.cell['mu_share']:.0%}；"
+      f"比值 1.6 -> MU 占比 {_r_mu.cell['mu_share']:.0%}")
+check(_r_mu.cell["mu_share"] > 0.5, "MU 划算时确实切过去")
+check(_r_mu.cell["cell_served_mbps"] > _r_su.cell["cell_served_mbps"],
+      "切到 MU 之后小区吞吐确实更高")
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:

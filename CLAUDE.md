@@ -25,7 +25,7 @@ python tests/test_gates.py       # 校准、标准表、三道门、统计判决
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
 python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应、单码字 57 项
-python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒 39 项
+python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒、MU 47 项
 python tests/test_interference.py # IoT、测量域、场景预设、探测模式、说明书回传、文档计数 262 项
 ```
 
@@ -481,6 +481,22 @@ Python 侧：反斜杠 + 数字 是合法的八进制转义，
 结论：CSS 里要中文就**直接写中文**，文件本来就是 UTF-8；
 真要写转义就用 raw 字符串，并给每个转义补足 6 位或补一个空格作结束符。
 这个只有在浏览器里看 `getComputedStyle(el,'::before').content` 才发现得了。
+
+### MU 是空间复用，不是频率复用
+
+配对的每个用户都拿**全带宽**，靠不同的空间波束区分。早先在 TTI 主循环里
+按 `1/K` 分 RE，MU 的聚合吞吐就和 SU **一模一样**——等于把空间复用做成了
+时频复用，MU 增益整个消失。测试里"切到 MU 之后小区吞吐确实更高"当场抓到。
+
+配对后每人只分到 `1/K` 的功率、还要吃残余干扰，这部分由
+`measure_mu_gain()` 在建表阶段用真实的 `su_mu_adaptation` 测出**聚合比值**，
+主循环按 `ratio/K` 折算。**这是标量近似**：逐 TTI 真配对要在每个 TTI 做
+SVD + 矩阵求逆，十万 TTI 跑不完。返回值带逐快照比值与离散度，
+离散度就是这个近似的可信度——实测 3.7%~13.1%，超过 30% 就不该用标量。
+
+实测在 10 用户 / 64 端口下 **MU/SU 比值 < 1**（密集城区 0.755、城区宏站 0.917），
+自适应因此全程选 SU。这不是 bug：SU 无干扰且能到 rank4，
+MU 硬顶 rank2 且每人只分 1/K 功率，自由度富余时 SU 本来就该赢。
 
 ### 样本数不是用户数
 

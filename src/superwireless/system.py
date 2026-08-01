@@ -244,6 +244,60 @@ def build_link_tables(
     return out
 
 
+def measure_mu_gain(
+    h_users: list[np.ndarray],
+    geo_sinr_db: list[float],
+    *,
+    num_ues: int | None = None,
+    max_mu_users: int = 4,
+    max_snapshots: int = 4,
+) -> dict[str, Any]:
+    """实测 MU 相对 SU 的小区谱效比，供 TTI 主循环使用。
+
+    **主循环里不可能逐 TTI 真做配对**——那要在每个 TTI 上做 SVD 与矩阵求逆，
+    十万 TTI 直接跑不完。折中是：在建表阶段用
+    :func:`mumimo.su_mu_adaptation` 在若干个快照上真配一遍，
+    把 MU/SU 的小区谱效比测出来，主循环按这个比例折算。
+
+    **这是当前最大的简化，必须说清楚。** 它假设 MU 增益在时间上是稳定的，
+    而真实的配对增益随用户瞬时信道起伏。返回值里带 ``per_snapshot``，
+    比值的离散程度就是这个假设的可信度——波动大就说明不该用一个标量。
+    """
+    if num_ues is not None and num_ues < len(h_users):
+        groups = group_samples_by_ue(len(h_users), num_ues)
+        h_users = [np.asarray(h_users[g[0]]) for g in groups]
+        geo_sinr_db = [float(np.nanmean([geo_sinr_db[i] for i in g])) for g in groups]
+
+    ratios: list[float] = []
+    modes: list[str] = []
+    n = min(max_snapshots, max(1, min(np.asarray(h).shape[0] for h in h_users)))
+    for t in range(n):
+        snaps = [np.asarray(h)[t:t + 1] for h in h_users]
+        npow = mu.noise_from_geometric_sinr(snaps[0], geo_sinr_db[0])
+        try:
+            dec = mu.su_mu_adaptation(snaps, noise_power=npow,
+                                      max_mu_users=max_mu_users)
+        except Exception:  # noqa: BLE001
+            continue
+        if dec.su_se > 0:
+            ratios.append(dec.mu_se / dec.su_se)
+            modes.append(dec.mode)
+    if not ratios:
+        return {"ratio": 1.0, "measured": False,
+                "note": "配对测不出来（用户数或天线数不足），MU 按 1.0 处理"}
+    r = float(np.median(ratios))
+    spread = float(np.std(ratios) / max(abs(r), _EPS))
+    return {
+        "ratio": r, "measured": True, "per_snapshot": [round(x, 3) for x in ratios],
+        "mode_share_mu": modes.count("MU") / len(modes),
+        "relative_spread": round(spread, 3),
+        "note": (f"**这是一个标量近似**：在 {len(ratios)} 个快照上真配了一遍取中位数，"
+                 f"主循环按它折算，没有逐 TTI 重新配对。"
+                 f"比值离散度 {spread * 100:.0f}%——超过 30% 就说明 MU 增益"
+                 f"随时间起伏很大，用一个标量会失真。"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 话务
 # ---------------------------------------------------------------------------
@@ -486,18 +540,23 @@ def simulate(
         busy_tti += 1
 
         # --- 发送 ---
-        share = 1.0 / len(picked)
+        # **MU 是空间复用，不是频率复用。** 配对的每个用户都拿**全带宽**，
+        # 靠不同的空间波束区分。早先按 1/K 分 RE，MU 的聚合吞吐就和 SU 一模一样——
+        # 等于把空间复用做成了时频复用，MU 增益整个消失。
+        n_pair = len(picked)
         for u in picked:
             r = int(tables[u].best_rank[snap])
+            if use_mu:
+                r = min(r, mu.MU_MAX_RANK)      # MU 每用户硬顶 rank2（工程约束）
             m = int(tables[u].mcs[snap, r - 1])
             mcs_obj = la.MCS_TABLES[3][m]
-            # MU 时每用户只拿一份功率/流，谱效按配对数折算并乘 MU 增益比
-            eff_se = tables[u].se[snap, min(r, mu.MU_MAX_RANK) - 1] if use_mu \
-                else tables[u].best_se[snap]
-            eff_se *= share * (mu_se_ratio if use_mu else 1.0)
             tbs_bits = la.transport_block_size(
-                int(re_per_tti * share), mcs_obj.rate, mcs_obj.q_m,
-                layers=min(r, mu.MU_MAX_RANK) if use_mu else r)
+                re_per_tti, mcs_obj.rate, mcs_obj.q_m, layers=r)
+            if use_mu:
+                # 配对后每人只分到 1/K 的功率、还要吃残余干扰。
+                # mu_se_ratio 是建表阶段用真实 SU/MU 自适应测出来的**聚合**比值，
+                # 所以这里除以配对数，使 K 个用户加起来 = ratio x 单用户 SU。
+                tbs_bits *= mu_se_ratio / n_pair
             tb_bytes = max(1, int(tbs_bits // 8))
 
             # HARQ：首传按该 MCS 的 BLER 判 ACK/NACK，失败进重传
@@ -541,7 +600,9 @@ def simulate(
         # --- PF 平均速率更新 ---
         inst = np.zeros(n_ue)
         for u in picked:
-            inst[u] = tables[u].best_se[snap] * share
+            # PF 的瞬时速率：MU 下每人分到 ratio/K 份
+            inst[u] = tables[u].best_se[snap] * (
+                mu_se_ratio / len(picked) if use_mu else 1.0)
         a = 1.0 / sched.pf_window_tti
         r_avg = (1.0 - a) * r_avg + a * inst
         if progress and tti % 5000 == 0:

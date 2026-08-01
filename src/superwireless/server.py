@@ -1529,6 +1529,9 @@ def sw_system_sim(
     # 每用户谱效被摊薄（实测 40 样本/10 UE 时从 0.32 掉到 0.08）。
     n_ue = int(ds.config.get("num_ues") or 0) or None
     tables = sysm.build_link_tables(h_users, [float(x) for x in sinr], num_ues=n_ue)
+    mu_gain = (sysm.measure_mu_gain(h_users, [float(x) for x in sinr], num_ues=n_ue)
+               if mu_enabled else {"ratio": 1.0, "measured": False,
+                                   "note": "未开 MU"})
 
     res = sysm.simulate(
         tables,
@@ -1539,10 +1542,12 @@ def sw_system_sim(
         sched=sysm.SchedulerConfig(algorithm=scheduler, pf_window_tti=int(pf_window_tti),
                                    mu_enabled=bool(mu_enabled)),
         kpi=sysm.KpiConfig(trim=trim),
+        mu_se_ratio=float(mu_gain["ratio"]),
     )
     out = res.as_dict()
     out["dataset_id"] = dataset_id
     out["num_ues"] = len(tables)
+    out["mu_gain"] = mu_gain
     out["num_samples"] = len(h_users)
     out["summary"] = res.text()
     out["hint"] = ("先把 summary 念给用户，再把 notes 里的每一条都说出来——"
