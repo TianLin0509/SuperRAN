@@ -17,6 +17,24 @@
 产物是**自包含的离线 HTML**（SVG 内联，无外部依赖），落到项目
 ``artifacts/specs/``。对话里只回路径和摘要，不把图往回贴。
 
+--- 信息分级，不是信息堆叠 ---------------------------------------------
+
+把六段内容一路平铺下去，等于把"找重点"这件事推给用户。所以：
+
+* **首屏**只放**网络拓扑图**（基站 + 用户 + 扇区，图内直接标站数/小区数/
+  UE 数/站间距，配比例尺）加一排**关键信息卡**；
+* 其余按主题折进 **tab**（基站阵列 / 频域与时域 / 信道剖面 / 参数全表），
+  用户按需点。
+
+关键信息卡选什么有两条依据：**做仿真通常最关心的**（规模、频点、带宽、阵列、
+场景），加上**这次对话里专门点过名的**——调用方把参数名传进 ``highlight``，
+它们会被顶到最前面并高亮。这样首屏既精准又不漏。
+
+tab 用**纯 CSS**（radio + label）实现，离线双击打开也能切，不依赖 JS。
+写的时候踩过：``input`` 必须是 ``.tabs`` 的直接子元素且与 ``.panels`` 同级，
+中间套一层容器 ``~`` 选择器就全失效——页面上直接露出原生 radio、一个面板都
+不显示。**这个光看代码看不出来，是在浏览器里看出来的。**
+
 --- 两条纪律 -----------------------------------------------------------
 
 1. **只画配置里真有的东西。** 站数被六边形栅格吸附（配 2 站实际 7 站）就画
@@ -258,6 +276,18 @@ def _esc(s: Any) -> str:
     return html.escape(str(s), quote=True)
 
 
+def _bold(s: Any) -> str:
+    """转义后把 ``**...**`` 变成 ``<b>``。
+
+    这些说明字符串同时给纯文本（CLAUDE.md、MCP 返回值）和 HTML 用，
+    源头统一写 markdown 强调；HTML 侧不转的话页面上会直接露出星号。
+    """
+    out, parts = [], _esc(s).split("**")
+    for i, seg in enumerate(parts):
+        out.append(f"<b>{seg}</b>" if i % 2 else seg)
+    return "".join(out)
+
+
 def _svg_array(spec: dict[str, Any]) -> str:
     """阵列面板：RF 端口栅格 + 每端口驱动的物理阵子。"""
     arr = spec["array"]
@@ -327,8 +357,17 @@ def _svg_array(spec: dict[str, Any]) -> str:
     return "".join(out)
 
 
-def _svg_layout(spec: dict[str, Any], ue_xy: list[tuple[float, float]] | None = None) -> str:
-    """站点布局：站点位置 + 扇区指向 + UE 撒点。"""
+def _svg_layout(
+    spec: dict[str, Any],
+    ue_xy: list[tuple[float, float]] | None = None,
+    *,
+    size: int | None = None,
+) -> str:
+    """网络拓扑图：站点 + 扇区指向 + UE 撒点，图上直接标关键数。
+
+    这是说明书的**门面**——用户打开先看它，所以图里自带站数/小区数/UE 数/
+    站间距和一根比例尺，不用去翻表。
+    """
     topo = spec["topology"]
     cells = topo["cells"]
     if not cells:
@@ -336,23 +375,63 @@ def _svg_layout(spec: dict[str, Any], ue_xy: list[tuple[float, float]] | None = 
 
     xs = [c["x"] for c in cells] + [p[0] for p in (ue_xy or [])]
     ys = [c["y"] for c in cells] + [p[1] for p in (ue_xy or [])]
-    span = max(max(xs) - min(xs), max(ys) - min(ys), 1.0) * 1.18
     cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
-    S = 460
-    def px(x): return S / 2 + (x - cx) / span * S
-    def py(y): return S / 2 - (y - cy) / span * S
 
-    out = [f'<svg viewBox="0 0 {S} {S + 30}" width="100%" style="max-width:{S}px" '
-           f'role="img" aria-label="站点布局示意图">']
-    out.append('<style>.lb{font:10.5px ui-monospace,Consolas,monospace;fill:#6e6e73}'
-               '.ue{fill:#34c759;opacity:.5}.st{fill:#ff3b30}'
-               '.bs{stroke:#0071e3;stroke-width:2;opacity:.75}</style>')
+    # 画布跟着部署形状走，不硬套正方形：
+    #   * 单站用 640 的画布只会得到一大片空白加中间一个点；
+    #   * 高铁那种线性布局是一条细长的线，正方形画布上下各空掉一半。
+    # 米/像素在两轴上保持一致，几何不失真；高度只做上下限保护。
+    n_sites = len({(c["x"], c["y"]) for c in cells})
+    W = int(size) if size else (340 if n_sites <= 1 else 640)
+    dx = max(max(xs) - min(xs), 1.0) * 1.22
+    dy = max(max(ys) - min(ys), 1.0) * 1.22
+    scale = W / dx                       # 像素/米，两轴共用
+    S = W
+    Hc = min(max(dy * scale, W * 0.34), W)   # 画布高度（不含图例条）
+    H = int(Hc) + 34
+
+    def px(x: float) -> float:
+        return W / 2 + (x - cx) * scale
+
+    def py(y: float) -> float:
+        return Hc / 2 - (y - cy) * scale
+
+    span = dx  # reach/比例尺沿用横向尺度
+
+    out = [f'<svg viewBox="0 0 {W} {H}" width="100%" style="max-width:{W}px" '
+           f'role="img" aria-label="网络拓扑图">']
+    out.append(
+        '<style>'
+        '.lb{font:11px ui-monospace,Consolas,monospace;fill:#6e6e73}'
+        '.ue{fill:#34c759;opacity:.55}.st{fill:#ff3b30}'
+        '.bs{stroke:#0071e3;stroke-width:2;opacity:.72}'
+        '.cov{fill:#0071e3;opacity:.045;stroke:#0071e3;stroke-opacity:.16;stroke-width:1}'
+        '.bx{fill:#0071e3;opacity:.06}'
+        '.bt{font:600 12px system-ui;fill:currentColor}'
+        '.bn{font:600 15px ui-monospace,Consolas,monospace;fill:#0071e3}'
+        '</style>'
+    )
+
+    # 每个扇区画一个 120 度（或 360/N）扇形覆盖示意，让"扇区"看得见
+    seen: set[tuple[float, float]] = set()
+    sec = max(int(topo["sectors_per_site"] or 1), 1)
+    half = math.radians(360.0 / sec / 2.0) if sec > 1 else math.pi
+    reach = (S / span * topo["isd_m"] * 0.55) if topo["isd_m"] else S * 0.3
+    for c in cells:
+        X, Y = px(c["x"]), py(c["y"])
+        a = math.radians(c["az"])
+        if sec > 1:
+            x1, y1 = X + reach * math.cos(a - half), Y - reach * math.sin(a - half)
+            x2, y2 = X + reach * math.cos(a + half), Y - reach * math.sin(a + half)
+            out.append(f'<path class="cov" d="M{X:.1f},{Y:.1f} L{x1:.1f},{y1:.1f} '
+                       f'A{reach:.1f},{reach:.1f} 0 0,0 {x2:.1f},{y2:.1f} Z"/>')
+        else:
+            out.append(f'<circle class="cov" cx="{X:.1f}" cy="{Y:.1f}" r="{reach:.1f}"/>')
 
     for x, y in (ue_xy or []):
-        out.append(f'<circle class="ue" cx="{px(x):.1f}" cy="{py(y):.1f}" r="2.4"/>')
+        out.append(f'<circle class="ue" cx="{px(x):.1f}" cy="{py(y):.1f}" r="2.8"/>')
 
-    seen: set[tuple[float, float]] = set()
-    arm = max(S / span * topo["isd_m"] * 0.30, 14) if topo["isd_m"] else 22
+    arm = max(reach * 0.55, 13)
     for c in cells:
         X, Y = px(c["x"]), py(c["y"])
         a = math.radians(c["az"])
@@ -360,17 +439,46 @@ def _svg_layout(spec: dict[str, Any], ue_xy: list[tuple[float, float]] | None = 
                    f'x2="{X + arm * math.cos(a):.1f}" y2="{Y - arm * math.sin(a):.1f}"/>')
         if (c["x"], c["y"]) not in seen:
             seen.add((c["x"], c["y"]))
-            out.append(f'<circle class="st" cx="{X:.1f}" cy="{Y:.1f}" r="4"/>')
+            out.append(f'<circle class="st" cx="{X:.1f}" cy="{Y:.1f}" r="4.5"/>')
 
+    # 图内信息盒：不用翻表就能看到规模
+    facts = [
+        (str(topo["num_sites_actual"]), "站点"),
+        (str(topo["num_cells"]), "小区"),
+    ]
+    if ue_xy:
+        facts.append((str(len(ue_xy)), "UE 撒点"))
     if topo["isd_m"]:
-        out.append(f'<text class="lb" x="8" y="{S + 20}">'
-                   f'站间距 {topo["isd_m"]:g} m · {topo["num_sites_actual"]} 站 x '
-                   f'{topo["sectors_per_site"]} 扇区 = {topo["num_cells"]} 小区'
-                   f'{" · UE " + str(len(ue_xy)) + " 个" if ue_xy else ""}</text>')
-    out.append('<circle class="st" cx="330" cy="' + str(S + 16) + '" r="4"/>'
-               f'<text class="lb" x="340" y="{S + 20}">站点</text>'
-               f'<line class="bs" x1="384" y1="{S + 16}" x2="400" y2="{S + 16}"/>'
-               f'<text class="lb" x="404" y="{S + 20}">扇区指向</text>')
+        facts.append((f'{topo["isd_m"]:g} m', "站间距"))
+    bw = 92 * len(facts) + 16
+    out.append(f'<rect class="bx" x="8" y="8" width="{bw}" height="46" rx="8"/>')
+    for i, (num, lab) in enumerate(facts):
+        x = 20 + i * 92
+        out.append(f'<text class="bn" x="{x}" y="30">{_esc(num)}</text>')
+        out.append(f'<text class="lb" x="{x}" y="46">{_esc(lab)}</text>')
+
+    # 比例尺
+    if topo["isd_m"]:
+        bar = S / span * topo["isd_m"]
+        if bar < S * 0.6:
+            x0, yb = 12, H - 26
+            out.append(f'<line x1="{x0}" y1="{yb}" x2="{x0 + bar:.1f}" y2="{yb}" '
+                       f'stroke="#6e6e73" stroke-width="1.6"/>')
+            for xx in (x0, x0 + bar):
+                out.append(f'<line x1="{xx:.1f}" y1="{yb-4}" x2="{xx:.1f}" y2="{yb+4}" '
+                           f'stroke="#6e6e73" stroke-width="1.6"/>')
+            out.append(f'<text class="lb" x="{x0 + bar + 8:.1f}" y="{yb + 4}">'
+                       f'{topo["isd_m"]:g} m（站间距）</text>')
+
+    lx = S - (168 if ue_xy else 116)
+    out.append(f'<circle class="st" cx="{lx}" cy="{H-30}" r="4"/>'
+               f'<text class="lb" x="{lx+9}" y="{H-26}">基站</text>')
+    if ue_xy:
+        out.append(f'<circle class="ue" cx="{lx+52}" cy="{H-30}" r="4"/>'
+                   f'<text class="lb" x="{lx+61}" y="{H-26}">用户</text>')
+    dx = lx + (104 if ue_xy else 52)
+    out.append(f'<line class="bs" x1="{dx}" y1="{H-30}" x2="{dx+16}" y2="{H-30}"/>'
+               f'<text class="lb" x="{dx+21}" y="{H-26}">扇区</text>')
     out.append("</svg>")
     return "".join(out)
 
@@ -512,20 +620,118 @@ code{font-family:ui-monospace,Consolas,monospace;background:var(--tint);padding:
 .kv b{font-weight:600;font-family:ui-monospace,Consolas,monospace}
 footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--border);
  color:var(--ink-soft);font-size:12.5px}
+
+/* 分级呈现：拓扑图与关键信息在首屏，其余折进 tab。
+   纯 CSS（radio + label），离线双击打开也能用，不依赖 JS。 */
+.tabs{position:relative;margin:26px 0 0}
+.tabs>input{position:absolute;opacity:0;width:0;height:0}
+.tabs>label{display:inline-block;padding:9px 17px;cursor:pointer;font-size:14px;
+ color:var(--ink-soft);border:1px solid transparent;border-bottom:none;
+ border-radius:9px 9px 0 0;user-select:none;position:relative;z-index:1}
+.tabs>label:hover{color:var(--ink)}
+.tabs>input:checked+label{background:var(--card);border-color:var(--border);
+ color:var(--accent);font-weight:600}
+.tabs>input:focus-visible+label{outline:2px solid var(--accent);outline-offset:-2px}
+.panels{border-top:1px solid var(--border);padding-top:16px;margin-top:-1px}
+.panels>section{display:none;animation:fade .18s ease}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+#tb1:checked~.panels>#pn1,#tb2:checked~.panels>#pn2,#tb3:checked~.panels>#pn3,
+#tb4:checked~.panels>#pn4,#tb5:checked~.panels>#pn5{display:block}
+
+/* 关键信息卡 */
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px;margin:16px 0}
+.fact{background:var(--card);border:1px solid var(--border);border-radius:11px;padding:12px 14px}
+.fact .n{font:700 19px ui-monospace,Consolas,monospace;letter-spacing:-.02em}
+.fact .k{font-size:12px;color:var(--ink-soft);margin-top:2px}
+.fact.hi{border-color:var(--accent);background:var(--tint-blue)}
+.fact.hi .n{color:var(--tint-blue-ink)}
+.fact.hi .k{color:var(--tint-blue-ink);opacity:.85}
+.hero{background:var(--card);border:1px solid var(--border);border-radius:14px;
+ padding:16px;margin:6px 0 0;text-align:center}
+.hero>svg{display:block;margin:0 auto}
+h3{font-size:15.5px;font-weight:600;margin:22px 0 4px}
+.lead{color:var(--ink-soft);font-size:13.5px;margin:2px 0 10px}
 """
 
 
-def render_html(spec: dict[str, Any], ue_xy: list[tuple[float, float]] | None = None) -> str:
+def _facts(spec: dict[str, Any], highlight: list[str] | None = None) -> list[dict[str, Any]]:
+    """首屏关键信息卡。
+
+    选什么摆首屏有两条依据：**做仿真通常最关心的**（规模、频点、带宽、阵列、
+    场景），加上**这次对话里专门提到的**（``highlight`` 传进来的参数名，
+    会被顶到最前面并高亮）。其余一律折进 tab。
+    """
+    a, f, t = spec["array"], spec["frequency"], spec["topology"]
+    cfg = spec["config"]
+    hl = set(highlight or [])
+    m = a.get("elements_per_rf_port")
+    n_ports = spec["panel"][0] * spec["panel"][1] * spec["panel"][2]
+
+    items = [
+        {"n": f'{t["num_cells"]}',
+         "k": f'小区（{t["num_sites_actual"]} 站 x {t["sectors_per_site"]} 扇区）',
+         "keys": ["num_sites", "sectors_per_site"]},
+        {"n": f'{n_ports}T{cfg.get("num_ue_rx_ant", "")}R',
+         "k": (f'1 驱 {m}、{a.get("physical_elements")} 阵子' if m else "独立阵元 legacy"),
+         "keys": ["num_bs_tx_ant", "num_ue_rx_ant"]},
+        {"n": f'{f["carrier_freq_hz"] / 1e9:g} GHz',
+         "k": f'{f["bandwidth_hz"] / 1e6:g} MHz 带宽',
+         "keys": ["carrier_freq_hz", "bandwidth_hz"]},
+        {"n": f'{f["num_rb"]}',
+         "k": f'RB（{f["num_rbg"]} x {f["rbg_size"]} RBG）',
+         "keys": ["num_rb", "subcarrier_spacing"]},
+        {"n": _esc(cfg.get("scenario", "-")),
+         "k": f'场景 · {cfg.get("channel_model", "-")}',
+         "keys": ["scenario", "channel_model"]},
+    ]
+    if t["isd_m"]:
+        items.append({"n": f'{t["isd_m"]:g} m', "k": "站间距", "keys": ["isd_m"]})
+    if cfg.get("num_ues"):
+        items.append({"n": f'{cfg["num_ues"]}', "k": "每轮 UE 数", "keys": ["num_ues"]})
+    if spec.get("num_samples"):
+        items.append({"n": f'{spec["num_samples"]}', "k": "样本数", "keys": ["num_samples"]})
+    if float(cfg.get("ue_speed_kmh", 0) or 0) > 3:
+        items.append({"n": f'{float(cfg["ue_speed_kmh"]):g}', "k": "km/h 移动",
+                      "keys": ["ue_speed_kmh", "mobility_mode"]})
+    if cfg.get("num_interfering_ues"):
+        items.append({"n": f'{cfg["num_interfering_ues"]}', "k": "每邻区干扰 UE",
+                      "keys": ["num_interfering_ues"]})
+
+    # 对话里点名过的参数：已有卡片就顶到最前并高亮，没有的补一张
+    for it in items:
+        it["hi"] = bool(hl & set(it["keys"]))
+    known = {k for it in items for k in it["keys"]}
+    for key in highlight or []:
+        if key in known or key not in cfg:
+            continue
+        items.append({"n": _esc(_fmt(key, cfg[key])),
+                      "k": _KEY_LABELS.get(key, (key, ""))[0] or key,
+                      "keys": [key], "hi": True})
+    items.sort(key=lambda it: not it["hi"])
+    return items
+
+
+def render_html(
+    spec: dict[str, Any],
+    ue_xy: list[tuple[float, float]] | None = None,
+    highlight: list[str] | None = None,
+) -> str:
+    """渲染成分级呈现的单页：拓扑图打头，其余折进 tab。
+
+    **信息分级，不是信息堆叠。** 首屏只放网络拓扑图 + 关键信息卡（做仿真通常
+    最关心的那几个，加上这次对话里专门点过名的）；阵列细节、频域时域、信道
+    剖面、参数全表折进 tab，用户按需点。
+
+    tab 用纯 CSS（radio + label）实现，**离线双击打开也能用**，不依赖 JS。
+    """
     a = spec["array"]
 
     notes = "".join(
         f'<div class="callout {"c-red" if "**" in n else "c-amber"}">'
-        f'<p>{_esc(n).replace("**", "")}</p></div>'
+        f'<p>{_bold(n)}</p></div>'
         for n in spec["notes"]
     )
 
-    # 这两段单独拎出来：内联进 f-string 要转义引号，而 f-string 里的反斜杠
-    # **Python 3.12 才允许**，本项目要求 >= 3.10。ruff 当场抓到的。
     pill_user = '<span class="pill p-user">用户指定</span>'
     pill_auto = '<span class="pill p-auto">默认</span>'
 
@@ -538,6 +744,12 @@ def render_html(spec: dict[str, Any], ue_xy: list[tuple[float, float]] | None = 
             for r in items
         )
 
+    facts = "".join(
+        f'<div class="fact{" hi" if it["hi"] else ""}">'
+        f'<div class="n">{it["n"]}</div><div class="k">{_esc(it["k"])}</div></div>'
+        for it in _facts(spec, highlight)
+    )
+
     n_user = sum(1 for r in spec["params"] + spec["other_params"] if r["by_user"])
     n_all = len(spec["params"]) + len(spec["other_params"])
 
@@ -545,17 +757,37 @@ def render_html(spec: dict[str, Any], ue_xy: list[tuple[float, float]] | None = 
         f'<div class="kv"><span>{k}</span><b>{_esc(v)}</b></div>'
         for k, v in [
             ("RF 端口", f'{spec["panel"][0]}H x {spec["panel"][1]}V x {spec["panel"][2]}pol'
-                        f' = {spec["panel"][0]*spec["panel"][1]*spec["panel"][2]}'),
+                        f' = {spec["panel"][0] * spec["panel"][1] * spec["panel"][2]}'),
             ("物理阵子", a.get("physical_elements") or "同端口数（legacy 独立阵元）"),
-            ("馈电", f'1 驱 {a["elements_per_rf_port"]}' if a.get("elements_per_rf_port") else "无子阵"),
+            ("馈电", f'1 驱 {a["elements_per_rf_port"]}'
+                     if a.get("elements_per_rf_port") else "无子阵"),
             ("水平间距", f'{a.get("horizontal_spacing_lambda", 0.5):g}λ'),
             ("垂直间距", f'{a.get("ae_vertical_spacing_lambda", 0.5):g}λ'),
             ("端口相位中心", f'{a.get("rf_vertical_spacing_lambda"):g}λ'
-                            if a.get("rf_vertical_spacing_lambda") else "-"),
+                             if a.get("rf_vertical_spacing_lambda") else "-"),
             ("固定下倾", f'{a.get("fixed_downtilt_deg", 0):g}°'),
             ("模型", a.get("antenna_model_mode")),
         ] if v not in (None, "-")
     )
+
+    fq, tm = spec["frequency"], spec["time"]
+    freq_kv = "".join(
+        f'<div class="kv"><span>{k}</span><b>{_esc(v)}</b></div>' for k, v in [
+            ("载波", f'{fq["carrier_freq_hz"] / 1e9:g} GHz'),
+            ("标称带宽", f'{fq["bandwidth_hz"] / 1e6:g} MHz'),
+            ("子载波间隔", f'{fq["scs_hz"] / 1e3:g} kHz'),
+            ("RB 数", fq["num_rb"]),
+            ("RBG", f'{fq["num_rbg"]} 组 x {fq["rbg_size"]} RB'),
+            ("实际占用", f'{fq["occupied_hz"] / 1e6:.2f} MHz'),
+            ("仿真粒度", "到 RB 为止（不建模到 RE）"),
+            ("TDD 图案", tm["tdd_pattern"]),
+            ("每样本时隙", tm["slots_per_sample"]),
+            ("每时隙符号", tm["symbols_per_slot"]),
+        ]
+    )
+
+    meta_ds = f' · 数据集 {_esc(spec["dataset_id"])}' if spec.get("dataset_id") else ""
+    meta_n = f' · {spec["num_samples"]} 个样本' if spec.get("num_samples") else ""
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
@@ -564,38 +796,65 @@ def render_html(spec: dict[str, Any], ue_xy: list[tuple[float, float]] | None = 
 <body><div class="wrap">
 
 <h1>{_esc(spec["title"])}</h1>
-<p class="meta">{_esc(spec["created_at"])} · 引擎 {_esc(spec["source"])}
-{" · 数据集 " + _esc(spec["dataset_id"]) if spec.get("dataset_id") else ""}
-{" · " + str(spec["num_samples"]) + " 个样本" if spec.get("num_samples") else ""}</p>
-<p class="src">这份说明书描述的是<b>将要跑（或已经跑过）的那个仿真</b>，
-不是配置意图——站数被栅格吸附、阵列走了 legacy 之类的差异都按实际画。</p>
+<p class="meta">{_esc(spec["created_at"])} · 引擎 {_esc(spec["source"])}{meta_ds}{meta_n}</p>
 
 {notes}
 
-<h2>一、基站阵列</h2>
-<div class="card">{_svg_array(spec)}</div>
+<div class="hero">{_svg_layout(spec, ue_xy)}</div>
+<div class="facts">{facts}</div>
+
+<div class="tabs">
+<input type="radio" name="tb" id="tb1" checked><label for="tb1">总览</label
+><input type="radio" name="tb" id="tb2"><label for="tb2">基站阵列</label
+><input type="radio" name="tb" id="tb3"><label for="tb3">频域与时域</label
+><input type="radio" name="tb" id="tb4"><label for="tb4">信道剖面</label
+><input type="radio" name="tb" id="tb5"><label for="tb5">参数全表</label>
+<div class="panels">
+
+<section id="pn1">
+<h3>这次在仿什么</h3>
+<p class="lead">{_esc(headline(spec))}</p>
+<p class="src">上面这张图和这些数字描述的是<b>将要跑（或已经跑过）的那个仿真</b>，
+不是配置意图——站数被栅格吸附、阵列走了 legacy 之类的差异都按实际画，
+有出入会在页首用黄框标出来。</p>
+<h3>想看细节点上面的页签</h3>
+<div class="tbl-wrap"><table>
+<tr><th>页签</th><th>回答什么问题</th></tr>
+<tr><td>基站阵列</td><td>端口怎么排、每端口驱动几个阵子、间距多少、有没有栅瓣</td></tr>
+<tr><td>频域与时域</td><td>多少 RB、怎么分 RBG、占多宽、TDD 怎么配</td></tr>
+<tr><td>信道剖面</td><td>多径的时延与功率分布</td></tr>
+<tr><td>参数全表</td><td>{n_all} 项配置逐条列出，标明哪些是你定的、哪些是系统补的</td></tr>
+</table></div>
+</section>
+
+<section id="pn2">
+<div class="hero">{_svg_array(spec)}</div>
 <div class="grid2"><div class="card">{array_kv}</div>
-<div class="card"><p class="src">{_esc(a.get("note", ""))}</p></div></div>
+<div class="card"><p class="src">{_bold(a.get("note", ""))}</p></div></div>
+</section>
 
-<h2>二、站点拓扑</h2>
-<div class="card">{_svg_layout(spec, ue_xy)}</div>
-
-<h2>三、频域布局</h2>
+<section id="pn3">
 <div class="card">{_svg_freq(spec)}</div>
-
-<h2>四、时域与 TDD</h2>
 <div class="card">{_svg_tdd(spec) or '<p class="src">无 TDD 图案。</p>'}</div>
+<div class="card">{freq_kv}</div>
+</section>
 
-<h2>五、信道剖面</h2>
+<section id="pn4">
 <div class="card">{_svg_pdp(spec) or '<p class="src">该模型没有可画的时延功率谱。</p>'}</div>
+<p class="src">CDL 系列每条径带角度（AoD/AoA/ZoD/ZoA），TDL 系列没有——
+凡是依赖角度的课题（波束管理、定位）必须用 CDL。</p>
+</section>
 
-<h2>六、参数全表</h2>
-<p class="src">{n_user}/{n_all} 项由用户指定，其余走默认值。
+<section id="pn5">
+<p class="lead">{n_user}/{n_all} 项由用户指定，其余走默认值。
 <b>标着「默认」的都是系统替你定的</b>，不认可就改。</p>
 <div class="tbl-wrap"><table>
 <tr><th>参数</th><th>值</th><th>来源</th></tr>
 {rows(spec["params"])}{rows(spec["other_params"])}
 </table></div>
+</section>
+
+</div></div>
 
 <footer>superwireless 仿真说明书 · 图与数均由本次配置生成，未经手工编辑</footer>
 </div></body></html>
@@ -610,11 +869,16 @@ def write_spec(
     dataset_id: str | None = None,
     title: str = "",
     ue_xy: list[tuple[float, float]] | None = None,
+    highlight: list[str] | None = None,
 ) -> dict[str, Any]:
     """生成说明书并落盘，返回结构化摘要 + 文件路径。
 
     HTML 落到 ``artifacts/specs/``；**对话里只回路径与摘要**，
     不要把图或整份 HTML 贴回去。
+
+    ``highlight`` 传本次对话里用户**专门提过**的参数名（如
+    ``["isd_m", "num_interfering_ues"]``），它们会被顶到首屏关键信息卡的最前面
+    并高亮——首屏因此既覆盖"做仿真通常最关心的"，也覆盖"这次特别在意的"。
     """
     spec = build_spec(cfg, num_samples=num_samples, user_set=user_set,
                       dataset_id=dataset_id, title=title)
@@ -626,7 +890,7 @@ def write_spec(
     # 数据集句柄本身唯一，其余情况补一段随机后缀。
     stem = dataset_id or f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
     path = out_dir / f"spec-{stem}.html"
-    path.write_text(render_html(spec, ue_xy), encoding="utf-8")
+    path.write_text(render_html(spec, ue_xy, highlight), encoding="utf-8")
 
     (out_dir / f"spec-{stem}.json").write_text(
         json.dumps({k: v for k, v in spec.items() if k != "config"},

@@ -1250,6 +1250,7 @@ def sw_spec_sheet(
     preset: str | None = None,
     config: dict[str, Any] | None = None,
     title: str = "",
+    highlight: list[str] | None = None,
 ) -> dict[str, Any]:
     """把敲定的仿真配置画成一份说明书（离线 HTML，含示意图）。
 
@@ -1278,6 +1279,10 @@ def sw_spec_sheet(
     dataset_id : 已生成的数据集，用它的配置与真实撒点
     preset : 预设名
     config : 直接给配置。与上面几个同时给时，config 作为覆盖项。
+    highlight : **本次对话里用户专门提过的参数名**，如
+        ``["isd_m", "num_interfering_ues"]``。它们会被顶到首屏关键信息卡最前面
+        并高亮。首屏因此既覆盖"做仿真通常最关心的"，也覆盖"这次特别在意的"——
+        用户点名过什么就把什么传进来。
     """
     from . import spec as sp
 
@@ -1312,7 +1317,7 @@ def sw_spec_sheet(
 
     out = sp.write_spec(
         cfg, user_set=user_set, dataset_id=dataset_id,
-        title=title or "仿真说明书", ue_xy=ue_xy,
+        title=title or "仿真说明书", ue_xy=ue_xy, highlight=highlight,
     )
     out["hint"] = (
         "把 headline 和 notes 转述给用户，并给出 html_path 让他自己打开。"

@@ -487,7 +487,7 @@ for _i, _sv in enumerate(_s1):
         check(False, f"svg{_i} XML 格式正确（{_e}）")
 check(_h1.rstrip().endswith("</html>"), "HTML 完整闭合")
 
-_lay = [x for x in _s1 if "站点布局" in x][0]
+_lay = [x for x in _s1 if "网络拓扑" in x][0]
 _sites = len(_re.findall(r'<circle class="st"', _lay)) - 1   # 减去图例那个
 check(_sites == 7, f"六边形 7 站都画出来了（实得 {_sites}）")
 check(len(_re.findall(r'<line class="bs"', _lay)) - 1 == 21, "21 个扇区指向都画出来了")
@@ -495,7 +495,7 @@ check(len(_re.findall(r'<line class="bs"', _lay)) - 1 == 21, "21 个扇区指向
 # 线性拓扑（高铁）：站点沿轨道两侧交错，不能画成一个点
 _r2 = sp.write_spec(dict(pl.load_presets()["hst_350kmh"]["config"]), title="test-linear")
 _h2, _s2 = _svgs(_r2["html_path"])
-_lay2 = [x for x in _s2 if "站点布局" in x][0]
+_lay2 = [x for x in _s2 if "网络拓扑" in x][0]
 _cx = [float(x) for x in _re.findall(r'<circle class="st" cx="([-\d.]+)"', _lay2)][:-1]
 print(f"  linear: {len(_cx)} 站，横坐标跨度 {max(_cx) - min(_cx):.0f}")
 check(len(_cx) == 7, f"线性拓扑 7 站（实得 {len(_cx)}）")
@@ -507,9 +507,9 @@ _a = sp.write_spec(dict(pl.load_presets()["company_64t4r"]["config"]), title="a"
 _b = sp.write_spec(dict(pl.load_presets()["hst_350kmh"]["config"]), title="b")
 check(_a["html_path"] != _b["html_path"], "同一秒生成的两份说明书文件名不冲突")
 _na = len(_re.findall(r'<circle class="st"',
-                      [x for x in _svgs(_a["html_path"])[1] if "站点布局" in x][0]))
+                      [x for x in _svgs(_a["html_path"])[1] if "网络拓扑" in x][0]))
 _nb = len(_re.findall(r'<circle class="st"',
-                      [x for x in _svgs(_b["html_path"])[1] if "站点布局" in x][0]))
+                      [x for x in _svgs(_b["html_path"])[1] if "网络拓扑" in x][0]))
 check(_na != _nb, "两份内容各自独立（没被对方覆盖）")
 
 # 阵列图必须如实反映实际用的模型
@@ -538,6 +538,52 @@ check("html_path" in _sheet, "sw_generate 自动产出说明书")
 check(Path(_sheet.get("html_path", "")).is_file(), "说明书文件真的落盘了")
 check("UE" in Path(_sheet["html_path"]).read_text(encoding="utf-8"),
       "生成后的说明书带真实撒点")
+
+# 分级呈现：拓扑图打头，其余折进 tab
+check(_h1.count('name="tb"') == 5, "五个 tab 都在")
+check(_h1.count('<section id="pn') == 5, "五个面板都在")
+check('id="tb1" checked' in _h1, "默认停在总览")
+# tab 用纯 CSS 实现，**离线双击打开必须能用**，不许依赖 JS
+check("<script" not in _h1, "不依赖 JS（离线 file:// 打开也能切页签）")
+# input 必须是 .tabs 的直接子元素且与 .panels 同级，~ 选择器才成立。
+# 早先套了一层 .tabbar，页面上直接露出原生 radio、一个面板都不显示——
+# 光看代码看不出来，是在浏览器里看出来的。
+check('<div class="tabs">\n<input' in _h1 or '<div class="tabs">\r\n<input' in _h1,
+      "input 是 .tabs 的直接子元素（否则 CSS 兄弟选择器失效、tab 变成裸 radio）")
+check("#tb1:checked~.panels>#pn1" in _h1, "选择器按 id 一一对应")
+
+# 拓扑图在 tab 之外（首屏就能看到），不是折进某个页签
+_hero_at = _h1.index('class="hero"')
+_tabs_at = _h1.index('<div class="tabs">')
+check(_hero_at < _tabs_at, "拓扑图在 tab 之前 —— 打开就看得见，不用点")
+check(_h1.index('class="facts"') < _tabs_at, "关键信息卡也在首屏")
+
+# highlight：对话里点过名的参数顶到最前并高亮
+_r5 = sp.write_spec(dict(pl.load_presets()["company_64t4r_multicell"]["config"]),
+                    title="test-hl", highlight=["isd_m"])
+_h5 = Path(_r5["html_path"]).read_text(encoding="utf-8")
+# 注意别拿 '<div class="fact' 去找第一张卡片——它会先命中容器
+# '<div class="facts">'。从容器结束的位置往后找。
+_box = _h5.index('<div class="facts">') + len('<div class="facts">')
+check(_h5[_box:_box + 40].startswith('<div class="fact hi"'),
+      "被 highlight 的信息卡排在第一个并高亮")
+_r6 = sp.write_spec(dict(pl.load_presets()["company_64t4r_multicell"]["config"]),
+                    title="test-nohl")
+_h6 = Path(_r6["html_path"]).read_text(encoding="utf-8")
+check('class="fact hi"' not in _h6, "没传 highlight 时不乱高亮")
+
+# 说明文字里的 ** 要变成 <b>，不能在页面上露出星号
+check("**" not in _h1.split("<footer>")[0], "页面上没有裸露的 markdown 星号")
+
+# 画布随规模自适应：单站不该用多小区那么大的画布
+_r7 = sp.write_spec(dict(pl.load_presets()["company_64t4r"]["config"]), title="test-1cell")
+_h7 = Path(_r7["html_path"]).read_text(encoding="utf-8")
+_lay7 = [x for x in _re.findall(r"<svg.*?</svg>", _h7, _re.S) if "网络拓扑" in x][0]
+_lay1 = [x for x in _s1 if "网络拓扑" in x][0]
+_w7 = int(_re.search(r'viewBox="0 0 (\d+)', _lay7).group(1))
+_w1 = int(_re.search(r'viewBox="0 0 (\d+)', _lay1).group(1))
+print(f"  画布：单站 {_w7} / 多小区 {_w1}")
+check(_w7 < _w1, "单站用更小的画布（大画布只会得到一片空白加中间一个点）")
 
 # ---------------------------------------------------------------------------
 sect("10  文档里的数字必须和代码对得上")
