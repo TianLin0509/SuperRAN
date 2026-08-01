@@ -721,6 +721,27 @@ def generate(
         if los.size:
             summary["los_ratio"] = round(float(los.mean()), 3)
 
+    # 仿真说明书：配置敲定之后把"这次到底在仿什么"画出来。
+    # 用真实撒点画拓扑图，所以放在生成之后而不是之前。
+    # **失败不影响数据集**——说明书是解释性产物，不是数据的一部分。
+    try:
+        from . import spec as _spec  # noqa: PLC0415
+
+        _pos = payload.get("ue_position")
+        _ue_xy = (
+            [(float(r[0]), float(r[1])) for r in _pos[:400] if np.isfinite(r[0])]
+            if _pos is not None and _pos.ndim == 2 and _pos.shape[1] >= 2 else None
+        )
+        summary["spec_sheet"] = _spec.write_spec(
+            dict(cfg, source=source_name),
+            num_samples=int(accepted),
+            dataset_id=dataset_id,
+            title=f"仿真说明书 · {dataset_id}",
+            ue_xy=_ue_xy,
+        )
+    except Exception as exc:  # noqa: BLE001
+        summary["spec_sheet"] = {"error": f"{type(exc).__name__}: {exc}"}
+
     (out_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )

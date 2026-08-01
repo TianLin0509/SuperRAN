@@ -461,6 +461,85 @@ check("几何 SINR / IoT 不受它影响" in (_am.get("note") or ""),
       "明示阵列模型不影响几何 SINR/IoT")
 
 # ---------------------------------------------------------------------------
+sect("9.8  仿真说明书")
+
+import re as _re  # noqa: E402
+import xml.etree.ElementTree as _ET  # noqa: E402
+
+from superwireless import spec as sp  # noqa: E402
+
+
+def _svgs(path):
+    h = Path(path).read_text(encoding="utf-8")
+    return h, _re.findall(r"<svg.*?</svg>", h, _re.S)
+
+
+# 多小区（六边形栅格）
+_r1 = sp.write_spec(dict(pl.load_presets()["company_64t4r_multicell"]["config"]),
+                    num_samples=100, title="test-hex")
+_h1, _s1 = _svgs(_r1["html_path"])
+print(f"  hex: {_r1['headline'][:60]}")
+check(len(_s1) == 5, f"五张图都在（阵列/拓扑/频域/TDD/剖面），实得 {len(_s1)}")
+for _i, _sv in enumerate(_s1):
+    try:
+        _ET.fromstring(_sv)
+    except _ET.ParseError as _e:
+        check(False, f"svg{_i} XML 格式正确（{_e}）")
+check(_h1.rstrip().endswith("</html>"), "HTML 完整闭合")
+
+_lay = [x for x in _s1 if "站点布局" in x][0]
+_sites = len(_re.findall(r'<circle class="st"', _lay)) - 1   # 减去图例那个
+check(_sites == 7, f"六边形 7 站都画出来了（实得 {_sites}）")
+check(len(_re.findall(r'<line class="bs"', _lay)) - 1 == 21, "21 个扇区指向都画出来了")
+
+# 线性拓扑（高铁）：站点沿轨道两侧交错，不能画成一个点
+_r2 = sp.write_spec(dict(pl.load_presets()["hst_350kmh"]["config"]), title="test-linear")
+_h2, _s2 = _svgs(_r2["html_path"])
+_lay2 = [x for x in _s2 if "站点布局" in x][0]
+_cx = [float(x) for x in _re.findall(r'<circle class="st" cx="([-\d.]+)"', _lay2)][:-1]
+print(f"  linear: {len(_cx)} 站，横坐标跨度 {max(_cx) - min(_cx):.0f}")
+check(len(_cx) == 7, f"线性拓扑 7 站（实得 {len(_cx)}）")
+check(max(_cx) - min(_cx) > 200, "线性拓扑真的铺开了，不是挤成一个点")
+
+# **同一秒内连出两份不能互相覆盖。** 秒级时间戳做文件名时踩过：
+# 后一份直接盖掉前一份且不报错，用户拿到的路径指向的是别人的图。
+_a = sp.write_spec(dict(pl.load_presets()["company_64t4r"]["config"]), title="a")
+_b = sp.write_spec(dict(pl.load_presets()["hst_350kmh"]["config"]), title="b")
+check(_a["html_path"] != _b["html_path"], "同一秒生成的两份说明书文件名不冲突")
+_na = len(_re.findall(r'<circle class="st"',
+                      [x for x in _svgs(_a["html_path"])[1] if "站点布局" in x][0]))
+_nb = len(_re.findall(r'<circle class="st"',
+                      [x for x in _svgs(_b["html_path"])[1] if "站点布局" in x][0]))
+check(_na != _nb, "两份内容各自独立（没被对方覆盖）")
+
+# 阵列图必须如实反映实际用的模型
+check("1 驱 3" in _h1 and "192" in _h1, "64T 说明书画的是 1 驱 3 / 192 阵子")
+check("0.67" in _h1, "标注了 0.67λ 垂直间距")
+_r3 = sp.write_spec(dict(pl.load_presets()["company_64t4r_legacy_array"]["config"]),
+                    title="test-legacy")
+_h3 = Path(_r3["html_path"]).read_text(encoding="utf-8")
+check("legacy" in _h3, "legacy 配置画的是独立阵元，不冒充 1 驱 3")
+check(any("legacy" in n for n in _r3["notes"]),
+      "64T 却走 legacy 时在 notes 里明确警告")
+
+# 参数来源要分得清
+_r4 = sp.write_spec(dict(pl.load_presets()["company_64t4r"]["config"]),
+                    user_set=["scenario", "num_ues"], title="test-user")
+check(_r4["num_user_set"] == 2, f"用户指定项计数正确（实得 {_r4['num_user_set']}）")
+check(_r4["num_params"] > _r4["num_user_set"], "其余标为默认值")
+
+# 生成时自动带一份
+_cfgs = dict(pl.load_presets()["company_64t4r"]["config"])
+_cfgs["num_rb"] = 24
+_cfgs["num_ues"] = 4
+_ss = gen.generate(_cfgs, num_samples=8, workers=1)
+_sheet = _ss.get("spec_sheet") or {}
+check("html_path" in _sheet, "sw_generate 自动产出说明书")
+check(Path(_sheet.get("html_path", "")).is_file(), "说明书文件真的落盘了")
+check("UE" in Path(_sheet["html_path"]).read_text(encoding="utf-8"),
+      "生成后的说明书带真实撒点")
+
+# ---------------------------------------------------------------------------
 sect("10  文档里的数字必须和代码对得上")
 
 # "19 项体检"这句话在 README / SKILL.md / 两份 HTML 里写了八处，而 full_report

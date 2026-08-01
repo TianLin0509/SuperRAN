@@ -1238,6 +1238,89 @@ def sw_compare_scenarios(
     return _jsonable(sc.compare_probes(named, num_samples=num_samples))
 
 
+# ---------------------------------------------------------------------------
+# 仿真说明书
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def sw_spec_sheet(
+    draft_id: str | None = None,
+    dataset_id: str | None = None,
+    preset: str | None = None,
+    config: dict[str, Any] | None = None,
+    title: str = "",
+) -> dict[str, Any]:
+    """把敲定的仿真配置画成一份说明书（离线 HTML，含示意图）。
+
+    **配置定下来之后、正式跑之前调一次**，让用户看清楚这次到底在仿什么：
+
+    * 基站阵列——RF 端口怎么排、每端口驱动几个物理阵子、间距多少、有没有栅瓣
+    * 站点拓扑——站点位置、扇区指向、UE 撒点、站间距
+    * 频域——多少 RB、怎么分 RBG、子载波间隔与实际占用带宽
+    * 时域——TDD 时隙图案
+    * 信道剖面——CDL/TDL 的时延功率谱
+    * 参数全表——**逐项标注是用户指定的还是系统默认补的**
+
+    画的是**将要跑的那个仿真**，不是配置意图：站数被六边形栅格吸附
+    （配 2 站实际 7 站）、阵列走了 legacy 而非本地 1 驱 3 硬件，
+    这些差异都按实际画并写进 ``notes``。
+
+    ``sw_generate`` 会自动生成一份（带真实撒点），句柄在 ``summary.spec_sheet``；
+    这个工具用于**生成之前**先看一眼。
+
+    **返回的是文件路径和摘要，不要把 HTML 内容贴回对话。**
+    把 ``headline`` 和 ``notes`` 转述给用户，并把 html_path 给他。
+
+    参数
+    ----
+    draft_id : sw_plan / sw_revise 的草稿句柄（最常用）
+    dataset_id : 已生成的数据集，用它的配置与真实撒点
+    preset : 预设名
+    config : 直接给配置。与上面几个同时给时，config 作为覆盖项。
+    """
+    from . import spec as sp
+
+    cfg: dict[str, Any] = {}
+    user_set: list[str] = []
+    ue_xy = None
+
+    if dataset_id:
+        from . import load as _load
+
+        ds = _load(dataset_id)
+        cfg = dict(ds.config)
+        try:
+            pos = ds.ue_position
+            ue_xy = [(float(r[0]), float(r[1])) for r in pos[:400]]
+        except Exception:  # noqa: BLE001
+            ue_xy = None
+    elif draft_id:
+        draft = pl.load_draft(draft_id)
+        cfg, _own = pl.resolved_config(draft)
+        user_set = list(draft.user_set)
+    elif preset:
+        presets = pl.load_presets()
+        if preset not in presets:
+            return {"error": f"未知预设 {preset!r}", "available": sorted(presets)}
+        cfg = dict(presets[preset]["config"])
+    if config:
+        cfg.update(config)
+        user_set = sorted(set(user_set) | set(config))
+    if not cfg:
+        return {"error": "需要 draft_id / dataset_id / preset / config 其中之一。"}
+
+    out = sp.write_spec(
+        cfg, user_set=user_set, dataset_id=dataset_id,
+        title=title or "仿真说明书", ue_xy=ue_xy,
+    )
+    out["hint"] = (
+        "把 headline 和 notes 转述给用户，并给出 html_path 让他自己打开。"
+        "**不要把 HTML 内容或图贴回对话。**"
+    )
+    return _jsonable(out)
+
+
 def main() -> None:
     # 启动即预热：依赖问题在这里暴露，且不拖慢第一次调用。
     # 注意只能写 stderr —— stdio 传输下 stdout 是 JSON-RPC 通道。

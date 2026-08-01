@@ -213,6 +213,7 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 - **[接入自研算法 `EXTERNAL_ALGO.html`](EXTERNAL_ALGO.html)** —— 让你自己的算法进门 2/门 3、预注册分析口径、边界与局限
 - **[从 SINR 到真实吞吐 `LINK_ADAPTATION.html`](LINK_ADAPTATION.html)** —— L1 链路自适应、38.214 MCS/CQI、SNR 扫描曲线、并行生成
 - **[测试体系说明 `TESTS.html`](TESTS.html)** —— 「635 项测试」是什么、拦住过哪 8 个真实事故、以及它**证明不了**什么
+- **仿真说明书** —— `sw_spec_sheet` 出的离线 HTML，画出阵列/拓扑/频域/时域/信道剖面 + 参数来源全表，落在 `artifacts/specs/`
 - **[场景拓展与干扰量化 `SCENARIOS.html`](SCENARIOS.html)** —— IoT 噪声抬升、业务域 vs 测量域、21 个场景的实测画像、场景探测、哪些提速是真的
 
 ## 四条设计铁律
@@ -326,7 +327,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 （§7.8.2 指标3，Annex A.1 圆周定义）、PRB 奇异值最大/次大/比值三条 CDF
 （指标4，10log10 尺度）。参考曲线在 R1-165974 / R1-165975 / R1-1909704。
 
-## MCP 工具（30 个）
+## MCP 工具（31 个）
 
 | 工具 | 作用 |
 |---|---|

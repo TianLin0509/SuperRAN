@@ -466,6 +466,8 @@ the spec review step was being skipped entirely.</em>
 <tr><td><code>sw_describe_dataset</code></td><td>看维度、分布、可用字段</td></tr>
 <tr><td><code>sw_list_datasets</code></td><td>本机已生成的数据集</td></tr>
 
+<tr><td><strong>说明书</strong></td><td><code>sw_spec_sheet</code></td><td><strong>把敲定的配置画出来</strong>：阵列/拓扑/频域/时域/信道剖面示意图 + 逐项标注来源的参数全表。离线 HTML，落在 artifacts/specs/</td></tr>
+
 <tr><td rowspan="3"><strong>场景探测</strong></td><td><code>sw_probe_scenario</code></td><td><strong>下单前先看货</strong>：几十秒探清干扰、覆盖、几何特征。num_rb 压到 24、num_ofdm_symbols 压到 4，几何量与全量<strong>逐位相同</strong>（实测），<strong>11.5 倍速</strong></td></tr>
 <tr><td><code>sw_compare_scenarios</code></td><td>几个候选场景并排比一张表</td></tr>
 <tr><td><code>sw_list_presets(group=…)</code></td><td>按 10 个分组浏览 23 个场景预设，每个都带实测特征</td></tr>

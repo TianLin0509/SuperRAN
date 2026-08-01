@@ -327,6 +327,22 @@ ChannelHub 的 `phy_sim/effective_array.py` 就是照这套硬件写的（模块
 1 驱 3 是**这一款 AAU 的硬件事实，不是通用规律**，所以只对 8x4x2 生效；
 16T/256T 之类的面板保持 legacy。
 
+### 说明书文件名要唯一到秒以下
+
+`spec.write_spec` 的文件名早先是 `spec-{秒级时间戳}.html`。同一秒里连着出两份
+（先看预设、再看草稿）后一份会**直接覆盖前一份且不报错**——用户拿到的路径
+指向的是别人的图。实测就这么丢过一份：高铁的线性拓扑被单小区的覆盖成了
+一个孤零零的点，还一度以为是 SVG 画错了。
+
+数据集句柄本身唯一，其余情况补 6 位随机后缀。`test_interference` 第 9.8 节
+有回归：同一秒生成两份，断言文件名不同且内容各自独立。
+
+### f-string 里不能有反斜杠（Python < 3.12）
+
+`f'<td>{"<span class='a'>x</span>" if c else "..."}</td>'` 在 3.12 之前是
+语法错误。本项目要求 >= 3.10，**本机是 3.12 所以跑得通、别的机器直接崩**。
+把这类片段提成局部变量再插值。ruff 会报 `invalid-syntax`，别忽略它。
+
 ### preset 里不要写死 bs_panel
 
 写死会让天线覆盖失效：用户传 `bs_antenna="4T4R"` 时 `num_bs_tx_ant` 变成 4，
@@ -516,6 +532,8 @@ ChannelHub 的 `doppler_hz` 来自**同一个 UE 相邻样本之间的位移**�
 - 新指标 → `analysis.KNOWN_METRICS` 加单位；自定义指标也支持，单位由调用方给
 - 新的标准查表值 → `spec38901.py`，**必须两条独立路径核对过**才录入
 - 新的默认硬件/载波口径 → `hardware.py`，它是**默认配置的唯一真相源**
+- 新的说明书示意图 → `spec.py` 加一个 `_svg_*` 函数并挂进 `render_html`；
+  **画的必须是实际会跑的配置**，不是用户以为的那个
 - 新场景 → `presets/presets.yaml`，不改代码。**加完必须跑一遍 `sw_probe_scenario` 把实测值写进 `expect`**——preset 里的 label 是设计意图，写着「高干扰」实际只有 2 dB 的事发生过
 - 新的干扰量或分级 → `interference.py`，门限改动等于改现场约定，先和用户对齐
 - 新射线追踪城市 → ChannelHub 的 `configs/scenes/`，`scenes.py` 自动发现
