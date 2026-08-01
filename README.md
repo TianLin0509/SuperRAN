@@ -329,7 +329,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 （§7.8.2 指标3，Annex A.1 圆周定义）、PRB 奇异值最大/次大/比值三条 CDF
 （指标4，10log10 尺度）。参考曲线在 R1-165974 / R1-165975 / R1-1909704。
 
-## MCP 工具（32 个）
+## MCP 工具（33 个）
 
 | 工具 | 作用 |
 |---|---|
@@ -352,6 +352,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 | `sw_mcs_info` | 表 1/2：38.214 + 分析模型；表 3：用户 MCS + NewTx/ReTx 门限 |
 | `sw_bler_curve` | 查单档原始 BLER 曲线、10% 门限，并在任意 SINR 点做对数域插值 |
 | `sw_tdd_mcs` | **TDD AMC**：CQI → PMI/SVD BF Gain → MCS → OLLA，返回逐 RB/流审计链 |
+| `sw_system_sim` | **系统级仿真**：连续几秒 TTI + PF 调度 + 话务，出体验速率等现网 KPI |
 | `sw_spec_sheet` | **仿真说明书**：拓扑图 + 分级页签 + 调参面板，**默认自己弹浏览器** |
 | `sw_await_config` | 等用户在说明书上点「应用到仿真」，**改动直接回来**，免复制粘贴 |
 | `sw_describe_dataset` / `sw_list_datasets` | 数据集信息 |

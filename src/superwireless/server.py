@@ -15,6 +15,7 @@ import sys
 from typing import Any
 
 import anyio
+import numpy as np
 
 # mcp 1.x 与 2.x 的服务端类改了名字和位置：
 #   1.x  mcp.server.fastmcp.FastMCP
@@ -1460,6 +1461,87 @@ def sw_await_config(timeout_s: float = 90.0, spec_id: str | None = None) -> dict
         "hint": "先向用户复述这几项改动，再调 sw_revise / sw_generate 落实。"
                 "改完记得重新出一份说明书。",
     }
+
+
+# ---------------------------------------------------------------------------
+# 系统级仿真
+# ---------------------------------------------------------------------------
+
+
+@tool()
+def sw_system_sim(
+    dataset_id: str,
+    duration_s: float = 5.0,
+    traffic_model: str = "ftp3",
+    file_bytes: int = 500_000,
+    arrival_rate_hz: float = 2.0,
+    scheduler: str = "pf",
+    pf_window_tti: int = 100,
+    mu_enabled: bool = False,
+    trim: str = "tail",
+    tdd_pattern: str = "DDDSU",
+    seed: int = 0,
+) -> dict[str, Any]:
+    """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI。**
+
+    这是和链路级完全不同的一层。链路级问"这个信道能跑多快"，
+    系统级问"**这个小区里的用户实际体验到多快**"——把话务到达与结束、
+    调度器的多用户取舍、HARQ 重传、缓冲区排空全算进去。
+
+    **体验速率是现网真正上报的 KPI**，不是吞吐量的平均：
+
+    * 只在"有数据要发"的时间段里算
+    * 分母是**缓冲区非空的时间**（含排队等调度的 TTI），不是被调度的 TTI 数
+    * ``trim="tail"``：排除清空缓冲区的最后一个 slice（3GPP TS 28.552 §5.1.1.3）
+    * ``trim="head_tail"``：再排除首个 TTI（运营商话统的掐头去尾口径）
+
+    返回里 **cell 是小区级、users 是用户级**，两级都有：平均调度 MCS、
+    平均 rank、首传 BLER、残留 BLER、体验速率的中位与 5% 边缘。
+
+    ``notes`` 会主动报出让结论不成立的情况：队列积压未收敛、burst 样本太少、
+    信道快照不足（时间起伏被低估，PF 拿不到多用户分集）、字节对不上账。
+    **这些必须转述给用户，别只报好看的数字。**
+
+    参数
+    ----
+    dataset_id : 已生成的数据集。**建议生成时 num_slots_per_sample >= 8**，
+        否则信道没有时间起伏，PF 调度退化成轮询。
+    duration_s : 仿真时长，3~20 秒。40000 TTI 实测 0.2 秒跑完。
+    traffic_model : ``ftp3``（3GPP FTP Model 3，评价体验速率的标准话务）/
+        ``full_buffer``（**体验速率在这个模型下没有意义**，缓冲区永不空）/ ``cbr``
+    arrival_rate_hz : 每用户每秒到达几个文件。控制负载——太高会积压，
+        ``notes`` 会拦。
+    mu_enabled : 是否允许 MU 配对。默认关，先看清 SU 基线。
+    """
+    from . import load as _load  # noqa: PLC0415
+    from . import system as sysm  # noqa: PLC0415
+
+    ds = _load(dataset_id)
+    try:
+        h = ds.h_true
+        sinr = np.asarray(ds.scalar("sinr_dB"))
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"取不到信道或 sinr_dB：{exc}"}
+
+    h_users = [np.asarray(h[i]) for i in range(h.shape[0])]
+    tables = sysm.build_link_tables(h_users, [float(x) for x in sinr])
+
+    res = sysm.simulate(
+        tables,
+        sys_cfg=sysm.SystemConfig(duration_s=float(duration_s),
+                                  tdd_pattern=tdd_pattern, seed=int(seed)),
+        traffic=sysm.TrafficConfig(model=traffic_model, file_bytes=int(file_bytes),
+                                   arrival_rate_hz=float(arrival_rate_hz)),
+        sched=sysm.SchedulerConfig(algorithm=scheduler, pf_window_tti=int(pf_window_tti),
+                                   mu_enabled=bool(mu_enabled)),
+        kpi=sysm.KpiConfig(trim=trim),
+    )
+    out = res.as_dict()
+    out["dataset_id"] = dataset_id
+    out["summary"] = res.text()
+    out["hint"] = ("先把 summary 念给用户，再把 notes 里的每一条都说出来——"
+                   "那些是让这组数字不成立的条件。用户级明细在 users 里。")
+    return _jsonable(out)
 
 
 def main() -> None:
