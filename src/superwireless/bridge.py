@@ -76,6 +76,7 @@ _pages: dict[str, _Page] = {}
 _inbox: list[Submission] = []
 _seen: set[str] = set()          # 幂等键，防重发变成两份改动
 _arrived = threading.Event()
+_waiters = 0                     # 当前有几个 sw_await_config 正阻塞着等
 
 
 def _dbg(msg: str) -> None:
@@ -186,9 +187,19 @@ class _Handler(BaseHTTPRequestHandler):
         # 回执之前不做任何可能阻塞的 I/O。
         with _lock:
             _inbox.append(sub)
+            waiting = _waiters > 0
             _arrived.set()
-        self._json(200, {"ok": True, "n": len(cleaned),
-                         "msg": "已送达 agent，回到对话框看结果"})
+        # **告诉用户改动落到哪一步了，别只说"已送达"。**
+        # agent 正等着 vs 改动躺在收件箱里，这两件事对他完全不同：
+        # 前者马上有回应，后者要等 agent 下次调工具才被看见。
+        # 之前统一说"已送达 agent，回到对话框看结果"，结果 agent 没在等的时候
+        # 对话框里什么都不会发生——用户以为没生效。
+        self._json(200, {
+            "ok": True, "n": len(cleaned), "waiting": waiting,
+            "msg": ("agent 正在等，马上就会回应你"
+                    if waiting else
+                    "已收下（agent 当前在忙）。它下一次动作时就会看到并跟你确认。"),
+        })
         _persist(sub)
 
 
@@ -300,22 +311,38 @@ def drain(spec_id: str | None = None) -> list[Submission]:
     return got
 
 
+def pending_count() -> int:
+    """收件箱里还没被取走的改动数。**每个 MCP 工具的返回值都会带上它**——
+    MCP 没有推送通道，这是让用户的点击"被看见"的唯一办法。"""
+    return len(_inbox)
+
+
 def await_submission(timeout_s: float = 90.0,
                      spec_id: str | None = None) -> list[Submission]:
     """等用户在页面上点「应用到仿真」。超时返回空列表——**超时不是错误**。
 
     先看一眼收件箱：用户可能在 agent 还没开始等的时候就点了。
+
+    等待期间登记 ``_waiters``，页面据此告诉用户"agent 正在等"还是
+    "已收下、它下次动作时会看到"——两种情况对用户的意义完全不同。
     """
+    global _waiters
     got = drain(spec_id)
     if got:
         return got
     deadline = time.time() + max(1.0, float(timeout_s))
-    while time.time() < deadline:
-        if _arrived.wait(timeout=min(1.0, max(0.05, deadline - time.time()))):
-            got = drain(spec_id)
-            if got:
-                return got
-    return []
+    with _lock:
+        _waiters += 1
+    try:
+        while time.time() < deadline:
+            if _arrived.wait(timeout=min(1.0, max(0.05, deadline - time.time()))):
+                got = drain(spec_id)
+                if got:
+                    return got
+        return []
+    finally:
+        with _lock:
+            _waiters = max(0, _waiters - 1)
 
 
 def open_url(target: str) -> bool:

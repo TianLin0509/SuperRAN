@@ -752,9 +752,17 @@ AP.onclick=()=>{{
   const send=()=>fetch(ST.post,{{method:'POST',
     headers:{{'Content-Type':'application/json'}},body:body}}).then(r=>r.json());
   send().catch(()=>new Promise(r=>setTimeout(r,400)).then(send))
-   .then(j=>{{m.textContent=j.ok?('已送达 agent（'+j.n+' 项）——回对话框看它怎么改'):
-                              ('没收下：'+(j.error||'未知原因')+'，可以改用复制');
-             AP.disabled=false;}})
+   .then(j=>{{
+     if(!j.ok){{m.textContent='没收下：'+(j.error||'未知原因')+'，可以改用复制';}}
+     else{{
+       // 回显服务端真正收到的项，并说清落到哪一步了。只说"已送达"的话，
+       // agent 没在等时对话框毫无动静，用户会以为没生效。
+       // 用 textContent 拼，不碰 innerHTML。
+       const ks=Object.keys(d).map(k=>k+'='+F(k,d[k])).join('、');
+       m.textContent='已收下 '+j.n+' 项：'+ks+'　·　'+(j.msg||'');
+       m.className=j.waiting?'ok':'warn';
+     }}
+     AP.disabled=false;}})
    .catch(()=>{{m.textContent='连不上 agent（服务可能已退出）。先看对话框，'
                 +'它收到就会复述改动；没有的话再用「复制配置改动」。';
               AP.disabled=false;}});
@@ -945,6 +953,11 @@ h3{font-size:15.5px;font-weight:600;margin:22px 0 4px}
 .ctl input:focus,.ctl select:focus{outline:2px solid var(--accent);outline-offset:-1px}
 .ctl .ch{font-size:11.5px;color:var(--ink-soft);margin-top:5px;opacity:.85}
 .pvbar{display:flex;align-items:center;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
+/* 回执分两种状态：agent 正等着（绿）vs 已入收件箱、等它下次动作（琥珀）。
+   对用户是完全不同的两件事，不能都用一样的灰字。 */
+#msg{font-size:13px;line-height:1.5}
+#msg.ok{color:var(--tint-blue-ink);font-weight:600}
+#msg.warn{color:var(--tint-amber-ink);font-weight:600}
 .btn{font:600 13.5px system-ui;padding:8px 16px;border-radius:9px;cursor:pointer;
  border:1px solid var(--accent);background:var(--accent);color:#fff}
 .btn:hover{opacity:.9}

@@ -648,6 +648,7 @@ sect("9.9  回传桥：页面把改动直接送回 agent，不用复制粘贴")
 
 import json as _json  # noqa: E402
 import urllib.error as _ue  # noqa: E402
+import time  # noqa: E402
 import urllib.request as _urq  # noqa: E402
 
 from superwireless import bridge as _br  # noqa: E402
@@ -709,6 +710,55 @@ try:
     check(False, "错 token 的 URL 被拒")
 except _ue.HTTPError as _e:
     check(_e.code == 404, f"错 token 的 URL 被拒（实得 {_e.code}）")
+
+# --- 送达感知：MCP 没有推送通道，用户点了必须有办法被看见 ---
+# **这条是从真实事故来的。** 用户点了「应用到仿真」，agent 当时没在等，
+# 改动躺在收件箱里，CLI 上毫无动静——用户以为功能没生效。
+check(_br.pending_count() == 0, "起点收件箱是空的")
+_post({"id": _rb["spec_id"], "overrides": {"num_sites": 1}, "nonce": "n3"})
+check(_br.pending_count() == 1, "未取走的改动能被计数")
+
+# 每个 MCP 工具的返回值都要挂上它 —— 这是唯一能让用户点击"被看见"的通道
+from superwireless import server as _srv2  # noqa: E402
+
+_wrapped = _srv2._with_pending({"foo": 1})
+check("pending_config_changes" in _wrapped, "工具返回值挂上了未处理回传的通知")
+check(_wrapped["pending_config_changes"]["count"] == 1, "通知里带条数")
+check("sw_await_config" in _wrapped["pending_config_changes"]["action"],
+      "通知里直接给出该调什么，不让 agent 自己猜")
+check(_wrapped["foo"] == 1, "原返回值原样保留")
+check(_srv2._with_pending("不是字典") == "不是字典", "非 dict 返回原样放行")
+
+# agent 有没有在等，页面上要说不同的话 —— 对用户是完全不同的两件事
+_c6, _b6 = _post({"id": _rb["spec_id"], "overrides": {"isd_m": 600}, "nonce": "n4"})
+check(_b6.get("waiting") is False, f"agent 没在等时回执标 waiting=False（{_b6.get('msg')}）")
+check("在忙" in _b6.get("msg", ""), "话术如实说明改动是入了收件箱而不是被立刻处理")
+
+import threading as _th  # noqa: E402
+
+_seen_waiting = {}
+
+
+def _wait_bg():
+    _seen_waiting["got"] = _br.await_submission(6, _rb["spec_id"])
+
+
+_t = _th.Thread(target=_wait_bg, daemon=True)
+_br.drain(_rb["spec_id"])          # 清干净，让后台线程真的进入等待
+_t.start()
+time.sleep(0.8)                     # 等它挂上去
+_c7, _b7 = _post({"id": _rb["spec_id"], "overrides": {"isd_m": 700}, "nonce": "n5"})
+check(_b7.get("waiting") is True, f"agent 正在等时回执标 waiting=True（{_b7.get('msg')}）")
+_t.join(8)
+check(_seen_waiting.get("got") and _seen_waiting["got"][-1].overrides == {"isd_m": 700},
+      "正在等的那次调用确实拿到了改动")
+check(_br.pending_count() == 0, "取走后计数归零，工具返回值不再挂通知")
+check("pending_config_changes" not in _srv2._with_pending({"foo": 1}),
+      "收件箱空时不打扰")
+
+# 页面要把服务端真正收到的项回显出来，并区分两种状态
+check("j.waiting" in _js[0] and "m.className" in _js[0], "页面按 waiting 区分两种回执状态")
+check("m.innerHTML" not in _js[0], "回执用 textContent 拼，不往 innerHTML 塞服务端字符串")
 
 # 关掉服务时必须**看得见地**降级，不能假装还能回传
 os.environ["SUPERWIRELESS_NO_SERVE"] = "1"

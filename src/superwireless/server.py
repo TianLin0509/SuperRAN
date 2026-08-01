@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import math
 import os
 import sys
@@ -42,6 +43,68 @@ mcp = _ServerClass("superwireless")
 _DEBUG = bool(os.environ.get("SUPERWIRELESS_DEBUG"))
 
 
+# ---------------------------------------------------------------------------
+# 说明书回传的"送达感知"
+# ---------------------------------------------------------------------------
+# **MCP 是纯拉取的：服务端没法往对话里推消息。** 用户在说明书页面上点了
+# 「应用到仿真」，如果 agent 此刻没有正好阻塞在 sw_await_config 上，
+# 那份改动就只是静静躺在收件箱里——CLI 上不会有任何动静，用户会以为没生效。
+#
+# 唯一能用的通道是**工具返回值**。所以把"有未处理的回传"挂到每一个工具的
+# 返回上：agent 下一次做任何事，都会在结果里看到它，然后立刻告诉用户。
+# 这不是推送，但把"用户感知不到"的窗口从"直到 agent 恰好来等"
+# 压到了"直到 agent 下一次调用任何工具"。
+def _with_pending(result: Any) -> Any:
+    """给返回值挂上未处理的配置回传通知。非 dict 的返回原样放行。"""
+    if not isinstance(result, dict):
+        return result
+    try:
+        from . import bridge as _br  # noqa: PLC0415
+
+        n = _br.pending_count()
+        if n:
+            result = dict(result)
+            result["pending_config_changes"] = {
+                "count": n,
+                "notice": f"用户在说明书页面上提交了 {n} 项配置改动，还没处理。",
+                "action": "**先停下手头的事**，调 sw_await_config(timeout_s=1) 取回来，"
+                          "向用户复述改了什么，再问是否照做。他点了按钮却没等到回应，"
+                          "多半正以为没生效。",
+            }
+    except Exception as exc:  # noqa: BLE001
+        _dbg(f"pending 检查失败（不影响工具本身）：{exc}")
+    return result
+
+
+def tool(*d_args: Any, **d_kwargs: Any):
+    """``@tool()`` 的包装，统一挂上回传通知。
+
+    **必须分同步/异步两条路。** 有些工具（``sw_generate``）是 ``async def``，
+    用同步包装器去调它只会拿到一个从没被 await 的 coroutine 对象，
+    然后 ``_with_pending`` 看它不是 dict 就原样放行——整个返回值静默变成垃圾。
+    实测症状是调用方拿到的结果里没有 ``summary`` 键，报 KeyError，
+    完全看不出跟装饰器有关。
+    """
+    inner = mcp.tool(*d_args, **d_kwargs)
+
+    def deco(fn):
+        if inspect.iscoroutinefunction(fn):
+
+            @functools.wraps(fn)
+            async def awrapper(*args, **kwargs):
+                return _with_pending(await fn(*args, **kwargs))
+
+            return inner(awrapper)
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            return _with_pending(fn(*args, **kwargs))
+
+        return inner(wrapper)
+
+    return deco
+
+
 def _dbg(msg: str) -> None:
     """调试打点。只能写 stderr —— stdio 传输下 stdout 是 JSON-RPC 通道。"""
     if _DEBUG:
@@ -67,7 +130,7 @@ def _jsonable(obj: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 def sw_capabilities() -> dict[str, Any]:
     """查看本机可用的仿真引擎，以及不可用的引擎缺什么。
 
@@ -93,7 +156,7 @@ def sw_capabilities() -> dict[str, Any]:
     }
 
 
-@mcp.tool()
+@tool()
 def sw_list_presets(group: str | None = None) -> dict[str, Any]:
     """列出场景预设。预设只提供场景骨架，具体参数由 sw_plan 协商决定。
 
@@ -124,7 +187,7 @@ def sw_list_presets(group: str | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 def sw_plan(
     intent: str,
     preset: str | None = None,
@@ -162,7 +225,7 @@ def sw_plan(
     return _jsonable(proposal)
 
 
-@mcp.tool()
+@tool()
 def sw_revise(
     draft_id: str,
     overrides: dict[str, Any] | None = None,
@@ -187,7 +250,7 @@ def sw_revise(
     return _jsonable(proposal)
 
 
-@mcp.tool()
+@tool()
 def sw_list_scenes() -> dict[str, Any]:
     """列出射线追踪可用的场景（真实建筑几何）。
 
@@ -218,7 +281,7 @@ def sw_list_scenes() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 async def sw_generate(
     draft_id: str | None = None,
     intent: str | None = None,
@@ -361,7 +424,7 @@ def _generate_sync(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 def sw_deliver(dataset_id: str, want: str | None = None) -> dict[str, Any]:
     """按需生成取货代码——返回可直接运行的 Python，不是数据。
 
@@ -373,7 +436,7 @@ def sw_deliver(dataset_id: str, want: str | None = None) -> dict[str, Any]:
     return _jsonable(dlv.build_code(dataset_id, want))
 
 
-@mcp.tool()
+@tool()
 def sw_describe_dataset(dataset_id: str) -> dict[str, Any]:
     """查看已生成数据集的维度、统计分布和可用字段。"""
     s = gen.load_summary(dataset_id)
@@ -397,13 +460,13 @@ def sw_describe_dataset(dataset_id: str) -> dict[str, Any]:
     )
 
 
-@mcp.tool()
+@tool()
 def sw_list_datasets() -> dict[str, Any]:
     """列出本机已生成的数据集。"""
     return _jsonable({"datasets": gen.list_datasets()})
 
 
-@mcp.tool()
+@tool()
 async def sw_validate(dataset_id: str) -> dict[str, Any]:
     """可信度体检：这批信道能不能拿来下结论。
 
@@ -429,7 +492,7 @@ def _validate_sync(dataset_id: str) -> dict[str, Any]:
     return _jsonable(out)
 
 
-@mcp.tool()
+@tool()
 async def sw_link_performance(
     dataset_id: str,
     snr_db: float | None = None,
@@ -504,7 +567,7 @@ def _link_perf_sync(
     )
 
 
-@mcp.tool()
+@tool()
 async def sw_calibrate(dataset_id: str) -> dict[str, Any]:
     """按 3GPP TR 38.901 §7.8 的口径算校准量。
 
@@ -535,7 +598,7 @@ def _calibrate_sync(dataset_id: str) -> dict[str, Any]:
     return _jsonable(out)
 
 
-@mcp.tool()
+@tool()
 async def sw_gate(
     dataset_id: str,
     stage: str = "channel",
@@ -566,7 +629,7 @@ def _gate_sync(dataset_id: str) -> dict[str, Any]:
     return _jsonable(out)
 
 
-@mcp.tool()
+@tool()
 async def sw_compare_arms(
     dataset_id: str,
     method_a: str,
@@ -623,7 +686,7 @@ def _compare_arms_sync(
     return _jsonable(out)
 
 
-@mcp.tool()
+@tool()
 def sw_sample_size(
     std_diff: float | None = None,
     expected_effect: float | None = None,
@@ -654,7 +717,7 @@ def sw_sample_size(
     )
 
 
-@mcp.tool()
+@tool()
 def sw_missing_slots(
     answered_design: list[str] | None = None,
     answered_params: list[str] | None = None,
@@ -688,7 +751,7 @@ def sw_missing_slots(
     )
 
 
-@mcp.tool()
+@tool()
 def sw_lock_analysis(
     primary_metric: str = "spectral_efficiency",
     baseline: str = "",
@@ -728,7 +791,7 @@ def sw_lock_analysis(
     return _jsonable(d)
 
 
-@mcp.tool()
+@tool()
 def sw_export_eval_template(
     dataset_id: str,
     metric: str = "spectral_efficiency",
@@ -752,7 +815,7 @@ def sw_export_eval_template(
     return _jsonable(rs.eval_template(dataset_id, metric=metric))
 
 
-@mcp.tool()
+@tool()
 async def sw_compare_results(
     result_id_a: str,
     result_id_b: str,
@@ -790,7 +853,7 @@ def _compare_results_sync(
     return _jsonable(out)
 
 
-@mcp.tool()
+@tool()
 def sw_list_results(dataset_id: str | None = None) -> dict[str, Any]:
     """列出已注册的外部算法结果。不给 dataset_id 就列全部。"""
     from . import analysis as an
@@ -804,7 +867,7 @@ def sw_list_results(dataset_id: str | None = None) -> dict[str, Any]:
     )
 
 
-@mcp.tool()
+@tool()
 async def sw_throughput(
     dataset_id: str,
     mcs_table: int = 1,
@@ -867,7 +930,7 @@ def _throughput_sync(*, dataset_id: str, mcs_table: int, target_bler: float,
     return _jsonable(out)
 
 
-@mcp.tool()
+@tool()
 def sw_mcs_info(
     table: int = 1,
     show_bler_anchors: bool = False,
@@ -911,7 +974,7 @@ def sw_mcs_info(
     return _jsonable(out)
 
 
-@mcp.tool()
+@tool()
 def sw_bler_curve(
     mcs: int,
     tx_mode: str = "newtx",
@@ -935,7 +998,7 @@ def sw_bler_curve(
     ))
 
 
-@mcp.tool()
+@tool()
 async def sw_tdd_mcs(
     dataset_id: str,
     cqi: int,
@@ -1004,7 +1067,7 @@ def _tdd_mcs_sync(
     ))
 
 
-@mcp.tool()
+@tool()
 async def sw_sweep_snr(
     dataset_id: str,
     snr_db_list: list[float] | None = None,
@@ -1078,7 +1141,7 @@ def _sweep_sync(*, dataset_id: str, snr_db_list: list[float] | None,
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 def sw_interference_report(dataset_id: str) -> dict[str, Any]:
     """一个数据集的干扰画像：业务域 IoT + 测量域导频 SIR。只读已落盘的标量。
 
@@ -1100,7 +1163,7 @@ def sw_interference_report(dataset_id: str) -> dict[str, Any]:
     return _jsonable(itf.interference_report(dataset_id))
 
 
-@mcp.tool()
+@tool()
 def sw_iot_convert(
     iot_db: float | None = None,
     load: float | None = None,
@@ -1141,7 +1204,7 @@ def sw_iot_convert(
     return _jsonable(out)
 
 
-@mcp.tool()
+@tool()
 def sw_design_interference(target_iot_db: float = 20.0) -> dict[str, Any]:
     """要构造某个干扰强度的场景，该动哪些旋钮。
 
@@ -1160,7 +1223,7 @@ def sw_design_interference(target_iot_db: float = 20.0) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 def sw_probe_scenario(
     preset: str | None = None,
     config: dict[str, Any] | None = None,
@@ -1203,7 +1266,7 @@ def sw_probe_scenario(
     return _jsonable(out)
 
 
-@mcp.tool()
+@tool()
 def sw_compare_scenarios(
     presets: list[str],
     num_samples: int = 30,
@@ -1243,7 +1306,7 @@ def sw_compare_scenarios(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@tool()
 def sw_spec_sheet(
     draft_id: str | None = None,
     dataset_id: str | None = None,
@@ -1351,7 +1414,7 @@ def sw_spec_sheet(
     return _jsonable(out)
 
 
-@mcp.tool()
+@tool()
 def sw_await_config(timeout_s: float = 90.0, spec_id: str | None = None) -> dict[str, Any]:
     """等用户在说明书页面上点「应用到仿真」，把他改的参数取回来。
 
