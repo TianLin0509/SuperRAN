@@ -215,7 +215,7 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 - **[测试体系说明 `TESTS.html`](TESTS.html)** —— 「635 项测试」是什么、拦住过哪 8 个真实事故、以及它**证明不了**什么
 - **仿真说明书** —— `sw_spec_sheet` 出的 HTML，**默认直接在浏览器里弹出来**：拓扑图打头、其余折进页签、还能在上面改参数点「应用到仿真」把改动送回 agent（`sw_await_config` 接）。落在 `artifacts/specs/`，拷走用 `file://` 打开时自动退回复制粘贴
 - **[MU-MIMO 算法流程 `MU_MIMO.html`](MU_MIMO.html)** —— 配对/预编码/功率分配逐步展开，含六个待确认的设计选择与实测数字
-- **[还缺什么 `ROADMAP.html`](ROADMAP.html)** —— 对着 Sionna / MATLAB 5G Toolbox / QuaDRiGa / 5G-LENA 逐模块点名，哪些有、哪些空、补哪个最划算
+- **[还缺什么 `ROADMAP.html`](ROADMAP.html)** —— 对着 Sionna / MATLAB 5G Toolbox / QuaDRiGa / 5G-LENA 逐模块点名。**只下行 · 只 TDD · BLER 一律查表**，边界写在第七节
 - **[场景拓展与干扰量化 `SCENARIOS.html`](SCENARIOS.html)** —— IoT 噪声抬升、业务域 vs 测量域、21 个场景的实测画像、场景探测、哪些提速是真的
 
 ## 四条设计铁律
