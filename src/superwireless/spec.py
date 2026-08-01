@@ -30,7 +30,12 @@
 场景），加上**这次对话里专门点过名的**——调用方把参数名传进 ``highlight``，
 它们会被顶到最前面并高亮。这样首屏既精准又不漏。
 
-tab 用**纯 CSS**（radio + label）实现，离线双击打开也能切，不依赖 JS。
+tab 用**纯 CSS**（radio + label）实现，离线双击打开也能切；页面里那段脚本
+只服务于「改配置」面板，**不碰页签**——JS 挂了导航照样能用。
+
+「改配置」页签让用户直接调参数、实时看拓扑变化，改完一键复制一段
+``overrides = {...}`` 粘回对话框，agent 照着重跑。payload **只带改动过的项**，
+免得把默认值当成用户意图固化下来。
 写的时候踩过：``input`` 必须是 ``.tabs`` 的直接子元素且与 ``.panels`` 同级，
 中间套一层容器 ``~`` 选择器就全失效——页面上直接露出原生 radio、一个面板都
 不显示。**这个光看代码看不出来，是在浏览器里看出来的。**
@@ -357,37 +362,65 @@ def _svg_array(spec: dict[str, Any]) -> str:
     return "".join(out)
 
 
+def unit_hex_layouts() -> dict[str, list[list[float]]]:
+    """ISD = 1 时的六边形站点坐标，按站数索引（"1" / "7" / "19"）。
+
+    **由 ChannelHub 现算，不硬编码。** 六边形位置随 ISD 线性缩放，所以前端
+    只要乘一个 ISD 就能得到精确坐标——不必在 JS 里重写栅格逻辑，也就不会漂。
+    """
+    try:
+        from .channelhub import _ensure_path  # noqa: PLC0415
+
+        _ensure_path()
+        from msg_embedding.topology.hex_grid import make_hex_grid  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return {}
+    out: dict[str, list[list[float]]] = {}
+    for rings, n in ((0, 1), (1, 7), (2, 19)):
+        try:
+            cells = make_hex_grid(num_rings=rings, isd_m=1.0, sectors=1,
+                                  tx_height_m=25.0, scenario="UMa_NLOS")
+        except Exception:  # noqa: BLE001
+            continue
+        out[str(n)] = [[round(float(c.position[0]), 6), round(float(c.position[1]), 6)]
+                       for c in cells]
+    return out
+
+
 def _svg_layout(
     spec: dict[str, Any],
     ue_xy: list[tuple[float, float]] | None = None,
     *,
     size: int | None = None,
 ) -> str:
-    """网络拓扑图：站点 + 扇区指向 + UE 撒点，图上直接标关键数。
+    """网络拓扑图：六边形小区 + 扇区 + 基站 + 用户，图上直接标关键数。
 
-    这是说明书的**门面**——用户打开先看它，所以图里自带站数/小区数/UE 数/
-    站间距和一根比例尺，不用去翻表。
+    画成教科书里那种蜂窝图——每个站一个六边形（外接圆半径 ISD/√3、顶点在
+    30°+k·60°，边正对邻站），里面按扇区数切扇形。比一堆重叠的圆好读得多。
     """
     topo = spec["topology"]
     cells = topo["cells"]
     if not cells:
         return '<p class="src">拿不到站点位置，无法绘制拓扑图。</p>'
 
+    isd = float(topo["isd_m"] or 0)
+    hex_r = isd / math.sqrt(3.0) if isd else 0.0
+    sites = sorted({(c["x"], c["y"]) for c in cells})
+
     xs = [c["x"] for c in cells] + [p[0] for p in (ue_xy or [])]
     ys = [c["y"] for c in cells] + [p[1] for p in (ue_xy or [])]
+    if hex_r:                       # 六边形要完整落在画布内
+        xs = xs + [min(xs) - hex_r, max(xs) + hex_r]
+        ys = ys + [min(ys) - hex_r, max(ys) + hex_r]
     cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
 
-    # 画布跟着部署形状走，不硬套正方形：
-    #   * 单站用 640 的画布只会得到一大片空白加中间一个点；
-    #   * 高铁那种线性布局是一条细长的线，正方形画布上下各空掉一半。
-    # 米/像素在两轴上保持一致，几何不失真；高度只做上下限保护。
-    n_sites = len({(c["x"], c["y"]) for c in cells})
-    W = int(size) if size else (340 if n_sites <= 1 else 640)
-    dx = max(max(xs) - min(xs), 1.0) * 1.22
-    dy = max(max(ys) - min(ys), 1.0) * 1.22
-    scale = W / dx                       # 像素/米，两轴共用
-    S = W
-    Hc = min(max(dy * scale, W * 0.34), W)   # 画布高度（不含图例条）
+    # 画布跟着部署形状走，米/像素两轴一致（几何不失真），高度只做上下限保护。
+    n_sites = len(sites)
+    W = int(size) if size else (340 if n_sites <= 1 else 660)
+    dx = max(max(xs) - min(xs), 1.0) * 1.08
+    dy = max(max(ys) - min(ys), 1.0) * 1.16
+    scale = W / dx
+    Hc = min(max(dy * scale, W * 0.34), W)
     H = int(Hc) + 34
 
     def px(x: float) -> float:
@@ -396,91 +429,295 @@ def _svg_layout(
     def py(y: float) -> float:
         return Hc / 2 - (y - cy) * scale
 
-    span = dx  # reach/比例尺沿用横向尺度
-
     out = [f'<svg viewBox="0 0 {W} {H}" width="100%" style="max-width:{W}px" '
            f'role="img" aria-label="网络拓扑图">']
     out.append(
+        '<defs>'
+        '<radialGradient id="sg" cx="50%" cy="50%" r="50%">'
+        '<stop offset="0%" stop-color="#0071e3" stop-opacity=".20"/>'
+        '<stop offset="100%" stop-color="#0071e3" stop-opacity=".03"/>'
+        '</radialGradient></defs>'
         '<style>'
         '.lb{font:11px ui-monospace,Consolas,monospace;fill:#6e6e73}'
-        '.ue{fill:#34c759;opacity:.55}.st{fill:#ff3b30}'
-        '.bs{stroke:#0071e3;stroke-width:2;opacity:.72}'
-        '.cov{fill:#0071e3;opacity:.045;stroke:#0071e3;stroke-opacity:.16;stroke-width:1}'
-        '.bx{fill:#0071e3;opacity:.06}'
-        '.bt{font:600 12px system-ui;fill:currentColor}'
-        '.bn{font:600 15px ui-monospace,Consolas,monospace;fill:#0071e3}'
+        '.hex{fill:none;stroke:#0071e3;stroke-opacity:.30;stroke-width:1.1}'
+                '.bore{stroke:#0071e3;stroke-width:1.8;stroke-opacity:.65;stroke-linecap:round}'
+        '.ueo{fill:#34c759;fill-opacity:.65}'
+        '.bsh{fill:#fff;fill-opacity:.95}.bsd{fill:#ff3b30}'
+        '.bx{fill:#0071e3;fill-opacity:.06}'
+        '.bn{font:700 15px ui-monospace,Consolas,monospace;fill:#0071e3}'
         '</style>'
     )
 
-    # 每个扇区画一个 120 度（或 360/N）扇形覆盖示意，让"扇区"看得见
-    seen: set[tuple[float, float]] = set()
+    # --- 六边形小区 ---
+    if hex_r and topo["layout"] != "linear":
+        rr = hex_r * scale
+        for (sx, sy) in sites:
+            X, Y = px(sx), py(sy)
+            pts = " ".join(
+                f'{X + rr * math.cos(math.radians(30 + 60 * k)):.1f},'
+                f'{Y - rr * math.sin(math.radians(30 + 60 * k)):.1f}'
+                for k in range(6)
+            )
+            out.append(f'<polygon class="hex" points="{pts}"/>')
+
+    # --- 扇区扇形 ---
     sec = max(int(topo["sectors_per_site"] or 1), 1)
     half = math.radians(360.0 / sec / 2.0) if sec > 1 else math.pi
-    reach = (S / span * topo["isd_m"] * 0.55) if topo["isd_m"] else S * 0.3
+    reach = (hex_r * scale * 0.92) if hex_r else W * 0.28
     for c in cells:
         X, Y = px(c["x"]), py(c["y"])
         a = math.radians(c["az"])
         if sec > 1:
             x1, y1 = X + reach * math.cos(a - half), Y - reach * math.sin(a - half)
             x2, y2 = X + reach * math.cos(a + half), Y - reach * math.sin(a + half)
-            out.append(f'<path class="cov" d="M{X:.1f},{Y:.1f} L{x1:.1f},{y1:.1f} '
+            out.append(f'<path fill="url(#sg)" d="M{X:.1f},{Y:.1f} L{x1:.1f},{y1:.1f} '
                        f'A{reach:.1f},{reach:.1f} 0 0,0 {x2:.1f},{y2:.1f} Z"/>')
         else:
-            out.append(f'<circle class="cov" cx="{X:.1f}" cy="{Y:.1f}" r="{reach:.1f}"/>')
+            out.append(f'<circle fill="url(#sg)" cx="{X:.1f}" cy="{Y:.1f}" r="{reach:.1f}"/>')
 
     for x, y in (ue_xy or []):
-        out.append(f'<circle class="ue" cx="{px(x):.1f}" cy="{py(y):.1f}" r="2.8"/>')
+        out.append(f'<circle class="ueo" cx="{px(x):.1f}" cy="{py(y):.1f}" r="2.7"/>')
 
-    arm = max(reach * 0.55, 13)
+    arm = max(reach * 0.5, 12)
     for c in cells:
         X, Y = px(c["x"]), py(c["y"])
         a = math.radians(c["az"])
-        out.append(f'<line class="bs" x1="{X:.1f}" y1="{Y:.1f}" '
+        out.append(f'<line class="bore" x1="{X:.1f}" y1="{Y:.1f}" '
                    f'x2="{X + arm * math.cos(a):.1f}" y2="{Y - arm * math.sin(a):.1f}"/>')
-        if (c["x"], c["y"]) not in seen:
-            seen.add((c["x"], c["y"]))
-            out.append(f'<circle class="st" cx="{X:.1f}" cy="{Y:.1f}" r="4.5"/>')
+    for (sx, sy) in sites:
+        X, Y = px(sx), py(sy)
+        out.append(f'<circle class="bsh" cx="{X:.1f}" cy="{Y:.1f}" r="5.6"/>'
+                   f'<circle class="bsd" cx="{X:.1f}" cy="{Y:.1f}" r="3.4"/>')
 
-    # 图内信息盒：不用翻表就能看到规模
-    facts = [
-        (str(topo["num_sites_actual"]), "站点"),
-        (str(topo["num_cells"]), "小区"),
-    ]
+    # --- 图内信息盒 ---
+    facts = [(str(topo["num_sites_actual"]), "站点"), (str(topo["num_cells"]), "小区")]
     if ue_xy:
         facts.append((str(len(ue_xy)), "UE 撒点"))
-    if topo["isd_m"]:
-        facts.append((f'{topo["isd_m"]:g} m', "站间距"))
+    if isd:
+        facts.append((f"{isd:g} m", "站间距"))
     bw = 92 * len(facts) + 16
-    out.append(f'<rect class="bx" x="8" y="8" width="{bw}" height="46" rx="8"/>')
+    out.append(f'<rect class="bx" x="8" y="8" width="{bw}" height="46" rx="9"/>')
     for i, (num, lab) in enumerate(facts):
         x = 20 + i * 92
         out.append(f'<text class="bn" x="{x}" y="30">{_esc(num)}</text>')
         out.append(f'<text class="lb" x="{x}" y="46">{_esc(lab)}</text>')
 
-    # 比例尺
-    if topo["isd_m"]:
-        bar = S / span * topo["isd_m"]
-        if bar < S * 0.6:
+    # --- 比例尺 ---
+    if isd:
+        bar = isd * scale
+        if bar < W * 0.55:
             x0, yb = 12, H - 26
             out.append(f'<line x1="{x0}" y1="{yb}" x2="{x0 + bar:.1f}" y2="{yb}" '
-                       f'stroke="#6e6e73" stroke-width="1.6"/>')
+                       f'stroke="#6e6e73" stroke-width="1.5"/>')
             for xx in (x0, x0 + bar):
                 out.append(f'<line x1="{xx:.1f}" y1="{yb-4}" x2="{xx:.1f}" y2="{yb+4}" '
-                           f'stroke="#6e6e73" stroke-width="1.6"/>')
+                           f'stroke="#6e6e73" stroke-width="1.5"/>')
             out.append(f'<text class="lb" x="{x0 + bar + 8:.1f}" y="{yb + 4}">'
-                       f'{topo["isd_m"]:g} m（站间距）</text>')
+                       f'{isd:g} m（站间距）</text>')
 
-    lx = S - (168 if ue_xy else 116)
-    out.append(f'<circle class="st" cx="{lx}" cy="{H-30}" r="4"/>'
-               f'<text class="lb" x="{lx+9}" y="{H-26}">基站</text>')
+    lx = W - (172 if ue_xy else 118)
+    out.append(f'<circle class="bsh" cx="{lx}" cy="{H-30}" r="5"/>'
+               f'<circle class="bsd" cx="{lx}" cy="{H-30}" r="3"/>'
+               f'<text class="lb" x="{lx+10}" y="{H-26}">基站</text>')
     if ue_xy:
-        out.append(f'<circle class="ue" cx="{lx+52}" cy="{H-30}" r="4"/>'
-                   f'<text class="lb" x="{lx+61}" y="{H-26}">用户</text>')
-    dx = lx + (104 if ue_xy else 52)
-    out.append(f'<line class="bs" x1="{dx}" y1="{H-30}" x2="{dx+16}" y2="{H-30}"/>'
-               f'<text class="lb" x="{dx+21}" y="{H-26}">扇区</text>')
+        out.append(f'<circle class="ueo" cx="{lx+54}" cy="{H-30}" r="3.4"/>'
+                   f'<text class="lb" x="{lx+63}" y="{H-26}">用户</text>')
+    dx2 = lx + (106 if ue_xy else 54)
+    out.append(f'<line class="bore" x1="{dx2}" y1="{H-30}" x2="{dx2+16}" y2="{H-30}"/>'
+               f'<text class="lb" x="{dx2+21}" y="{H-26}">扇区</text>')
     out.append("</svg>")
     return "".join(out)
+
+
+# 可在 HTML 里直接改的参数。**只放改了确实有意义、且改错也不会把仿真跑崩的那些**——
+# 这个面板的用途是"用户按自己的需要调一版，一键粘回给 agent"，不是完整配置编辑器。
+# (key, 中文名, 类型, 选项或范围, 提示)
+_EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
+    ("num_sites", "站点数", "select", [1, 7, 19], "六边形栅格只能取 1/7/19"),
+    ("sectors_per_site", "每站扇区", "select", [1, 3], ""),
+    ("isd_m", "站间距 m", "number", (50, 6000, 10), "密集城区 150~200、宏站 500、农村 1732+"),
+    ("num_ues", "每轮 UE 数", "number", (1, 500, 1), "样本数会自动对齐到它的整数倍"),
+    ("num_interfering_ues", "每邻区干扰 UE", "number", (0, 32, 1), "主要影响测量域（SRS）"),
+    ("num_bs_tx_ant", "基站端口", "select", [4, 16, 32, 64, 256], "64 会自动用 1 驱 3 真实阵列"),
+    ("num_ue_rx_ant", "终端接收天线", "select", [2, 4], ""),
+    ("carrier_freq_hz", "载波", "select",
+     [700000000.0, 2100000000.0, 2600000000.0, 3500000000.0], "默认 n41 2.6 GHz"),
+    ("bandwidth_hz", "带宽", "select",
+     [10000000.0, 20000000.0, 100000000.0], ""),
+    ("num_rb", "RB 数", "number", (12, 275, 1), "默认 272 = 17 RBG x 16"),
+    ("scenario", "传播场景", "select",
+     ["UMa_NLOS", "UMa_LOS", "UMi_NLOS", "UMi_LOS", "InF"], ""),
+    ("channel_model", "信道剖面", "select",
+     ["CDL-A", "CDL-B", "CDL-C", "CDL-D", "CDL-E",
+      "TDL-A", "TDL-B", "TDL-C", "TDL-D", "TDL-E"], "TDL 没有角度，波束/定位类必须用 CDL"),
+    ("tx_power_dbm", "发射功率 dBm", "number", (10, 55, 1), "UMi 默认 33、UMa 默认 43"),
+    ("ue_speed_kmh", "终端速度 km/h", "number", (0, 500, 1), ""),
+    ("link", "链路方向", "select", ["DL", "UL", "BOTH"], "测量域 SIR 只在 BOTH 下产生"),
+    ("num_samples", "样本数", "number", (1, 5000, 1), "由 sw_sample_size 算，别拍脑袋"),
+)
+
+
+def _interactive(spec: dict[str, Any]) -> str:
+    """可交互的调参面板：改参数 → 实时看拓扑 → 一键复制回传给 agent。
+
+    **拓扑预览用的坐标由 ChannelHub 现算后内嵌**（ISD=1 的单位布局），
+    前端只做线性缩放，不在 JS 里重写栅格逻辑——所以预览和真跑的几何一致，
+    不会出现"图上七站、跑出来十九站"这种漂移。
+    """
+    cfg = spec["config"]
+    init: dict[str, Any] = {}
+    rows: list[str] = []
+
+    for key, label, kind, spec_v, hint in _EDITABLE:
+        if key == "num_samples":
+            cur = spec.get("num_samples")
+            if cur is None:
+                continue
+        else:
+            cur = cfg.get(key)
+            if cur is None:
+                continue
+        init[key] = cur
+        hint_html = f'<div class="ch">{_esc(hint)}</div>' if hint else ""
+        if kind == "select":
+            opts = list(spec_v)
+            if cur not in opts:
+                opts = [cur, *opts]
+            body = "".join(
+                f'<option value="{_esc(o)}"{" selected" if o == cur else ""}>'
+                f'{_esc(_fmt(key, o))}</option>' for o in opts
+            )
+            ctl = f'<select data-k="{key}">{body}</select>'
+        else:
+            lo, hi, step = spec_v
+            ctl = (f'<input type="number" data-k="{key}" value="{_esc(cur)}" '
+                   f'min="{lo}" max="{hi}" step="{step}">')
+        rows.append(f'<label class="ctl"><span class="cl">{_esc(label)}</span>'
+                    f'{ctl}{hint_html}</label>')
+
+    state = {
+        "init": init,
+        "layout": spec["topology"]["layout"],
+        "track_offset_m": float(cfg.get("track_offset_m", 80.0) or 80.0),
+        "unit": unit_hex_layouts(),
+        "title": spec["title"],
+    }
+    return f"""
+<p class="lead">改完点<b>复制</b>，把内容粘回对话框——agent 会照着它重新配置并重跑。
+只会带上<b>改动过</b>的项，没动的不进 payload。</p>
+<div class="ctls">{"".join(rows)}</div>
+<div class="hero" id="prev"></div>
+<div class="pvbar">
+  <button class="btn" id="cp">复制配置改动</button>
+  <button class="btn ghost" id="rs">重置</button>
+  <span class="src" id="msg"></span>
+</div>
+<textarea id="pl" class="pl" readonly rows="9"></textarea>
+<script>
+const ST={json.dumps(state, ensure_ascii=False)};
+const cur=Object.assign({{}},ST.init);
+const NL=String.fromCharCode(10);
+const F=(k,v)=>{{
+  if(k==='carrier_freq_hz')return (v/1e9)+' GHz';
+  if(k==='bandwidth_hz')return (v/1e6)+' MHz';
+  return String(v);
+}};
+function sites(){{
+  const n=+cur.num_sites||1, isd=+cur.isd_m||500;
+  if(ST.layout==='linear'){{
+    const o=ST.track_offset_m, a=[];
+    for(let i=0;i<n;i++)a.push([(i-(n-1)/2)*isd, (i%2?-o:o)]);
+    return a;
+  }}
+  const u=ST.unit[String(n)]||ST.unit['7']||[[0,0]];
+  return u.map(p=>[p[0]*isd,p[1]*isd]);
+}}
+function draw(){{
+  const S=sites(), sec=+cur.sectors_per_site||1, isd=+cur.isd_m||500;
+  const hexR=ST.layout==='linear'?0:isd/Math.sqrt(3);
+  let xs=S.map(p=>p[0]), ys=S.map(p=>p[1]);
+  if(hexR){{xs=xs.concat([Math.min(...xs)-hexR,Math.max(...xs)+hexR]);
+           ys=ys.concat([Math.min(...ys)-hexR,Math.max(...ys)+hexR]);}}
+  const cx=(Math.max(...xs)+Math.min(...xs))/2, cy=(Math.max(...ys)+Math.min(...ys))/2;
+  const W=S.length<=1?340:660;
+  const dx=Math.max(Math.max(...xs)-Math.min(...xs),1)*1.08;
+  const dy=Math.max(Math.max(...ys)-Math.min(...ys),1)*1.16;
+  const sc=W/dx, Hc=Math.min(Math.max(dy*sc,W*0.34),W), H=Math.round(Hc)+34;
+  const PX=x=>W/2+(x-cx)*sc, PY=y=>Hc/2-(y-cy)*sc;
+  let o=`<svg viewBox="0 0 ${{W}} ${{H}}" width="100%" style="max-width:${{W}}px">`;
+  o+='<defs><radialGradient id="sg2" cx="50%" cy="50%" r="50%">'
+   +'<stop offset="0%" stop-color="#0071e3" stop-opacity=".20"/>'
+   +'<stop offset="100%" stop-color="#0071e3" stop-opacity=".03"/></radialGradient></defs>'
+   +'<style>.lb{{font:11px ui-monospace,Consolas,monospace;fill:#6e6e73}}'
+   +'.hex{{fill:none;stroke:#0071e3;stroke-opacity:.30;stroke-width:1.1}}'
+   +'.bore{{stroke:#0071e3;stroke-width:1.8;stroke-opacity:.65;stroke-linecap:round}}'
+   +'.bsh{{fill:#fff;fill-opacity:.95}}.bsd{{fill:#ff3b30}}'
+   +'.bx{{fill:#0071e3;fill-opacity:.06}}'
+   +'.bn{{font:700 15px ui-monospace,Consolas,monospace;fill:#0071e3}}</style>';
+  if(hexR){{const rr=hexR*sc;
+    for(const[sx,sy]of S){{const X=PX(sx),Y=PY(sy);let pts=[];
+      for(let k=0;k<6;k++){{const a=(30+60*k)*Math.PI/180;
+        pts.push((X+rr*Math.cos(a)).toFixed(1)+','+(Y-rr*Math.sin(a)).toFixed(1));}}
+      o+=`<polygon class="hex" points="${{pts.join(' ')}}"/>`;}}}}
+  const half=sec>1?(Math.PI/sec):Math.PI, reach=hexR?hexR*sc*0.92:W*0.28;
+  for(const[sx,sy]of S)for(let k=0;k<sec;k++){{
+    const X=PX(sx),Y=PY(sy),a=k*2*Math.PI/sec;
+    if(sec>1){{const x1=X+reach*Math.cos(a-half),y1=Y-reach*Math.sin(a-half),
+      x2=X+reach*Math.cos(a+half),y2=Y-reach*Math.sin(a+half);
+      o+=`<path fill="url(#sg2)" d="M${{X.toFixed(1)}},${{Y.toFixed(1)}} L${{x1.toFixed(1)}},${{y1.toFixed(1)}} A${{reach.toFixed(1)}},${{reach.toFixed(1)}} 0 0,0 ${{x2.toFixed(1)}},${{y2.toFixed(1)}} Z"/>`;}}
+    else o+=`<circle fill="url(#sg2)" cx="${{X.toFixed(1)}}" cy="${{Y.toFixed(1)}}" r="${{reach.toFixed(1)}}"/>`;}}
+  const arm=Math.max(reach*0.5,12);
+  for(const[sx,sy]of S){{const X=PX(sx),Y=PY(sy);
+    for(let k=0;k<sec;k++){{const a=k*2*Math.PI/sec;
+      o+=`<line class="bore" x1="${{X.toFixed(1)}}" y1="${{Y.toFixed(1)}}" x2="${{(X+arm*Math.cos(a)).toFixed(1)}}" y2="${{(Y-arm*Math.sin(a)).toFixed(1)}}"/>`;}}
+    o+=`<circle class="bsh" cx="${{X.toFixed(1)}}" cy="${{Y.toFixed(1)}}" r="5.6"/><circle class="bsd" cx="${{X.toFixed(1)}}" cy="${{Y.toFixed(1)}}" r="3.4"/>`;}}
+  const f=[[String(S.length),'站点'],[String(S.length*sec),'小区'],[isd+' m','站间距']];
+  o+=`<rect class="bx" x="8" y="8" width="${{92*f.length+16}}" height="46" rx="9"/>`;
+  f.forEach((it,i)=>{{o+=`<text class="bn" x="${{20+i*92}}" y="30">${{it[0]}}</text>`
+    +`<text class="lb" x="${{20+i*92}}" y="46">${{it[1]}}</text>`;}});
+  o+=`<text class="lb" x="12" y="${{H-10}}">预览 · 撒点由生成时决定，这里不画</text></svg>`;
+  document.getElementById('prev').innerHTML=o;
+}}
+function diff(){{
+  const d={{}};for(const k in cur)if(String(cur[k])!==String(ST.init[k]))d[k]=cur[k];
+  return d;
+}}
+function sync(){{
+  draw();
+  const d=diff(), ks=Object.keys(d);
+  const t=document.getElementById('pl');
+  if(!ks.length){{t.value='（还没有改动。调上面的参数后这里会出现可粘贴的内容。）';return;}}
+  let s='【仿真配置调整】基于 '+ST.title+NL+'改动 '+ks.length+' 项：'+NL;
+  for(const k of ks)s+='  '+k+': '+F(k,ST.init[k])+' -> '+F(k,d[k])+NL;
+  s+=NL+'overrides = '+JSON.stringify(d)+NL+NL
+   +'请用这个 overrides 重新配置并重跑（sw_revise / sw_generate），完事再出一份说明书。';
+  t.value=s;
+}}
+document.querySelectorAll('.ctls [data-k]').forEach(el=>{{
+  el.addEventListener('input',()=>{{
+    const k=el.dataset.k,v=el.value;
+    cur[k]=(el.tagName==='SELECT'&&typeof ST.init[k]==='string')?v:
+           (isNaN(+v)||v==='')?v:+v;
+    sync();
+  }});
+}});
+document.getElementById('rs').onclick=()=>{{
+  Object.assign(cur,ST.init);
+  document.querySelectorAll('.ctls [data-k]').forEach(el=>{{el.value=ST.init[el.dataset.k];}});
+  sync();document.getElementById('msg').textContent='';
+}};
+document.getElementById('cp').onclick=()=>{{
+  const t=document.getElementById('pl');
+  t.removeAttribute('readonly');t.select();t.setSelectionRange(0,99999);
+  let ok=false;
+  try{{ok=document.execCommand('copy');}}catch(e){{}}
+  if(navigator.clipboard)navigator.clipboard.writeText(t.value).then(()=>{{}},()=>{{}});
+  t.setAttribute('readonly','');
+  document.getElementById('msg').textContent=ok?'已复制，粘到对话框即可':'请手动全选复制上面的文本';
+}};
+sync();
+</script>
+"""
 
 
 def _svg_freq(spec: dict[str, Any]) -> str:
@@ -636,7 +873,8 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--border);
 .panels>section{display:none;animation:fade .18s ease}
 @keyframes fade{from{opacity:0}to{opacity:1}}
 #tb1:checked~.panels>#pn1,#tb2:checked~.panels>#pn2,#tb3:checked~.panels>#pn3,
-#tb4:checked~.panels>#pn4,#tb5:checked~.panels>#pn5{display:block}
+#tb4:checked~.panels>#pn4,#tb5:checked~.panels>#pn5,
+#tb6:checked~.panels>#pn6{display:block}
 
 /* 关键信息卡 */
 .facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px;margin:16px 0}
@@ -651,6 +889,25 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--border);
 .hero>svg{display:block;margin:0 auto}
 h3{font-size:15.5px;font-weight:600;margin:22px 0 4px}
 .lead{color:var(--ink-soft);font-size:13.5px;margin:2px 0 10px}
+
+/* 调参面板 */
+.ctls{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:14px 0 18px}
+.ctl{display:block;background:var(--card);border:1px solid var(--border);
+ border-radius:10px;padding:10px 12px}
+.ctl .cl{display:block;font-size:12.5px;color:var(--ink-soft);margin-bottom:5px}
+.ctl input,.ctl select{width:100%;font:14px ui-monospace,Consolas,monospace;
+ padding:6px 8px;border:1px solid var(--border);border-radius:7px;
+ background:var(--bg);color:var(--ink)}
+.ctl input:focus,.ctl select:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.ctl .ch{font-size:11.5px;color:var(--ink-soft);margin-top:5px;opacity:.85}
+.pvbar{display:flex;align-items:center;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
+.btn{font:600 13.5px system-ui;padding:8px 16px;border-radius:9px;cursor:pointer;
+ border:1px solid var(--accent);background:var(--accent);color:#fff}
+.btn:hover{opacity:.9}
+.btn.ghost{background:transparent;color:var(--ink-soft);border-color:var(--border)}
+.pl{width:100%;font:12.5px ui-monospace,Consolas,monospace;padding:12px 14px;
+ border:1px solid var(--border);border-radius:10px;background:var(--tint);
+ color:var(--ink);resize:vertical}
 """
 
 
@@ -805,10 +1062,11 @@ def render_html(
 
 <div class="tabs">
 <input type="radio" name="tb" id="tb1" checked><label for="tb1">总览</label
-><input type="radio" name="tb" id="tb2"><label for="tb2">基站阵列</label
-><input type="radio" name="tb" id="tb3"><label for="tb3">频域与时域</label
-><input type="radio" name="tb" id="tb4"><label for="tb4">信道剖面</label
-><input type="radio" name="tb" id="tb5"><label for="tb5">参数全表</label>
+><input type="radio" name="tb" id="tb2"><label for="tb2">改配置</label
+><input type="radio" name="tb" id="tb3"><label for="tb3">基站阵列</label
+><input type="radio" name="tb" id="tb4"><label for="tb4">频域与时域</label
+><input type="radio" name="tb" id="tb5"><label for="tb5">信道剖面</label
+><input type="radio" name="tb" id="tb6"><label for="tb6">参数全表</label>
 <div class="panels">
 
 <section id="pn1">
@@ -820,6 +1078,7 @@ def render_html(
 <h3>想看细节点上面的页签</h3>
 <div class="tbl-wrap"><table>
 <tr><th>页签</th><th>回答什么问题</th></tr>
+<tr><td><b>改配置</b></td><td><b>直接在这页改参数、实时看拓扑，一键复制粘回对话框让 agent 重跑</b></td></tr>
 <tr><td>基站阵列</td><td>端口怎么排、每端口驱动几个阵子、间距多少、有没有栅瓣</td></tr>
 <tr><td>频域与时域</td><td>多少 RB、怎么分 RBG、占多宽、TDD 怎么配</td></tr>
 <tr><td>信道剖面</td><td>多径的时延与功率分布</td></tr>
@@ -828,24 +1087,28 @@ def render_html(
 </section>
 
 <section id="pn2">
+{_interactive(spec)}
+</section>
+
+<section id="pn3">
 <div class="hero">{_svg_array(spec)}</div>
 <div class="grid2"><div class="card">{array_kv}</div>
 <div class="card"><p class="src">{_bold(a.get("note", ""))}</p></div></div>
 </section>
 
-<section id="pn3">
+<section id="pn4">
 <div class="card">{_svg_freq(spec)}</div>
 <div class="card">{_svg_tdd(spec) or '<p class="src">无 TDD 图案。</p>'}</div>
 <div class="card">{freq_kv}</div>
 </section>
 
-<section id="pn4">
+<section id="pn5">
 <div class="card">{_svg_pdp(spec) or '<p class="src">该模型没有可画的时延功率谱。</p>'}</div>
 <p class="src">CDL 系列每条径带角度（AoD/AoA/ZoD/ZoA），TDL 系列没有——
 凡是依赖角度的课题（波束管理、定位）必须用 CDL。</p>
 </section>
 
-<section id="pn5">
+<section id="pn6">
 <p class="lead">{n_user}/{n_all} 项由用户指定，其余走默认值。
 <b>标着「默认」的都是系统替你定的</b>，不认可就改。</p>
 <div class="tbl-wrap"><table>

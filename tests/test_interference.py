@@ -470,8 +470,15 @@ from superwireless import spec as sp  # noqa: E402
 
 
 def _svgs(path):
+    """返回 (完整 HTML, 文档里的静态 SVG 列表)。
+
+    **必须先把 <script> 剥掉再找 SVG。** 交互面板的 JS 里用字符串拼 SVG，
+    直接正则会把那段 JS 也当成一张图捞出来——它带 ${...} 模板占位，
+    XML 解析必然失败，看起来像"生成的 SVG 坏了"。
+    """
     h = Path(path).read_text(encoding="utf-8")
-    return h, _re.findall(r"<svg.*?</svg>", h, _re.S)
+    body = _re.sub(r"<script>.*?</script>", "", h, flags=_re.S)
+    return h, _re.findall(r"<svg.*?</svg>", body, _re.S)
 
 
 # 多小区（六边形栅格）
@@ -488,15 +495,16 @@ for _i, _sv in enumerate(_s1):
 check(_h1.rstrip().endswith("</html>"), "HTML 完整闭合")
 
 _lay = [x for x in _s1 if "网络拓扑" in x][0]
-_sites = len(_re.findall(r'<circle class="st"', _lay)) - 1   # 减去图例那个
+_sites = len(_re.findall(r'<circle class="bsd"', _lay)) - 1   # 减去图例那个
 check(_sites == 7, f"六边形 7 站都画出来了（实得 {_sites}）")
-check(len(_re.findall(r'<line class="bs"', _lay)) - 1 == 21, "21 个扇区指向都画出来了")
+check(len(_re.findall(r'<line class="bore"', _lay)) - 1 == 21, "21 个扇区指向都画出来了")
+check(len(_re.findall(r'<polygon class="hex"', _lay)) == 7, "7 个六边形小区都画出来了")
 
 # 线性拓扑（高铁）：站点沿轨道两侧交错，不能画成一个点
 _r2 = sp.write_spec(dict(pl.load_presets()["hst_350kmh"]["config"]), title="test-linear")
 _h2, _s2 = _svgs(_r2["html_path"])
 _lay2 = [x for x in _s2 if "网络拓扑" in x][0]
-_cx = [float(x) for x in _re.findall(r'<circle class="st" cx="([-\d.]+)"', _lay2)][:-1]
+_cx = [float(x) for x in _re.findall(r'<circle class="bsd" cx="([-\d.]+)"', _lay2)][:-1]
 print(f"  linear: {len(_cx)} 站，横坐标跨度 {max(_cx) - min(_cx):.0f}")
 check(len(_cx) == 7, f"线性拓扑 7 站（实得 {len(_cx)}）")
 check(max(_cx) - min(_cx) > 200, "线性拓扑真的铺开了，不是挤成一个点")
@@ -506,9 +514,9 @@ check(max(_cx) - min(_cx) > 200, "线性拓扑真的铺开了，不是挤成一�
 _a = sp.write_spec(dict(pl.load_presets()["company_64t4r"]["config"]), title="a")
 _b = sp.write_spec(dict(pl.load_presets()["hst_350kmh"]["config"]), title="b")
 check(_a["html_path"] != _b["html_path"], "同一秒生成的两份说明书文件名不冲突")
-_na = len(_re.findall(r'<circle class="st"',
+_na = len(_re.findall(r'<circle class="bsd"',
                       [x for x in _svgs(_a["html_path"])[1] if "网络拓扑" in x][0]))
-_nb = len(_re.findall(r'<circle class="st"',
+_nb = len(_re.findall(r'<circle class="bsd"',
                       [x for x in _svgs(_b["html_path"])[1] if "网络拓扑" in x][0]))
 check(_na != _nb, "两份内容各自独立（没被对方覆盖）")
 
@@ -540,11 +548,15 @@ check("UE" in Path(_sheet["html_path"]).read_text(encoding="utf-8"),
       "生成后的说明书带真实撒点")
 
 # 分级呈现：拓扑图打头，其余折进 tab
-check(_h1.count('name="tb"') == 5, "五个 tab 都在")
-check(_h1.count('<section id="pn') == 5, "五个面板都在")
+check(_h1.count('name="tb"') == 6, "六个 tab 都在")
+check(_h1.count('<section id="pn') == 6, "六个面板都在")
 check('id="tb1" checked' in _h1, "默认停在总览")
-# tab 用纯 CSS 实现，**离线双击打开必须能用**，不许依赖 JS
-check("<script" not in _h1, "不依赖 JS（离线 file:// 打开也能切页签）")
+# tab 必须是纯 CSS 的：**JS 挂了、被禁用、或者浏览器老旧，页签也得能切**。
+# 页面现在确实有一段脚本（交互调参面板），但它不许碰页签。
+_js_all = "".join(_re.findall(r"<script>(.*?)</script>", _h1, _re.S))
+check('name="tb"' not in _js_all and "tb1" not in _js_all,
+      "脚本不碰页签（JS 挂了也不影响导航）")
+check("#tb1:checked~.panels>#pn1" in _h1, "页签靠 CSS :checked 切换，不是 JS")
 # input 必须是 .tabs 的直接子元素且与 .panels 同级，~ 选择器才成立。
 # 早先套了一层 .tabbar，页面上直接露出原生 radio、一个面板都不显示——
 # 光看代码看不出来，是在浏览器里看出来的。
@@ -584,6 +596,47 @@ _w7 = int(_re.search(r'viewBox="0 0 (\d+)', _lay7).group(1))
 _w1 = int(_re.search(r'viewBox="0 0 (\d+)', _lay1).group(1))
 print(f"  画布：单站 {_w7} / 多小区 {_w1}")
 check(_w7 < _w1, "单站用更小的画布（大画布只会得到一片空白加中间一个点）")
+
+# --- 交互式调参面板 ---
+check(_h1.count('name="tb"') == 6, "六个 tab（多了「改配置」）")
+check('id="pn2"' in _h1 and 'data-k="isd_m"' in _h1, "调参面板在第 2 个页签")
+for _k in ("num_sites", "sectors_per_site", "isd_m", "num_ues", "num_bs_tx_ant",
+           "carrier_freq_hz", "scenario", "channel_model", "link"):
+    check(f'data-k="{_k}"' in _h1, f"{_k} 可在页面上改")
+check('id="cp"' in _h1 and 'id="rs"' in _h1, "有复制与重置按钮")
+check('id="pl"' in _h1, "有可粘贴的 payload 文本框")
+check("overrides = " in _h1, "payload 里带 overrides，agent 能直接照做")
+
+# 拓扑预览的坐标由 ChannelHub 现算后内嵌，前端只做线性缩放——
+# 不在 JS 里重写栅格逻辑，就不会出现"图上七站、跑出来十九站"
+_u = sp.unit_hex_layouts()
+check(set(_u) == {"1", "7", "19"}, f"内嵌 1/7/19 三套单位布局（实得 {sorted(_u)}）")
+check([len(v) for v in (_u["1"], _u["7"], _u["19"])] == [1, 7, 19], "站数对得上")
+_d7 = max(abs(x) for x, y in _u["7"])
+check(abs(_d7 - 1.0) < 1e-6, f"单位布局按 ISD=1 归一（最大横坐标 {_d7}）")
+check('const ST=' in _h1 and '"unit"' in _h1, "单位布局内嵌进页面")
+
+# **JS 语法回归。** payload 里要换行，早先写成 \n 要穿过两层 f-string，
+# 结果塌成真换行落进单引号字符串里 —— 整段脚本 SyntaxError、页面点不动，
+# 而 HTML 结构检查完全看不出来。现在用 String.fromCharCode(10)，不带转义。
+_js = _re.findall(r"<script>(.*?)</script>", _h1, _re.S)
+check(len(_js) == 1, "只有一段内联脚本")
+_bad = []
+for _i, _ln in enumerate(_js[0].splitlines(), 1):
+    _stripped = _re.sub(r"\\.", "", _ln)          # 去掉转义对
+    if _stripped.count("'") % 2 or _stripped.count('"') % 2:
+        _bad.append(_i)
+check(not _bad, f"脚本里没有跨行的引号字符串（可疑行：{_bad[:5]}）")
+check("String.fromCharCode(10)" in _js[0], "换行用字符码而不是反斜杠转义")
+
+# **SVG 的 <style> 是文档级的，不是这张图私有的。** 页面上两张图时后注入的
+# 会盖掉同名 class —— 预览图的 .sec{fill:url(#sg2)} 曾把静态图的扇区填充
+# 整个抹掉（引用到藏在隐藏 tab 里、渲染不出来的那个渐变）。
+# 渐变改成写在元素上的 presentation attribute，跨图不再打架。
+check('class="sec"' not in _h1, "扇区填充不靠 class（SVG style 是文档级的，会跨图串）")
+check(_h1.count('fill="url(#sg)"') == 21, "静态图 21 个扇区都有渐变填充")
+check("url(#sg2)" in _js[0], "预览图用自己的渐变 id，不与静态图重名")
+check("\\n" not in _js[0], "脚本里不残留反斜杠转义的换行")
 
 # ---------------------------------------------------------------------------
 sect("10  文档里的数字必须和代码对得上")

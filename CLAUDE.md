@@ -337,6 +337,39 @@ ChannelHub 的 `phy_sim/effective_array.py` 就是照这套硬件写的（模块
 数据集句柄本身唯一，其余情况补 6 位随机后缀。`test_interference` 第 9.8 节
 有回归：同一秒生成两份，断言文件名不同且内容各自独立。
 
+### 内嵌 JS 里别用反斜杠转义
+
+说明书的调参面板要往 payload 里塞换行。写成 `
+` 得穿过**两层 f-string**
+（`_interactive` 返回的 f-string 再被 `render_html` 的 f-string 嵌进去），
+实测每次都塌成**真换行**，落进 JS 单引号字符串里就是硬 SyntaxError——
+整段脚本不执行、页面点不动，而 HTML 结构检查完全看不出来。
+
+现在用 `const NL=String.fromCharCode(10)`，一个转义都不写。
+`test_interference` 有回归：逐行数引号，跨行的字符串字面量直接判失败；
+另外断言脚本里不残留反斜杠转义的换行。
+
+**验证内嵌 JS 只能靠真的跑一遍**：`node --check` 抽出来的脚本，
+或者在浏览器里看 console。光看 Python 源码看不出来。
+
+### SVG 的 <style> 是文档级的
+
+一页上有两张内联 SVG 时，**后注入的 `<style>` 会盖掉前一张的同名 class**——
+它们共用同一份文档样式表，不是各自私有。
+
+调参面板的预览图定义 `.sec{fill:url(#sg2)}`，直接把静态拓扑图的 `.sec` 也改成
+引用它自己那个渐变；而那个渐变藏在隐藏的 tab 里渲染不出来，于是**静态图的扇区
+填充整个消失**。图还在、线还在，就是没有底色，看起来像"渐变写错了"。
+
+跨图共享的东西（渐变、marker）用**写在元素上的 presentation attribute**
+（`fill="url(#sg)"`），别走 class。id 也要各用各的（`sg` / `sg2`）。
+
+### 正则找 SVG 前要先剥掉 script
+
+调参面板的 JS 用字符串拼 SVG，`<svg.*?</svg>` 会把那段 JS 也捞成一张"图"——
+它带 `${...}` 模板占位，XML 解析必然失败，看起来像"生成的 SVG 坏了"。
+测试里的 `_svgs()` 先 `re.sub` 掉 `<script>...</script>` 再找。
+
 ### f-string 里不能有反斜杠（Python < 3.12）
 
 `f'<td>{"<span class='a'>x</span>" if c else "..."}</td>'` 在 3.12 之前是
