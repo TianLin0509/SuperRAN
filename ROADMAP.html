@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>superwireless 还缺什么</title>
+<style>
+  :root{
+    --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
+    --border:#d2d2d7; --accent:#0071e3;
+    --success:#34c759; --warning:#ff9f0a; --danger:#ff3b30;
+    --code-bg:#1d1d1f; --code-ink:#f5f5f7;
+    --tint-blue:#eef5fd; --tint-blue-ink:#0055b3;
+    --tint-green:#eef9f0; --tint-green-ink:#1a7a34;
+    --tint-amber:#fdf5e8; --tint-amber-ink:#8a5a00;
+    --tint-red:#fdeeed; --tint-red-ink:#a32620;
+    --tint-grey:#f2f2f4; --tint-grey-ink:#4a4a4e;
+    --tint-purple:#f3f0fb; --tint-purple-ink:#5a3ec8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#1d1d1f; --card:#2c2c2e; --ink:#f5f5f7; --ink-soft:#aeaeb2;
+      --border:#38383a; --accent:#0a84ff;
+      --success:#30d158; --warning:#ffd60a; --danger:#ff453a;
+      --tint-blue:#12263c; --tint-blue-ink:#8ec2ff;
+      --tint-green:#14301c; --tint-green-ink:#7ee096;
+      --tint-amber:#33280c; --tint-amber-ink:#ffd77a;
+      --tint-red:#3a1a18; --tint-red-ink:#ff9a92;
+      --tint-grey:#333336; --tint-grey-ink:#c8c8cc;
+      --tint-purple:#241d3d; --tint-purple-ink:#b9a6f5;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; padding:40px 20px; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    font-size:15px; line-height:1.75; overflow-x:hidden;}
+  .wrap{max-width:1140px; margin:0 auto;}
+  h1{font-size:34px; font-weight:700; letter-spacing:-0.03em; margin:0 0 10px;}
+  .tagline{font-size:17px; color:var(--ink-soft); margin:0 0 8px;}
+  .meta{color:var(--ink-soft); font-size:13px; margin:0 0 28px; font-family:"SF Mono",Consolas,monospace;}
+  h2{font-size:24px; font-weight:700; letter-spacing:-0.02em; margin:54px 0 8px; padding-top:22px; border-top:1px solid var(--border);}
+  h3{font-size:18px; font-weight:600; margin:32px 0 8px;}
+  h4{font-size:15px; font-weight:600; margin:22px 0 6px;}
+  p{margin:10px 0;}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:14px; padding:24px; margin:20px 0;}
+  .lead{font-size:16px; color:var(--ink-soft); margin:0 0 18px;}
+
+  .toc{background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px 24px; margin:24px 0 34px;}
+  .toc ol{margin:6px 0; padding-left:22px; columns:2; column-gap:32px;}
+  .toc li{margin:4px 0; break-inside:avoid;}
+  .toc a{color:var(--accent); text-decoration:none;}
+  .toc a:hover{text-decoration:underline;}
+
+  .callout{border-radius:10px; padding:16px 20px; margin:18px 0; border-left:3px solid;}
+  .callout p:first-child{margin-top:0;} .callout p:last-child{margin-bottom:0;}
+  .c-blue{background:var(--tint-blue); color:var(--tint-blue-ink); border-left-color:var(--accent);}
+  .c-green{background:var(--tint-green); color:var(--tint-green-ink); border-left-color:var(--success);}
+  .c-amber{background:var(--tint-amber); color:var(--tint-amber-ink); border-left-color:var(--warning);}
+  .c-red{background:var(--tint-red); color:var(--tint-red-ink); border-left-color:var(--danger);}
+  .c-purple{background:var(--tint-purple); color:var(--tint-purple-ink); border-left-color:#5a3ec8;}
+
+  .plain{background:var(--tint-grey); color:var(--tint-grey-ink); border-radius:10px; padding:14px 18px; margin:14px 0; font-size:14.5px;}
+  .plain::before{content:"白话讲　"; font-weight:600;}
+  .plain p{margin:8px 0;} .plain p:first-of-type{display:inline;}
+
+  .tbl-wrap{overflow-x:auto; margin:16px 0; border:1px solid var(--border); border-radius:10px;}
+  table{border-collapse:collapse; width:100%; font-size:13.5px; background:var(--card);}
+  th,td{padding:9px 13px; text-align:left; border-bottom:1px solid var(--border); vertical-align:top;}
+  th{background:var(--tint-grey); color:var(--tint-grey-ink); font-weight:600; white-space:nowrap; font-size:13px;}
+  tr:last-child td{border-bottom:none;}
+  code{font-family:"SF Mono",Consolas,Monaco,monospace; background:var(--tint-grey); color:var(--tint-grey-ink);
+       padding:1px 5px; border-radius:4px; font-size:12.5px;}
+  td code,th code{font-size:12px;}
+  .nowrap{white-space:nowrap;}
+  pre{background:var(--code-bg); color:var(--code-ink); padding:16px 20px; border-radius:10px; overflow-x:auto;
+      font-family:"SF Mono",Consolas,Monaco,monospace; font-size:12.5px; line-height:1.62; margin:14px 0;}
+  pre code{background:none; color:inherit; padding:0; font-size:inherit;}
+  .cm{color:#8e8e93;}
+
+  ul,ol{margin:10px 0; padding-left:24px;} li{margin:5px 0;}
+
+  .pill{display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:20px; white-space:nowrap;}
+  .p-ok{background:var(--tint-green); color:var(--tint-green-ink);}
+  .p-no{background:var(--tint-red); color:var(--tint-red-ink);}
+  .p-mid{background:var(--tint-amber); color:var(--tint-amber-ink);}
+  .p-info{background:var(--tint-blue); color:var(--tint-blue-ink);}
+  .p-out{background:var(--tint-grey); color:var(--tint-grey-ink);}
+  .p-purple{background:var(--tint-purple); color:var(--tint-purple-ink);}
+
+  .grid2{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:16px; margin:18px 0;}
+  .mini{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:18px;}
+  .mini h4{margin:0 0 8px; font-size:15px;}
+  .mini p{margin:6px 0; font-size:14px; color:var(--ink-soft);}
+
+  .src{font-family:"SF Mono",Consolas,monospace; font-size:12px; color:var(--ink-soft);}
+  footer{margin-top:64px; padding-top:24px; border-top:1px solid var(--border); color:var(--ink-soft); font-size:13px;}
+
+  /* --- 本页专用 --- */
+  .rank{display:grid; grid-template-columns:44px 1fr; gap:0 16px; margin:16px 0;}
+  .rank .no{font:700 26px "SF Mono",Consolas,monospace; color:var(--accent); line-height:1.3;}
+  .rank .bd{border-bottom:1px solid var(--border); padding-bottom:16px; margin-bottom:16px;}
+  .rank .bd:last-child{border-bottom:none;}
+  .rank h4{margin:0 0 4px; font-size:16.5px;}
+  .rank .tags{display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 8px;}
+  .rank p{margin:6px 0; font-size:14.5px;}
+
+  .stack{margin:20px 0; border:1px solid var(--border); border-radius:12px; overflow:hidden;}
+  .layer{display:grid; grid-template-columns:170px 1fr 96px; gap:14px; align-items:start;
+         padding:11px 16px; border-bottom:1px solid var(--border); font-size:13.5px;}
+  .layer:last-child{border-bottom:none;}
+  .layer .nm{font-weight:600;}
+  .layer .ds{color:var(--ink-soft);}
+  .layer.have{background:var(--tint-green);} .layer.have .nm{color:var(--tint-green-ink);}
+  .layer.part{background:var(--tint-amber);} .layer.part .nm{color:var(--tint-amber-ink);}
+  .layer.gap{background:var(--tint-red);}   .layer.gap .nm{color:var(--tint-red-ink);}
+  .layer.out{background:var(--tint-grey);}  .layer.out .nm{color:var(--tint-grey-ink);}
+  .layer .st{text-align:right;}
+  @media (max-width:640px){ .layer{grid-template-columns:1fr; gap:2px;} .layer .st{text-align:left;} }
+
+  .legend{display:flex; gap:14px; flex-wrap:wrap; margin:10px 0 0; font-size:13px; color:var(--ink-soft);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>还缺什么</h1>
+<p class="tagline">对着 Sionna / MATLAB 5G Toolbox / QuaDRiGa / 5G-LENA 逐模块点名</p>
+<p class="meta">2026-08-01 · 定位：纯链路仿真 · 本页是<b>盘点与取舍</b>，不是实跑数据</p>
+
+<div class="callout c-amber">
+<p><b>先说清这页是什么。</b> 左列"我们现在有什么"逐条对着本仓库代码核过；
+右列各库的能力来自它们的公开文档与 API 索引，<b>没有逐个装起来跑过</b>。
+工作量估计是量级判断，不是排期。看到"约 XXX 行"请读成"这是个几天还是几周的事"。</p>
+</div>
+
+<div class="toc">
+<strong>目录</strong>
+<ol>
+<li><a href="#s1">结论：五件事，按性价比排</a></li>
+<li><a href="#s2">定位：纯链路仿真的边界画在哪</a></li>
+<li><a href="#s3">一条完整链路，逐段点名</a></li>
+<li><a href="#s4">逐模块对照表</a></li>
+<li><a href="#s5">五个主缺口详解</a></li>
+<li><a href="#s6">第二梯队</a></li>
+<li><a href="#s7">明确不补的</a></li>
+<li><a href="#s8">建议顺序</a></li>
+</ol>
+</div>
+
+
+<h2 id="s1">一、结论：五件事，按性价比排</h2>
+
+<p class="lead">不是按"缺得多严重"排，是按 <b>解锁的问题数 ÷ 工作量</b> 排。
+排在最前的不是最大的洞。</p>
+
+<div class="card">
+<div class="rank">
+
+<div class="no">1</div>
+<div class="bd">
+<h4>接收机家族：IRC / ML / K-Best / EP / SIC</h4>
+<div class="tags">
+  <span class="pill p-ok">工作量小</span>
+  <span class="pill p-info">约 400~600 行</span>
+  <span class="pill p-purple">没有新依赖</span>
+</div>
+<p>现在只有 <code>mmse</code> / <code>mrc</code> / <code>zf</code> 三个线性接收机，而且
+<b>都不做干扰白化</b>。这件事的荒谬之处在于：这个项目最花力气的地方恰恰是多小区干扰
+——干扰小区信道矩阵能存下来、IoT 能精确算、业务域测量域分得清——
+然后用一个假设"干扰是白噪声"的接收机去评价它。</p>
+<p><b>IRC 尤其该先补</b>：它只要把干扰协方差 <code>R_uu</code> 代进 MMSE 的求逆项，
+数据（<code>h_interferers</code>）本来就有。一百多行代码，直接把已有的多小区数据
+从"只能看 SINR"变成"能比接收机"。</p>
+</div>
+
+<div class="no">2</div>
+<div class="bd">
+<h4>信道估计器可插拔 + 导频图案</h4>
+<div class="tags">
+  <span class="pill p-mid">工作量中</span>
+  <span class="pill p-info">约 600~900 行</span>
+  <span class="pill p-info">接得上已有的测量域 SIR</span>
+</div>
+<p>现在 <code>h_est</code> 是 ChannelHub 给的一个结果，用户<b>换不了估计算法</b>。
+而上一轮刚做完的"高测量干扰场景"（SRS 拥塞，实测测量域 SIR 差 17.9 dB）
+正是为了研究导频污染——却没有地方放"不同估计器在污染下表现如何"。</p>
+<p>补上 LS / DFT 去噪 / MMSE-Wiener 三档，再加 DMRS/SRS 的时频位置配置，
+<code>estimation_nmse_floor_db</code> 那条理论下限就有了实测对照物。</p>
+</div>
+
+<div class="no">3</div>
+<div class="bd">
+<h4>MU-MIMO：配对 + 多用户预编码（ZF / RZF / BD）</h4>
+<div class="tags">
+  <span class="pill p-mid">工作量中</span>
+  <span class="pill p-info">约 500~800 行</span>
+</div>
+<p>64 端口 AAU 的价值有一大半在多用户复用上，现在全是单用户。
+默认硬件已经是 8×4×2 的真实面板了，却只能问"一个用户能跑多快"。</p>
+<p>配对准则（SLNR / 正交度 / 贪心）本身就是常见课题，
+而且它和已有的 Type I 码本、SVD 预编码共用同一套 <code>compute_precoder</code> 接口。</p>
+</div>
+
+<div class="no">4</div>
+<div class="bd">
+<h4>上行补齐：PUSCH 链路性能 + 开环功控</h4>
+<div class="tags">
+  <span class="pill p-mid">工作量中</span>
+  <span class="pill p-info">约 400~600 行</span>
+</div>
+<p>上行现在是<b>半条腿</b>：SRS 测量域 SIR 有了、上行几何 SIR 靠钩子取到了，
+但没有对应的 <code>link_performance</code>，也没有开环功控
+（38.213 §7.1 的 <code>P0 + α·PL</code>）。</p>
+<p>没有功控的上行仿真会得到一个失真的干扰画像——近点用户以满功率发，
+IoT 被系统性高估。这一条<b>不补就不该出上行结论</b>。</p>
+</div>
+
+<div class="no">5</div>
+<div class="bd">
+<h4>比特级链路：LDPC + 映射/解调 + CRC</h4>
+<div class="tags">
+  <span class="pill p-no">工作量大</span>
+  <span class="pill p-info">约 2000~3000 行</span>
+  <span class="pill p-mid">与 Sionna 差距最大的一块</span>
+</div>
+<p>现在的 BLER 全部来自<b>查表</b>：表 1/2 是分析模型，表 3 是公司实测的 20B 曲线。
+它对"给定 SINR 会不会解出来"回答得很好，但对"<b>换一个译码器/接收机会怎样</b>"
+完全无能为力——因为链路里根本没有译码器。</p>
+<p>排第 5 不是因为它不重要，而是因为<b>它的收益高度依赖你要回答什么问题</b>。
+如果课题是 CSI 反馈、波束管理、干扰协调、定位——用等效 SINR + BLER 表是
+业界系统级仿真的标准做法，补全比特链路只会让每个样本慢两个数量级。
+如果课题是接收机算法、短包低时延、HARQ 合并增益——那它就是第 1 名。</p>
+</div>
+
+</div>
+</div>
+
+<div class="callout c-blue">
+<p><b>一句话取舍。</b> 1~4 是"把已有的数据用足"，投入小、和现有代码接口对得上；
+5 是"换一个仿真层次"，投入大、会改变整个项目的耗时量级。
+<b>先做 1~4，第 5 项等到有具体课题需要它时再动。</b></p>
+</div>
+
+
+<h2 id="s2">二、定位：纯链路仿真的边界画在哪</h2>
+
+<p>"纯链路仿真"这个定位很有用，因为它一刀切掉了一大片东西。但它也有歧义——
+业界的"链路级"通常指<b>单条收发链路的比特级仿真</b>，而 superwireless 目前做的是
+<b>多小区几何 + 信道矩阵 + 等效 SINR + 查表 BLER</b>，严格说站在链路级与系统级之间。</p>
+
+<div class="grid2">
+<div class="mini">
+<h4>链路级（Link Level）</h4>
+<p>一个基站、一个用户、一条链路。比特进、比特出，跑真实的编码调制解调译码。
+关心 BER/BLER 曲线、接收机算法、同步、估计误差。</p>
+<p class="src">Sionna PHY · MATLAB 5G Toolbox · Vienna LL</p>
+</div>
+<div class="mini">
+<h4>系统级（System Level）</h4>
+<p>几十个小区、几百个用户。不跑比特，用等效 SINR 映射查 BLER。
+关心吞吐分布、边缘用户、调度、干扰协调、移动性。</p>
+<p class="src">5G-LENA · Vienna SL · Sionna SYS</p>
+</div>
+</div>
+
+<div class="callout c-purple">
+<p><b>superwireless 现在的位置：几何与信道按系统级建，评价链路按链路级的公式算。</b></p>
+<p>往上：有 7/19 站、57 小区、干扰小区信道矩阵、IoT——这是系统级的规模。<br>
+往下：有逐 RB 逐流的后处理 SINR、EESM/MIESM 有效 SINR、38.214 MCS/TBS、
+BLER 曲线插值——这是链路到系统映射（L2S）的标准做法。<br>
+中间空的那段：<b>比特级收发链路本身</b>。</p>
+<p>这个位置其实相当合理——它正是 <b>Sionna SYS</b> 的定位（"基于物理层抽象的
+系统级仿真"）。区别是 Sionna SYS 下面压着一个真的 Sionna PHY，
+需要时能换成真链路；我们下面压着的是查表。</p>
+</div>
+
+
+<h2 id="s3">三、一条完整链路，逐段点名</h2>
+
+<p class="lead">下行方向，从比特到吞吐。绿=有、黄=部分、红=空、灰=定位之外。</p>
+
+<div class="stack">
+<div class="layer out"><div class="nm">业务模型</div><div class="ds">全缓冲 / 泊松到达 / FTP，缓冲区状态</div><div class="st"><span class="pill p-out">定位之外</span></div></div>
+<div class="layer out"><div class="nm">调度器</div><div class="ds">PF / RR / max-C&#47;I，RBG 分配，优先级</div><div class="st"><span class="pill p-out">定位之外</span></div></div>
+<div class="layer part"><div class="nm">链路自适应</div><div class="ds">CQI → MCS、BF Gain、OLLA、TDD AMC　<span class="src">有；缺外环收敛的多用户联合</span></div><div class="st"><span class="pill p-mid">部分</span></div></div>
+<div class="layer gap"><div class="nm">HARQ</div><div class="ds">进程状态机、<b>软合并 Chase/IR</b>、残留 BLER　<span class="src">现只有 NewTx/ReTx 两条曲线 + 平均传输次数</span></div><div class="st"><span class="pill p-no">空</span></div></div>
+<div class="layer gap"><div class="nm">TB 处理</div><div class="ds">CRC24A/B、码块分段与 CB-CRC、加扰　<span class="src">只有 <code>code_blocks</code> 分段计数</span></div><div class="st"><span class="pill p-no">空</span></div></div>
+<div class="layer gap"><div class="nm">信道编码</div><div class="ds">LDPC BG1/BG2 编译码、速率匹配、环形缓冲、Polar（控制信道）</div><div class="st"><span class="pill p-no">空</span></div></div>
+<div class="layer gap"><div class="nm">调制映射</div><div class="ds">QPSK~1024QAM 星座、mapper / demapper、max-log LLR　<span class="src">有 QAM 约束容量 <code>qam_mi</code>，但那是信息论量不是符号</span></div><div class="st"><span class="pill p-no">空</span></div></div>
+<div class="layer part"><div class="nm">层映射 / 预编码</div><div class="ds">SVD、宽带 SVD、DFT、Type I 码本（含秩自适应）、MRT　<span class="src">SU 齐全；<b>缺 MU 的 ZF/RZF/BD</b> 与 Type II</span></div><div class="st"><span class="pill p-mid">部分</span></div></div>
+<div class="layer gap"><div class="nm">资源栅格</div><div class="ds">RE 级映射、DMRS / PTRS / CSI-RS / TRS 图案　<span class="src">仿真粒度到 RB 为止；DMRS 只作为开销从 RE 数里扣掉</span></div><div class="st"><span class="pill p-no">空</span></div></div>
+<div class="layer gap"><div class="nm">波形</div><div class="ds">CP-OFDM / DFT-s-OFDM 调制解调、成形滤波、PAPR</div><div class="st"><span class="pill p-no">空</span></div></div>
+<div class="layer have"><div class="nm">信道</div><div class="ds">38.901 UMa/UMi/InF、CDL/TDL 十档剖面、多小区几何、Sionna RT 十个城市、时序老化、1驱3 真实阵列</div><div class="st"><span class="pill p-ok">强项</span></div></div>
+<div class="layer gap"><div class="nm">射频损伤</div><div class="ds">相噪、PA 非线性、IQ 失衡、CFO/TO、ADC 量化</div><div class="st"><span class="pill p-no">空</span></div></div>
+<div class="layer part"><div class="nm">信道估计</div><div class="ds"><code>h_est</code> 有（ChannelHub 给），<b>估计算法换不了</b>；测量域 SIR 与 NMSE 理论下限有</div><div class="st"><span class="pill p-mid">部分</span></div></div>
+<div class="layer part"><div class="nm">均衡 / 检测</div><div class="ds">MMSE / MRC / ZF　<span class="src"><b>缺 IRC 干扰白化</b>、ML、K-Best、EP、SIC</span></div><div class="st"><span class="pill p-mid">部分</span></div></div>
+<div class="layer have"><div class="nm">SINR / 谱效</div><div class="ds">逐 RB 逐流后处理 SINR、容量上界、EESM/MIESM 有效 SINR</div><div class="st"><span class="pill p-ok">有</span></div></div>
+<div class="layer part"><div class="nm">BLER</div><div class="ds">分析模型（有限码长 + 实现损失）+ 公司 20B 实测曲线 28 档　<span class="src"><b>查表，不是译码结果</b></span></div><div class="st"><span class="pill p-mid">部分</span></div></div>
+<div class="layer have"><div class="nm">吞吐与判决</div><div class="ds">TBS、Mbps、5% 边缘用户、配对检验、三道门、预注册</div><div class="st"><span class="pill p-ok">强项</span></div></div>
+</div>
+
+<p class="legend">
+<span class="pill p-ok">强项/有</span> 已实现且有测试
+<span class="pill p-mid">部分</span> 有一部分，边界写在 CAPABILITIES.html
+<span class="pill p-no">空</span> 没有
+<span class="pill p-out">定位之外</span> 纯链路仿真不该管
+</p>
+
+<div class="plain">
+<p>红色那一整段（HARQ 合并、CRC、LDPC、映射、RE 栅格、波形）是<b>连在一起的一块</b>
+——补就得整块补，单补 LDPC 没有输入、单补 mapper 没有下游。这也是为什么它在
+结论里被当成一件事排在第 5 名而不是五件事。</p>
+</div>
+
+
+<h2 id="s4">四、逐模块对照表</h2>
+
+<p class="lead">✅ 有 · ◐ 部分 · ✗ 无 · — 不在该库范围内</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr>
+  <th style="min-width:150px">模块</th><th>superwireless</th><th>Sionna PHY</th><th>Sionna SYS</th>
+  <th>MATLAB 5G TB</th><th>QuaDRiGa</th><th>5G-LENA</th>
+</tr></thead>
+<tbody>
+<tr><td><b>信道模型 38.901</b></td><td>✅ UMa/UMi/InF + CDL/TDL 10 档</td><td>✅ + RMa</td><td>—</td><td>✅</td><td>✅ 最全，含空间一致性</td><td>◐ 简化</td></tr>
+<tr><td><b>射线追踪</b></td><td>◐ 借 Sionna RT，10 个城市；<b>拿不到逐径几何</b></td><td>✅ 自带可微 RT</td><td>—</td><td>✗</td><td>✗</td><td>✗</td></tr>
+<tr><td><b>多小区几何 / 撒点</b></td><td>✅ 1/7/19 站、57 小区、线性轨道</td><td>◐</td><td>✅ 含 wraparound</td><td>✗</td><td>✅</td><td>✅</td></tr>
+<tr><td><b>真实阵列建模</b></td><td>✅ 1驱3 / 192 阵子 / 0.67λ，三档模型可切</td><td>◐ 面板阵列</td><td>—</td><td>◐</td><td>✅</td><td>◐</td></tr>
+<tr><td><b>空间一致性 / drifting</b></td><td>✗</td><td>◐</td><td>—</td><td>✗</td><td>✅ 招牌能力</td><td>✗</td></tr>
+<tr><td><b>FEC（LDPC/Polar/Turbo）</b></td><td>✗ 只有码块分段计数</td><td>✅ 全套 + 多种译码器</td><td>—</td><td>✅</td><td>—</td><td>✗ 用 L2S</td></tr>
+<tr><td><b>CRC / 加扰 / 交织</b></td><td>✗</td><td>✅</td><td>—</td><td>✅</td><td>—</td><td>✗</td></tr>
+<tr><td><b>星座 / mapper / LLR</b></td><td>✗（有 QAM 约束容量）</td><td>✅ 含可学习星座</td><td>—</td><td>✅</td><td>—</td><td>✗</td></tr>
+<tr><td><b>OFDM 资源栅格 / 导频图案</b></td><td>✗ 粒度到 RB</td><td>✅</td><td>—</td><td>✅</td><td>—</td><td>◐</td></tr>
+<tr><td><b>信道估计算法</b></td><td>◐ 有 <code>h_est</code>，<b>算法不可换</b></td><td>✅ LS + LMMSE 插值</td><td>—</td><td>✅</td><td>—</td><td>✗</td></tr>
+<tr><td><b>均衡 / 检测</b></td><td>◐ MMSE/MRC/ZF，<b>无 IRC</b></td><td>✅ MMSE-PIC / K-Best / EP / ML</td><td>—</td><td>✅</td><td>—</td><td>✗</td></tr>
+<tr><td><b>SU 预编码 / 码本</b></td><td>✅ SVD / DFT / Type I（秩自适应）/ MRT</td><td>✅ ZF 等</td><td>—</td><td>✅ Type I/II</td><td>—</td><td>◐</td></tr>
+<tr><td><b>MU-MIMO 配对 + 多用户预编码</b></td><td>✗</td><td>◐ 有 stream management</td><td>✅ 含 PF 配对</td><td>◐</td><td>—</td><td>✅</td></tr>
+<tr><td><b>CSI 反馈：Type II / 量化 / 时延</b></td><td>✗（只有 Type I）</td><td>◐</td><td>—</td><td>✅</td><td>—</td><td>◐</td></tr>
+<tr><td><b>PHY 抽象（EESM/MIESM）</b></td><td>✅</td><td>—</td><td>✅</td><td>✗</td><td>—</td><td>✅</td></tr>
+<tr><td><b>MCS / CQI / TBS（38.214）</b></td><td>✅ 逐字录入 + 内蕴自检</td><td>✅</td><td>✅</td><td>✅</td><td>—</td><td>✅</td></tr>
+<tr><td><b>BLER 曲线</b></td><td>◐ 分析模型 + 公司 20B 实测 28 档</td><td>✅ 真跑出来</td><td>✅ 内置表</td><td>✅ 真跑出来</td><td>—</td><td>✅ 内置表</td></tr>
+<tr><td><b>链路自适应（内外环 OLLA）</b></td><td>✅ 含 BF Gain 与逐 RB 审计链</td><td>—</td><td>✅</td><td>◐</td><td>—</td><td>✅</td></tr>
+<tr><td><b>HARQ 软合并</b></td><td>✗（有平均传输次数）</td><td>✅ IR</td><td>◐</td><td>✅</td><td>—</td><td>✅</td></tr>
+<tr><td><b>功率控制</b></td><td>✗</td><td>—</td><td>✅ 上行开环 + 下行公平</td><td>✗</td><td>—</td><td>✅</td></tr>
+<tr><td><b>调度器</b></td><td>✗</td><td>—</td><td>✅ PF</td><td>✗</td><td>—</td><td>✅ 多种</td></tr>
+<tr><td><b>射频损伤</b></td><td>✗</td><td>◐ 滤波/窗/重采样</td><td>—</td><td>✅ 全套</td><td>—</td><td>✗</td></tr>
+<tr><td><b>干扰量化（IoT / 业务域测量域分离）</b></td><td>✅ <b>独有</b></td><td>✗</td><td>◐</td><td>✗</td><td>✗</td><td>◐</td></tr>
+<tr><td><b>统计判决 / 预注册 / 门控</b></td><td>✅ <b>独有</b></td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr>
+<tr><td><b>Agent 接口（MCP）</b></td><td>✅ <b>独有</b>，32 个工具</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td><td>✗</td></tr>
+<tr><td><b>可微 / GPU 批量</b></td><td>✗ numpy + 多进程</td><td>✅ 全可微</td><td>✅</td><td>✗</td><td>✗</td><td>✗</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="callout c-green">
+<p><b>别只盯着红叉。</b> 最后三行是别人都没有的：把干扰讲清楚（IoT 精确推导、
+业务域与测量域分离）、把结论管住（三道门、预注册、配对检验）、
+把仿真交给 agent 开（MCP）。这三样才是这个项目存在的理由，
+补模块的时候不要把它们稀释掉。</p>
+</div>
+
+
+<h2 id="s5">五、五个主缺口详解</h2>
+
+<h3>1 · 接收机家族</h3>
+<div class="card">
+<p><b>现状。</b> <code>linklevel.post_equalizer_sinr</code> 支持 <code>mmse</code> /
+<code>mrc</code> / <code>zf</code>。三者都把干扰当白噪声处理。</p>
+<p><b>为什么这是最划算的一笔。</b> 数据已经在了——多小区配置下打开
+<code>interferer_channels</code> 就有 <code>h_interferers</code>，
+干扰协方差 <code>R_uu = Σ H_i H_i^H + σ²I</code> 现成能算。
+IRC 就是把 MMSE 里的 <code>σ²I</code> 换成 <code>R_uu</code>，
+其余全部复用。</p>
+<p><b>补了能回答什么。</b></p>
+<ul>
+<li>"IRC 相比 MMSE 在 IoT 20 dB 下能捞回多少 dB" —— 现在完全答不了</li>
+<li>"干扰小区数从 1 增到 6，IRC 的增益怎么衰减"</li>
+<li>非线性检测（K-Best/EP）在高阶调制 + 相关信道下值不值得</li>
+</ul>
+<p><b>要注意的坑。</b> IRC 的 <code>R_uu</code> 在实际系统里是<b>估出来的</b>，
+用真值算会系统性高估增益。所以接口一开始就要能选
+<code>R_uu</code> 来源（真值 / 有限样本估计 + 对角加载），
+否则又是一个"看起来正常但偏乐观"的数。</p>
+</div>
+
+<h3>2 · 信道估计器可插拔</h3>
+<div class="card">
+<p><b>现状。</b> 数据集里同时有 <code>h_true</code> 与 <code>h_est</code>，
+但 <code>h_est</code> 怎么估的由 ChannelHub 决定，用户改不了。
+测量域 SIR（<code>ul_sir_dB</code> / <code>dl_sir_dB</code>）与 NMSE 理论下限
+（<code>estimation_nmse_floor_db</code>）都有，<b>但没有实测 NMSE 与之对照</b>。</p>
+<p><b>缺的三件。</b></p>
+<ol>
+<li><b>估计器</b>：LS（最朴素）、DFT 域去噪（时延截断）、MMSE/Wiener（需要时延与多普勒统计）</li>
+<li><b>导频图案</b>：DMRS 的时频位置与密度、SRS 的梳齿与周期、CSI-RS 端口映射</li>
+<li><b>污染注入</b>：邻区导频用同一图案时的相干干扰，这才是"高测量干扰场景"的物理机制</li>
+</ol>
+<p><b>补了能回答什么。</b> SRS 拥塞把测量域 SIR 从 +7.4 压到 −10.5 dB
+（已实测），那么<b>估计 NMSE 实际掉多少、掉到什么程度开始影响预编码增益</b>
+——这条链现在断在中间。</p>
+</div>
+
+<h3>3 · MU-MIMO</h3>
+<div class="card">
+<p><b>现状。</b> <code>compute_precoder</code> 是单用户的：一个 UE 的信道进去、
+一个预编码矩阵出来。</p>
+<p><b>缺的两层。</b> 多用户预编码（ZF / 正则化 ZF / 块对角化）和配对准则
+（正交度门限、SLNR 贪心、比例公平配对）。前者是线性代数，后者是组合选择。</p>
+<p><b>接口上怎么接。</b> 现在 <code>generate</code> 一次撒 <code>num_ues</code> 个 UE，
+同一批样本里的 UE 天然可以配对——数据结构不用动，
+只要 <code>link_performance</code> 增加一个"把这几个 UE 一起算"的入口。</p>
+<p><b>要注意的坑。</b> MU 的增益<b>极度依赖 CSI 精度</b>。用 <code>h_true</code> 做 ZF
+会得到教科书上的漂亮曲线，用 <code>h_est</code> 会掉一大截。这个项目已经有
+"门 2 查 CSI 口径"的机制，MU 上线时必须挂进去，不然一定会出现
+"MU 增益 3.8 倍"这种数字。</p>
+</div>
+
+<h3>4 · 上行补齐</h3>
+<div class="card">
+<p><b>现状。</b> <code>link="UL"</code> 能生成上行信道，SRS 测量量齐全，
+上行几何 SIR 靠 <code>install_geometry_capture</code> 钩子取到。
+但 <code>link_performance</code> / <code>throughput</code> 这条评价链是照下行写的。</p>
+<p><b>缺的两件。</b></p>
+<ul>
+<li><b>开环功控</b>（38.213 §7.1）：<code>P = min(P_max, P0 + 10log10(M) + α·PL)</code>。
+不补的话所有 UE 满功率发，近点用户把 IoT 抬得毫无道理。</li>
+<li><b>上行接收链路</b>：基站侧多天线合并（MRC / IRC）、上行 SINR、
+上行 MCS 选择（上行没有 CQI，靠 SRS 测得的 SINR）。</li>
+</ul>
+<p><b>这一条的性质和别的不同</b>：它不是"补了能多做一类课题"，
+而是<b>不补就不该出上行结论</b>。目前上行数据可以生成、可以看干扰，
+但不能直接说"上行吞吐是多少"。</p>
+</div>
+
+<h3>5 · 比特级链路</h3>
+<div class="card">
+<p><b>现状。</b> BLER 有两条后端：38.214 表 1/2 配分析模型（有限码长 + 1 dB 实现损失），
+表 3 是公司实测的 20B 曲线（28 档 MCS、56 条 NewTx/ReTx、1824 个点）。
+两条都是<b>查表</b>，链路里没有编码器也没有译码器。</p>
+<p><b>整块要补的东西。</b> CRC24A/B → 码块分段 + CB-CRC → LDPC BG1/BG2 编码
+→ 速率匹配与 HARQ 环形缓冲 → 加扰 → 星座映射 → RE 映射 → OFDM 调制
+→（信道）→ OFDM 解调 → 信道估计 → 均衡 → 解映射出 LLR → LDPC 译码 → CRC 校验。
+一头一尾少一段都跑不通。</p>
+<p><b>代价要说在前面。</b> 每个 TB 都要真跑一遍 LDPC 译码，
+纯 numpy 实现下单样本从<b>百毫秒量级掉到几十秒量级</b>。
+现在的 11.5 倍探测提速、多进程并行、200 样本 1 分钟这些工程成果，
+在比特链路上全部失效。</p>
+<p><b>所以更现实的做法是分级。</b> 保留查表作为默认（快、够用），
+比特链路作为<b>可选的高保真模式</b>，只在需要时对少量样本开启——
+并且用它<b>反过来校准</b>查表模型。这样两者互为验证，
+而不是拿一个替换另一个。</p>
+<div class="callout c-amber">
+<p><b>另一个选项：不自己写，接 Sionna PHY。</b> 项目已经通过 <code>sionna-rt</code>
+用上了 Sionna 的射线追踪。比特链路同样可以把信道矩阵喂给
+<code>sionna.phy</code> 的 PUSCH/PDSCH 收发链，省掉 2000 行 FEC 实现。
+代价是引入 TensorFlow 依赖（约 500 MB）以及一份新的口径对齐工作
+（Sionna 的资源栅格与我们的 RB 粒度要对上）。<b>值得先花半天做个可行性验证
+再决定自研还是外接。</b></p>
+</div>
+</div>
+
+
+<h2 id="s6">六、第二梯队</h2>
+
+<div class="grid2">
+<div class="mini">
+<h4>HARQ 软合并（Chase / IR）</h4>
+<p>现在用 NewTx/ReTx 两条曲线近似，重传多于一次时复用 ReTx 曲线
+（结果里标了 <code>harq_model=newtx_then_retx_curve_reused</code>）。
+真软合并要有 LLR，所以它<b>依赖第 5 项</b>。</p>
+</div>
+<div class="mini">
+<h4>CSI Type II 码本 + 反馈时延</h4>
+<p>Type I 已有且做了秩自适应。Type II 是 MU-MIMO 的前提条件之一——
+没有高精度 CSI，MU 的干扰抵消无从谈起。<b>建议和第 3 项一起做。</b>
+反馈时延与量化误差则能直接复用已有的时序老化数据。</p>
+</div>
+<div class="mini">
+<h4>RE 级资源栅格</h4>
+<p>目前 RB 粒度是<b>刻意的复杂度取舍</b>（1 RB = 12 RE，降 12 倍）。
+只有做导频图案、PTRS 相噪跟踪、频选调度才需要 RE 级。
+和第 2 项绑定，单独做没有意义。</p>
+</div>
+<div class="mini">
+<h4>射频损伤</h4>
+<p>相噪（高频段关键）、PA 非线性、IQ 失衡、CFO/TO、ADC 量化位宽。
+2.6 GHz 场景下优先级不高；如果以后要看毫米波或大带宽，
+相噪与 PA 会变成第一梯队。</p>
+</div>
+<div class="mini">
+<h4>空间一致性与 drifting</h4>
+<p>QuaDRiGa 的招牌。移动场景下簇的生灭与角度漂移，
+决定了轨迹上的信道是不是"连续的"。
+现在的移动性靠多时隙相关性近似（实测 60 km/h 首末相关 0.346），
+做切换/波束跟踪类课题时会不够。</p>
+</div>
+<div class="mini">
+<h4>可微 / GPU 批量</h4>
+<p>Sionna 全链路可微，能端到端训练接收机。
+我们是 numpy + 多进程。<b>这不是"缺"，是不同路线</b>——
+除非哪天要做 AI 原生接收机的联合训练，否则不必跟。</p>
+</div>
+</div>
+
+
+<h2 id="s7">七、明确不补的</h2>
+
+<p class="lead">摊大饼是这类项目最常见的死法。以下几项建议明确写进边界，
+以后有人提就指这一节。</p>
+
+<div class="tbl-wrap">
+<table>
+<thead><tr><th style="min-width:180px">不补什么</th><th>为什么</th></tr></thead>
+<tbody>
+<tr><td><b>MAC 调度器与业务模型</b></td><td>一旦有了调度器就要有缓冲区、有队列、有时延分布，接着就要有 RLC/PDCP——这是 5G-LENA 和 Vienna SL 的地盘，它们做了十几年。定位是纯链路仿真，这条线不越。</td></tr>
+<tr><td><b>协议栈与信令</b></td><td>RRC、切换流程、随机接入。要真跑协议去用 OAI / srsRAN。</td></tr>
+<tr><td><b>光通信</b></td><td>Sionna PHY 有 SSFM/EDFA。和无线毫无交集。</td></tr>
+<tr><td><b>自研射线追踪求解器</b></td><td>Sionna RT 已经能用且免费。该做的是把它的 <code>Paths</code> 对象透出来（现在拿不到逐径几何），不是重写一个。</td></tr>
+<tr><td><b>端到端可微训练框架</b></td><td>引入 TF/PyTorch 会让整个项目的依赖与部署复杂度翻倍，而 MCP 的定位是"给 agent 供数据与判决"，不是训练平台。</td></tr>
+<tr><td><b>QuaDRiGa 全量对接</b></td><td>需要 MATLAB/Octave 运行时。要空间一致性的话，自己按 38.901 §7.6.3 实现一个子集更划算。</td></tr>
+</tbody>
+</table>
+</div>
+
+
+<h2 id="s8">八、建议顺序</h2>
+
+<div class="card">
+<p><b>第一步（小而独立，各自能单独交付）</b></p>
+<ol>
+<li><b>IRC 接收机</b> —— 一百多行，立刻让已有的多小区数据产生新结论。<span class="src">改 <code>linklevel.post_equalizer_sinr</code></span></li>
+<li><b>上行开环功控</b> —— 让上行结论站得住。<span class="src">新增 <code>uplink.py</code></span></li>
+</ol>
+
+<p><b>第二步（成组做，彼此依赖）</b></p>
+<ol start="3">
+<li><b>信道估计器 + 导频图案</b>，和"高测量干扰场景"接上</li>
+<li><b>MU-MIMO 配对与多用户预编码</b>，同时补 <b>Type II 码本</b>——两者互为前提</li>
+</ol>
+
+<p><b>第三步（先做可行性，再决定自研还是外接）</b></p>
+<ol start="5">
+<li><b>比特级链路</b> —— 先花半天验证"把我们的信道矩阵喂给 <code>sionna.phy</code>"能不能跑通、口径怎么对齐。<b>能跑通就别自研 FEC。</b></li>
+</ol>
+
+<div class="callout c-blue">
+<p><b>每一项上线前都要过同一道关：新模块必须能进已有的门控体系。</b>
+新的接收机要能被门 2 查 CSI 口径，新的估计器要能被门 1 体检，
+新的 MU 增益要能被门 3 的配对检验判决。
+<b>不能被证伪的能力不算能力</b>——这是这个项目和别的仿真库最不一样的地方，
+补模块的时候尤其容易忘。</p>
+</div>
+</div>
+
+
+<footer>
+superwireless · 还缺什么 · 2026-08-01<br>
+左列对着本仓库代码核过；右列来自各库公开文档，未逐个装起来实测。
+工作量为量级判断，不构成排期。
+</footer>
+
+</div>
+</body>
+</html>

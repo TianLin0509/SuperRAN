@@ -1251,8 +1251,9 @@ def sw_spec_sheet(
     config: dict[str, Any] | None = None,
     title: str = "",
     highlight: list[str] | None = None,
+    open_browser: bool = True,
 ) -> dict[str, Any]:
-    """把敲定的仿真配置画成一份说明书（离线 HTML，含示意图）。
+    """把敲定的仿真配置画成一份说明书并**直接弹到用户面前**（含示意图、可调参）。
 
     **配置定下来之后、正式跑之前调一次**，让用户看清楚这次到底在仿什么：
 
@@ -1270,8 +1271,21 @@ def sw_spec_sheet(
     ``sw_generate`` 会自动生成一份（带真实撒点），句柄在 ``summary.spec_sheet``；
     这个工具用于**生成之前**先看一眼。
 
+    **默认会自己在浏览器里打开**（``open_browser=False`` 可关）。页面还带一个
+    调参面板：用户改完点「应用到仿真」，改动**直接回到这个 MCP 进程**，
+    你随后调 ``sw_await_config`` 就能拿到——不用他复制粘贴。
+
+    所以敲定配置那一步的标准动作是：
+
+        sw_spec_sheet(...)  →  告诉用户"页面已经打开，看一眼；要改就在上面改，
+                               改完点应用"  →  sw_await_config()
+
+    ``writeback`` 字段告诉你这次是哪条路：``post`` 表示回传通道通了、
+    可以去 ``sw_await_config`` 等；``clipboard`` 表示服务没起来（原因在
+    ``serve_error``），得让用户复制粘贴。
+
     **返回的是文件路径和摘要，不要把 HTML 内容贴回对话。**
-    把 ``headline`` 和 ``notes`` 转述给用户，并把 html_path 给他。
+    把 ``headline`` 和 ``notes`` 转述给用户。
 
     参数
     ----
@@ -1283,6 +1297,7 @@ def sw_spec_sheet(
         ``["isd_m", "num_interfering_ues"]``。它们会被顶到首屏关键信息卡最前面
         并高亮。首屏因此既覆盖"做仿真通常最关心的"，也覆盖"这次特别在意的"——
         用户点名过什么就把什么传进来。
+    open_browser : 默认 True。同一轮里连出好几份说明书时可以关掉，别刷屏。
     """
     from . import spec as sp
 
@@ -1318,12 +1333,69 @@ def sw_spec_sheet(
     out = sp.write_spec(
         cfg, user_set=user_set, dataset_id=dataset_id,
         title=title or "仿真说明书", ue_xy=ue_xy, highlight=highlight,
+        open_browser=open_browser,
     )
-    out["hint"] = (
-        "把 headline 和 notes 转述给用户，并给出 html_path 让他自己打开。"
-        "**不要把 HTML 内容或图贴回对话。**"
-    )
+    if out.get("writeback") == "post" and out.get("opened_in_browser"):
+        out["hint"] = (
+            "页面已经在用户浏览器里打开了——转述 headline 和 notes，"
+            "然后告诉他「要调参就在页面上改，改完点『应用到仿真』」，"
+            "接着调 sw_await_config 等他。**不要把 HTML 内容或图贴回对话。**"
+        )
+    else:
+        out["hint"] = (
+            "把 headline 和 notes 转述给用户，并给出 html_path 让他自己打开；"
+            f"回传走复制粘贴（{out.get('serve_error') or '未开浏览器'}）。"
+            "**不要把 HTML 内容或图贴回对话。**"
+        )
     return _jsonable(out)
+
+
+@mcp.tool()
+def sw_await_config(timeout_s: float = 90.0, spec_id: str | None = None) -> dict[str, Any]:
+    """等用户在说明书页面上点「应用到仿真」，把他改的参数取回来。
+
+    **紧跟在 ``sw_spec_sheet`` 之后调**（前提是它返回 ``writeback="post"``）。
+    用户在页面上拖几下滑块、点一下按钮，改动就到这里了——省掉"复制 → 切窗口
+    → 粘贴"三步。
+
+    返回 ``got=0`` **不是错误**，只是这段时间里用户没点。两种处理：
+
+    * 用户还在看 → 再调一次接着等；
+    * 用户已经在对话里说话了 → 别再等，按他说的做。
+
+    ``overrides`` 可以直接喂给 ``sw_revise(draft_id, **overrides)`` 或
+    ``sw_generate(config=...)``。**拿到后先复述一遍改了什么再动手**，
+    用户点错了得有机会喊停。
+
+    参数
+    ----
+    timeout_s : 最多等多久，默认 90 秒（上限 240）。别设太长，
+        MCP 客户端那边也有超时，卡住比等不到更难解释。
+    spec_id : 只收某一份说明书的回传。不传就收全部。
+    """
+    from . import bridge as br
+
+    subs = br.await_submission(min(float(timeout_s), 240.0), spec_id)
+    if not subs:
+        return {
+            "got": 0,
+            "waited_s": round(min(float(timeout_s), 240.0), 1),
+            "note": "这段时间里用户没点「应用到仿真」。不是错误——"
+                    "他要么还在看，要么已经改用对话说了。",
+            "bridge": br.status(),
+        }
+    # 多次点击以**最后一次**为准：用户改了又改，最后那下才是他的意思。
+    last = subs[-1]
+    return {
+        "got": len(subs),
+        "overrides": last.overrides,
+        "spec_id": last.spec_id,
+        "title": last.title,
+        "text": last.text,
+        "superseded": [s.overrides for s in subs[:-1]] or None,
+        "hint": "先向用户复述这几项改动，再调 sw_revise / sw_generate 落实。"
+                "改完记得重新出一份说明书。",
+    }
 
 
 def main() -> None:

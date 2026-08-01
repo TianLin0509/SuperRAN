@@ -18,20 +18,21 @@
 
 ```bash
 python tests/test_e2e.py         # 端到端 39 项
-python tests/test_mcp_server.py  # MCP 全链路 33 项
+python tests/test_mcp_server.py  # MCP 全链路 37 项
 python tests/test_raytracing.py  # 射线追踪与决策层 40 项
 python tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
-python tests/test_interference.py # IoT、测量域、场景预设、探测模式、文档计数 145 项
+python tests/test_interference.py # IoT、测量域、场景预设、探测模式、说明书回传、文档计数 262 项
 ```
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
 后前三个都要跑；改动 `linklevel.py` / `validate.py` / `calibration.py` /
 `gates.py` / `spec38901.py` 要跑 test_linklevel + test_gates；
 改动 `results.py` / `analysis.py` / `loader.py` 要跑 test_results；
-改动 `interference.py` / `scenario.py` / `presets.yaml` 要跑 test_interference。
+改动 `interference.py` / `scenario.py` / `presets.yaml` / `spec.py` / `bridge.py`
+要跑 test_interference（说明书与回传桥都在它第 9 节）。
 
 ## 与 ChannelHub 的边界
 
@@ -364,6 +365,46 @@ ChannelHub 的 `phy_sim/effective_array.py` 就是照这套硬件写的（模块
 跨图共享的东西（渐变、marker）用**写在元素上的 presentation attribute**
 （`fill="url(#sg)"`），别走 class。id 也要各用各的（`sg` / `sg2`）。
 
+### 回执要先于落盘发出，而且必须幂等
+
+说明书页面点「应用到仿真」是一次 POST。`do_POST` 的顺序是**先进内存收件箱、
+立刻回执并 flush、最后才落盘**——回执之前不做任何可能阻塞的 I/O。
+
+顺序反了的后果实测过：验证脚本在 `await_submission` 一返回就退出，服务随之消失，
+回执还没写完 socket 就断了。**agent 已经收到改动，页面却显示「回传失败，请改用复制」**。
+用户照做再粘一遍，同一份改动就进来两次——最坏的一种不一致：两边都以为自己是对的。
+
+所以还有幂等键：页面 fetch 失败会带**同一个 nonce** 重发一次，服务端见过就回
+`dup: true` 不再入库。nonce 里带 `Date.now()`，所以用户**真的点两次**仍然算两次
+（那是他的本意），只有内部自动重试是幂等的。
+
+连不上时页面说的是"连不上 agent（服务可能已退出）。**先看对话框**，
+它收到就会复述改动"——不是"失败了，请重发"。**结果不确定时就别断言结果。**
+
+### 说明书默认会弹浏览器，测试里必须关掉
+
+`write_spec(open_browser=True)` 是默认值。跑一次 `test_interference` 会调十几次
+`write_spec`，不关就是十几个浏览器窗口糊满屏幕。测试文件在 **import spec 之前**
+设 `SUPERWIRELESS_NO_BROWSER=1`。
+
+`generate.py` 里生成后的那份说明书显式传 `open_browser=False`：它是**存档**不是
+交互点。批量跑 20 个配置时不该弹 20 个窗口。要交互的那次在 `sw_spec_sheet`
+（配置敲定、开跑之前）。
+
+打开浏览器走 `os.startfile` 而不是 `webbrowser.open`：后者在没有 DISPLAY 或被
+沙箱限制时会挨个试一串命令行浏览器，其中有些会往 **stdout** 写东西，
+而 stdio 传输下 stdout 是 JSON-RPC 通道，一个字节杂音就能让会话崩掉。
+
+### 回传接口的白名单只能有一份
+
+`bridge._sanitize` 的白名单来自 `spec.editable_keys()`，也就是页面上那些控件
+（`_EDITABLE`）。**别在 bridge 里另抄一份**——抄了就会漂，然后出现"页面上能改、
+POST 回来被拒"或者反过来"页面没有的键也能塞进去"。
+
+页面是我们自己生成的，但**接口一旦开着就得按"任何人都能戳"来写**：只绑
+127.0.0.1、URL 里带每进程随机 token、POST 也要带同一个 token、值必须是标量。
+`test_interference` 第 9.9 节逐条验：越权键、嵌套值、错 token、未注册的说明书。
+
 ### 正则找 SVG 前要先剥掉 script
 
 调参面板的 JS 用字符串拼 SVG，`<svg.*?</svg>` 会把那段 JS 也捞成一张"图"——
@@ -567,6 +608,8 @@ ChannelHub 的 `doppler_hz` 来自**同一个 UE 相邻样本之间的位移**�
 - 新的默认硬件/载波口径 → `hardware.py`，它是**默认配置的唯一真相源**
 - 新的说明书示意图 → `spec.py` 加一个 `_svg_*` 函数并挂进 `render_html`；
   **画的必须是实际会跑的配置**，不是用户以为的那个
+- 新的可在页面上改的参数 → `spec._EDITABLE`，**只加这一处**：控件、payload、
+  回传白名单都从它派生（`spec.editable_keys()`）
 - 新场景 → `presets/presets.yaml`，不改代码。**加完必须跑一遍 `sw_probe_scenario` 把实测值写进 `expect`**——preset 里的 label 是设计意图，写着「高干扰」实际只有 2 dB 的事发生过
 - 新的干扰量或分级 → `interference.py`，门限改动等于改现场约定，先和用户对齐
 - 新射线追踪城市 → ChannelHub 的 `configs/scenes/`，`scenes.py` 自动发现

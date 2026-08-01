@@ -5,12 +5,17 @@
 from __future__ import annotations
 
 import math
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+# 说明书默认会弹浏览器——跑测试时不要。**必须在 import spec 之前设**，
+# 不然 write_spec 一调就是十几个窗口糊满屏幕。
+os.environ["SUPERWIRELESS_NO_BROWSER"] = "1"
 
 # Windows 中文控制台是 GBK，统一兜底（见 test_gates.py 同样的处理）。
 sys.stdout.reconfigure(errors="replace")
@@ -637,6 +642,86 @@ check('class="sec"' not in _h1, "扇区填充不靠 class（SVG style 是文档�
 check(_h1.count('fill="url(#sg)"') == 21, "静态图 21 个扇区都有渐变填充")
 check("url(#sg2)" in _js[0], "预览图用自己的渐变 id，不与静态图重名")
 check("\\n" not in _js[0], "脚本里不残留反斜杠转义的换行")
+
+# ---------------------------------------------------------------------------
+sect("9.9  回传桥：页面把改动直接送回 agent，不用复制粘贴")
+
+import json as _json  # noqa: E402
+import urllib.error as _ue  # noqa: E402
+import urllib.request as _urq  # noqa: E402
+
+from superwireless import bridge as _br  # noqa: E402
+
+_rb = sp.write_spec(dict(pl.load_presets()["company_64t4r_multicell"]["config"]),
+                    num_samples=60, title="test-bridge", open_browser=False)
+check(_rb["writeback"] == "post", f"回传通道通了（实得 {_rb['writeback']}，"
+                                  f"{_rb.get('serve_error')}）")
+check(bool(_rb["url"]) and _rb["url"].startswith("http://127.0.0.1:"),
+      "只绑环回地址，本机以外连不上")
+_hb = Path(_rb["html_path"]).read_text(encoding="utf-8")
+check('id="ap"' in _hb and "应用到仿真" in _hb, "页面上有「应用到仿真」按钮")
+check("location.protocol" in _hb,
+      "页面自己判断能不能 POST（file:// 下退回复制粘贴）")
+
+# 落盘那份和挂出去那份必须是同一个东西——不然用户拷走的 HTML 和他刚才看的不一样
+check(_urq.urlopen(_rb["url"]).read().decode("utf-8") == _hb,
+      "服务端返回的 HTML 与落盘的逐字相同")
+
+
+def _post(payload):
+    req = _urq.Request(_br.apply_url(), data=_json.dumps(payload).encode("utf-8"),
+                       headers={"Content-Type": "application/json"})
+    try:
+        r = _urq.urlopen(req)
+        return r.status, _json.loads(r.read().decode("utf-8"))
+    except _ue.HTTPError as e:
+        return e.code, _json.loads(e.read().decode("utf-8"))
+
+
+_code, _body = _post({"id": _rb["spec_id"], "overrides": {"num_sites": 19, "isd_m": 300},
+                      "nonce": "n1", "text": "改两项"})
+check(_code == 200 and _body.get("ok"), f"合法回传被收下（{_code} {_body}）")
+_got = _br.await_submission(3, _rb["spec_id"])
+check(len(_got) == 1 and _got[0].overrides == {"num_sites": 19, "isd_m": 300},
+      f"agent 侧原样收到（实得 {[s.overrides for s in _got]}）")
+check(not _br.await_submission(1, _rb["spec_id"]),
+      "取走即清空，同一条不会被读两次；没人点时返回空列表而不是抛异常")
+
+# **幂等键。** 回执可能在路上丢（服务正好退出、socket 被掐），页面会重发一次。
+# 没有 nonce 的话重发就是第二份改动，agent 看起来像用户点了两次。
+_post({"id": _rb["spec_id"], "overrides": {"isd_m": 400}, "nonce": "n2"})
+_c2, _b2 = _post({"id": _rb["spec_id"], "overrides": {"isd_m": 400}, "nonce": "n2"})
+check(_c2 == 200 and _b2.get("dup") is True, f"同 nonce 重发被识别为重复（{_b2}）")
+check(len(_br.await_submission(3, _rb["spec_id"])) == 1, "重发只算一份改动")
+check("nonce" in _js[0] and "setTimeout" in _js[0], "页面失败后会带同一个 nonce 重发一次")
+
+# --- 接口是开着的，就得按"任何人都能戳"来写 ---
+_c3, _b3 = _post({"id": _rb["spec_id"], "overrides": {"rm_rf": "/"}})
+check(_c3 == 400 and "rm_rf" in _b3.get("error", ""), f"白名单外的参数名被拒（{_b3}）")
+_c4, _b4 = _post({"id": _rb["spec_id"], "overrides": {"isd_m": {"nested": 1}}})
+check(_c4 == 400, f"非标量值被拒（{_b4}）")
+_c5, _b5 = _post({"id": "不存在的说明书", "overrides": {"isd_m": 300}})
+check(_c5 == 404, f"未注册的说明书被拒（{_b5}）")
+check(_br.allowed_for(_rb["spec_id"]) == sp.editable_keys() and "isd_m" in sp.editable_keys(),
+      "白名单就是页面上那些控件，没有另抄一份")
+try:
+    _urq.urlopen(_br.status()["base_url"] + "/s/deadbeef/" + _rb["spec_id"])
+    check(False, "错 token 的 URL 被拒")
+except _ue.HTTPError as _e:
+    check(_e.code == 404, f"错 token 的 URL 被拒（实得 {_e.code}）")
+
+# 关掉服务时必须**看得见地**降级，不能假装还能回传
+os.environ["SUPERWIRELESS_NO_SERVE"] = "1"
+try:
+    _rn = sp.write_spec(dict(pl.load_presets()["company_64t4r"]["config"]),
+                        title="test-noserve", open_browser=False)
+    check(_rn["writeback"] == "clipboard" and _rn["url"] is None,
+          "关掉服务后退回复制粘贴")
+    check(bool(_rn["serve_error"]), f"降级原因说清楚了（{_rn['serve_error']}）")
+    check("应用到仿真" in Path(_rn["html_path"]).read_text(encoding="utf-8"),
+          "按钮仍在 HTML 里（换台机器起了服务照样能用），只是页面自己不显示")
+finally:
+    os.environ.pop("SUPERWIRELESS_NO_SERVE", None)
 
 # ---------------------------------------------------------------------------
 sect("10  文档里的数字必须和代码对得上")

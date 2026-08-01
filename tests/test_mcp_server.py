@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -262,6 +263,18 @@ async def main() -> None:
             lst = _payload(await session.call_tool("sw_list_datasets", {}))
             print(f"  本机已有 {len(lst['datasets'])} 个数据集")
             check(len(lst["datasets"]) >= 1, "数据集列表可用")
+
+            print("\n" + "=" * 68 + "\n9  说明书回传：没人点也要干净返回\n" + "=" * 68)
+            # `got=0` 是**正常路径**，不是错误：用户可能还在看，也可能改用对话说了。
+            # 早先这里若抛异常或长时间挂住，agent 就会以为工具坏了并放弃这条交互。
+            _t0 = time.time()
+            wait = _payload(await session.call_tool("sw_await_config", {"timeout_s": 2}))
+            _el = time.time() - _t0
+            print(f"  等了 {_el:.1f} 秒，got={wait.get('got')}")
+            check(wait.get("got") == 0 and "error" not in wait, "没人点时干净返回 got=0")
+            check("note" in wait and "不是错误" in wait["note"], "明说超时不是错误")
+            check(2.0 <= _el < 8.0, f"真的按 timeout_s 等（实测 {_el:.1f} 秒）")
+            check(wait["bridge"]["enabled"] is True, "回传桥状态一并返回，便于排查")
 
 
 if __name__ == "__main__":

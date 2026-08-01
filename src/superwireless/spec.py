@@ -57,6 +57,7 @@ import time
 import uuid
 from typing import Any
 
+from . import bridge as br
 from .paths import artifacts_root
 
 # ---------------------------------------------------------------------------
@@ -557,8 +558,19 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
 )
 
 
-def _interactive(spec: dict[str, Any]) -> str:
-    """可交互的调参面板：改参数 → 实时看拓扑 → 一键复制回传给 agent。
+def editable_keys() -> frozenset[str]:
+    """页面上允许改的参数名。回传接口的白名单以此为准，别另抄一份。"""
+    return frozenset(k for k, *_ in _EDITABLE)
+
+
+def _interactive(spec: dict[str, Any], *, apply_url: str = "",
+                 spec_id: str = "") -> str:
+    """可交互的调参面板：改参数 → 实时看拓扑 → 回传给 agent。
+
+    **回传有两条路，主备关系不是二选一。** 页面从 ``http://127.0.0.1`` 打开时
+    走「应用到仿真」直接 POST 回 MCP 进程，用户点一下就完；从 ``file://`` 打开时
+    浏览器不许跨到环回源，自动退回「复制 → 粘回对话框」。同一份 HTML 两种都能用，
+    落盘的那份换台机器打开照样有效。
 
     **拓扑预览用的坐标由 ChannelHub 现算后内嵌**（ISD=1 的单位布局），
     前端只做线性缩放，不在 JS 里重写栅格逻辑——所以预览和真跑的几何一致，
@@ -601,13 +613,17 @@ def _interactive(spec: dict[str, Any]) -> str:
         "track_offset_m": float(cfg.get("track_offset_m", 80.0) or 80.0),
         "unit": unit_hex_layouts(),
         "title": spec["title"],
+        "post": apply_url,
+        "id": spec_id,
     }
     return f"""
-<p class="lead">改完点<b>复制</b>，把内容粘回对话框——agent 会照着它重新配置并重跑。
-只会带上<b>改动过</b>的项，没动的不进 payload。</p>
+<p class="lead">改完点<b>应用到仿真</b>，改动直接回到 agent——不用复制、不用切窗口。
+只会带上<b>改动过</b>的项，没动的不进 payload。
+<span class="src">（这份 HTML 从文件直接打开时没有回传通道，会自动退回复制粘贴。）</span></p>
 <div class="ctls">{"".join(rows)}</div>
 <div class="hero" id="prev"></div>
 <div class="pvbar">
+  <button class="btn" id="ap" hidden>应用到仿真</button>
   <button class="btn" id="cp">复制配置改动</button>
   <button class="btn ghost" id="rs">重置</button>
   <span class="src" id="msg"></span>
@@ -682,10 +698,16 @@ function diff(){{
   const d={{}};for(const k in cur)if(String(cur[k])!==String(ST.init[k]))d[k]=cur[k];
   return d;
 }}
+const AP=document.getElementById('ap');
+// file:// 打开时浏览器不许跨到环回源，fetch 必然被拦——那就不摆这个按钮，
+// 老老实实退回复制粘贴。同一份 HTML 两种打开方式都成立。
+const CANPOST=!!ST.post&&location.protocol.indexOf('http')===0;
+if(CANPOST)AP.hidden=false;
 function sync(){{
   draw();
   const d=diff(), ks=Object.keys(d);
   const t=document.getElementById('pl');
+  AP.disabled=!ks.length;
   if(!ks.length){{t.value='（还没有改动。调上面的参数后这里会出现可粘贴的内容。）';return;}}
   let s='【仿真配置调整】基于 '+ST.title+NL+'改动 '+ks.length+' 项：'+NL;
   for(const k of ks)s+='  '+k+': '+F(k,ST.init[k])+' -> '+F(k,d[k])+NL;
@@ -714,6 +736,23 @@ document.getElementById('cp').onclick=()=>{{
   if(navigator.clipboard)navigator.clipboard.writeText(t.value).then(()=>{{}},()=>{{}});
   t.setAttribute('readonly','');
   document.getElementById('msg').textContent=ok?'已复制，粘到对话框即可':'请手动全选复制上面的文本';
+}};
+AP.onclick=()=>{{
+  const d=diff(); if(!Object.keys(d).length)return;
+  const m=document.getElementById('msg');
+  m.textContent='正在送给 agent…';AP.disabled=true;
+  // nonce 让重发是幂等的：回执可能在路上丢，重发一次比让用户猜安全。
+  const body=JSON.stringify({{id:ST.id,overrides:d,nonce:ST.id+'-'+Date.now()+'-'+
+    Object.keys(d).sort().join(','),text:document.getElementById('pl').value}});
+  const send=()=>fetch(ST.post,{{method:'POST',
+    headers:{{'Content-Type':'application/json'}},body:body}}).then(r=>r.json());
+  send().catch(()=>new Promise(r=>setTimeout(r,400)).then(send))
+   .then(j=>{{m.textContent=j.ok?('已送达 agent（'+j.n+' 项）——回对话框看它怎么改'):
+                              ('没收下：'+(j.error||'未知原因')+'，可以改用复制');
+             AP.disabled=false;}})
+   .catch(()=>{{m.textContent='连不上 agent（服务可能已退出）。先看对话框，'
+                +'它收到就会复述改动；没有的话再用「复制配置改动」。';
+              AP.disabled=false;}});
 }};
 sync();
 </script>
@@ -972,6 +1011,9 @@ def render_html(
     spec: dict[str, Any],
     ue_xy: list[tuple[float, float]] | None = None,
     highlight: list[str] | None = None,
+    *,
+    apply_url: str = "",
+    spec_id: str = "",
 ) -> str:
     """渲染成分级呈现的单页：拓扑图打头，其余折进 tab。
 
@@ -980,6 +1022,9 @@ def render_html(
     剖面、参数全表折进 tab，用户按需点。
 
     tab 用纯 CSS（radio + label）实现，**离线双击打开也能用**，不依赖 JS。
+
+    ``apply_url`` / ``spec_id`` 给调参面板用：有它们时页面能把改动直接 POST 回
+    MCP 进程；没有（或用户从 ``file://`` 打开）时自动退回复制粘贴。
     """
     a = spec["array"]
 
@@ -1087,7 +1132,7 @@ def render_html(
 </section>
 
 <section id="pn2">
-{_interactive(spec)}
+{_interactive(spec, apply_url=apply_url, spec_id=spec_id)}
 </section>
 
 <section id="pn3">
@@ -1133,8 +1178,10 @@ def write_spec(
     title: str = "",
     ue_xy: list[tuple[float, float]] | None = None,
     highlight: list[str] | None = None,
+    serve: bool = True,
+    open_browser: bool = True,
 ) -> dict[str, Any]:
-    """生成说明书并落盘，返回结构化摘要 + 文件路径。
+    """生成说明书并落盘（默认顺手打开浏览器），返回结构化摘要 + 文件路径。
 
     HTML 落到 ``artifacts/specs/``；**对话里只回路径与摘要**，
     不要把图或整份 HTML 贴回去。
@@ -1142,6 +1189,11 @@ def write_spec(
     ``highlight`` 传本次对话里用户**专门提过**的参数名（如
     ``["isd_m", "num_interfering_ues"]``），它们会被顶到首屏关键信息卡的最前面
     并高亮——首屏因此既覆盖"做仿真通常最关心的"，也覆盖"这次特别在意的"。
+
+    ``serve=True`` 时把页面同时挂到 ``127.0.0.1`` 的环回服务上并返回 ``url``，
+    这样调参面板能把改动**直接 POST 回来**（``bridge.await_submission`` 接）。
+    起不来就退回 ``file://``，页面自动降级成复制粘贴——**降级要能看见**，
+    返回值里的 ``serve_error`` 会说明原因。
     """
     spec = build_spec(cfg, num_samples=num_samples, user_set=user_set,
                       dataset_id=dataset_id, title=title)
@@ -1152,8 +1204,24 @@ def write_spec(
     # 实测就这么丢过一份：HST 的拓扑图被单小区的覆盖成了一个孤零零的点。
     # 数据集句柄本身唯一，其余情况补一段随机后缀。
     stem = dataset_id or f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+
+    # 回传地址要**先拿到再渲染**——它是要写进页面 JS 的。
+    apply_url, serve_error = "", ""
+    if serve:
+        if not br.enabled():
+            serve_error = "SUPERWIRELESS_NO_SERVE 已关闭回传服务"
+        elif br.start() is None:
+            serve_error = "环回服务起不来（端口被占或被沙箱限制）"
+        else:
+            apply_url = br.apply_url() or ""
+
+    html = render_html(spec, ue_xy, highlight, apply_url=apply_url, spec_id=stem)
     path = out_dir / f"spec-{stem}.html"
-    path.write_text(render_html(spec, ue_xy, highlight), encoding="utf-8")
+    path.write_text(html, encoding="utf-8")
+
+    url = br.serve(stem, html, title=spec["title"],
+                   allowed=editable_keys()) if apply_url else None
+    opened = br.open_url(url or str(path)) if open_browser else False
 
     (out_dir / f"spec-{stem}.json").write_text(
         json.dumps({k: v for k, v in spec.items() if k != "config"},
@@ -1162,6 +1230,11 @@ def write_spec(
     )
     return {
         "html_path": str(path),
+        "url": url,
+        "spec_id": stem,
+        "opened_in_browser": opened,
+        "writeback": "post" if url else "clipboard",
+        "serve_error": serve_error or None,
         "json_path": str(out_dir / f"spec-{stem}.json"),
         "headline": headline(spec),
         "notes": spec["notes"],

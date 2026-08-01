@@ -738,6 +738,9 @@ def generate(
             dataset_id=dataset_id,
             title=f"仿真说明书 · {dataset_id}",
             ue_xy=_ue_xy,
+            # 生成后的这份是**存档**，不是交互点：批量跑 20 个配置时不该弹 20 个
+            # 浏览器窗口。要交互的那次在 `sw_spec_sheet`（配置敲定、开跑之前）。
+            open_browser=False,
         )
     except Exception as exc:  # noqa: BLE001
         summary["spec_sheet"] = {"error": f"{type(exc).__name__}: {exc}"}
