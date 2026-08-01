@@ -553,8 +553,8 @@ check("UE" in Path(_sheet["html_path"]).read_text(encoding="utf-8"),
       "生成后的说明书带真实撒点")
 
 # 分级呈现：拓扑图打头，其余折进 tab
-check(_h1.count('name="tb"') == 6, "六个 tab 都在")
-check(_h1.count('<section id="pn') == 6, "六个面板都在")
+check(_h1.count('name="tb"') == 7, "七个 tab 都在")
+check(_h1.count('<section id="pn') == 7, "七个面板都在")
 check('id="tb1" checked' in _h1, "默认停在总览")
 # tab 必须是纯 CSS 的：**JS 挂了、被禁用、或者浏览器老旧，页签也得能切**。
 # 页面现在确实有一段脚本（交互调参面板），但它不许碰页签。
@@ -603,7 +603,7 @@ print(f"  画布：单站 {_w7} / 多小区 {_w1}")
 check(_w7 < _w1, "单站用更小的画布（大画布只会得到一片空白加中间一个点）")
 
 # --- 交互式调参面板 ---
-check(_h1.count('name="tb"') == 6, "六个 tab（多了「改配置」）")
+check(_h1.count('name="tb"') == 7, "七个 tab（改配置 + 算法）")
 check('id="pn2"' in _h1 and 'data-k="isd_m"' in _h1, "调参面板在第 2 个页签")
 for _k in ("num_sites", "sectors_per_site", "isd_m", "num_ues", "num_bs_tx_ant",
            "carrier_freq_hz", "scenario", "channel_model", "link"):
@@ -647,8 +647,8 @@ check("\\n" not in _js[0], "脚本里不残留反斜杠转义的换行")
 sect("9.9  回传桥：页面把改动直接送回 agent，不用复制粘贴")
 
 import json as _json  # noqa: E402
-import urllib.error as _ue  # noqa: E402
 import time  # noqa: E402
+import urllib.error as _ue  # noqa: E402
 import urllib.request as _urq  # noqa: E402
 
 from superwireless import bridge as _br  # noqa: E402
@@ -772,6 +772,61 @@ try:
           "按钮仍在 HTML 里（换台机器起了服务照样能用），只是页面自己不显示")
 finally:
     os.environ.pop("SUPERWIRELESS_NO_SERVE", None)
+# ---------------------------------------------------------------------------
+sect("9.10  算法页签：这次用了哪些算法，全部可见")
+
+from superwireless import algorithms as _alg  # noqa: E402
+
+_ai = _alg.algorithm_list(dict(pl.load_presets()["company_64t4r_multicell"]["config"]))
+check(len(_ai) >= 13, f"算法清单至少 13 条（实得 {len(_ai)}）")
+check({a["stage"] for a in _ai} <= set(_alg.stages()), "每条都归到已知阶段")
+for _k in ("rank_adaptation", "noise_reference", "mcs_selection", "mu_pairing",
+           "su_mu_adaptation", "scheduler", "traffic", "experienced_throughput",
+           "harq", "receiver", "channel_est"):
+    check(any(a["key"] == _k for a in _ai), f"{_k} 在清单里")
+
+# **每条都得说清什么时候会失真** —— 只写"用了 XX 算法"没有价值
+_no_caveat = [a["key"] for a in _ai if not a.get("caveat")]
+check(not _no_caveat, f"每条算法都写了失真条件（缺：{_no_caveat}）")
+_no_why = [a["key"] for a in _ai if not a.get("why")]
+check(not _no_why, f"每条算法都写了为什么这么选（缺：{_no_why}）")
+
+# 清单必须跟着配置变，不能是写死的一张纸
+_leg = _alg.algorithm_list({"num_bs_tx_ant": 4, "num_sites": 1, "sectors_per_site": 1})
+_a64 = next(a for a in _ai if a["key"] == "antenna_model")
+_a4 = next(a for a in _leg if a["key"] == "antenna_model")
+check("1 驱 3" in _a64["choice"] and "legacy" in _a4["choice"],
+      "阵列模型那条随配置变（64T 走 1 驱 3、4T 走 legacy）")
+_r64 = next(a for a in _ai if a["key"] == "receiver")
+_r4 = next(a for a in _leg if a["key"] == "receiver")
+check(_r64["caveat"] != _r4["caveat"], "接收机那条在单/多小区下说法不同")
+
+# 现网锚点必须带出处
+check(_alg.FIELD_ANCHORS["avg_rank"] == 2.7 and _alg.FIELD_ANCHORS["avg_mcs"] == 15.0,
+      "现网锚点是用户给的那两个数")
+check("2026-08-02" in _alg.FIELD_ANCHORS["source"], "锚点带出处与日期")
+
+# --- 页面上真的能看见 ---
+_ha = _h1                                            # 多小区那份说明书
+check(_ha.count('name="tb"') == 7, "七个 tab（多了「算法」）")
+check('<label for="tb6">算法</label' in _ha, "算法页签有入口")
+check(_ha.count('<details class="algo"') >= 13, "13 条算法都渲染进页面")
+check("#tb6:checked~.panels>#pn6" in _ha, "算法页签能被 CSS 切出来")
+check("#tb7:checked~.panels>#pn7" in _ha, "参数全表顺延到第 7 个且仍可切换")
+
+# 默认折叠、点开才看细节 —— 否则一屏塞不下
+check("<details" in _ha and "open>" not in _ha.split('id="pn6"')[1][:4000],
+      "算法条目默认折叠")
+# **CSS 转义的坑**：▸ 用字面字符写，别用 \25B8（Python 会当八进制吃掉 \2）
+check("\25B8" not in _ha and "\25BE" not in _ha, "展开标记不用十六进制转义")
+check("\u25b8" in _ha and "\u25be" in _ha, "展开标记是字面的 ▸ ▾")
+check(not any(ord(c) < 9 or 11 <= ord(c) < 32 for c in _ha),
+      "页面里没有被转义咬坏的控制字符")
+
+# 关键结论必须出现在页面上，而不只是藏在代码注释里
+for _phrase in ("12 dB", "信道求逆功控", "单码字", "缓冲区非空", "秩 1", "平均 rank 2.7"):
+    check(_phrase in _ha, f"页面上写清了「{_phrase}」")
+
 
 # ---------------------------------------------------------------------------
 sect("10  文档里的数字必须和代码对得上")

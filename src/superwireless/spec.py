@@ -772,6 +772,58 @@ sync();
 """
 
 
+def _algorithms_panel(spec: dict[str, Any]) -> str:
+    """「算法」页签：这次仿真用到的每一个算法，点开看细节。
+
+    **一次仿真里嵌着十几个算法选择，平时全藏在代码里。** 用户看到的只有一个
+    "谱效 26.3"，但预编码用什么、MCS 怎么选、rank 怎么定、体验速率怎么掐，
+    每一个都会改变那个数字。这个页签把它们逐条摊开——用 ``<details>`` 折叠，
+    默认只显示"是什么/选了哪个"，点开才看公式、理由和失真条件。
+
+    纯 HTML，不依赖 JS——离线双击打开照样能展开。
+    """
+    from . import algorithms as alg  # noqa: PLC0415
+
+    items = alg.algorithm_list(spec["config"])
+    by_stage: dict[str, list[dict[str, Any]]] = {}
+    for it in items:
+        by_stage.setdefault(it["stage"], []).append(it)
+
+    out = ['<p class="lead">这次仿真实际用到的算法。<b>点任意一条展开</b>看公式、'
+           '为什么这么选、以及什么情况下它会让结论失真。</p>']
+    for st in alg.stages():
+        rows = by_stage.get(st)
+        if not rows:
+            continue
+        out.append(f'<h3>{_esc(st)}</h3>')
+        for it in rows:
+            body = []
+            if it.get("formula"):
+                body.append(f'<div class="fml">{_esc(it["formula"])}</div>')
+            if it.get("why"):
+                body.append(f'<p><b>为什么这么选。</b>{_bold(it["why"])}</p>')
+            if it.get("caveat"):
+                body.append(f'<div class="callout c-amber"><p><b>什么时候会失真。</b>'
+                            f'{_bold(it["caveat"])}</p></div>')
+            if it.get("alternatives"):
+                alts = "、".join(_esc(a) for a in it["alternatives"])
+                body.append(f'<p class="src">还可以选：{alts}</p>')
+            if it.get("source"):
+                body.append(f'<p class="src">依据：{_esc(it["source"])}</p>')
+            out.append(
+                f'<details class="algo"><summary><span class="an">{_esc(it["name"])}</span>'
+                f'<span class="ac">{_esc(it["choice"])}</span></summary>'
+                f'<div class="ab">{"".join(body)}</div></details>'
+            )
+    fa = alg.FIELD_ANCHORS
+    out.append(
+        f'<div class="callout c-blue"><p><b>现网对标锚点。</b>'
+        f'平均 MCS {fa["avg_mcs"]}（远点 {fa["avg_mcs_far"]}、近点 {fa["avg_mcs_near"]}）、'
+        f'平均 rank {fa["avg_rank"]}。来源：{_esc(fa["source"])}。'
+        f'<b>仿真结果明显偏离这几个数时，先怀疑口径而不是算法。</b></p></div>')
+    return "".join(out)
+
+
 def _svg_freq(spec: dict[str, Any]) -> str:
     """频域：RB 按 RBG 分组。"""
     f = spec["frequency"]
@@ -926,6 +978,7 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--border);
 @keyframes fade{from{opacity:0}to{opacity:1}}
 #tb1:checked~.panels>#pn1,#tb2:checked~.panels>#pn2,#tb3:checked~.panels>#pn3,
 #tb4:checked~.panels>#pn4,#tb5:checked~.panels>#pn5,
+#tb6:checked~.panels>#pn6,#tb7:checked~.panels>#pn7,
 #tb6:checked~.panels>#pn6{display:block}
 
 /* 关键信息卡 */
@@ -952,6 +1005,18 @@ h3{font-size:15.5px;font-weight:600;margin:22px 0 4px}
  background:var(--bg);color:var(--ink)}
 .ctl input:focus,.ctl select:focus{outline:2px solid var(--accent);outline-offset:-1px}
 .ctl .ch{font-size:11.5px;color:var(--ink-soft);margin-top:5px;opacity:.85}
+.algo{border:1px solid var(--border);border-radius:10px;margin:8px 0;background:var(--card)}
+.algo>summary{cursor:pointer;padding:11px 15px;display:flex;gap:12px;align-items:baseline;
+ flex-wrap:wrap;list-style:none}
+.algo>summary::-webkit-details-marker{display:none}
+.algo>summary::before{content:"▸";color:var(--accent);font-size:11px;margin-right:2px}
+.algo[open]>summary::before{content:"▾"}
+.algo>summary:hover{background:var(--tint)}
+.an{font-weight:600;min-width:150px}
+.ac{color:var(--accent);font-size:13.5px}
+.ab{padding:2px 15px 14px;border-top:1px solid var(--border)}
+.fml{background:var(--tint);border-radius:8px;padding:10px 14px;margin:10px 0;
+ font-family:ui-monospace,Consolas,monospace;font-size:12.5px;overflow-x:auto;white-space:pre-wrap}
 .pvbar{display:flex;align-items:center;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 /* 回执分两种状态：agent 正等着（绿）vs 已入收件箱、等它下次动作（琥珀）。
    对用户是完全不同的两件事，不能都用一样的灰字。 */
@@ -1129,7 +1194,7 @@ def render_html(
 ><input type="radio" name="tb" id="tb3"><label for="tb3">基站阵列</label
 ><input type="radio" name="tb" id="tb4"><label for="tb4">频域与时域</label
 ><input type="radio" name="tb" id="tb5"><label for="tb5">信道剖面</label
-><input type="radio" name="tb" id="tb6"><label for="tb6">参数全表</label>
+><input type="radio" name="tb" id="tb6"><label for="tb6">算法</label><input type="radio" name="tb" id="tb7"><label for="tb7">参数全表</label>
 <div class="panels">
 
 <section id="pn1">
@@ -1172,6 +1237,10 @@ def render_html(
 </section>
 
 <section id="pn6">
+{_algorithms_panel(spec)}
+</section>
+
+<section id="pn7">
 <p class="lead">{n_user}/{n_all} 项由用户指定，其余走默认值。
 <b>标着「默认」的都是系统替你定的</b>，不认可就改。</p>
 <div class="tbl-wrap"><table>

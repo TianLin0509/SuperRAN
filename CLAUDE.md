@@ -24,7 +24,8 @@ python tests/test_linklevel.py   # 谱效、可信度、物理层、IRC 62 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
-python tests/test_mumimo.py      # MU-MIMO 配对、预编码、功率分配、CSI 敏感性 37 项
+python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应、单码字 57 项
+python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒 30 项
 python tests/test_interference.py # IoT、测量域、场景预设、探测模式、说明书回传、文档计数 262 项
 ```
 
@@ -34,7 +35,8 @@ python tests/test_interference.py # IoT、测量域、场景预设、探测模�
 改动 `results.py` / `analysis.py` / `loader.py` 要跑 test_results；
 改动 `interference.py` / `scenario.py` / `presets.yaml` / `spec.py` / `bridge.py`
 要跑 test_interference（说明书与回传桥都在它第 9 节）；
-改动 `mumimo.py` 要跑 test_mumimo。
+改动 `mumimo.py` 要跑 test_mumimo；改动 `system.py` 要跑 test_system；
+改动 `algorithms.py` 要跑 test_interference（算法页签在它第 9.10 节）。
 
 ## 与 ChannelHub 的边界
 
