@@ -166,6 +166,78 @@ _ideal = mu.mu_link_performance(_Hm, noise_power=0.01, precoder="zf",
 check(_ideal.leakage_ratio < 1e-12,
       f"理想 CSI 下 ZF 残余干扰为零（实得 {_ideal.leakage_ratio:.2e}）")
 check(_ideal.csi_for_precoding == "h_true", "没传估计信道时标成 h_true")
+# ---------------------------------------------------------------------------
+sect("6  单码字谱效与 rank 自适应")
+
+# 用户级 SINR：RBG 内线性平均、RBG 间与流间 dB 域平均
+_s = np.full((32, 1), 10.0)
+check(abs(mu.user_sinr_db(_s, rb_per_rbg=16) - 10.0) < 1e-9, "全平信道的用户级 SINR 就是它本身")
+# **dB 域平均必须比线性平均保守** —— 单码字会被深衰的 RBG 拖下去
+_v = np.array([[100.0]] * 16 + [[0.01]] * 16)
+_db = mu.user_sinr_db(_v, rb_per_rbg=16)
+_lin = 10 * np.log10(_v.mean())
+print(f"  半好半坏：dB 域平均 {_db:.2f} dB，线性平均 {_lin:.2f} dB")
+check(_db < _lin - 10, "dB 域平均显著低于线性平均（单码字被深衰 RBG 拖累）")
+check(abs(_db) < 1e-6, f"两个 RBG 各 +20/-20 dB，dB 域平均是 0（实得 {_db}）")
+
+# 谱效 = rank x MCS 谱效
+_se1, _m1 = mu.se_from_sinr(20.0, 1)
+_se2, _m2 = mu.se_from_sinr(20.0, 2)
+check(abs(_se2 - 2 * _se1) < 1e-9, "同 SINR 下谱效严格正比于 rank")
+check(mu.se_from_sinr(30.0, 1)[1].index >= _m1.index, "SINR 越高 MCS 不降")
+
+# rank 自适应
+_rng2 = np.random.default_rng(11)
+_hh = ((_rng2.standard_normal((1, 32, 16, 4)) + 1j * _rng2.standard_normal((1, 32, 16, 4)))
+       / np.sqrt(2))
+_lo = mu.su_rank_adaptation(_hh, noise_power=mu.noise_from_geometric_sinr(_hh, 0.0))
+_hi = mu.su_rank_adaptation(_hh, noise_power=mu.noise_from_geometric_sinr(_hh, 30.0))
+print(f"  几何 SINR 0 dB -> rank {_lo.rank} MCS {_lo.mcs}；30 dB -> rank {_hi.rank} MCS {_hi.mcs}")
+check(_lo.rank <= _hi.rank, "信噪比高时选的秩不低于低信噪比时")
+check(len(_hi.candidates) == 4, "四个 rank 候选都算过并留在结果里")
+check(all(c["rank"] == i + 1 for i, c in enumerate(_hi.candidates)), "候选按 rank 排列")
+check(_hi.se == max(c["se"] for c in _hi.candidates), "选中的就是谱效最高的候选")
+
+# **噪声口径**：用 mean(|h|^2) 反推会把阵列增益算两遍，实测差 12 dB
+_n_anchor = mu.noise_from_geometric_sinr(_hh, 15.0)
+_hb = _hh.mean(axis=0)
+_n_naive = float(np.mean(np.abs(_hb) ** 2)) / 10 ** 1.5
+_delta = 10 * np.log10(_n_anchor / _n_naive)
+print(f"  两种噪声口径相差 {_delta:.1f} dB")
+check(_delta > 6.0, f"锚定口径的噪声显著高于 mean(|h|²) 口径（差 {_delta:.1f} dB）")
+check(mu.su_rank_adaptation(_hh, noise_power=_n_naive).mcs
+      > mu.su_rank_adaptation(_hh, noise_power=_n_anchor).mcs,
+      "错口径会系统性高估 MCS —— 这正是它危险的地方")
+
+_r1 = [c for c in mu.su_rank_adaptation(
+    _hh, noise_power=mu.noise_from_geometric_sinr(_hh, 12.0)).candidates
+    if c["rank"] == 1][0]
+check(abs(_r1["sinr_db"] - 12.0) < 1.5,
+      f"rank1 的用户级 SINR 锚在几何 SINR 上（实得 {_r1['sinr_db']}，目标 12.0）")
+
+# ---------------------------------------------------------------------------
+sect("7  SU / MU 自适应")
+
+_Hs = make_users(n_k=6, n_rb=32, n_bs=32, n_ue=4, seed=13)
+_npow = mu.noise_from_geometric_sinr(_Hs[0], 15.0)
+_dec = mu.su_mu_adaptation(_Hs, noise_power=_npow)
+print(f"  {_dec.note}")
+print(f"  判决 {_dec.mode}：小区谱效 {_dec.cell_se:.3f}"
+      f"（SU {_dec.su_se:.3f} / MU {_dec.mu_se:.3f}）")
+check(_dec.mode in ("SU", "MU"), "给出明确判决")
+check(abs(_dec.cell_se - max(_dec.su_se, _dec.mu_se)) < 1e-9, "小区谱效取两者中的高者")
+check(_dec.su_rank <= mu.SU_MAX_RANK, f"SU 秩不超过 {mu.SU_MAX_RANK}")
+check(all(d["rank"] <= mu.MU_MAX_RANK for d in _dec.mu_per_user),
+      f"MU 每用户秩不超过 {mu.MU_MAX_RANK}（工程约束）")
+check(bool(_dec.mu_users), "MU 方案确实配了人")
+check(len(_dec.mu_per_user) == len(_dec.mu_users), "逐用户明细齐全")
+
+# 功率按流均分：rank2 的用户拿 2 份
+_he2 = mu.effective_user_channels(_Hs[:3], streams_per_user=2)
+_, _pp = mu.mu_precoder(_he2, method="zf", noise_power=_npow)
+check(abs(_pp[0].sum() - 1.0) < 1e-9, "总功率仍归一")
+check(abs(_pp[0][0] - 1.0 / 6) < 1e-9, "6 条流每流 1/6，即 rank2 的用户拿 1/3")
+
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)

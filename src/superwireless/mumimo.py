@@ -32,6 +32,56 @@ PairingCriterion = Literal["sus", "greedy_sum_rate", "all", "best_single"]
 MuPrecoder = Literal["zf", "rzf", "mrt"]
 PowerAllocation = Literal["equal", "waterfilling"]
 
+# 工程约定（用户 2026-08-02 给的现场口径）
+MU_MAX_RANK = 2          # MU 配对时每用户最多 2 流，硬约束
+SU_MAX_RANK = 4          # SU 发送可以到 4 流
+RB_PER_RBG = 16          # 17 RBG × 16 RB = 272
+
+
+# ---------------------------------------------------------------------------
+# 0 · 单码字谱效：SINR → MCS → rank × 谱效
+# ---------------------------------------------------------------------------
+def user_sinr_db(sinr_lin_per_rb: np.ndarray, *, rb_per_rbg: int = RB_PER_RBG) -> float:
+    """把 ``[RB, stream]`` 的线性 SINR 压成一个**用户级 SINR**（dB）。
+
+    口径（用户 2026-08-02 定）::
+
+        逐 RB SINR → RBG 内聚合 → 各 RBG 的 dB 值算术平均 → 各流的 dB 值算术平均
+
+    **为什么不是逐 RB 算谱效再平均。** 一个用户一个 TTI 只发**一个码字**，
+    这个码字用同一个 MCS 覆盖全部 RB 与全部流。所以必须先把 SINR 压成一个数
+    再查 MCS，而不是逐 RB 查完再平均——后者等于假设每个 RB 能用不同 MCS，
+    会系统性高估。两者的差正是单码字相对多码字的损失。
+
+    dB 域平均（即几何平均）比线性平均保守，这是链路自适应的常规做法：
+    深衰的那几个 RBG 会把整个码字拖下去，线性平均会把它们的影响冲淡。
+
+    RBG **内部**用线性域平均（同一个调度单位，功率域相加合理），
+    RBG **之间**用 dB 域平均。
+    """
+    s = np.asarray(sinr_lin_per_rb, dtype=float)
+    if s.ndim == 1:
+        s = s[:, None]
+    n_rb = s.shape[0]
+    step = max(1, min(int(rb_per_rbg), n_rb))
+    # RB → RBG（线性域平均）
+    n_rbg = int(np.ceil(n_rb / step))
+    rbg = np.stack([s[i * step:(i + 1) * step].mean(axis=0) for i in range(n_rbg)])
+    # RBG 与流两个维度都在 dB 域取算术平均（顺序无关，都是 dB 域算术平均）
+    return float(np.mean(10.0 * np.log10(np.maximum(rbg, _EPS))))
+
+
+def se_from_sinr(sinr_db: float, rank: int, *, table: int = 3,
+                 target_bler: float = 0.1) -> tuple[float, Any]:
+    """用户级 SINR + rank → ``(谱效, Mcs)``。谱效 = ``rank × MCS 的谱效``。
+
+    表 3 是公司实测的 20B NewTx 曲线（28 档 MCS），最贴近现网。
+    """
+    from . import linkadapt as la  # noqa: PLC0415
+
+    mcs = la.select_mcs(float(sinr_db), table=table, target_bler=target_bler)
+    return float(rank) * float(mcs.se), mcs
+
 
 # ---------------------------------------------------------------------------
 # 1 · 逐用户等效信道
@@ -420,6 +470,234 @@ def mu_link_performance_from_effective(
         jain_fairness=jain,
         leakage_ratio=leak_num / max(leak_den, _EPS),
     )
+
+
+def noise_from_geometric_sinr(h: np.ndarray, sinr_db: float, *,
+                              total_power: float = 1.0) -> float:
+    """由 ChannelHub 的几何 ``sinr_dB`` 反推噪声功率，**口径不重复计增益**。
+
+    约定：``rank=1``（全功率压在最强特征方向）时的后波束 SINR
+    **恰好等于** ChannelHub 报的几何 ``sinr_dB``。即::
+
+        noise = σ₁² · P / 10^(sinr_dB/10)
+
+    **别用 ``mean(|h|²)`` 反推。** ChannelHub 的几何 SINR 信号项里已经含了
+    ``N_ant·|w^H a|²`` 的波束赋形增益（见 CLAUDE.md「IoT 不是 snr_dB 减 sinr_dB」），
+    再按平均单天线功率反推噪声、然后叠一次 SVD 的阵列增益，就是**把增益算了两遍**。
+
+    实测这一步值 **12 dB**，而且它不是"精度问题"是"另一个答案"：
+    同一批数据（几何 SINR 中位 15.8 dB），两种口径下 rank 自适应的结果是
+
+    ==================  ========  ========  ==========
+    噪声口径             平均 rank  平均 MCS  MCS 范围
+    ==================  ========  ========  ==========
+    ``mean(|h|²)`` 反推    3.90      23.5      10~27
+    锚定 rank1（本函数）    2.23      11.1       0~23
+    现网实测锚点           2.70      15.0       5~25
+    ==================  ========  ========  ==========
+
+    前者几乎所有用户都判到 rank 4、MCS 顶格，一眼就能看出不对——
+    但如果没有现网锚点作对照，它长得完全像一份正常结果。
+    """
+    hb = np.asarray(h)
+    hb = hb.mean(axis=0) if hb.ndim == 4 else hb
+    n_rb = hb.shape[0]
+    step = max(1, n_rb // 32)                  # 抽样即可，σ₁ 在频域上很平
+    s1 = float(np.mean([
+        np.linalg.svd(hb[f].conj().T, compute_uv=False)[0] ** 2
+        for f in range(0, n_rb, step)
+    ]))
+    return s1 * float(total_power) / max(10.0 ** (float(sinr_db) / 10.0), _EPS)
+
+
+@dataclass
+class RankChoice:
+    """一次 rank 自适应的结果与它的全部候选。"""
+
+    rank: int
+    sinr_db: float
+    mcs: int
+    se: float
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"rank": self.rank, "sinr_db": round(self.sinr_db, 2),
+                "mcs": self.mcs, "se": round(self.se, 4),
+                "candidates": self.candidates}
+
+
+def su_rank_adaptation(h: np.ndarray, *, noise_power: float,
+                       max_rank: int = SU_MAX_RANK, table: int = 3,
+                       target_bler: float = 0.1,
+                       total_power: float = 1.0) -> RankChoice:
+    """单用户 rank 自适应：遍历 rank 1..max_rank，取谱效最高的那个。
+
+    **这是个真实的权衡，不是"rank 越高越好"。** 总功率固定，rank 个流均分，
+    所以：
+
+    * rank 1 —— 全部功率压在最强流上，BF 增益最大、SINR 最高、MCS 最高，
+      但 ``SE = 1 × MCS谱效``，只有一条流，吃亏在流数上。
+    * rank 4 —— 每流只有 P/4，弱流的 SINR 很低，把用户级 SINR（dB 域平均）
+      拖下去，MCS 掉档，但乘的是 4。
+
+    最优点通常在中间。用户给的现网锚点是**平均 rank 2.7**，
+    可以用 :func:`calibration_summary` 对一下。
+
+    SINR 口径：SVD 预编码后逐流 ``|σ_k|²·(P/rank)/σ_n²``，
+    再按 :func:`user_sinr_db` 压成一个数（单码字）。
+    """
+    hb = np.asarray(h)
+    hb = hb.mean(axis=0) if hb.ndim == 4 else hb          # [RB, BS, UE]
+    n_rb = hb.shape[0]
+    r_max = max(1, min(int(max_rank), hb.shape[1], hb.shape[2]))
+
+    # 逐 RB 的奇异值，一次算好给所有 rank 复用
+    sv = np.stack([np.linalg.svd(hb[f].conj().T, compute_uv=False) for f in range(n_rb)])
+
+    best: RankChoice | None = None
+    cands: list[dict[str, Any]] = []
+    for r in range(1, r_max + 1):
+        p_per = float(total_power) / r
+        sinr = (sv[:, :r] ** 2) * p_per / max(float(noise_power), _EPS)   # [RB, r]
+        s_db = user_sinr_db(sinr)
+        se, mcs = se_from_sinr(s_db, r, table=table, target_bler=target_bler)
+        cands.append({"rank": r, "sinr_db": round(s_db, 2), "mcs": mcs.index,
+                      "se": round(se, 4)})
+        if best is None or se > best.se:
+            best = RankChoice(r, s_db, mcs.index, se)
+    assert best is not None
+    best.candidates = cands
+    return best
+
+
+@dataclass
+class CellDecision:
+    """SU / MU 自适应的判决：这一个 TTI 到底怎么发。"""
+
+    mode: str                      # "SU" 或 "MU"
+    cell_se: float                 # 小区谱效（一个 TTI 内的和谱效）
+    su_se: float
+    mu_se: float
+    su_user: int
+    su_rank: int
+    su_mcs: int
+    mu_users: list[int]
+    mu_per_user: list[dict[str, Any]] = field(default_factory=list)
+    note: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "cell_se": round(self.cell_se, 4),
+            "su_se": round(self.su_se, 4), "mu_se": round(self.mu_se, 4),
+            "gain_of_mu": round(self.mu_se - self.su_se, 4),
+            "su": {"user": self.su_user, "rank": self.su_rank, "mcs": self.su_mcs},
+            "mu": {"users": self.mu_users, "per_user": self.mu_per_user},
+            "note": self.note,
+        }
+
+
+def su_mu_adaptation(
+    h_users: list[np.ndarray],
+    *,
+    noise_power: float,
+    h_users_for_precoding: list[np.ndarray] | None = None,
+    mu_rank: int = MU_MAX_RANK,
+    su_max_rank: int = SU_MAX_RANK,
+    max_mu_users: int = 4,
+    precoder: MuPrecoder = "zf",
+    table: int = 3,
+    target_bler: float = 0.1,
+) -> CellDecision:
+    """SU / MU 自适应：同一个 TTI 里，两种发法哪个小区谱效高就用哪个。
+
+    **判据是小区谱效，不是用户间正交度。** 这是用户 2026-08-02 定的口径——
+    现场没有明确的相关性门限，实际做法就是把两种方案都算一遍取高的：
+
+    * **SU** —— 一个 TTI 只服务一个用户，**没有 MU 干扰**，rank 可以到 4。
+      取所有用户里 rank 自适应后谱效最高的那个。
+    * **MU** —— 配对多个用户同时发，每用户 rank 固定 2（工程约束），
+      功率按流均分（rank2 的用户拿 2 份），代价是 CSI 误差导致的残余干扰。
+
+    SU 之所以能赢，是因为它没干扰且能开到 rank 4；MU 之所以能赢，
+    是因为流数多。两者不是一个总能压另一个。
+
+    配对候选用贪心粗选（用户说"简单粗估即可，不用特别精细"）：
+    按等效信道范数排序，逐个加入直到 ``max_mu_users`` 或加了反而更差。
+    """
+    n_k = len(h_users)
+    hp = h_users_for_precoding or h_users
+
+    # --- SU 候选：逐用户 rank 自适应，取最好的那个 ---
+    su_best, su_user = None, 0
+    for u in range(n_k):
+        rc = su_rank_adaptation(h_users[u], noise_power=noise_power,
+                                max_rank=su_max_rank, table=table,
+                                target_bler=target_bler)
+        if su_best is None or rc.se > su_best.se:
+            su_best, su_user = rc, u
+    assert su_best is not None
+
+    # --- MU 候选：贪心加人，每人 rank=mu_rank ---
+    he_all = effective_user_channels(hp, streams_per_user=mu_rank)
+    order = list(np.argsort(-np.linalg.norm(he_all.mean(axis=2)[:, 0, :], axis=1)))
+    cap = max(1, min(int(max_mu_users), n_k, he_all.shape[-1] // max(mu_rank, 1)))
+
+    sel: list[int] = []
+    mu_best_se, mu_best_detail = 0.0, []
+    for cand in order:
+        if len(sel) >= cap:
+            break
+        trial = [*sel, int(cand)]
+        se, detail = _mu_cell_se(h_users, hp, trial, noise_power=noise_power,
+                                 rank=mu_rank, precoder=precoder, table=table,
+                                 target_bler=target_bler)
+        if se <= mu_best_se and sel:          # 加了反而更差就不加
+            continue
+        sel, mu_best_se, mu_best_detail = trial, se, detail
+
+    mode = "MU" if mu_best_se > su_best.se else "SU"
+    return CellDecision(
+        mode=mode,
+        cell_se=max(mu_best_se, su_best.se),
+        su_se=su_best.se, mu_se=mu_best_se,
+        su_user=su_user, su_rank=su_best.rank, su_mcs=su_best.mcs,
+        mu_users=sel, mu_per_user=mu_best_detail,
+        note=(f"MU 配 {len(sel)} 个用户每人 rank{mu_rank}，"
+              f"SU 单用户 rank{su_best.rank}；"
+              f"{'MU' if mode == 'MU' else 'SU'} 高 "
+              f"{abs(mu_best_se - su_best.se):.3f} bit/s/Hz"),
+    )
+
+
+def _mu_cell_se(h_eval: list[np.ndarray], h_prec: list[np.ndarray], users: list[int],
+                *, noise_power: float, rank: int, precoder: MuPrecoder,
+                table: int, target_bler: float) -> tuple[float, list[dict[str, Any]]]:
+    """给定配对集合，算这一个 TTI 的小区谱效（单码字口径）。"""
+    he_v = effective_user_channels([h_eval[u] for u in users], streams_per_user=rank)
+    he_p = effective_user_channels([h_prec[u] for u in users], streams_per_user=rank)
+    n_k, n_s, n_rb, _ = he_v.shape
+    n_str = n_k * n_s
+    if n_str > he_v.shape[-1]:
+        return 0.0, []
+
+    w, pw = mu_precoder(he_p, method=precoder, noise_power=noise_power,
+                        total_power=1.0, power_allocation="equal")
+    sinr = np.zeros((n_rb, n_str))
+    for f in range(n_rb):
+        g = he_v[:, :, f, :].reshape(n_str, -1) @ w[f]
+        p = (np.abs(g) ** 2) * pw[f][None, :]
+        for k in range(n_str):
+            sinr[f, k] = p[k, k] / max(float(np.sum(p[k]) - p[k, k]) + noise_power, _EPS)
+
+    total, detail = 0.0, []
+    for i, u in enumerate(users):
+        s_db = user_sinr_db(sinr[:, i * n_s:(i + 1) * n_s])   # 该用户的全部流
+        se, mcs = se_from_sinr(s_db, n_s, table=table, target_bler=target_bler)
+        total += se
+        detail.append({"user": int(u), "rank": n_s, "sinr_db": round(s_db, 2),
+                       "mcs": mcs.index, "se": round(se, 4)})
+    return total, detail
 
 
 def mu_link_performance(
