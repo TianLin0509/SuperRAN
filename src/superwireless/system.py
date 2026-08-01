@@ -160,6 +160,23 @@ class UeLinkTable:
     outage: np.ndarray | None = None     # [snapshot] 该快照下根本调度不动
 
 
+def group_samples_by_ue(n_samples: int, num_ues: int) -> list[list[int]]:
+    """把数据集里的样本按 UE 分组。
+
+    **样本数不等于用户数。** ChannelHub 一次生成 ``num_samples`` 个样本，
+    分布在 ``num_ues`` 个 UE 位置上（轮转分配，每 UE
+    ``num_samples/num_ues`` 个）。把每个样本当成一个独立用户，
+    小区就被塞进了 4 倍的人——实测 40 样本 / 10 UE 的配置下，
+    每用户谱效从应有的 0.32 掉到 0.08，**看起来像边缘用户被饿死**，
+    其实是分母大了 4 倍。
+
+    同一个 UE 的多个样本是**时间相关的**（多普勒就是从相邻样本的位移算的），
+    所以它们正好当这个 UE 的信道快照序列用。
+    """
+    n_ue = max(1, min(int(num_ues), int(n_samples)))
+    return [list(range(u, int(n_samples), n_ue)) for u in range(n_ue)]
+
+
 def build_link_tables(
     h_users: list[np.ndarray],
     geo_sinr_db: list[float],
@@ -168,6 +185,7 @@ def build_link_tables(
     table: int = 3,
     target_bler: float = 0.1,
     num_snapshots: int = 1,
+    num_ues: int | None = None,
 ) -> list[UeLinkTable]:
     """第一相：逐 UE 把 rank 1..max_rank 的 SINR / MCS / 谱效全部算好。
 
@@ -175,7 +193,21 @@ def build_link_tables(
 
     ``h_users[i]`` 形状 ``[T, RB, BS, UE]``；``T > 1`` 时把每个时隙当一个
     独立快照（ChannelHub 的多时隙是时间相关的，正好用来表达信道起伏）。
+
+    ``num_ues`` 给定时，按 :func:`group_samples_by_ue` 把样本合并成这么多个
+    用户，同一 UE 的多个样本当作它的快照序列。**不给的话每个样本算一个用户**
+    ——那通常不是你想要的，见该函数的说明。
     """
+    if num_ues is not None and num_ues < len(h_users):
+        groups = group_samples_by_ue(len(h_users), num_ues)
+        merged_h, merged_g = [], []
+        for g in groups:
+            merged_h.append(np.concatenate(
+                [np.asarray(h_users[i]).reshape(-1, *np.asarray(h_users[i]).shape[-3:])
+                 for i in g], axis=0))
+            merged_g.append(float(np.nanmean([geo_sinr_db[i] for i in g])))
+        h_users, geo_sinr_db = merged_h, merged_g
+
     out: list[UeLinkTable] = []
     for i, h in enumerate(h_users):
         hh = np.asarray(h)

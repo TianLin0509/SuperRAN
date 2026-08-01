@@ -1524,7 +1524,11 @@ def sw_system_sim(
         return {"error": f"取不到信道或 sinr_dB：{exc}"}
 
     h_users = [np.asarray(h[i]) for i in range(h.shape[0])]
-    tables = sysm.build_link_tables(h_users, [float(x) for x in sinr])
+    # **样本数不是用户数。** 数据集里 num_samples 个样本分布在 num_ues 个
+    # UE 位置上；不按 UE 合并的话小区里会多出好几倍的人，
+    # 每用户谱效被摊薄（实测 40 样本/10 UE 时从 0.32 掉到 0.08）。
+    n_ue = int(ds.config.get("num_ues") or 0) or None
+    tables = sysm.build_link_tables(h_users, [float(x) for x in sinr], num_ues=n_ue)
 
     res = sysm.simulate(
         tables,
@@ -1538,6 +1542,8 @@ def sw_system_sim(
     )
     out = res.as_dict()
     out["dataset_id"] = dataset_id
+    out["num_ues"] = len(tables)
+    out["num_samples"] = len(h_users)
     out["summary"] = res.text()
     out["hint"] = ("先把 summary 念给用户，再把 notes 里的每一条都说出来——"
                    "那些是让这组数字不成立的条件。用户级明细在 users 里。")

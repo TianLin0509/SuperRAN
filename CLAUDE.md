@@ -25,7 +25,7 @@ python tests/test_gates.py       # 校准、标准表、三道门、统计判决
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
 python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应、单码字 57 项
-python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒 30 项
+python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒 39 项
 python tests/test_interference.py # IoT、测量域、场景预设、探测模式、说明书回传、文档计数 262 项
 ```
 
@@ -481,6 +481,20 @@ Python 侧：反斜杠 + 数字 是合法的八进制转义，
 结论：CSS 里要中文就**直接写中文**，文件本来就是 UTF-8；
 真要写转义就用 raw 字符串，并给每个转义补足 6 位或补一个空格作结束符。
 这个只有在浏览器里看 `getComputedStyle(el,'::before').content` 才发现得了。
+
+### 样本数不是用户数
+
+数据集里 `num_samples` 个样本分布在 `num_ues` 个 UE 位置上（轮转分配）。
+同一个 UE 的多个样本是**时间相关的**（多普勒就是从相邻样本的位移算的），
+正好当这个 UE 的信道快照序列用。
+
+把每个样本当成一个独立用户，小区里就凭空多出好几倍的人。实测 40 样本 / 10 UE：
+每用户谱效从应有的 0.32 掉到 **0.08**，5% 边缘从 0.194 掉到 0.040——
+**表现出来像"边缘用户被调度器饿死了"**，我当时的第一反应就是去查 PF 有没有把人饿死，
+查了半天 outage 全是 0%。真因只是分母大了 4 倍。
+
+`system.group_samples_by_ue()` 负责分组，`build_link_tables(num_ues=...)` 用它。
+`sw_system_sim` 从 `ds.config["num_ues"]` 自动读。
 
 ### 回执要先于落盘发出，而且必须幂等
 

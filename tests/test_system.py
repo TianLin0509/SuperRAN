@@ -33,7 +33,7 @@ def fake_tables(n_ue=8, n_snap=8, sinr_lo=0.0, sinr_hi=25.0, seed=0):
     rng = np.random.default_rng(seed)
     geo = np.linspace(sinr_hi, sinr_lo, n_ue)
     hs = []
-    for u in range(n_ue):
+    for _ in range(n_ue):
         h = ((rng.standard_normal((n_snap, 24, 16, 4))
               + 1j * rng.standard_normal((n_snap, 24, 16, 4))) / np.sqrt(2))
         hs.append(h)
@@ -200,6 +200,38 @@ check(_big.config["system"]["num_tti"] >= 100_000, "确实跑了十万个 TTI")
 check(_el < 20.0, f"十万 TTI 在 20 秒内跑完（实得 {_el:.2f}s）")
 check(mu.MU_MAX_RANK == 2 and mu.SU_MAX_RANK == 4, "MU/SU 秩上限是现场定的工程约束")
 
+
+# ---------------------------------------------------------------------------
+sect("8  样本数不是用户数")
+
+# **这条从一次真实误判来的。** 40 个样本分布在 10 个 UE 位置上，
+# 把每个样本当独立用户，小区里凭空多出 4 倍的人，每用户谱效被摊薄 4 倍——
+# 表现出来是"5% 边缘用户谱效差一个数量级"，看起来像调度器把人饿死了。
+_g = sysm.group_samples_by_ue(40, 10)
+check(len(_g) == 10, f"40 个样本分成 10 个 UE（实得 {len(_g)}）")
+check(sorted(i for grp in _g for i in grp) == list(range(40)), "样本不重不漏")
+check(all(len(grp) == 4 for grp in _g), "每个 UE 拿到 4 个样本")
+check(_g[0] == [0, 10, 20, 30], f"按轮转分组（实得 {_g[0]}）")
+
+_hs = [np.ones((2, 12, 16, 4), dtype=complex) for _ in range(40)]
+_merged = sysm.build_link_tables(_hs, [15.0] * 40, num_ues=10)
+check(len(_merged) == 10, f"按 num_ues 合并后是 10 个用户（实得 {len(_merged)}）")
+check(_merged[0].sinr_db.shape[0] == 8, "合并后每 UE 有 4 样本 x 2 时隙 = 8 个快照")
+_unmerged = sysm.build_link_tables(_hs, [15.0] * 40)
+check(len(_unmerged) == 40, "不给 num_ues 时仍是每样本一个用户（向后兼容）")
+
+# 用户数直接决定每用户谱效 —— 同样的小区容量摊给不同人数
+_r10 = sysm.simulate(_merged, sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=11),
+                     traffic=sysm.TrafficConfig(model="full_buffer"))
+_r40 = sysm.simulate(_unmerged, sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=11),
+                     traffic=sysm.TrafficConfig(model="full_buffer"))
+_p10 = float(np.mean([x["served_mbps"] for x in _r10.users]))
+_p40 = float(np.mean([x["served_mbps"] for x in _r40.users]))
+print(f"  10 用户每人 {_p10:.1f} Mbps / 40 用户每人 {_p40:.1f} Mbps  比值 {_p10 / _p40:.2f}")
+check(_p10 > _p40 * 2.5, f"用户数翻 4 倍，每用户吞吐大致降到 1/4（比值 {_p10 / _p40:.2f}）")
+check(abs(_r10.cell["cell_served_mbps"] - _r40.cell["cell_served_mbps"])
+      / max(_r10.cell["cell_served_mbps"], 1) < 0.15,
+      "小区总吞吐基本不变——变的只是分给几个人")
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:
