@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import inspect as _inspect
 import sys
 from pathlib import Path
 
@@ -261,6 +262,64 @@ print(f"  比值 0.8 -> MU 占比 {_r_su.cell['mu_share']:.0%}；"
 check(_r_mu.cell["mu_share"] > 0.5, "MU 划算时确实切过去")
 check(_r_mu.cell["cell_served_mbps"] > _r_su.cell["cell_served_mbps"],
       "切到 MU 之后小区吞吐确实更高")
+
+# ---------------------------------------------------------------------------
+sect("10  健壮性回归：这些都是真踩到过的")
+
+# **nan 的几何 SINR 能真到这儿**（被拒样本、全零信道、几何量缺失）。
+# 早先一个用户的一个快照就能把整条系统级仿真挂掉，
+# 报的还是 "cannot convert float NaN to integer"，看不出是谁。
+_tn = sysm.build_link_tables([np.ones((2, 8, 8, 2), dtype=complex)] * 2,
+                             [20.0, float("nan")])
+check(len(_tn) == 2, "nan 几何 SINR 不抛异常")
+check(bool(_tn[1].outage.all()), "nan 的用户判为覆盖外，而不是随便给个 MCS")
+check(bool(np.all(np.isfinite(_tn[0].se))), "正常用户不受影响")
+
+# MCS 选择必须自己兜住非有限输入
+from superwireless import linkadapt as _la2  # noqa: E402
+
+for _v, _want in ((float("nan"), 0), (float("-inf"), 0), (float("inf"), 27)):
+    check(_la2.select_mcs(_v, table=3).index == _want,
+          f"select_mcs({_v}) -> MCS {_want}")
+
+# **RBG 尺寸分布必须跟着配置的 num_rbg 走。**
+# 早先 draw_rbg 签名给了默认 17、调用处又不传，num_rbg=8 的配置照样抽 1~17，
+# 实测平均 9.03 个 RBG 却只有 8 个可用、满带宽占比从 0.30 变成 0.586。
+_tb8 = sysm.build_link_tables([np.ones((2, 8, 8, 2), dtype=complex)] * 4, [20.0] * 4)
+_r8 = sysm.simulate(_tb8, sys_cfg=sysm.SystemConfig(duration_s=3.0, num_rbg=8, seed=2),
+                    traffic=sysm.TrafficConfig(model="bimodal", arrival_rate_hz=6.0))
+_h8 = _r8.cell["rbg_size_hist"]
+print(f"  num_rbg=8：1RBG {_h8['p_1rbg']:.2f} 满带宽 {_h8['p_full']:.2f} "
+      f"平均 {_h8['mean_rbg']:.2f}")
+check(_h8["mean_rbg"] <= 8.0, f"RBG 尺寸不超过 num_rbg（实得均值 {_h8['mean_rbg']}）")
+check(0.15 < _h8["p_full"] < 0.5, f"满带宽占比回到 0.30 附近（实得 {_h8['p_full']}）")
+
+# **PF 度量必须和实发口径一致。** MU 下实发被限到 rank≤2，
+# 记 rank4 的谱效会让 PF 以为给足了，公平性判据整个偏掉。
+_src = _inspect.getsource(sysm.simulate)
+check("min(int(tables[u].best_rank[snap]), mu.MU_MAX_RANK)" in _src,
+      "PF 更新在 MU 下用 rank≤2 的谱效")
+
+# 形状不一致要当场报错，不能静默广播出错误结果
+try:
+    mu.effective_user_channels([np.ones((1, 4, 8, 2), dtype=complex),
+                                np.ones((1, 8, 8, 2), dtype=complex)])
+    check(False, "各用户形状不一致时报错")
+except ValueError as _e:
+    check("形状必须一致" in str(_e), f"各用户形状不一致时报错（{_e}）")
+
+# 全员覆盖外不能崩，且要说清楚
+_tz = sysm.build_link_tables([np.ones((2, 8, 8, 2), dtype=complex)] * 3, [-40.0] * 3)
+_rz = sysm.simulate(_tz, sys_cfg=sysm.SystemConfig(duration_s=1.0),
+                    traffic=sysm.TrafficConfig(model="ftp3", arrival_rate_hz=5.0))
+check(_rz.cell["outage_ue"] == 3, "全员覆盖外时如实报 3 个")
+check(np.isfinite(_rz.cell["cell_served_mbps"]), "吞吐是有限值不是 nan")
+check(any("覆盖外" in n for n in _rz.notes), "notes 里点明覆盖外")
+
+# 邻区负载为 0 必须等价于无干扰
+check(abs(sysm.apply_neighbor_load(10.0, 12.0, 0.0)
+          - sysm.interference_free_sinr(10.0, 12.0)) < 1e-6,
+      "邻区负载 0 等价于无干扰")
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:

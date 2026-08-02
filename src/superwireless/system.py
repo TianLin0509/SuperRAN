@@ -536,7 +536,8 @@ class _Traffic:
     """按话务模型往每个 UE 的缓冲区里投 burst。"""
 
     def __init__(self, cfg: TrafficConfig, n_ue: int, tti_ms: float,
-                 rng: np.random.Generator, small_bytes: int = 1500) -> None:
+                 rng: np.random.Generator, small_bytes: int = 1500,
+                 num_rbg: int = 17) -> None:
         self.cfg, self.n_ue, self.tti_ms, self.rng = cfg, n_ue, tti_ms, rng
         self.active: list[_Burst | None] = [None] * n_ue
         self.queue: list[list[_Burst]] = [[] for _ in range(n_ue)]
@@ -546,6 +547,7 @@ class _Traffic:
         # 小包只占 1 个 RBG：按 1/num_rbg 的 RE 数、中等 MCS 估个字节数。
         # 它小到一个 TTI 就发完，所以体验速率完全由调度时延决定。
         self._per_rbg_bytes = max(50, int(small_bytes or 1500))
+        self.num_rbg = int(num_rbg)
         self.rbg_hist: list[int] = []
         self._cbr_per_tti = int(cfg.cbr_mbps * 1e6 * tti_ms / 1000.0 / 8)
 
@@ -569,7 +571,7 @@ class _Traffic:
         for u in range(self.n_ue):
             if self.rng.random() < self._p_arrive:
                 if self.cfg.model == "bimodal":
-                    n_rbg, small = self.draw_rbg()
+                    n_rbg, small = self.draw_rbg(self.num_rbg)
                     # 一次调度占 n_rbg 个 RBG，burst 大小按它一个 TTI 的承载算
                     n_bytes = max(200, int(self._per_rbg_bytes * n_rbg))
                 else:
@@ -581,8 +583,14 @@ class _Traffic:
                 else:
                     self.queue[u].append(b)
 
-    def draw_rbg(self, num_rbg: int = 17) -> tuple[int, bool]:
-        """抽一次传输占几个 RBG。两头高中间低。返回 ``(RBG 数, 是不是小包)``。"""
+    def draw_rbg(self, num_rbg: int | None = None) -> tuple[int, bool]:
+        """抽一次传输占几个 RBG。两头高中间低。返回 ``(RBG 数, 是不是小包)``。
+
+        **num_rbg 必须跟着配置走。** 早先签名给了默认值 17、调用处又不传，
+        于是 ``num_rbg=8`` 的配置照样抽出 1~17 个 RBG——
+        实测平均 9.03 个 RBG 却只有 8 个可用，"满带宽占比"也从 0.30 变成 0.586。
+        """
+        num_rbg = int(num_rbg if num_rbg is not None else self.num_rbg)
         x = self.rng.random()
         if x < self.cfg.p_small_rbg:
             n = 1
@@ -735,7 +743,8 @@ def simulate(
     # 小包只占 1 个 RBG：按该 RBG 的 RE 数 × 中等 MCS 谱效估承载
     # 1 个 RBG 一个 TTI 的承载：RB×12 子载波×12 数据符号×中等谱效
     _small_b = max(200, int(sys_cfg.rb_per_rbg * 12 * 12 * 3.0 / 8))
-    tr = _Traffic(traffic, n_ue, sys_cfg.tti_ms, rng, small_bytes=_small_b)
+    tr = _Traffic(traffic, n_ue, sys_cfg.tti_ms, rng, small_bytes=_small_b,
+                  num_rbg=sys_cfg.num_rbg)
 
     n_rb = sys_cfg.num_rbg * sys_cfg.rb_per_rbg
     # 每 TTI 可用 RE：RB × 12 子载波 × 12 个数据符号（扣 DM-RS 与控制开销）
@@ -884,9 +893,14 @@ def simulate(
         # --- PF 平均速率更新 ---
         inst = np.zeros(n_ue)
         for u in picked:
-            # PF 的瞬时速率：MU 下每人分到 ratio/K 份
-            inst[u] = tables[u].best_se[snap] * (
-                mu_se_ratio / len(picked) if use_mu else 1.0)
+            # **PF 的瞬时速率必须和实发口径一致。** MU 下实发被限到 rank≤2，
+            # 而 best_se 可能是 rank4 的——记错了会让 PF 以为给足了，
+            # 公平性判据整个偏掉。
+            if use_mu:
+                _r = min(int(tables[u].best_rank[snap]), mu.MU_MAX_RANK)
+                inst[u] = tables[u].se[snap, _r - 1] * mu_se_ratio / len(picked)
+            else:
+                inst[u] = tables[u].best_se[snap]
         a = 1.0 / sched.pf_window_tti
         r_avg = (1.0 - a) * r_avg + a * inst
         if progress and tti % 5000 == 0:
@@ -1071,7 +1085,12 @@ def _bler_lookup(mcs: int, sinr_db: float, tx_mode: str = "newtx") -> float:
     量化到 0.5 dB 是有意的：BLER 曲线在门限附近很陡，但 0.5 dB 的分辨率
     足够（一档 MCS 的间隔约 1~2 dB），而缓存命中率因此接近 100%。
     """
-    key = (int(mcs), int(round(sinr_db * 2)), tx_mode)
+    # **nan 要在这里兜住。** int(round(nan*2)) 直接 ValueError，
+    # 而 nan SINR 是能真到这儿的（被拒样本、全零信道、几何 SINR 缺失）。
+    # 一个用户的一个快照能把整条系统级仿真挂掉，报的错还看不出是谁。
+    if sinr_db != sinr_db:                      # nan
+        return 1.0                              # 发不出去
+    key = (int(mcs), int(round(min(max(sinr_db, -60.0), 60.0) * 2)), tx_mode)
     v = _BLER_CACHE.get(key)
     if v is None:
         from . import bler_curves as bc  # noqa: PLC0415

@@ -108,6 +108,12 @@ def effective_user_channels(
     hs = [np.asarray(h) for h in h_users]
     if not hs:
         raise ValueError("至少要有一个用户")
+    # **形状必须一致，不一致要当场报错。** 不查的话 numpy 会在赋值时
+    # 抛一个看不出所以然的 broadcast 错，或者更糟——形状恰好能广播时
+    # 静默给出错误结果。
+    _shapes = {tuple(np.asarray(h).shape[-3:]) for h in hs}
+    if len(_shapes) > 1:
+        raise ValueError(f"各用户的 [RB, BS, UE] 形状必须一致，实得 {sorted(_shapes)}")
     n_rb = hs[0].shape[1]
     n_bs = hs[0].shape[2]
     s_max = int(streams_per_user)

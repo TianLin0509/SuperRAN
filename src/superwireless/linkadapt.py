@@ -902,9 +902,26 @@ def select_cqi(sinr_eff_db: float, *, table: int = 1, target_bler: float = 0.1,
 def select_mcs(sinr_eff_db: float, *, table: int = 1, target_bler: float = 0.1,
                n_coded_bits: int = 20000, n_code_blocks: int = 1,
                model: Any | None = None) -> Mcs:
-    """选满足目标 BLER 的最高 MCS。全都不满足时退回 MCS 0（并留下高 BLER）。"""
-    mdl = model or _default_bler_model(table)
+    """选满足目标 BLER 的最高 MCS。全都不满足时退回 MCS 0（并留下高 BLER）。
+
+    **非有限的 SINR 必须自己兜住，不能让底层抛。** nan 是能真实到达这里的：
+    ChannelHub 的 ``sinr_dB`` 在被拒样本上是 nan、全零信道算出来的用户级 SINR
+    也是 nan，一路传下来就崩在 BLER 曲线的有限性检查上。
+    整条系统级仿真会因为一个用户的一个快照整个挂掉，
+    而报的错是「sinr_db must contain only finite values」，
+    完全看不出是哪个 UE 的哪个 rank。
+
+    约定：nan / −inf → MCS 0（发不出去），+inf → 最高档。
+    """
     tbl = MCS_TABLES[table]
+    _s = float(sinr_eff_db)
+    if _s != _s:                       # nan
+        return tbl[0]
+    if _s == float("-inf"):
+        return tbl[0]
+    if _s == float("inf"):
+        return tbl[-1]
+    mdl = model or _default_bler_model(table)
     best = tbl[0]
     for m in tbl:
         if float(mdl.bler(sinr_eff_db, m, n_coded_bits, n_code_blocks)[0]) <= target_bler:
