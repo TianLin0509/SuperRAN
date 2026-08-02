@@ -262,16 +262,30 @@ def build_link_tables(
     ——那通常不是你想要的，见该函数的说明。
     """
     sir_in = list(geo_sir_db) if geo_sir_db is not None else [float("nan")] * len(h_users)
+    # 逐快照的几何量。**合并成一个均值会把动态范围压掉一半**——
+    # 实测 40 个样本的 SINR 跨度 20.7 dB，按 UE 取均值后只剩 11.9 dB，
+    # "5% 边缘用户"于是变成了一个中等信道的用户，边缘 MCS 报 8.2 而不是 <5。
+    # 现在每个快照保留自己的 SINR/SIR，只有对外报的标量才取均值。
+    per_snap_sinr: list[list[float]] = [[float(x)] for x in geo_sinr_db]
+    per_snap_sir: list[list[float]] = [[float(x)] for x in sir_in]
     if num_ues is not None and num_ues < len(h_users):
         groups = group_samples_by_ue(len(h_users), num_ues)
         merged_h, merged_g, merged_s = [], [], []
         for g in groups:
+            per_sample = [np.asarray(h_users[i]) for i in g]
             merged_h.append(np.concatenate(
-                [np.asarray(h_users[i]).reshape(-1, *np.asarray(h_users[i]).shape[-3:])
-                 for i in g], axis=0))
-            merged_g.append(float(np.nanmean([geo_sinr_db[i] for i in g])))
-            merged_s.append(float(np.nanmean([sir_in[i] for i in g])))
-        h_users, geo_sinr_db, sir_in = merged_h, merged_g, merged_s
+                [x.reshape(-1, *x.shape[-3:]) for x in per_sample], axis=0))
+            # 每个样本贡献 T 个快照，它的几何量在这 T 个快照上重复
+            merged_g.append([float(geo_sinr_db[i])
+                             for i, x in zip(g, per_sample, strict=True)
+                             for _ in range(x.shape[0] if x.ndim == 4 else 1)])
+            merged_s.append([float(sir_in[i])
+                             for i, x in zip(g, per_sample, strict=True)
+                             for _ in range(x.shape[0] if x.ndim == 4 else 1)])
+        h_users = merged_h
+        per_snap_sinr, per_snap_sir = merged_g, merged_s
+        geo_sinr_db = [float(np.nanmean(v)) for v in merged_g]
+        sir_in = [float(np.nanmean(v)) for v in merged_s]
 
     # **邻区不是 full buffer。** 按 PRB 利用率折算干扰后再建表——
     # 折算必须发生在算 SINR/MCS/rank 之前，事后乘系数是补不回来的。
@@ -280,10 +294,13 @@ def build_link_tables(
         # 只改 SINR 会让后面的 IoT = SIR/(SIR−SINR) 用两个不同口径的量算，
         # 直接报 inf。这和 CLAUDE.md 里「IoT 不是 snr 减 sinr」是同一类错。
         _u_db = 10.0 * np.log10(max(neighbor_load, 1e-12))
-        geo_sinr_db = [apply_neighbor_load(g, sr, neighbor_load)
-                       for g, sr in zip(geo_sinr_db, sir_in, strict=False)]
-        sir_in = [(sr - _u_db) if np.isfinite(sr) and sr < 49.0 else sr
-                  for sr in sir_in]
+        _shift = lambda sr: (sr - _u_db) if np.isfinite(sr) and sr < 49.0 else sr  # noqa: E731
+        per_snap_sinr = [[apply_neighbor_load(g, sr, neighbor_load)
+                          for g, sr in zip(gs, ss, strict=True)]
+                         for gs, ss in zip(per_snap_sinr, per_snap_sir, strict=True)]
+        per_snap_sir = [[_shift(sr) for sr in ss] for ss in per_snap_sir]
+        geo_sinr_db = [float(np.nanmean(v)) for v in per_snap_sinr]
+        sir_in = [float(np.nanmean(v)) for v in per_snap_sir]
 
     out: list[UeLinkTable] = []
     for i, h in enumerate(h_users):
@@ -297,8 +314,10 @@ def build_link_tables(
         sinr = np.zeros((n_s, max_rank))
         mcs = np.zeros((n_s, max_rank), dtype=int)
         se = np.zeros((n_s, max_rank))
+        _gs = per_snap_sinr[i] if i < len(per_snap_sinr) else [geo_sinr_db[i]]
         for s, hs in enumerate(snaps):
-            npow = mu.noise_from_geometric_sinr(hs, geo_sinr_db[i])
+            # 逐快照用它自己的几何 SINR，不用 UE 的均值——保住动态范围
+            npow = mu.noise_from_geometric_sinr(hs, _gs[s % len(_gs)])
             rc = mu.su_rank_adaptation(hs, noise_power=npow, max_rank=max_rank,
                                        table=table, target_bler=target_bler)
             for c in rc.candidates:
