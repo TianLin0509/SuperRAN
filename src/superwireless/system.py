@@ -35,7 +35,7 @@ from . import mumimo as mu
 
 _EPS = 1e-12
 
-TrafficModel = Literal["full_buffer", "ftp3", "cbr"]
+TrafficModel = Literal["full_buffer", "ftp3", "cbr", "bimodal"]
 SchedAlgorithm = Literal["pf", "rr", "max_ci"]
 ThroughputTrim = Literal["none", "tail", "head_tail"]
 
@@ -57,6 +57,10 @@ class TrafficConfig:
     file_bytes: int = 500_000            # FTP3 常用 0.5 MB
     arrival_rate_hz: float = 2.0         # 每用户每秒到达几个文件
     cbr_mbps: float = 5.0                # CBR 模式的恒定速率
+    # --- bimodal：现网话务两头高中间低 ---
+    small_share: float = 0.7             # 小包占比（信令、心跳、短交互）
+    small_rbg: int = 1                   # 小包只占 1 个 RBG
+    large_bytes: int = 1_000_000         # 大包占满全带宽（视频、下载）
 
     def as_dict(self) -> dict[str, Any]:
         d = {"model": self.model}
@@ -66,6 +70,14 @@ class TrafficConfig:
                       round(self.file_bytes * 8 * self.arrival_rate_hz / 1e6, 3)}
         elif self.model == "cbr":
             d |= {"cbr_mbps": self.cbr_mbps}
+        elif self.model == "bimodal":
+            d |= {"small_share": self.small_share, "small_rbg": self.small_rbg,
+                  "large_bytes": self.large_bytes,
+                  "arrival_rate_hz": self.arrival_rate_hz,
+                  "note": ("现网话务两头高中间低：绝大部分是只占 1 个 RBG 的小包"
+                           "和占满全带宽的大包，中间尺寸很少。"
+                           "**小包的体验速率被调度时延主导，大包才反映信道能力**"
+                           "——两者混在一起平均会得到一个谁都不像的数。")}
         return d
 
 
@@ -205,6 +217,12 @@ class UeLinkTable:
     outage: np.ndarray | None = None     # [snapshot] 该快照下根本调度不动
     iot_db: float = float("nan")         # 干扰抬升：(I+N)/N，>20 dB 算高干扰
     sir_db: float = float("nan")
+
+
+def _nan_safe(fn, values, *args) -> float:
+    """全是 NaN 时返回 NaN 而不是让 numpy 抛 RuntimeWarning。"""
+    v = [x for x in values if np.isfinite(x)]
+    return float(fn(v, *args)) if v else float("nan")
 
 
 def _iot(sinr_db: float, sir_db: float) -> float:
@@ -411,19 +429,23 @@ class _Burst:
     bytes_first: int = 0
     bytes_last: int = 0
     prev_tti: int = -1                   # 倒数第二次被服务的 TTI，掐尾时用
+    is_small: bool = False               # bimodal 的小包（只占 1 个 RBG）
 
 
 class _Traffic:
     """按话务模型往每个 UE 的缓冲区里投 burst。"""
 
     def __init__(self, cfg: TrafficConfig, n_ue: int, tti_ms: float,
-                 rng: np.random.Generator) -> None:
+                 rng: np.random.Generator, small_bytes: int = 1500) -> None:
         self.cfg, self.n_ue, self.tti_ms, self.rng = cfg, n_ue, tti_ms, rng
         self.active: list[_Burst | None] = [None] * n_ue
         self.queue: list[list[_Burst]] = [[] for _ in range(n_ue)]
         self.done: list[list[_Burst]] = [[] for _ in range(n_ue)]
         self._p_arrive = cfg.arrival_rate_hz * tti_ms / 1000.0
         self.offered_bytes = 0
+        # 小包只占 1 个 RBG：按 1/num_rbg 的 RE 数、中等 MCS 估个字节数。
+        # 它小到一个 TTI 就发完，所以体验速率完全由调度时延决定。
+        self._small_bytes = max(200, int(small_bytes or 1500))
         self._cbr_per_tti = int(cfg.cbr_mbps * 1e6 * tti_ms / 1000.0 / 8)
 
     def step(self, tti: int) -> None:
@@ -442,11 +464,17 @@ class _Traffic:
                     b.bytes_total += self._cbr_per_tti
                 self.offered_bytes += self._cbr_per_tti
             return
-        # ftp3：泊松到达（每 TTI 用伯努利近似，p 很小时等价）
+        # ftp3 / bimodal：泊松到达（每 TTI 用伯努利近似，p 很小时等价）
         for u in range(self.n_ue):
             if self.rng.random() < self._p_arrive:
-                b = _Burst(tti, self.cfg.file_bytes, self.cfg.file_bytes)
-                self.offered_bytes += self.cfg.file_bytes
+                if self.cfg.model == "bimodal":
+                    small = self.rng.random() < self.cfg.small_share
+                    # 小包只占 1 个 RBG：字节数按该 RBG 一个 TTI 能装多少估
+                    n_bytes = self._small_bytes if small else self.cfg.large_bytes
+                else:
+                    small, n_bytes = False, self.cfg.file_bytes
+                b = _Burst(tti, n_bytes, n_bytes, is_small=small)
+                self.offered_bytes += n_bytes
                 if self.active[u] is None:
                     self.active[u] = b
                 else:
@@ -591,7 +619,9 @@ def simulate(
 
     n_ue = len(tables)
     rng = np.random.default_rng(sys_cfg.seed)
-    tr = _Traffic(traffic, n_ue, sys_cfg.tti_ms, rng)
+    # 小包只占 1 个 RBG：按该 RBG 的 RE 数 × 中等 MCS 谱效估承载
+    _small_b = max(200, int(sys_cfg.rb_per_rbg * 12 * 12 * 3.0 / 8))
+    tr = _Traffic(traffic, n_ue, sys_cfg.tti_ms, rng, small_bytes=_small_b)
 
     n_rb = sys_cfg.num_rbg * sys_cfg.rb_per_rbg
     # 每 TTI 可用 RE：RB × 12 子载波 × 12 个数据符号（扣 DM-RS 与控制开销）
@@ -738,10 +768,20 @@ def simulate(
     # --- KPI 汇总 ---
     offered_bytes = tr.offered_bytes
     users: list[UeKpi] = []
+    small_thp: list[float] = []
+    large_thp: list[float] = []
     for u in range(n_ue):
+        _done = [b for b in tr.done[u] if b.start_tti >= kpi.warmup_tti]
         thps = [x for x in (_burst_throughput_mbps(b, sys_cfg.tti_ms, kpi)
-                            for b in tr.done[u] if b.start_tti >= kpi.warmup_tti)
-                if x is not None]
+                            for b in _done) if x is not None]
+        # **小包和大包要分开报。** 小包的体验速率被调度时延主导、大包才反映
+        # 信道能力，混在一起平均会得到一个谁都不像的数。
+        _sm = [x for b in _done if b.is_small
+               for x in [_burst_throughput_mbps(b, sys_cfg.tti_ms, kpi)] if x is not None]
+        _lg = [x for b in _done if not b.is_small
+               for x in [_burst_throughput_mbps(b, sys_cfg.tti_ms, kpi)] if x is not None]
+        small_thp.append(float(np.mean(_sm)) if _sm else float("nan"))
+        large_thp.append(float(np.mean(_lg)) if _lg else float("nan"))
         users.append(UeKpi(
             ue=u, geo_sinr_db=tables[u].geo_sinr_db, iot_db=tables[u].iot_db,
             experienced_mbps=float(np.mean(thps)) if thps else 0.0,
@@ -772,6 +812,11 @@ def simulate(
         "occupancy": busy_tti / max(dl_tti, 1),
         "mu_share": mu_tti / max(busy_tti, 1),
         "measured_bursts": int(np.sum([x.bursts for x in users])),
+        # bimodal 下小包与大包分开报：前者由调度时延主导，后者反映信道能力
+        "small_pkt_experienced_mbps": (float(np.nanmean(small_thp))
+                                       if np.any(np.isfinite(small_thp)) else None),
+        "large_pkt_experienced_mbps": (float(np.nanmean(large_thp))
+                                       if np.any(np.isfinite(large_thp)) else None),
         "outage_ue": int(sum(1 for t in tables
                              if t.outage is not None and t.outage.all())),
         "outage_skips": int(outage_tti),
@@ -780,14 +825,14 @@ def simulate(
         "mu_rbg_share": mu_rbg / max(busy_tti * sys_cfg.num_rbg, 1),
         "su_fits_skips": int(su_fits_skip),
         # **IoT = (I+N)/N**：干扰主导还是噪声主导。密集城区常 >20 dB。
-        "iot_db_median": float(np.nanmedian([t.iot_db for t in tables])),
-        "iot_db_p5": float(np.nanpercentile([t.iot_db for t in tables], 5)),
-        "iot_db_p95": float(np.nanpercentile([t.iot_db for t in tables], 95)),
+        "iot_db_median": _nan_safe(np.nanmedian, [t.iot_db for t in tables]),
+        "iot_db_p5": _nan_safe(np.nanpercentile, [t.iot_db for t in tables], 5),
+        "iot_db_p95": _nan_safe(np.nanpercentile, [t.iot_db for t in tables], 95),
         "high_iot_ue_share": float(np.mean([
             (t.iot_db >= 20.0) if np.isfinite(t.iot_db) else False for t in tables])),
         # **边缘用户 MCS**：现场经验通常 < 5。它比平均 MCS 更能暴露覆盖问题。
-        "edge_mcs_p5": float(np.nanpercentile(
-            [x.avg_mcs for x in users if x.sched_tti > 0] or [float("nan")], 5)),
+        "edge_mcs_p5": _nan_safe(np.nanpercentile,
+                                 [x.avg_mcs for x in users if x.sched_tti > 0], 5),
         # 守恒对账：到达了多少、发完了多少、还压着多少。
         # 不报这三个的话，"实际吞吐 105 Mbps vs 话务负载 144 Mbps"
         # 这种缺口只能靠猜——它可能是队列积压（正常），也可能是漏数据（bug）。
@@ -827,6 +872,13 @@ def simulate(
             f"**IoT 中位只有 {cell['iot_db_median']:.1f} dB**，几乎是噪声受限。"
             "密集城区实际常在 20 dB 以上——检查是不是站间距太大、"
             "或者邻区负载 prb_utilization 设得过低。")
+    if traffic.model == "bimodal" and cell["small_pkt_experienced_mbps"] is None:
+        notes.append(
+            "**小包的体验速率测不出来**：它们在一个 TTI 内就发完了，"
+            "而 3GPP TS 28.552 的掐尾口径要排除清空缓冲区的那个 slice，"
+            "单 slice 的 burst 因此没有可测量的时间。"
+            "**这不是 bug，是这个 KPI 的固有盲区**——现网话统里小包同样测不到，"
+            "它们的体验由调度时延而非速率决定。要看小包体验请看调度时延分布。")
     if cell["outage_ue"]:
         notes.append(
             f"**{cell['outage_ue']} 个用户全程处于覆盖外**（用户级 SINR 够不到 MCS 0 的门限），"

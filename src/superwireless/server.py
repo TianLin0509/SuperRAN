@@ -1509,6 +1509,8 @@ def sw_system_sim(
         否则信道没有时间起伏，PF 调度退化成轮询。
     duration_s : 仿真时长，3~20 秒。40000 TTI 实测 0.2 秒跑完。
     traffic_model : ``ftp3``（3GPP FTP Model 3，评价体验速率的标准话务）/
+        ``bimodal``（**现网话务两头高中间低**：绝大部分是只占 1 个 RBG 的小包
+        和占满全带宽的大包，两者的体验速率分开报）/
         ``full_buffer``（**体验速率在这个模型下没有意义**，缓冲区永不空）/ ``cbr``
     arrival_rate_hz : 每用户每秒到达几个文件。控制负载——太高会积压，
         ``notes`` 会拦。
