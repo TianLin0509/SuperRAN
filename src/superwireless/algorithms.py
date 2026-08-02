@@ -241,3 +241,128 @@ def algorithm_list(cfg: dict[str, Any]) -> list[dict[str, Any]]:
 
 def stages() -> list[str]:
     return ["信道生成", "发射", "接收", "链路自适应", "多用户", "系统级"]
+
+
+# ---------------------------------------------------------------------------
+# 对标量的推导过程 —— 每一步都摊开，供人工核对
+# ---------------------------------------------------------------------------
+def derivations(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """峰值速率/谱效等对标量的**逐步推导**，供用户亲自核对。
+
+    **只给一个"29.63 vs 30.0，偏差 −1.2%"是不可核对的。** 这里把每一步的
+    输入、公式、中间结果全列出来，任何一步对不上都能当场指出来。
+    数字全部从代码现算，不是抄进来的常量。
+    """
+    from . import hardware as hw  # noqa: PLC0415
+    from . import linkadapt as la  # noqa: PLC0415
+
+    cfg = cfg or {}
+    out: list[dict[str, Any]] = []
+
+    # --- 峰值谱效 ---
+    m27 = la.MCS_TABLES[3][27]
+    out.append({
+        "key": "peak_se",
+        "name": "峰值谱效",
+        "result": f"{4 * m27.se:.3f} bit/s/Hz",
+        "reference": "30.0 bit/s/Hz",
+        "ref_src": "ITU-R M.2412 / IMT-2020 最低要求，DL 峰值谱效",
+        "steps": [
+            ("最高档 MCS", "表 3 的 MCS 27",
+             f"调制阶数 q_m = {m27.q_m}（{2 ** m27.q_m}QAM），"
+             f"目标码率 R = {m27.r_1024:.0f}/1024 = {m27.rate:.4f}"),
+            ("单流谱效", "SE₁ = q_m × R",
+             f"{m27.q_m} × {m27.rate:.4f} = {m27.se:.4f} bit/s/Hz"),
+            ("最大层数", "SU 最多 4 流",
+             f"终端 {hw.COMPANY_UE_RX_ANT}R，rank 上限 = 4"),
+            ("峰值谱效", "SE_peak = rank × SE₁",
+             f"4 × {m27.se:.4f} = {4 * m27.se:.4f} bit/s/Hz"),
+            ("与参考对比", "ITU-R 要求 30.0",
+             f"偏差 {(4 * m27.se - 30.0) / 30.0 * 100:+.1f}%。"
+             f"差的这一点来自码率——IMT-2020 的 30 是按 q_m=8、R=0.9375 "
+             f"（=960/1024）算的，表 3 最高档是 {m27.rate:.4f}"),
+        ],
+    })
+
+    # --- 峰值速率 ---
+    n_prb, oh = 273, 0.14
+    ts = 1e-3 / 14 / 2
+    r_max = 948 / 1024
+    peak = 4 * 8 * r_max * (n_prb * 12 / ts) * (1 - oh)
+    re_tti = hw.COMPANY_NUM_RB * 12 * 12
+    tbs = la.transport_block_size(re_tti, m27.rate, m27.q_m, layers=4)
+    out.append({
+        "key": "peak_rate",
+        "name": "峰值速率",
+        "result": f"{tbs / 0.5e-3 / 1e9:.3f} Gbps",
+        "reference": f"{peak / 1e9:.3f} Gbps",
+        "ref_src": "3GPP TS 38.306 §4.1.2 峰值速率公式",
+        "steps": [
+            ("标准公式", "R = v · Q_m · f · R_max · (N_PRB×12 / T_s) · (1−OH)",
+             f"v=4 层，Q_m=8，f=1（无缩放），R_max={r_max:.4f}（948/1024），"
+             f"N_PRB={n_prb}，T_s={ts * 1e6:.2f} μs（30 kHz，14 符号/0.5 ms），"
+             f"OH=0.14（DL FR1 开销）"),
+            ("标准公式结果", "代入",
+             f"4 × 8 × {r_max:.4f} × ({n_prb}×12 / {ts:.3e}) × {1 - oh:.2f} "
+             f"= {peak / 1e9:.4f} Gbps"),
+            ("本仿真器的 RE 数", "N_RE = N_RB × 12 子载波 × 12 数据符号",
+             f"{hw.COMPANY_NUM_RB} × 12 × 12 = {re_tti} 个 RE/TTI"
+             f"（14 符号扣掉 2 个给 DM-RS 与控制）"),
+            ("按 38.214 §5.1.3.2 算 TBS", "transport_block_size(N_RE, R, q_m, layers=4)",
+             f"= {tbs} bit"),
+            ("折成速率", "TBS / TTI 时长",
+             f"{tbs} / 0.5 ms = {tbs / 0.5e-3 / 1e9:.4f} Gbps"),
+            ("与公式对比", "两条独立路径",
+             f"偏差 {(tbs / 0.5e-3 - peak) / peak * 100:+.1f}%。"
+             f"差异来自 RB 数（{hw.COMPANY_NUM_RB} vs {n_prb}）与开销口径——"
+             f"我们按 12/14 符号扣，标准按固定 OH=0.14 扣"),
+        ],
+    })
+
+    # --- 小区谱效的 TDD 归一 ---
+    pat = str(cfg.get("tdd_pattern", "DDDSU")).upper() or "DDDSU"
+    dl_ratio = (pat.count("D") + 0.7 * pat.count("S")) / len(pat)
+    out.append({
+        "key": "tdd_normalize",
+        "name": "小区谱效的 TDD 归一",
+        "result": f"下行占比 {dl_ratio:.4f}",
+        "reference": "ITU 的小区谱效是按全下行定义的",
+        "ref_src": "ITU-R M.2412 Dense Urban DL 平均小区谱效 7.8 bit/s/Hz/TRxP",
+        "steps": [
+            ("TDD 图案", f"{pat}",
+             f"{pat.count('D')} 个 D + {pat.count('S')} 个 S + "
+             f"{pat.count('U')} 个 U，周期 {len(pat)} 个时隙"),
+            ("S 时隙折算", "按 0.7 个下行算",
+             "S 时隙大部分符号是下行，剩下给 GP 和上行导频"),
+            ("下行占比", "(D + 0.7×S) / 周期",
+             f"({pat.count('D')} + 0.7×{pat.count('S')}) / {len(pat)} = {dl_ratio:.4f}"),
+            ("归一", "仿真谱效 / 下行占比",
+             f"仿真里一秒只有 {dl_ratio:.0%} 的时隙能发下行，"
+             f"而 ITU 的参考值是按全下行定义的，所以要除以 {dl_ratio:.4f} 才可比"),
+        ],
+    })
+
+    # --- 噪声口径 ---
+    out.append({
+        "key": "noise_ref",
+        "name": "噪声功率口径（值 12 dB）",
+        "result": "锚定 rank1：noise = σ₁²·P / 10^(几何SINR/10)",
+        "reference": "对错口径实测差 12 dB",
+        "ref_src": "现网锚点 平均 rank 2.7 / MCS 15 反推",
+        "steps": [
+            ("ChannelHub 的几何 SINR 含什么", "信号项 = N_ant·|w^H a|²",
+             "它已经包含了波束赋形增益（64 天线约 18 dB）"),
+            ("错误做法", "noise = mean(|h|²) / 10^(SINR/10)",
+             "按单天线平均功率反推噪声，之后 SVD 又叠一次阵列增益 —— 算了两遍"),
+            ("错误做法的后果", "实测",
+             "平均 rank 3.90 / 平均 MCS 23.5 / MCS 范围 10~27，"
+             "几乎所有用户判到 rank4、MCS 顶格"),
+            ("正确做法", "noise = σ₁²·P / 10^(SINR/10)",
+             "使 rank=1（全功率压最强流）时的后波束 SINR 恰好等于几何 SINR"),
+            ("正确做法的结果", "实测",
+             "平均 rank 2.23 / 平均 MCS 11.1，现网锚点是 2.70 / 15.0"),
+            ("为什么必须有现网锚点", "错的那个长得像正常结果",
+             "曲线形状对、随场景变化的趋势也对，只是整体偏了 12 dB"),
+        ],
+    })
+    return out

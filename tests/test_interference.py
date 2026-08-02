@@ -827,6 +827,34 @@ check(not any(ord(c) < 9 or 11 <= ord(c) < 32 for c in _ha),
 for _phrase in ("12 dB", "信道求逆功控", "单码字", "缓冲区非空", "秩 1", "平均 rank 2.7"):
     check(_phrase in _ha, f"页面上写清了「{_phrase}」")
 
+# --- 对标量的逐步推导，供人工核对 ---
+_dv = _alg.derivations({})
+check(len(_dv) >= 4, f"至少四项推导（实得 {len(_dv)}）")
+for _d in _dv:
+    check(len(_d["steps"]) >= 4, f"{_d['name']} 的推导至少 4 步")
+    check(all(len(x) == 3 for x in _d["steps"]), f"{_d['name']} 每步都有(做什么,公式,结果)")
+    check(bool(_d["ref_src"]), f"{_d['name']} 带参考出处")
+
+# **数字必须现算，不能是抄进来的常量。** 抄的话改了 MCS 表这里不会跟着变。
+_peak = next(d for d in _dv if d["key"] == "peak_se")
+from superwireless import linkadapt as _la  # noqa: E402
+
+_m27 = _la.MCS_TABLES[3][27]
+check(f"{4 * _m27.se:.3f}" in _peak["result"],
+      f"峰值谱效由 MCS 表现算（表里 SE={_m27.se:.4f}×4，页面写 {_peak['result']}）")
+check(str(_m27.q_m) in _peak["steps"][0][2], "调制阶数取自 MCS 表")
+
+_rate = next(d for d in _dv if d["key"] == "peak_rate")
+check("38.306" in _rate["ref_src"], "峰值速率引 38.306 §4.1.2")
+check("transport_block_size" in " ".join(x[1] for x in _rate["steps"]),
+      "峰值速率走真实的 TBS 函数，不是另算一套")
+
+# 页面上要能展开看到
+check(_ha.count("这一步在做什么") == len(_dv), f"{len(_dv)} 张推导表都渲染了")
+check("参考出处" in _ha, "每张表带参考出处")
+_dtl = _ha.count('<details class="algo"')
+check(_dtl >= 13 + len(_dv), f"折叠项 = 13 条算法 + {len(_dv)} 项推导（实得 {_dtl}）")
+
 
 # ---------------------------------------------------------------------------
 sect("10  文档里的数字必须和代码对得上")

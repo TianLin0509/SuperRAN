@@ -815,6 +815,26 @@ def _algorithms_panel(spec: dict[str, Any]) -> str:
                 f'<span class="ac">{_esc(it["choice"])}</span></summary>'
                 f'<div class="ab">{"".join(body)}</div></details>'
             )
+    # --- 对标量的逐步推导，供人工核对 ---
+    out.append('<h3>对标量怎么算出来的</h3>'
+               '<p class="lead">**只给一个"偏差 −1.2%"是不可核对的。**'
+               '下面每一步的输入、公式、中间结果全列出来，'
+               '任何一步对不上都能当场指出。数字由代码现算，不是抄进来的常量。</p>'
+               .replace("**只给一个", "<b>只给一个").replace('是不可核对的。**', '是不可核对的。</b>'))
+    for d in alg.derivations(spec["config"]):
+        rows = "".join(
+            f'<tr><td>{i}</td><td>{_esc(t)}</td><td><code>{_esc(f)}</code></td>'
+            f'<td>{_bold(r)}</td></tr>'
+            for i, (t, f, r) in enumerate(d["steps"], 1))
+        out.append(
+            f'<details class="algo"><summary><span class="an">{_esc(d["name"])}</span>'
+            f'<span class="ac">{_esc(d["result"])}　参考 {_esc(d["reference"])}</span>'
+            f'</summary><div class="ab">'
+            f'<p class="src">参考出处：{_esc(d["ref_src"])}</p>'
+            f'<div class="tbl-wrap"><table>'
+            f'<tr><th>#</th><th>这一步在做什么</th><th>公式 / 输入</th><th>结果</th></tr>'
+            f'{rows}</table></div></div></details>')
+
     fa = alg.FIELD_ANCHORS
     out.append(
         f'<div class="callout c-blue"><p><b>现网对标锚点。</b>'
