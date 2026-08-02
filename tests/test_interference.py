@@ -491,7 +491,7 @@ _r1 = sp.write_spec(dict(pl.load_presets()["company_64t4r_multicell"]["config"])
                     num_samples=100, title="test-hex")
 _h1, _s1 = _svgs(_r1["html_path"])
 print(f"  hex: {_r1['headline'][:60]}")
-check(len(_s1) == 5, f"五张图都在（阵列/拓扑/频域/TDD/剖面），实得 {len(_s1)}")
+check(len(_s1) == 12, f"五张示意图 + 七张算法流程图，实得 {len(_s1)}")
 for _i, _sv in enumerate(_s1):
     try:
         _ET.fromstring(_sv)
@@ -590,7 +590,9 @@ _h6 = Path(_r6["html_path"]).read_text(encoding="utf-8")
 check('class="fact hi"' not in _h6, "没传 highlight 时不乱高亮")
 
 # 说明文字里的 ** 要变成 <b>，不能在页面上露出星号
-check("**" not in _h1.split("<footer>")[0], "页面上没有裸露的 markdown 星号")
+_body_only = _re.sub(r"<details class=\"algo\".*?</details>", "",
+                     _h1.split("<footer>")[0], flags=_re.S)
+check("**" not in _body_only, "页面正文没有裸露的 markdown 星号")
 
 # 画布随规模自适应：单站不该用多小区那么大的画布
 _r7 = sp.write_spec(dict(pl.load_presets()["company_64t4r"]["config"]), title="test-1cell")

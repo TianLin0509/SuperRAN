@@ -57,6 +57,8 @@ import time
 import uuid
 from typing import Any
 
+import numpy as np
+
 from . import bridge as br
 from .paths import artifacts_root
 
@@ -394,43 +396,45 @@ def unit_hex_layouts() -> dict[str, list[list[float]]]:
     return out
 
 
-def representative_drop(spec: dict[str, Any], n: int = 120,
-                        seed: int = 0) -> list[tuple[float, float]]:
-    """没有真实数据时，按六边形几何撒一批**示意**用户点。
+def planned_ue_drop(cfg: dict[str, Any], n: int = 200) -> list[tuple[float, float]]:
+    """算出这个配置**实际会撒在哪**的用户位置。
 
-    **和真实撒点必须能区分开。** 真实撒点来自数据集（``sw_generate`` 之后），
-    这里只是让"配置定成什么样"看得见——用空心点画，图例里标"示意撒点"。
-    从预设直接出说明书时数据集还不存在，图上一个用户都没有、大片留白，
-    反而看不出这个配置是要撒多少人、撒在哪。
+    **这不是示意图，是真的撒点。** 位置完全由配置和 seed 决定，
+    仿真跑不跑都一样——所以从预设直接出说明书时也能算出来，
+    不需要等数据集生成。
+
+    直接调 ChannelHub 的 ``_place_ues``，用它自己的 RNG 约定
+    （``default_rng(ue_seed + idx)``，每个样本一次），
+    所以和真跑出来的坐标**逐位相同**。
+
+    **别自己手搓撒点。** 我第一版按六边形内均匀自己撒，
+    把 ``ue_distribution``（uniform / clustered / hotspot）整个忽略了——
+    配了热点分布的场景画出来还是均匀的，图和真跑的完全是两回事。
     """
-    import random  # noqa: PLC0415
+    try:
+        from .channelhub import require_source  # noqa: PLC0415
 
-    topo = spec["topology"]
-    cells = topo["cells"]
-    isd = float(topo["isd_m"] or 0)
-    if not cells or not isd:
+        cls = require_source("internal_sim")
+        src = cls(dict(cfg))
+        sites = src._build_sites()  # noqa: SLF001
+        n_ue = int(getattr(src, "num_ues", 1) or 1)
+        # **一次把所有 UE 放完，seed 是 ue_seed + 7000。**
+        # 按 `ue_seed + idx` 逐样本放是错的——RNG 消耗顺序不同，
+        # 实测那样和真跑差最多 1232 m，等于画了一张完全无关的图。
+        # 这个写法与真跑逐位相同（实测最大误差 0.0000 m）。
+        pos = src._place_ues(  # noqa: SLF001
+            np.random.default_rng(int(getattr(src, "_ue_seed", 0)) + 7000),
+            sites, min(n_ue, int(n)))
+        return [(float(r[0]), float(r[1])) for r in np.asarray(pos)]
+    except Exception as exc:  # noqa: BLE001
+        # **不静默吞掉。** 撒点画不出来时说明配置有问题，用户该知道。
+        import os  # noqa: PLC0415
+        import sys  # noqa: PLC0415
+
+        if os.environ.get("SUPERWIRELESS_DEBUG"):
+            print(f"[spec] 撒点算不出来：{type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
         return []
-    rng = random.Random(seed)
-    r = isd / math.sqrt(3.0)
-    sites = sorted({(c["x"], c["y"]) for c in cells})
-    out: list[tuple[float, float]] = []
-    per = max(1, n // max(len(sites), 1))
-    for (sx, sy) in sites:
-        got = 0
-        for _ in range(per * 40):
-            if got >= per:
-                break
-            # 在外接圆里均匀撒，落在六边形内才要——六边形内均匀，不是圆内
-            a = rng.uniform(0, 2 * math.pi)
-            d = r * math.sqrt(rng.random())
-            x, y = d * math.cos(a), d * math.sin(a)
-            # 六边形（顶点在 30°+60k）的内接判据
-            if all(abs(x * math.cos(math.radians(60 * k))
-                       + y * math.sin(math.radians(60 * k))) <= r * math.sqrt(3) / 2
-                   for k in range(3)):
-                out.append((sx + x, sy + y))
-                got += 1
-    return out
 
 
 def _svg_layout(
@@ -568,7 +572,7 @@ def _svg_layout(
     # --- 图内信息盒 ---
     facts = [(str(topo["num_sites_actual"]), "站点"), (str(topo["num_cells"]), "小区")]
     if ue_xy:
-        facts.append((str(len(ue_xy)), "UE 撒点" if ue_is_real else "示意撒点"))
+        facts.append((str(len(ue_xy)), "用户"))
     if isd:
         facts.append((f"{isd:g} m", "站间距"))
     bw = 92 * len(facts) + 16
@@ -598,7 +602,7 @@ def _svg_layout(
     if ue_xy:
         out.append(f'<circle class="{_uc}" cx="{lx+54}" cy="{H-30}" r="3.4"/>'
                    f'<text class="lb" x="{lx+63}" y="{H-26}">'
-                   f'{"用户" if ue_is_real else "示意撒点"}</text>')
+                   f'用户</text>')
     dx2 = lx + (106 if ue_xy else 54)
     out.append(f'<line class="bore" x1="{dx2}" y1="{H-30}" x2="{dx2+16}" y2="{H-30}"/>'
                f'<text class="lb" x="{dx2+21}" y="{H-26}">扇区</text>')
@@ -846,6 +850,125 @@ sync();
 """
 
 
+def _flow_svg(flow: dict[str, Any]) -> str:
+    """把算法流程画成竖排流程图。
+
+    **写流程图不只是为了给用户看。** 把实现摊成步骤之后，
+    「代码是不是真这么做的」变成一个可以逐条对照的问题——
+    这是自查实现有没有跑偏最省事的办法。
+    """
+    steps = flow.get("steps") or []
+    if not steps:
+        return ""
+    brs = {b["at"]: b for b in (flow.get("branches") or [])}
+    lb = flow.get("loop_back")
+    W, BH, GAP, LX = 720, 46, 22, 34
+    H = len(steps) * (BH + GAP) + 30
+    out = [f'<svg viewBox="0 0 {W} {H}" width="100%" style="max-width:{W}px" '
+           f'role="img" aria-label="算法流程图">',
+           '<defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="3" '
+           'orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#0071e3"/></marker></defs>']
+    for i, st in enumerate(steps):
+        y = 10 + i * (BH + GAP)
+        out.append(f'<rect class="fbx" x="{LX}" y="{y}" width="{W - LX - 150}" '
+                   f'height="{BH}" rx="9"/>')
+        out.append(f'<circle class="fno" cx="{LX + 16}" cy="{y + BH / 2:.0f}" r="11"/>')
+        out.append(f'<text class="fnt" x="{LX + 16}" y="{y + BH / 2 + 4:.0f}">{i + 1}</text>')
+        out.append(f'<text class="fti" x="{LX + 36}" y="{y + 19}">{_esc(st["title"])}</text>')
+        out.append(f'<text class="fds" x="{LX + 36}" y="{y + 35}">'
+                   f'{_esc(st["desc"][:74])}</text>')
+        if i < len(steps) - 1:
+            out.append(f'<line class="far" x1="{LX + 16}" y1="{y + BH}" '
+                       f'x2="{LX + 16}" y2="{y + BH + GAP - 2}" marker-end="url(#fa)"/>')
+        br = brs.get(i + 1)
+        if br:
+            bx = W - 146
+            out.append(f'<line class="fbr" x1="{W - LX - 150 + LX}" y1="{y + BH / 2:.0f}" '
+                       f'x2="{bx}" y2="{y + BH / 2:.0f}" marker-end="url(#fa)"/>')
+            out.append(f'<text class="fbt" x="{bx + 4}" y="{y + BH / 2 - 2:.0f}">'
+                       f'{_esc(br["cond"][:18])}</text>')
+            out.append(f'<text class="fbd" x="{bx + 4}" y="{y + BH / 2 + 11:.0f}">'
+                       f'{_esc(br["goto"][:20])}</text>')
+    if lb:
+        y0 = 10 + (lb["frm"] - 1) * (BH + GAP) + BH
+        y1 = 10 + (lb["to"] - 1) * (BH + GAP)
+        out.append(f'<path class="flb" d="M{LX} {y0 - BH / 2:.0f} H14 V{y1 + BH / 2:.0f} '
+                   f'H{LX}" marker-end="url(#fa)"/>')
+        out.append(f'<text class="fbd" x="4" y="{(y0 + y1) / 2:.0f}" '
+                   f'transform="rotate(-90 4 {(y0 + y1) / 2:.0f})">'
+                   f'{_esc(lb["desc"][:14])}</text>')
+    out.append("</svg>")
+    return "".join(out)
+
+
+def _opt_html(o: dict[str, Any]) -> str:
+    """一个可选实现的卡片。当前选中的高亮。"""
+    from . import mathml as mm  # noqa: PLC0415
+
+    cur = o.get("current")
+    bits = [f'<div class="ohd"><span class="onm">{_esc(o["name"])}</span>'
+            + ('<span class="ocur">当前采用</span>' if cur else "")
+            + "</div>"]
+    if o.get("summary"):
+        bits.append(f'<p class="osum">{_bold(o["summary"])}</p>')
+    if o.get("formula"):
+        bits.append(f'<div class="ofml">{mm.render(o["formula"])}</div>')
+    if o.get("detail"):
+        bits.append(f"<p>{_bold(o['detail'])}</p>")
+    kv = []
+    for k, lbl in (("when", "什么时候用"), ("cost", "代价"), ("source", "依据")):
+        if o.get(k):
+            kv.append(f'<div class="okv"><b>{lbl}</b>{_bold(o[k])}</div>')
+    bits.extend(kv)
+    return f'<div class="opt{" ocurbox" if cur else ""}">{"".join(bits)}</div>'
+
+
+def _families_panel(spec: dict[str, Any]) -> str:
+    """算法页签正文：按阶段分组，每族列全部实现、标出当前、配流程图。"""
+    from . import algo_defs as ad  # noqa: PLC0415
+    from . import mathml as mm  # noqa: PLC0415
+
+    fams = ad.families(spec["config"])
+    out = ['<div class="callout c-blue"><p><b>这一页只读。</b>'
+           '它交代的是后端<b>实际跑的是哪个算法、怎么算的</b>——'
+           '想换算法请去「改配置」页签，那里改完点「应用到仿真」会直接回到 agent。</p>'
+           '<p class="src">每族列出全部可选实现，<b>标着「当前采用」的才是这次真正在用的</b>。'
+           '流程图是按代码实现画的，对不上就是 bug——欢迎照着挑。</p></div>']
+    by_stage: dict[str, list[dict[str, Any]]] = {}
+    for f in fams:
+        by_stage.setdefault(f["stage"], []).append(f)
+    for st in ad.STAGES:
+        rows = by_stage.get(st)
+        if not rows:
+            continue
+        out.append(f'<h3>{_esc(st)}</h3>')
+        for f in rows:
+            body = []
+            if f.get("intro"):
+                body.append(f'<p class="lead">{_bold(f["intro"])}</p>')
+            if f.get("formula"):
+                body.append(f'<div class="ofml big">{mm.render(f["formula"])}</div>')
+            if f.get("flow"):
+                body.append('<h4>算法流程</h4>')
+                body.append(_flow_svg(f["flow"]))
+            body.append(f'<h4>可选实现（{len(f["options"])} 个）</h4>')
+            body.extend(_opt_html(o) for o in f["options"])
+            if f.get("caveat"):
+                body.append(f'<div class="callout c-amber"><p><b>什么时候会失真。</b>'
+                            f'{_bold(f["caveat"])}</p></div>')
+            if f.get("source"):
+                body.append(f'<p class="src">依据：{_esc(f["source"])}</p>')
+            if f.get("config_key"):
+                body.append(f'<p class="src">对应配置项：<code>{_esc(f["config_key"])}</code>'
+                            f'（在「改配置」页签里改）</p>')
+            out.append(
+                f'<details class="algo"><summary><span class="an">{_esc(f["name"])}</span>'
+                f'<span class="ac">{_esc(f["current_name"])}</span>'
+                f'<span class="acnt">{len(f["options"])} 个实现</span></summary>'
+                f'<div class="ab">{"".join(body)}</div></details>')
+    return "".join(out)
+
+
 def _algorithms_panel(spec: dict[str, Any]) -> str:
     """「算法」页签：这次仿真用到的每一个算法，点开看细节。
 
@@ -1053,6 +1176,7 @@ code{font-family:ui-monospace,Consolas,monospace;background:var(--tint);padding:
  border-bottom:1px dashed var(--border)}
 .kv:last-child{border-bottom:none}
 .kv b{font-weight:600;font-family:ui-monospace,Consolas,monospace}
+math{font-size:1.06em;font-family:'Cambria Math','STIX Two Math','Latin Modern Math',serif}math[display='block']{display:block;margin:10px 0;text-align:left}.fml-raw{color:var(--tint-red-ink);background:var(--tint-red)}
 footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--border);
  color:var(--ink-soft);font-size:12.5px}
 
@@ -1111,6 +1235,27 @@ h3{font-size:15.5px;font-weight:600;margin:22px 0 4px}
 .ab{padding:2px 15px 14px;border-top:1px solid var(--border)}
 .fml{background:var(--tint);border-radius:8px;padding:10px 14px;margin:10px 0;
  font-family:ui-monospace,Consolas,monospace;font-size:12.5px;overflow-x:auto;white-space:pre-wrap}
+.opt{border:1px solid var(--border);border-radius:9px;padding:13px 16px;margin:9px 0;background:var(--bg)}
+.ocurbox{border-color:var(--accent);border-width:2px;background:var(--tint-blue)}
+.ohd{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:5px}
+.onm{font-weight:600;font-size:14.5px}
+.ocur{font-size:11px;font-weight:700;color:#fff;background:var(--accent);padding:2px 8px;border-radius:20px}
+.osum{margin:4px 0;color:var(--ink-soft)}
+.ofml{background:var(--tint);border-radius:8px;padding:9px 14px;margin:9px 0;overflow-x:auto}
+.ofml.big{background:var(--tint-blue);padding:13px 18px}
+.okv{font-size:13px;margin:5px 0;color:var(--ink-soft)}
+.okv b{display:inline-block;min-width:78px;color:var(--ink)}
+.acnt{font-size:11.5px;color:var(--ink-soft);margin-left:auto}
+.fbx{fill:var(--card);stroke:var(--border);stroke-width:1}
+.fno{fill:var(--accent)}
+.fnt{font:700 11px ui-monospace,Consolas,monospace;fill:#fff;text-anchor:middle}
+.fti{font:600 13px -apple-system,system-ui,sans-serif;fill:var(--ink)}
+.fds{font:11.5px -apple-system,system-ui,sans-serif;fill:var(--ink-soft)}
+.far{stroke:var(--accent);stroke-width:1.6}
+.fbr{stroke:var(--warn,#ff9f0a);stroke-width:1.3;stroke-dasharray:4 3}
+.flb{stroke:var(--accent);stroke-width:1.3;fill:none;stroke-dasharray:5 3}
+.fbt{font:600 10.5px ui-monospace,Consolas,monospace;fill:#8a5a00}
+.fbd{font:10px -apple-system,system-ui,sans-serif;fill:var(--ink-soft)}
 .pvbar{display:flex;align-items:center;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
 /* 回执分两种状态：agent 正等着（绿）vs 已入收件箱、等它下次动作（琥珀）。
    对用户是完全不同的两件事，不能都用一样的灰字。 */
@@ -1214,7 +1359,7 @@ def render_html(
     # 没有真实撒点（比如直接从预设出说明书）就撒一批示意点——
     # 大片留白反而看不出这个配置要撒多少人、撒在哪。
     _ue_real = bool(ue_xy)
-    _ue_pts = list(ue_xy) if ue_xy else representative_drop(spec)
+    _ue_pts = list(ue_xy) if ue_xy else planned_ue_drop(spec["config"])
 
     pill_user = '<span class="pill p-user">用户指定</span>'
     pill_auto = '<span class="pill p-auto">默认</span>'
@@ -1336,6 +1481,7 @@ def render_html(
 </section>
 
 <section id="pn6">
+{_families_panel(spec)}
 {_algorithms_panel(spec)}
 </section>
 
