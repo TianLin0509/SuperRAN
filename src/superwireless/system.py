@@ -95,12 +95,26 @@ class SchedulerConfig:
 
     algorithm: SchedAlgorithm = "pf"
     pf_window_tti: int = 100
+    # --- OLLA（外环链路自适应）---
+    # 发送端按无干扰选 MCS，接收端吃着干扰误码，OLLA 把偏置压下来。
+    # 步长按目标 BLER 不对称：ACK 加 up、NACK 减 down，
+    # 稳态时 BLER → up/(up+down)。默认 0.1/0.9 对应 10%。
+    olla_enabled: bool = True
+    olla_step_up_db: float = 0.1
+    olla_step_down_db: float = 0.9
+    olla_min_db: float = -12.0
+    olla_max_db: float = 3.0
     mu_enabled: bool = True              # 是否允许 MU 配对（SU/MU 自适应）
     max_mu_users: int = 4
 
     def as_dict(self) -> dict[str, Any]:
         return {"algorithm": self.algorithm, "pf_window_tti": self.pf_window_tti,
-                "mu_enabled": self.mu_enabled, "max_mu_users": self.max_mu_users}
+                "mu_enabled": self.mu_enabled, "max_mu_users": self.max_mu_users,
+                "olla_enabled": self.olla_enabled,
+                "olla_steps_db": [self.olla_step_up_db, self.olla_step_down_db],
+                "olla_target_bler": round(
+                    self.olla_step_up_db / (self.olla_step_up_db
+                                            + self.olla_step_down_db), 3)}
 
 
 @dataclass
@@ -217,12 +231,41 @@ class UeLinkTable:
     outage: np.ndarray | None = None     # [snapshot] 该快照下根本调度不动
     iot_db: float = float("nan")         # 干扰抬升：(I+N)/N，>20 dB 算高干扰
     sir_db: float = float("nan")
+    # **发送侧与接收侧是两个 SINR。** 发送端一开始不知道干扰，
+    # 按无干扰（或 CQI 反馈的粗略统计）选 MCS；接收端实打实吃着干扰。
+    # 两者的差通过误码由 OLLA 收敛回来——这是干扰影响吞吐的第一性路径。
+    sinr_tx_db: np.ndarray | None = None  # [snapshot, rank] 无干扰，用于选 MCS
+    mcs_tx: np.ndarray | None = None      # [snapshot, rank] 发送端据此定的 MCS
 
 
 def _nan_safe(fn, values, *args) -> float:
     """全是 NaN 时返回 NaN 而不是让 numpy 抛 RuntimeWarning。"""
     v = [x for x in values if np.isfinite(x)]
     return float(fn(v, *args)) if v else float("nan")
+
+
+def interference_free_sinr(sinr_db: float, sir_db: float) -> float:
+    """从含干扰的几何 SINR 反推**无干扰**的 SNR（同口径）。
+
+    令 S=1：``I = 1/SIR``、``I+N = 1/SINR``，所以 ``N = 1/SINR − 1/SIR``，
+    无干扰时 ``SNR = 1/N``。
+
+    **这是发送端一开始看到的世界。** 发送端不知道瞬时干扰，按无干扰
+    （或 CQI 反馈的粗略统计）选 MCS；接收端实打实吃着干扰，SINR 更低，
+    于是误码，OLLA 把偏置压下来。干扰越大，OLLA 收敛到的偏置越负——
+    这就是"干扰越大、接收 SINR 越低、吞吐越低"的第一性路径。
+
+    **别用 ChannelHub 的 snr_dB 代替。** 它是另一个口径（不含阵列增益、
+    额外减了 10log10(RB)），和 sinr_dB 差几十 dB，见 CLAUDE.md。
+    """
+    if not (np.isfinite(sinr_db) and np.isfinite(sir_db)) or sir_db >= 49.0:
+        return float(sinr_db)
+    s_lin = 10.0 ** (float(sinr_db) / 10.0)
+    i_lin = 10.0 ** (-float(sir_db) / 10.0)
+    n_lin = 1.0 / s_lin - i_lin
+    if n_lin <= 0:
+        return float(sinr_db)
+    return float(-10.0 * np.log10(n_lin))
 
 
 def _iot(sinr_db: float, sir_db: float) -> float:
@@ -333,16 +376,30 @@ def build_link_tables(
         sinr = np.zeros((n_s, max_rank))
         mcs = np.zeros((n_s, max_rank), dtype=int)
         se = np.zeros((n_s, max_rank))
+        sinr_tx = np.zeros((n_s, max_rank))
+        mcs_tx = np.zeros((n_s, max_rank), dtype=int)
         _gs = per_snap_sinr[i] if i < len(per_snap_sinr) else [geo_sinr_db[i]]
+        _ss = per_snap_sir[i] if i < len(per_snap_sir) else [sir_in[i]]
         for s, hs in enumerate(snaps):
+            _g = _gs[s % len(_gs)]
+            _r = _ss[s % len(_ss)]
             # 逐快照用它自己的几何 SINR，不用 UE 的均值——保住动态范围
-            npow = mu.noise_from_geometric_sinr(hs, _gs[s % len(_gs)])
+            npow = mu.noise_from_geometric_sinr(hs, _g)
             rc = mu.su_rank_adaptation(hs, noise_power=npow, max_rank=max_rank,
                                        table=table, target_bler=target_bler,
                                        rb_per_rbg=rb_per_rbg)
             for c in rc.candidates:
                 r = c["rank"] - 1
                 sinr[s, r], mcs[s, r], se[s, r] = c["sinr_db"], c["mcs"], c["se"]
+            # **发送侧：按无干扰算。** 发送端一开始不知道瞬时干扰，
+            # 会把 MCS 选高；接收端吃着干扰、误码，OLLA 再把它压回来。
+            npow_tx = mu.noise_from_geometric_sinr(hs, interference_free_sinr(_g, _r))
+            rc_tx = mu.su_rank_adaptation(hs, noise_power=npow_tx, max_rank=max_rank,
+                                          table=table, target_bler=target_bler,
+                                          rb_per_rbg=rb_per_rbg)
+            for c in rc_tx.candidates:
+                r = c["rank"] - 1
+                sinr_tx[s, r], mcs_tx[s, r] = c["sinr_db"], c["mcs"]
         best = np.argmax(se, axis=1)
         # **覆盖判定。** 用户级 SINR 连 MCS 0 的 10% BLER 门限都够不到时，
         # 这个快照下他根本调度不动——发了也是白发。必须显式标出来：
@@ -356,7 +413,12 @@ def build_link_tables(
             ue=i, sinr_db=sinr, mcs=mcs, se=se,
             best_rank=best + 1, best_se=se[np.arange(n_s), best],
             geo_sinr_db=float(geo_sinr_db[i]), outage=outage,
-            iot_db=float(_iot(geo_sinr_db[i], sir_in[i])), sir_db=float(sir_in[i]),
+            # **IoT 逐快照算再取中位，不能拿平均后的 SINR/SIR 去算。**
+            # 两个量各自平均后相减，差值可以塌到 0，IoT 直接报 inf——
+            # 实测逐样本算出来是 5~41 dB，从来不是 inf。
+            iot_db=_nan_safe(np.nanmedian, [_iot(g, r) for g, r in
+                                            zip(_gs, _ss, strict=False)]),
+            sir_db=float(sir_in[i]), sinr_tx_db=sinr_tx, mcs_tx=mcs_tx,
         ))
     return out
 
@@ -646,6 +708,7 @@ def simulate(
     outage_tti = 0
     su_fits_skip = 0
     mu_rbg = 0
+    olla_db = np.zeros(n_ue)              # 每用户的 OLLA 偏置（dB）
     pattern = sys_cfg.tdd_pattern.upper() or "D"
 
     from . import linkadapt as la  # noqa: PLC0415
@@ -705,7 +768,13 @@ def simulate(
             r = int(tables[u].best_rank[snap])
             if use_mu:
                 r = min(r, mu.MU_MAX_RANK)      # MU 每用户硬顶 rank2（工程约束）
-            m = int(tables[u].mcs[snap, r - 1])
+            # **发送端按无干扰的 SINR + OLLA 偏置选 MCS**，
+            # 接收端按含干扰的 SINR 判误码。两者的差就是 OLLA 要收敛掉的东西。
+            if tables[u].sinr_tx_db is not None and sched.olla_enabled:
+                _tx = float(tables[u].sinr_tx_db[snap, r - 1]) + olla_db[u]
+                m = la.select_mcs(_tx, table=3, target_bler=0.1).index
+            else:
+                m = int(tables[u].mcs[snap, r - 1])
             mcs_obj = la.MCS_TABLES[3][m]
             tbs_bits = la.transport_block_size(
                 re_per_tti, mcs_obj.rate, mcs_obj.q_m, layers=r)
@@ -750,9 +819,15 @@ def simulate(
             if rng.random() > bler:
                 sent = tr.serve(u, tti, tb_bytes)
                 served[u] += sent
+                if sched.olla_enabled:      # ACK：小步上调
+                    olla_db[u] = min(olla_db[u] + sched.olla_step_up_db,
+                                     sched.olla_max_db)
             else:
                 nack_first[u] += 1
                 harq_pending[u] = (3, tb_bytes)
+                if sched.olla_enabled:      # NACK：大步下调
+                    olla_db[u] = max(olla_db[u] - sched.olla_step_down_db,
+                                     sched.olla_min_db)
 
         # --- PF 平均速率更新 ---
         inst = np.zeros(n_ue)
@@ -820,6 +895,11 @@ def simulate(
         "outage_ue": int(sum(1 for t in tables
                              if t.outage is not None and t.outage.all())),
         "outage_skips": int(outage_tti),
+        # **OLLA 收敛到多少，就说明发送端把干扰低估了多少。**
+        # 它应当与 IoT 同向：干扰越大、偏置越负。
+        "olla_db_mean": float(np.mean(olla_db)),
+        "olla_db_p5": float(np.percentile(olla_db, 5)),
+        "olla_db_p95": float(np.percentile(olla_db, 95)),
         # **MU 配对比例**：MU 配对的 RBG 数占已调度 RBG 总数。
         # 现场经验值：30%~50% PRB 利用率下大约 5%~20%。
         "mu_rbg_share": mu_rbg / max(busy_tti * sys_cfg.num_rbg, 1),
