@@ -110,6 +110,51 @@ class KpiConfig:
 
 
 @dataclass
+class NeighborLoadConfig:
+    """邻区负载。**不能假设所有小区都是 full buffer。**
+
+    ChannelHub 的几何 SINR 是按**所有邻区都在发**算出来的，等于 100% PRB
+    利用率。真实网络 5G 典型平均 PRB 利用率是 10% / 30% / 50%——
+    邻区没在发的那些 PRB 上，本小区用户根本不受干扰。
+    按 full buffer 算会把干扰放大到不真实的程度。
+
+    折算方式：干扰功率按利用率 ``η`` 线性缩放，噪声不变::
+
+        SINR' = S / (η·I + N)，其中 I = S/SIR、N = S/SNR
+
+    ``prb_utilization = 1.0`` 时退化成原来的 full buffer 行为。
+    """
+
+    prb_utilization: float = 0.3          # 5G 典型：0.1 / 0.3 / 0.5
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"prb_utilization": self.prb_utilization,
+                "note": ("邻区按这个 PRB 利用率折算干扰；1.0 等于假设所有邻区"
+                         "full buffer（ChannelHub 几何 SINR 的原始假设）")}
+
+
+def apply_neighbor_load(sinr_db: float, sir_db: float, utilization: float) -> float:
+    """把几何 SINR 按邻区负载折算。返回新的 SINR（dB）。
+
+    推导：令 S=1，则 I = 1/SIR_lin、N = 1/SINR_lin − I。
+    邻区只在 ``η`` 比例的 PRB 上发，干扰变成 ``η·I``，噪声不变::
+
+        SINR' = 1 / (η·I + N)
+
+    ``sir_db`` 拿不到（单小区哨兵 49.9）时原样返回——没有干扰可折算。
+    """
+    u = min(max(float(utilization), 0.0), 1.0)
+    if u >= 1.0 or not np.isfinite(sir_db) or sir_db >= 49.0:
+        return float(sinr_db)
+    s_lin = 10.0 ** (float(sinr_db) / 10.0)
+    i_lin = 10.0 ** (-float(sir_db) / 10.0)
+    n_lin = 1.0 / s_lin - i_lin
+    if n_lin <= 0:                        # 口径对不上时不硬算
+        return float(sinr_db)
+    return float(10.0 * np.log10(1.0 / (u * i_lin + n_lin)))
+
+
+@dataclass
 class SystemConfig:
     duration_s: float = 5.0
     scs_khz: int = 30                    # 30 kHz → slot 0.5 ms
@@ -158,6 +203,22 @@ class UeLinkTable:
     best_se: np.ndarray                  # [snapshot]
     geo_sinr_db: float
     outage: np.ndarray | None = None     # [snapshot] 该快照下根本调度不动
+    iot_db: float = float("nan")         # 干扰抬升：(I+N)/N，>20 dB 算高干扰
+    sir_db: float = float("nan")
+
+
+def _iot(sinr_db: float, sir_db: float) -> float:
+    """IoT = SIR/(SIR−SINR)（线性域）。**只能用同口径的两个量**。
+
+    体现的是干扰主导还是噪声主导：IoT 接近 0 dB 说明几乎没有干扰、
+    完全是噪声受限；密集城区经常到 20 dB 以上，那时干扰是绝对主导，
+    再加发射功率也没用（信号和干扰同步上涨）。
+    """
+    from . import interference as itf  # noqa: PLC0415
+
+    if not (np.isfinite(sinr_db) and np.isfinite(sir_db)):
+        return float("nan")
+    return float(np.asarray(itf.iot_db(sinr_db, sir_db)).item())
 
 
 def group_samples_by_ue(n_samples: int, num_ues: int) -> list[list[int]]:
@@ -181,6 +242,8 @@ def build_link_tables(
     h_users: list[np.ndarray],
     geo_sinr_db: list[float],
     *,
+    geo_sir_db: list[float] | None = None,
+    neighbor_load: float = 1.0,
     max_rank: int = mu.SU_MAX_RANK,
     table: int = 3,
     target_bler: float = 0.1,
@@ -198,15 +261,29 @@ def build_link_tables(
     用户，同一 UE 的多个样本当作它的快照序列。**不给的话每个样本算一个用户**
     ——那通常不是你想要的，见该函数的说明。
     """
+    sir_in = list(geo_sir_db) if geo_sir_db is not None else [float("nan")] * len(h_users)
     if num_ues is not None and num_ues < len(h_users):
         groups = group_samples_by_ue(len(h_users), num_ues)
-        merged_h, merged_g = [], []
+        merged_h, merged_g, merged_s = [], [], []
         for g in groups:
             merged_h.append(np.concatenate(
                 [np.asarray(h_users[i]).reshape(-1, *np.asarray(h_users[i]).shape[-3:])
                  for i in g], axis=0))
             merged_g.append(float(np.nanmean([geo_sinr_db[i] for i in g])))
-        h_users, geo_sinr_db = merged_h, merged_g
+            merged_s.append(float(np.nanmean([sir_in[i] for i in g])))
+        h_users, geo_sinr_db, sir_in = merged_h, merged_g, merged_s
+
+    # **邻区不是 full buffer。** 按 PRB 利用率折算干扰后再建表——
+    # 折算必须发生在算 SINR/MCS/rank 之前，事后乘系数是补不回来的。
+    if neighbor_load < 1.0:
+        # **SINR 和 SIR 必须一起折算。** 干扰降到 η 倍，SIR 就升高 1/η；
+        # 只改 SINR 会让后面的 IoT = SIR/(SIR−SINR) 用两个不同口径的量算，
+        # 直接报 inf。这和 CLAUDE.md 里「IoT 不是 snr 减 sinr」是同一类错。
+        _u_db = 10.0 * np.log10(max(neighbor_load, 1e-12))
+        geo_sinr_db = [apply_neighbor_load(g, sr, neighbor_load)
+                       for g, sr in zip(geo_sinr_db, sir_in, strict=False)]
+        sir_in = [(sr - _u_db) if np.isfinite(sr) and sr < 49.0 else sr
+                  for sr in sir_in]
 
     out: list[UeLinkTable] = []
     for i, h in enumerate(h_users):
@@ -240,6 +317,7 @@ def build_link_tables(
             ue=i, sinr_db=sinr, mcs=mcs, se=se,
             best_rank=best + 1, best_se=se[np.arange(n_s), best],
             geo_sinr_db=float(geo_sinr_db[i]), outage=outage,
+            iot_db=float(_iot(geo_sinr_db[i], sir_in[i])), sir_db=float(sir_in[i]),
         ))
     return out
 
@@ -356,6 +434,11 @@ class _Traffic:
     def has_data(self, u: int) -> bool:
         return self.active[u] is not None
 
+    def bytes_left(self, u: int) -> int:
+        """当前 burst 还剩多少没发。SU/MU 判决要用它——一个 TTI 能传完就不配对。"""
+        b = self.active[u]
+        return int(b.bytes_left) if b is not None else 0
+
     def serve(self, u: int, tti: int, n_bytes: int) -> int:
         """给这个 UE 发 ``n_bytes``，返回实际发出去的字节数。"""
         b = self.active[u]
@@ -385,23 +468,27 @@ def _burst_throughput_mbps(b: _Burst, tti_ms: float, cfg: KpiConfig) -> float | 
     "半个 TTI 的时间"去除"半个 TTI 的数据"，得到一个虚高的瞬时速率。
     单 slice 的 burst 因此完全无法测量，只能整个丢掉。
 
-    **分母是"缓冲区非空的时间"，不是"被调度的 TTI 数"。** 这两个差得很远——
-    用户排队等调度的那些 TTI 也算在体验时间里，那正是调度器压力的体现。
-    早先按被调度 TTI 数算，12 个用户各报出 583 Mbps、小区合计 8.2 Gbps，
-    对一个 100 MHz 小区是物理上不可能的数（峰值约 1.2 Gbps）——
-    因为每个用户被算成"只要轮到我，我就独享整个小区"。
+    **分母是一段时间，不是被调度的 TTI 数。** 这两个差得很远——
+    用户排队等调度的那些 TTI 也在消耗体验。早先按被调度 TTI 数算，
+    12 个用户各报出 583 Mbps、小区合计 8.2 Gbps，对一个 100 MHz 小区
+    物理上不可能（峰值约 1.2 Gbps）——每个用户被算成"轮到我就独享整个小区"。
+
+    起点按 ``trim`` 分两种（用户 2026-08-02 明确）：
+
+    * ``none`` / ``tail``：从**数据到达**算起，等调度的时间计入分母
+    * ``head_tail``：从**首次被调度的 TTI** 算起，
+      **话务到达但还没被调度的等待时间不计入**
     """
     if b.n_tti < max(2, cfg.min_burst_tti) or b.last_tti < 0:
         return None
-    # 缓冲区非空的时间：从数据到达（burst 开始）到发完
     vol = b.bytes_total
-    n = b.last_tti - b.start_tti + 1
+    # 掐头 = 起点从"到达"挪到"首次被调度"
+    t0 = b.first_tti if cfg.trim == "head_tail" else b.start_tti
+    n = b.last_tti - t0 + 1
     if cfg.trim in ("tail", "head_tail"):
+        # 掐尾：排除清空缓冲区的最后一个 slice，时间与数据同时扣
         vol -= b.bytes_last
         n -= (b.last_tti - b.prev_tti) if b.prev_tti >= 0 else 1
-    if cfg.trim == "head_tail":
-        vol -= b.bytes_first
-        n -= (b.first_tti - b.start_tti + 1)
     if n <= 0 or vol <= 0:
         return None
     return vol * 8.0 / (n * tti_ms / 1000.0) / 1e6
@@ -411,6 +498,7 @@ def _burst_throughput_mbps(b: _Burst, tti_ms: float, cfg: KpiConfig) -> float | 
 class UeKpi:
     ue: int
     geo_sinr_db: float
+    iot_db: float
     experienced_mbps: float
     served_mbps: float                   # 端到端平均（含空闲，用于对照）
     bursts: int
@@ -446,8 +534,11 @@ class SystemResult:
             f"小区体验速率 {c['cell_experienced_mbps']:.2f} Mbps"
             f"（用户中位 {c['ue_experienced_median_mbps']:.2f}、"
             f"5% 边缘 {c['ue_experienced_p5_mbps']:.2f}）\n"
-            f"平均调度 MCS {c['avg_mcs']:.1f}，平均 rank {c['avg_rank']:.2f}，"
-            f"首传 BLER {c['bler_first_tx']:.3f}\n"
+            f"平均调度 MCS {c['avg_mcs']:.1f}（5% 边缘 {c['edge_mcs_p5']:.1f}），"
+            f"平均 rank {c['avg_rank']:.2f}，首传 BLER {c['bler_first_tx']:.3f}\n"
+            f"IoT 中位 {c['iot_db_median']:.1f} dB"
+            f"（{c['high_iot_ue_share']:.0%} 的用户 ≥20 dB 属高干扰），"
+            f"MU 配对占 RBG {c['mu_rbg_share']:.1%}\n"
             f"调度 {c['scheduled_tti']} 个 TTI / 共 {c['dl_tti']} 个下行 TTI"
             f"（占用率 {c['occupancy']:.1%}），MU 占比 {c['mu_share']:.1%}"
         )
@@ -502,6 +593,8 @@ def simulate(
     busy_tti = 0
     mu_tti = 0
     outage_tti = 0
+    su_fits_skip = 0
+    mu_rbg = 0
     pattern = sys_cfg.tdd_pattern.upper() or "D"
 
     from . import linkadapt as la  # noqa: PLC0415
@@ -532,11 +625,24 @@ def simulate(
             metric = np.array([-((tti + u) % n_ue) for u in cand], dtype=float)
         order = np.argsort(-metric)
 
+        # **SU 能一个 TTI 传完就不触发 MU**（用户 2026-08-02 的现场准则）——
+        # 数据都发完了，配对没有意义，还白白引入用户间干扰。
+        _top = cand[order[0]]
+        _su_bytes = int(la.transport_block_size(
+            re_per_tti, la.MCS_TABLES[3][int(tables[_top].mcs[
+                snap, int(tables[_top].best_rank[snap]) - 1])].rate,
+            la.MCS_TABLES[3][int(tables[_top].mcs[
+                snap, int(tables[_top].best_rank[snap]) - 1])].q_m,
+            layers=int(tables[_top].best_rank[snap])) // 8)
+        _fits_in_su = tr.bytes_left(_top) <= _su_bytes
         use_mu = (sched.mu_enabled and mu_se_ratio > 1.0
-                  and len(cand) >= 2)
+                  and len(cand) >= 2 and not _fits_in_su)
+        if _fits_in_su and len(cand) >= 2:
+            su_fits_skip += 1
         picked = [cand[i] for i in order[:sched.max_mu_users]] if use_mu else [cand[order[0]]]
         if use_mu:
             mu_tti += 1
+            mu_rbg += sys_cfg.num_rbg          # MU 时整band 都是配对的
         busy_tti += 1
 
         # --- 发送 ---
@@ -616,7 +722,7 @@ def simulate(
                             for b in tr.done[u] if b.start_tti >= kpi.warmup_tti)
                 if x is not None]
         users.append(UeKpi(
-            ue=u, geo_sinr_db=tables[u].geo_sinr_db,
+            ue=u, geo_sinr_db=tables[u].geo_sinr_db, iot_db=tables[u].iot_db,
             experienced_mbps=float(np.mean(thps)) if thps else 0.0,
             served_mbps=served[u] * 8 / max(sys_cfg.duration_s, _EPS) / 1e6,
             bursts=len(thps),
@@ -648,6 +754,19 @@ def simulate(
         "outage_ue": int(sum(1 for t in tables
                              if t.outage is not None and t.outage.all())),
         "outage_skips": int(outage_tti),
+        # **MU 配对比例**：MU 配对的 RBG 数占已调度 RBG 总数。
+        # 现场经验值：30%~50% PRB 利用率下大约 5%~20%。
+        "mu_rbg_share": mu_rbg / max(busy_tti * sys_cfg.num_rbg, 1),
+        "su_fits_skips": int(su_fits_skip),
+        # **IoT = (I+N)/N**：干扰主导还是噪声主导。密集城区常 >20 dB。
+        "iot_db_median": float(np.nanmedian([t.iot_db for t in tables])),
+        "iot_db_p5": float(np.nanpercentile([t.iot_db for t in tables], 5)),
+        "iot_db_p95": float(np.nanpercentile([t.iot_db for t in tables], 95)),
+        "high_iot_ue_share": float(np.mean([
+            (t.iot_db >= 20.0) if np.isfinite(t.iot_db) else False for t in tables])),
+        # **边缘用户 MCS**：现场经验通常 < 5。它比平均 MCS 更能暴露覆盖问题。
+        "edge_mcs_p5": float(np.nanpercentile(
+            [x.avg_mcs for x in users if x.sched_tti > 0] or [float("nan")], 5)),
         # 守恒对账：到达了多少、发完了多少、还压着多少。
         # 不报这三个的话，"实际吞吐 105 Mbps vs 话务负载 144 Mbps"
         # 这种缺口只能靠猜——它可能是队列积压（正常），也可能是漏数据（bug）。
@@ -677,6 +796,16 @@ def simulate(
     if cell["accounting_error_pct"] > 1.0:
         notes.append(f"**字节对不上账（差 {cell['accounting_error_pct']}%）**——"
                      "发出去的 + 还压着的 应该等于到达的。这是 bug 不是现象。")
+    if np.isfinite(cell["edge_mcs_p5"]) and cell["edge_mcs_p5"] > 8:
+        notes.append(
+            f"**5% 边缘用户的 MCS 是 {cell['edge_mcs_p5']:.1f}，偏高**"
+            "（现场经验通常 <5）。多半是撒点没覆盖到真正的边缘，"
+            "或者邻区负载设得太低、干扰被低估了。")
+    if np.isfinite(cell["iot_db_median"]) and cell["iot_db_median"] < 3:
+        notes.append(
+            f"**IoT 中位只有 {cell['iot_db_median']:.1f} dB**，几乎是噪声受限。"
+            "密集城区实际常在 20 dB 以上——检查是不是站间距太大、"
+            "或者邻区负载 prb_utilization 设得过低。")
     if cell["outage_ue"]:
         notes.append(
             f"**{cell['outage_ue']} 个用户全程处于覆盖外**（用户级 SINR 够不到 MCS 0 的门限），"

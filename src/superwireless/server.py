@@ -1480,6 +1480,7 @@ def sw_system_sim(
     mu_enabled: bool = False,
     trim: str = "tail",
     tdd_pattern: str = "DDDSU",
+    neighbor_prb_util: float = 0.3,
     seed: int = 0,
 ) -> dict[str, Any]:
     """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI。**
@@ -1512,6 +1513,9 @@ def sw_system_sim(
     arrival_rate_hz : 每用户每秒到达几个文件。控制负载——太高会积压，
         ``notes`` 会拦。
     mu_enabled : 是否允许 MU 配对。默认关，先看清 SU 基线。
+    neighbor_prb_util : **邻区 PRB 利用率**，默认 0.3。ChannelHub 的几何 SINR
+        是按所有邻区都在发算的（等于 100%），真实网络 5G 典型是 10%/30%/50%。
+        按 full buffer 算会把干扰放大到不真实的程度。1.0 退化成原行为。
     """
     from . import load as _load  # noqa: PLC0415
     from . import system as sysm  # noqa: PLC0415
@@ -1528,7 +1532,12 @@ def sw_system_sim(
     # UE 位置上；不按 UE 合并的话小区里会多出好几倍的人，
     # 每用户谱效被摊薄（实测 40 样本/10 UE 时从 0.32 掉到 0.08）。
     n_ue = int(ds.config.get("num_ues") or 0) or None
-    tables = sysm.build_link_tables(h_users, [float(x) for x in sinr], num_ues=n_ue)
+    try:
+        sir = [float(x) for x in np.asarray(ds.scalar("sir_dB"))]
+    except Exception:  # noqa: BLE001
+        sir = None
+    tables = sysm.build_link_tables(h_users, [float(x) for x in sinr], num_ues=n_ue,
+                                    geo_sir_db=sir, neighbor_load=float(neighbor_prb_util))
     mu_gain = (sysm.measure_mu_gain(h_users, [float(x) for x in sinr], num_ues=n_ue)
                if mu_enabled else {"ratio": 1.0, "measured": False,
                                    "note": "未开 MU"})
