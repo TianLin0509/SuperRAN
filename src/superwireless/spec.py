@@ -230,10 +230,14 @@ def build_spec(
         )
     if cell_err:
         notes.append(f"站点位置画不出来：{cell_err}")
-    if int(cfg.get("num_rb") or 0) and n_rb != _rb_from_bandwidth(cfg):
+    # RB 数与带宽推导值不一致时才提——**272 vs 273 是本地的常规口径**
+    # （17 RBG × 16 RB vs 38.104 标准表），每次都弹一条黄框纯属噪音。
+    # 差得多才是真要提醒的事。
+    _rb_auto = _rb_from_bandwidth(cfg)
+    if int(cfg.get("num_rb") or 0) and abs(n_rb - _rb_auto) > 2:
         notes.append(
-            f"RB 数是显式指定的 {n_rb}，不是由带宽推的 "
-            f"{_rb_from_bandwidth(cfg)}。"
+            f"RB 数是显式指定的 {n_rb}，与带宽推导的 {_rb_auto} 差 "
+            f"{abs(n_rb - _rb_auto)} 个——**确认这是有意的**。"
         )
 
     return {
@@ -390,11 +394,51 @@ def unit_hex_layouts() -> dict[str, list[list[float]]]:
     return out
 
 
+def representative_drop(spec: dict[str, Any], n: int = 120,
+                        seed: int = 0) -> list[tuple[float, float]]:
+    """没有真实数据时，按六边形几何撒一批**示意**用户点。
+
+    **和真实撒点必须能区分开。** 真实撒点来自数据集（``sw_generate`` 之后），
+    这里只是让"配置定成什么样"看得见——用空心点画，图例里标"示意撒点"。
+    从预设直接出说明书时数据集还不存在，图上一个用户都没有、大片留白，
+    反而看不出这个配置是要撒多少人、撒在哪。
+    """
+    import random  # noqa: PLC0415
+
+    topo = spec["topology"]
+    cells = topo["cells"]
+    isd = float(topo["isd_m"] or 0)
+    if not cells or not isd:
+        return []
+    rng = random.Random(seed)
+    r = isd / math.sqrt(3.0)
+    sites = sorted({(c["x"], c["y"]) for c in cells})
+    out: list[tuple[float, float]] = []
+    per = max(1, n // max(len(sites), 1))
+    for (sx, sy) in sites:
+        got = 0
+        for _ in range(per * 40):
+            if got >= per:
+                break
+            # 在外接圆里均匀撒，落在六边形内才要——六边形内均匀，不是圆内
+            a = rng.uniform(0, 2 * math.pi)
+            d = r * math.sqrt(rng.random())
+            x, y = d * math.cos(a), d * math.sin(a)
+            # 六边形（顶点在 30°+60k）的内接判据
+            if all(abs(x * math.cos(math.radians(60 * k))
+                       + y * math.sin(math.radians(60 * k))) <= r * math.sqrt(3) / 2
+                   for k in range(3)):
+                out.append((sx + x, sy + y))
+                got += 1
+    return out
+
+
 def _svg_layout(
     spec: dict[str, Any],
     ue_xy: list[tuple[float, float]] | None = None,
     *,
     size: int | None = None,
+    ue_is_real: bool = True,
 ) -> str:
     """网络拓扑图：六边形小区 + 扇区 + 基站 + 用户，图上直接标关键数。
 
@@ -420,8 +464,8 @@ def _svg_layout(
     # 画布跟着部署形状走，米/像素两轴一致（几何不失真），高度只做上下限保护。
     n_sites = len(sites)
     W = int(size) if size else (340 if n_sites <= 1 else 660)
-    dx = max(max(xs) - min(xs), 1.0) * 1.08
-    dy = max(max(ys) - min(ys), 1.0) * 1.16
+    dx = max(max(xs) - min(xs), 1.0) * 1.02
+    dy = max(max(ys) - min(ys), 1.0) * 1.06
     scale = W / dx
     Hc = min(max(dy * scale, W * 0.34), W)
     H = int(Hc) + 34
@@ -445,9 +489,22 @@ def _svg_layout(
         '.hex{fill:none;stroke:#0071e3;stroke-opacity:.30;stroke-width:1.1}'
                 '.bore{stroke:#0071e3;stroke-width:1.8;stroke-opacity:.65;stroke-linecap:round}'
         '.ueo{fill:#34c759;fill-opacity:.65}'
+        # 示意撒点用空心，和数据集里的真实撒点一眼能分开
+        '.ues{fill:none;stroke:#34c759;stroke-width:1.2;stroke-opacity:.7}'
         '.bsh{fill:#fff;fill-opacity:.95}.bsd{fill:#ff3b30}'
         '.bx{fill:#0071e3;fill-opacity:.06}'
         '.bn{font:700 15px ui-monospace,Consolas,monospace;fill:#0071e3}'
+        # 小区编号压在扇区色块上，用细白描边提清晰度（paint-order 先描边后填充）
+        # **类名必须带前缀。** SVG 的 <style> 是文档级的，`.cl` 和调参面板的
+        # <span class="cl">、`.sl` 和 TDD 图的时隙标号（fill:#fff）全撞了——
+        # 实测小区编号糊成蓝块、站点编号白底白字整个看不见。
+        '.tpc{font:600 9.5px ui-monospace,Consolas,monospace;fill:#0071e3;'
+        'text-anchor:middle;paint-order:stroke;stroke:#fff;stroke-width:1.6px;'
+        'stroke-linejoin:round}'
+        # 站点编号给个底：白描边在小字号上会把字整个糊掉，实测糊成一片白块
+        '.tpsb{fill:#fff;fill-opacity:.85;stroke:#d2d2d7;stroke-width:.5}'
+        '.tps{font:600 8.5px ui-monospace,Consolas,monospace;fill:#3a3a3c;'
+        'text-anchor:middle}'
         '</style>'
     )
 
@@ -478,8 +535,18 @@ def _svg_layout(
         else:
             out.append(f'<circle fill="url(#sg)" cx="{X:.1f}" cy="{Y:.1f}" r="{reach:.1f}"/>')
 
+    _uc = "ueo" if ue_is_real else "ues"
     for x, y in (ue_xy or []):
-        out.append(f'<circle class="ueo" cx="{px(x):.1f}" cy="{py(y):.1f}" r="2.7"/>')
+        out.append(f'<circle class="{_uc}" cx="{px(x):.1f}" cy="{py(y):.1f}" r="2.7"/>')
+
+    # --- 小区编号：贴在扇区指向上，字小、有描边，不跟别的元素打架 ---
+    # 编号规则和数据里一致：小区 i 属于站点 i//sectors，扇区 i%sectors。
+    for i, c in enumerate(cells):
+        X, Y = px(c["x"]), py(c["y"])
+        a = math.radians(c["az"])
+        d = reach * 0.62 if sec > 1 else reach * 0.55
+        out.append(f'<text class="tpc" x="{X + d * math.cos(a):.1f}" '
+                   f'y="{Y - d * math.sin(a) + 3:.1f}">C{i}</text>')
 
     arm = max(reach * 0.5, 12)
     for c in cells:
@@ -487,15 +554,21 @@ def _svg_layout(
         a = math.radians(c["az"])
         out.append(f'<line class="bore" x1="{X:.1f}" y1="{Y:.1f}" '
                    f'x2="{X + arm * math.cos(a):.1f}" y2="{Y - arm * math.sin(a):.1f}"/>')
-    for (sx, sy) in sites:
+    for si, (sx, sy) in enumerate(sites):
         X, Y = px(sx), py(sy)
         out.append(f'<circle class="bsh" cx="{X:.1f}" cy="{Y:.1f}" r="5.6"/>'
                    f'<circle class="bsd" cx="{X:.1f}" cy="{Y:.1f}" r="3.4"/>')
+        # 站点编号放在基站正下方，和小区编号错开
+        _lbl = f"Site{si}"
+        _w = 6.0 + 5.0 * len(_lbl)
+        out.append(f'<rect class="tpsb" x="{X - _w / 2:.1f}" y="{Y + 8:.1f}" '
+                   f'width="{_w:.1f}" height="11" rx="3"/>'
+                   f'<text class="tps" x="{X:.1f}" y="{Y + 16:.1f}">{_lbl}</text>')
 
     # --- 图内信息盒 ---
     facts = [(str(topo["num_sites_actual"]), "站点"), (str(topo["num_cells"]), "小区")]
     if ue_xy:
-        facts.append((str(len(ue_xy)), "UE 撒点"))
+        facts.append((str(len(ue_xy)), "UE 撒点" if ue_is_real else "示意撒点"))
     if isd:
         facts.append((f"{isd:g} m", "站间距"))
     bw = 92 * len(facts) + 16
@@ -523,8 +596,9 @@ def _svg_layout(
                f'<circle class="bsd" cx="{lx}" cy="{H-30}" r="3"/>'
                f'<text class="lb" x="{lx+10}" y="{H-26}">基站</text>')
     if ue_xy:
-        out.append(f'<circle class="ueo" cx="{lx+54}" cy="{H-30}" r="3.4"/>'
-                   f'<text class="lb" x="{lx+63}" y="{H-26}">用户</text>')
+        out.append(f'<circle class="{_uc}" cx="{lx+54}" cy="{H-30}" r="3.4"/>'
+                   f'<text class="lb" x="{lx+63}" y="{H-26}">'
+                   f'{"用户" if ue_is_real else "示意撒点"}</text>')
     dx2 = lx + (106 if ue_xy else 54)
     out.append(f'<line class="bore" x1="{dx2}" y1="{H-30}" x2="{dx2+16}" y2="{H-30}"/>'
                f'<text class="lb" x="{dx2+21}" y="{H-26}">扇区</text>')
@@ -1137,6 +1211,11 @@ def render_html(
         for n in spec["notes"]
     )
 
+    # 没有真实撒点（比如直接从预设出说明书）就撒一批示意点——
+    # 大片留白反而看不出这个配置要撒多少人、撒在哪。
+    _ue_real = bool(ue_xy)
+    _ue_pts = list(ue_xy) if ue_xy else representative_drop(spec)
+
     pill_user = '<span class="pill p-user">用户指定</span>'
     pill_auto = '<span class="pill p-auto">默认</span>'
 
@@ -1205,7 +1284,7 @@ def render_html(
 
 {notes}
 
-<div class="hero">{_svg_layout(spec, ue_xy)}</div>
+<div class="hero">{_svg_layout(spec, _ue_pts, ue_is_real=_ue_real)}</div>
 <div class="facts">{facts}</div>
 
 <div class="tabs">
