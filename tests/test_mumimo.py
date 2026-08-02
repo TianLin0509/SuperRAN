@@ -239,6 +239,36 @@ check(abs(_pp[0].sum() - 1.0) < 1e-9, "总功率仍归一")
 check(abs(_pp[0][0] - 1.0 / 6) < 1e-9, "6 条流每流 1/6，即 rank2 的用户拿 1/3")
 
 
+
+# ---------------------------------------------------------------------------
+sect("8  RBG 粒度：降 16 倍算量而不改结论")
+
+_rng3 = np.random.default_rng(31)
+_hb = ((_rng3.standard_normal((272, 32, 4)) + 1j * _rng3.standard_normal((272, 32, 4)))
+       / np.sqrt(2))
+_red = mu.rbg_reduce(_hb, 16)
+check(_red.shape == (17, 32, 4), f"272 RB -> 17 RBG（实得 {_red.shape}）")
+check(mu.rbg_reduce(_hb, 1).shape == (272, 32, 4), "rb_per_rbg=1 退回 RB 粒度")
+
+_h4 = _hb[None]
+_np = mu.noise_from_geometric_sinr(_h4, 15.0)
+_rb_res = mu.su_rank_adaptation(_h4, noise_power=_np, rb_per_rbg=1)
+_rbg_res = mu.su_rank_adaptation(_h4, noise_power=_np, rb_per_rbg=16)
+print(f"  RB 粒度 rank {_rb_res.rank} MCS {_rb_res.mcs} SE {_rb_res.se:.3f}")
+print(f"  RBG粒度 rank {_rbg_res.rank} MCS {_rbg_res.mcs} SE {_rbg_res.se:.3f}")
+check(_rb_res.rank == _rbg_res.rank, "两种粒度选出同一个 rank")
+check(abs(_rb_res.mcs - _rbg_res.mcs) <= 1, "MCS 最多差一档")
+check(abs(_rb_res.se - _rbg_res.se) / max(_rb_res.se, 1e-9) < 0.05,
+      f"谱效差 <5%（实得 {abs(_rb_res.se - _rbg_res.se) / max(_rb_res.se, 1e-9):.1%}）")
+
+# **取代表点而不是平均。** 平均会把频选衰落抹平、抬高信道条件数，进而高估 rank。
+_flat = np.repeat(_hb.mean(axis=0, keepdims=True), 17, axis=0)
+_sv_avg = np.linalg.svd(_flat[0].conj().T, compute_uv=False)
+_sv_rep = np.linalg.svd(_red[0].conj().T, compute_uv=False)
+print(f"  平均后奇异值比 σ4/σ1 = {_sv_avg[3] / _sv_avg[0]:.3f}；"
+      f"取代表点 {_sv_rep[3] / _sv_rep[0]:.3f}")
+check(_sv_rep[3] / _sv_rep[0] < _sv_avg[3] / _sv_avg[0] * 3,
+      "取代表点保留了真实的奇异值分布，没有被平均抹平")
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:

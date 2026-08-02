@@ -526,10 +526,34 @@ class RankChoice:
                 "candidates": self.candidates}
 
 
+def rbg_reduce(h: np.ndarray, rb_per_rbg: int = RB_PER_RBG) -> np.ndarray:
+    """把 ``[RB, BS, UE]`` 的信道按 RBG 聚合，返回 ``[RBG, BS, UE]``。
+
+    **降到 RBG 粒度是安全的，因为 RB 级的分辨率没有任何算法在用。**
+    一个 RBG 内的 16 个 RB 共用同一个 MCS、同一次调度决策、同一个预编码；
+    仿真到 RB 只是多算 16 倍的 SVD。272 RB → 17 RBG 省 16 倍。
+
+    会受影响的只有**频选调度**与**导频图案**，两者都还没做——
+    真要做时把 ``rb_per_rbg`` 设成 1 就退回 RB 粒度。
+
+    聚合方式是 RBG 内**取中间那个 RB**，不是平均：平均会把频选衰落
+    抹平、人为抬高信道的条件数（奇异值分布变平），进而高估 rank。
+    取代表点保留了真实的空间结构。
+    """
+    hh = np.asarray(h)
+    n_rb = hh.shape[0]
+    step = max(1, int(rb_per_rbg))
+    if step <= 1 or n_rb <= step:
+        return hh
+    idx = np.arange(step // 2, n_rb, step)
+    return hh[idx]
+
+
 def su_rank_adaptation(h: np.ndarray, *, noise_power: float,
                        max_rank: int = SU_MAX_RANK, table: int = 3,
                        target_bler: float = 0.1,
-                       total_power: float = 1.0) -> RankChoice:
+                       total_power: float = 1.0,
+                       rb_per_rbg: int = 1) -> RankChoice:
     """单用户 rank 自适应：遍历 rank 1..max_rank，取谱效最高的那个。
 
     **这是个真实的权衡，不是"rank 越高越好"。** 总功率固定，rank 个流均分，
@@ -548,6 +572,8 @@ def su_rank_adaptation(h: np.ndarray, *, noise_power: float,
     """
     hb = np.asarray(h)
     hb = hb.mean(axis=0) if hb.ndim == 4 else hb          # [RB, BS, UE]
+    if rb_per_rbg > 1:
+        hb = rbg_reduce(hb, rb_per_rbg)                   # 降到 RBG 粒度，省 16 倍 SVD
     n_rb = hb.shape[0]
     r_max = max(1, min(int(max_rank), hb.shape[1], hb.shape[2]))
 
@@ -559,7 +585,8 @@ def su_rank_adaptation(h: np.ndarray, *, noise_power: float,
     for r in range(1, r_max + 1):
         p_per = float(total_power) / r
         sinr = (sv[:, :r] ** 2) * p_per / max(float(noise_power), _EPS)   # [RB, r]
-        s_db = user_sinr_db(sinr)
+        # 已经降过粒度的话每行就是一个 RBG，不能再按 16 分组
+        s_db = user_sinr_db(sinr, rb_per_rbg=1 if rb_per_rbg > 1 else RB_PER_RBG)
         se, mcs = se_from_sinr(s_db, r, table=table, target_bler=target_bler)
         cands.append({"rank": r, "sinr_db": round(s_db, 2), "mcs": mcs.index,
                       "se": round(se, 4)})

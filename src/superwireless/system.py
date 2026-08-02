@@ -249,6 +249,7 @@ def build_link_tables(
     target_bler: float = 0.1,
     num_snapshots: int = 1,
     num_ues: int | None = None,
+    rb_per_rbg: int = 16,
 ) -> list[UeLinkTable]:
     """第一相：逐 UE 把 rank 1..max_rank 的 SINR / MCS / 谱效全部算好。
 
@@ -319,7 +320,8 @@ def build_link_tables(
             # 逐快照用它自己的几何 SINR，不用 UE 的均值——保住动态范围
             npow = mu.noise_from_geometric_sinr(hs, _gs[s % len(_gs)])
             rc = mu.su_rank_adaptation(hs, noise_power=npow, max_rank=max_rank,
-                                       table=table, target_bler=target_bler)
+                                       table=table, target_bler=target_bler,
+                                       rb_per_rbg=rb_per_rbg)
             for c in rc.candidates:
                 r = c["rank"] - 1
                 sinr[s, r], mcs[s, r], se[s, r] = c["sinr_db"], c["mcs"], c["se"]

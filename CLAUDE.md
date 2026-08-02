@@ -24,7 +24,7 @@ python tests/test_linklevel.py   # 谱效、可信度、物理层、IRC 62 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
-python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应、单码字 57 项
+python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应、单码字、RBG 粒度 63 项
 python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒、MU 47 项
 python tests/test_interference.py # IoT、测量域、场景预设、探测模式、说明书回传、文档计数 262 项
 ```
@@ -481,6 +481,18 @@ Python 侧：反斜杠 + 数字 是合法的八进制转义，
 结论：CSS 里要中文就**直接写中文**，文件本来就是 UTF-8；
 真要写转义就用 raw 字符串，并给每个转义补足 6 位或补一个空格作结束符。
 这个只有在浏览器里看 `getComputedStyle(el,'::before').content` 才发现得了。
+
+### 仿真粒度降到 RBG 是安全的
+
+一个 RBG 内的 16 个 RB 共用同一个 MCS、同一次调度决策、同一个预编码，
+**RB 级的分辨率没有任何已实现的算法在用**。降到 RBG（272 → 17）实测
+rank 与 MCS **逐位相同**、谱效差 0.1%，建表快一倍。
+
+聚合方式是 RBG 内**取中间那个 RB 作代表**，不是平均。平均会把频选衰落抹平、
+让奇异值分布变平（信道条件数被人为改善），进而**高估 rank**。
+
+会受影响的只有频选调度与导频图案，两者都还没做。真要做时把
+`rb_per_rbg=1` 设回去就退回 RB 粒度。
 
 ### MU 是空间复用，不是频率复用
 
