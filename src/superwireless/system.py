@@ -57,10 +57,17 @@ class TrafficConfig:
     file_bytes: int = 500_000            # FTP3 常用 0.5 MB
     arrival_rate_hz: float = 2.0         # 每用户每秒到达几个文件
     cbr_mbps: float = 5.0                # CBR 模式的恒定速率
-    # --- bimodal：现网话务两头高中间低 ---
-    small_share: float = 0.7             # 小包占比（信令、心跳、短交互）
-    small_rbg: int = 1                   # 小包只占 1 个 RBG
-    large_bytes: int = 1_000_000         # 大包占满全带宽（视频、下载）
+    # --- bimodal：现网话务按**占用 RBG 数**的分布，两头高中间低 ---
+    # 用户 2026-08-02 给的现网口径：
+    #   1 个 RBG（小包）约 30%、17 个 RBG（满带宽）约 30%、
+    #   2~16 个 RBG 相对均匀分布，折合平均 PRB 利用率约 30%
+    #   （另有约 30% 的 TTI 根本没有调度，0 个 RBG）
+    # **这是"一次传输占多少频域资源"的分布，不是文件大小的分布。**
+    # 我第一版理解成了文件大小，两者完全不同：前者决定单次调度的 TBS，
+    # 后者决定一个 burst 要发多少个 TTI。
+    p_small_rbg: float = 0.30            # 只占 1 个 RBG
+    p_full_rbg: float = 0.30             # 占满全部 RBG
+    p_idle_tti: float = 0.30             # 根本没有调度的 TTI 占比
 
     def as_dict(self) -> dict[str, Any]:
         d = {"model": self.model}
@@ -71,14 +78,23 @@ class TrafficConfig:
         elif self.model == "cbr":
             d |= {"cbr_mbps": self.cbr_mbps}
         elif self.model == "bimodal":
-            d |= {"small_share": self.small_share, "small_rbg": self.small_rbg,
-                  "large_bytes": self.large_bytes,
-                  "arrival_rate_hz": self.arrival_rate_hz,
-                  "note": ("现网话务两头高中间低：绝大部分是只占 1 个 RBG 的小包"
-                           "和占满全带宽的大包，中间尺寸很少。"
-                           "**小包的体验速率被调度时延主导，大包才反映信道能力**"
-                           "——两者混在一起平均会得到一个谁都不像的数。")}
+            d |= {"p_small_rbg": self.p_small_rbg, "p_full_rbg": self.p_full_rbg,
+                  "p_idle_tti": self.p_idle_tti,
+                  "expected_prb_utilization": round(self.expected_prb_util(), 4),
+                  "note": ("**按占用 RBG 数分布，不是按文件大小。** 现网两头高中间低："
+                           "1 个 RBG 约 30%、满带宽约 30%、中间相对均匀，"
+                           "另有约 30% 的 TTI 根本没有调度。"
+                           "**小包测不到体验速率**——一个 TTI 就发完，"
+                           "3GPP 掐尾口径下没有可测量的时间。")}
         return d
+
+    def expected_prb_util(self, num_rbg: int = 17) -> float:
+        """这套分布折合出来的平均 PRB 利用率。现网口径约 30%。"""
+        p_mid = max(0.0, 1.0 - self.p_small_rbg - self.p_full_rbg)
+        mid_mean = (2 + num_rbg - 1) / 2.0 / num_rbg     # 2~16 均匀的均值
+        busy = (self.p_small_rbg * (1.0 / num_rbg)
+                + self.p_full_rbg * 1.0 + p_mid * mid_mean)
+        return float(busy * (1.0 - self.p_idle_tti))
 
 
 @dataclass
@@ -507,7 +523,8 @@ class _Traffic:
         self.offered_bytes = 0
         # 小包只占 1 个 RBG：按 1/num_rbg 的 RE 数、中等 MCS 估个字节数。
         # 它小到一个 TTI 就发完，所以体验速率完全由调度时延决定。
-        self._small_bytes = max(200, int(small_bytes or 1500))
+        self._per_rbg_bytes = max(50, int(small_bytes or 1500))
+        self.rbg_hist: list[int] = []
         self._cbr_per_tti = int(cfg.cbr_mbps * 1e6 * tti_ms / 1000.0 / 8)
 
     def step(self, tti: int) -> None:
@@ -530,9 +547,9 @@ class _Traffic:
         for u in range(self.n_ue):
             if self.rng.random() < self._p_arrive:
                 if self.cfg.model == "bimodal":
-                    small = self.rng.random() < self.cfg.small_share
-                    # 小包只占 1 个 RBG：字节数按该 RBG 一个 TTI 能装多少估
-                    n_bytes = self._small_bytes if small else self.cfg.large_bytes
+                    n_rbg, small = self.draw_rbg()
+                    # 一次调度占 n_rbg 个 RBG，burst 大小按它一个 TTI 的承载算
+                    n_bytes = max(200, int(self._per_rbg_bytes * n_rbg))
                 else:
                     small, n_bytes = False, self.cfg.file_bytes
                 b = _Burst(tti, n_bytes, n_bytes, is_small=small)
@@ -541,6 +558,18 @@ class _Traffic:
                     self.active[u] = b
                 else:
                     self.queue[u].append(b)
+
+    def draw_rbg(self, num_rbg: int = 17) -> tuple[int, bool]:
+        """抽一次传输占几个 RBG。两头高中间低。返回 ``(RBG 数, 是不是小包)``。"""
+        x = self.rng.random()
+        if x < self.cfg.p_small_rbg:
+            n = 1
+        elif x < self.cfg.p_small_rbg + self.cfg.p_full_rbg:
+            n = num_rbg
+        else:
+            n = int(self.rng.integers(2, max(3, num_rbg)))   # 2~16 均匀
+        self.rbg_hist.append(n)
+        return n, n == 1
 
     def has_data(self, u: int) -> bool:
         return self.active[u] is not None
@@ -682,6 +711,7 @@ def simulate(
     n_ue = len(tables)
     rng = np.random.default_rng(sys_cfg.seed)
     # 小包只占 1 个 RBG：按该 RBG 的 RE 数 × 中等 MCS 谱效估承载
+    # 1 个 RBG 一个 TTI 的承载：RB×12 子载波×12 数据符号×中等谱效
     _small_b = max(200, int(sys_cfg.rb_per_rbg * 12 * 12 * 3.0 / 8))
     tr = _Traffic(traffic, n_ue, sys_cfg.tti_ms, rng, small_bytes=_small_b)
 
@@ -888,6 +918,11 @@ def simulate(
         "mu_share": mu_tti / max(busy_tti, 1),
         "measured_bursts": int(np.sum([x.bursts for x in users])),
         # bimodal 下小包与大包分开报：前者由调度时延主导，后者反映信道能力
+        "rbg_size_hist": (
+            {"p_1rbg": round(float(np.mean(np.array(tr.rbg_hist) == 1)), 3),
+             "p_full": round(float(np.mean(np.array(tr.rbg_hist) >= sys_cfg.num_rbg)), 3),
+             "mean_rbg": round(float(np.mean(tr.rbg_hist)), 2),
+             "n": len(tr.rbg_hist)} if tr.rbg_hist else None),
         "small_pkt_experienced_mbps": (float(np.nanmean(small_thp))
                                        if np.any(np.isfinite(small_thp)) else None),
         "large_pkt_experienced_mbps": (float(np.nanmean(large_thp))
@@ -952,6 +987,15 @@ def simulate(
             f"**IoT 中位只有 {cell['iot_db_median']:.1f} dB**，几乎是噪声受限。"
             "密集城区实际常在 20 dB 以上——检查是不是站间距太大、"
             "或者邻区负载 prb_utilization 设得过低。")
+    if traffic.model == "bimodal":
+        _u = traffic.expected_prb_util(sys_cfg.num_rbg)
+        if abs(_u - 0.30) > 0.05:
+            notes.append(
+                f"**这套 RBG 尺寸分布折合出来的 PRB 利用率是 {_u:.1%}，"
+                f"现网口径约 30%**。差在中间段——2~{sys_cfg.num_rbg - 1} 个 RBG "
+                f"均匀分布的均值是 {(2 + sys_cfg.num_rbg - 1) / 2 / sys_cfg.num_rbg:.2f}，"
+                "偏高。要对齐现网就调 p_idle_tti 或把中间段改成偏小的分布——"
+                "**这个参数我没有替你调，因为它直接决定负载**。")
     if traffic.model == "bimodal" and cell["small_pkt_experienced_mbps"] is None:
         notes.append(
             "**小包的体验速率测不出来**：它们在一个 TTI 内就发完了，"
