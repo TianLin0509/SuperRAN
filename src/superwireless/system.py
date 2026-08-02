@@ -114,11 +114,13 @@ class SchedulerConfig:
     # --- OLLA（外环链路自适应）---
     # 发送端按无干扰选 MCS，接收端吃着干扰误码，OLLA 把偏置压下来。
     # 步长按目标 BLER 不对称：ACK 加 up、NACK 减 down，
-    # 稳态时 BLER → up/(up+down)。默认 0.1/0.9 对应 10%。
+    # 稳态时 BLER → up/(up+down)。**现网基线是 +0.01/−0.1**（≈9.1% BLER）。
+    # 步长放大能加快收敛但会在稳态附近抖得更厉害——要快收敛就临时调大，
+    # 出正式结论用基线值。
     olla_enabled: bool = True
-    olla_step_up_db: float = 0.1
-    olla_step_down_db: float = 0.9
-    olla_min_db: float = -12.0
+    olla_step_up_db: float = 0.01        # 现网基线（用户 2026-08-02）
+    olla_step_down_db: float = 0.1        # 稳态 BLER -> 0.01/(0.01+0.1) = 9.1%
+    olla_min_db: float = -20.0
     olla_max_db: float = 3.0
     mu_enabled: bool = True              # 是否允许 MU 配对（SU/MU 自适应）
     max_mu_users: int = 4
@@ -254,6 +256,14 @@ class UeLinkTable:
     mcs_tx: np.ndarray | None = None      # [snapshot, rank] 发送端据此定的 MCS
 
 
+def la_sel(sinr_db: float, table: int, target_bler: float) -> int:
+    """选 MCS 的薄封装，建表时用。"""
+    from . import linkadapt as la  # noqa: PLC0415
+
+    return int(la.select_mcs(float(sinr_db), table=table,
+                             target_bler=target_bler).index)
+
+
 def _nan_safe(fn, values, *args) -> float:
     """全是 NaN 时返回 NaN 而不是让 numpy 抛 RuntimeWarning。"""
     v = [x for x in values if np.isfinite(x)]
@@ -294,6 +304,14 @@ def _iot(sinr_db: float, sir_db: float) -> float:
     from . import interference as itf  # noqa: PLC0415
 
     if not (np.isfinite(sinr_db) and np.isfinite(sir_db)):
+        return float("nan")
+    # **SIR < SINR 物理上不可能**（SINR = S/(I+N) ≤ S/I = SIR）。
+    # 出现它只有一个原因：两个量不同口径。实测 num_slots_per_sample=4 时
+    # sinr_dB 是各 slot 的 dB 均值、sir_dB 只取最后一个 slot，
+    # 20 个样本里 12 个的 sir−sinr 是负的（最小 −9.5 dB），IoT 直接算成 inf。
+    # 单时隙下同一场景 IoT 中位 32.2 dB —— 正对应现网密集城区 >20 dB。
+    # 宁可返回 nan 也不给一个偏低到误导人的数。
+    if sir_db < sinr_db - 1e-6:
         return float("nan")
     return float(np.asarray(itf.iot_db(sinr_db, sir_db)).item())
 
@@ -407,15 +425,19 @@ def build_link_tables(
             for c in rc.candidates:
                 r = c["rank"] - 1
                 sinr[s, r], mcs[s, r], se[s, r] = c["sinr_db"], c["mcs"], c["se"]
-            # **发送侧：按无干扰算。** 发送端一开始不知道瞬时干扰，
-            # 会把 MCS 选高；接收端吃着干扰、误码，OLLA 再把它压回来。
-            npow_tx = mu.noise_from_geometric_sinr(hs, interference_free_sinr(_g, _r))
-            rc_tx = mu.su_rank_adaptation(hs, noise_power=npow_tx, max_rank=max_rank,
-                                          table=table, target_bler=target_bler,
-                                          rb_per_rbg=rb_per_rbg)
-            for c in rc_tx.candidates:
-                r = c["rank"] - 1
-                sinr_tx[s, r], mcs_tx[s, r] = c["sinr_db"], c["mcs"]
+            # 发送侧的 SINR 在循环外统一算 —— 它是**长期统计量**，不逐快照变
+        # --- 发送侧 SINR：CQI 反馈带来的**粗略统计**干扰信息 ---
+        # 发送端不知道瞬时干扰，但 CQI 是终端测的、本来就含干扰，
+        # 只是被平均掉了快变。所以发送侧 ≈ 该用户接收 SINR 的长期均值，
+        # 而不是"完全不知道干扰"。
+        #
+        # **做成"完全无干扰"是错的**：实测那样发送侧 40.7 dB、接收侧 12.7 dB，
+        # 差 28 dB，OLLA 的钳位根本追不上，首传 BLER 飙到 0.85。
+        # CQI 口径下两者只差瞬时起伏那几 dB，OLLA 正好能收敛掉。
+        sinr_tx = np.tile(sinr.mean(axis=0, keepdims=True), (n_s, 1))
+        for _s in range(n_s):
+            for _r in range(max_rank):
+                mcs_tx[_s, _r] = la_sel(sinr_tx[_s, _r], table, target_bler)
         best = np.argmax(se, axis=1)
         # **覆盖判定。** 用户级 SINR 连 MCS 0 的 10% BLER 门限都够不到时，
         # 这个快照下他根本调度不动——发了也是白发。必须显式标出来：
@@ -935,6 +957,8 @@ def simulate(
         "olla_db_mean": float(np.mean(olla_db)),
         "olla_db_p5": float(np.percentile(olla_db, 5)),
         "olla_db_p95": float(np.percentile(olla_db, 95)),
+        "olla_target_bler": round(sched.olla_step_up_db
+                                  / (sched.olla_step_up_db + sched.olla_step_down_db), 4),
         # **MU 配对比例**：MU 配对的 RBG 数占已调度 RBG 总数。
         # 现场经验值：30%~50% PRB 利用率下大约 5%~20%。
         "mu_rbg_share": mu_rbg / max(busy_tti * sys_cfg.num_rbg, 1),
@@ -943,6 +967,8 @@ def simulate(
         "iot_db_median": _nan_safe(np.nanmedian, [t.iot_db for t in tables]),
         "iot_db_p5": _nan_safe(np.nanpercentile, [t.iot_db for t in tables], 5),
         "iot_db_p95": _nan_safe(np.nanpercentile, [t.iot_db for t in tables], 95),
+        "iot_valid_ue_share": float(np.mean(
+            [bool(np.isfinite(t.iot_db)) for t in tables])),
         "high_iot_ue_share": float(np.mean([
             (t.iot_db >= 20.0) if np.isfinite(t.iot_db) else False for t in tables])),
         # **边缘用户 MCS**：现场经验通常 < 5。它比平均 MCS 更能暴露覆盖问题。
@@ -982,7 +1008,23 @@ def simulate(
             f"**5% 边缘用户的 MCS 是 {cell['edge_mcs_p5']:.1f}，偏高**"
             "（现场经验通常 <5）。多半是撒点没覆盖到真正的边缘，"
             "或者邻区负载设得太低、干扰被低估了。")
-    if np.isfinite(cell["iot_db_median"]) and cell["iot_db_median"] < 3:
+    _tgt = cell["olla_target_bler"]
+    if sched.olla_enabled and cell["bler_first_tx"] > _tgt * 1.6:
+        notes.append(
+            f"**首传 BLER {cell['bler_first_tx']:.3f} 明显高于 OLLA 的稳态目标 "
+            f"{_tgt:.3f}，说明外环还没收敛完。** 现网基线步长 +0.01/−0.1 很慢，"
+            f"每次 NACK 只压 0.1 dB，而 MCS 是整数档、小步长常常压不动一档。"
+            "要看稳态结论就加长 duration_s；要快收敛就临时把步长调大"
+            "（比例不变则稳态 BLER 不变）。")
+    if cell["iot_valid_ue_share"] < 0.9:
+        notes.append(
+            f"**只有 {cell['iot_valid_ue_share']:.0%} 的用户能算出有效 IoT。**"
+            "多半是生成时 num_slots_per_sample > 1——那时 sinr_dB 是各 slot 的"
+            "dB 均值、sir_dB 只取最后一个 slot，两者不同口径，"
+            "会出现 SIR < SINR 这种物理上不可能的值。"
+            "**要看 IoT 就用 num_slots_per_sample=1 重新生成**"
+            "（实测同场景单时隙 IoT 中位 32.2 dB，多时隙算出来是 inf）。")
+    elif np.isfinite(cell["iot_db_median"]) and cell["iot_db_median"] < 3:
         notes.append(
             f"**IoT 中位只有 {cell['iot_db_median']:.1f} dB**，几乎是噪声受限。"
             "密集城区实际常在 20 dB 以上——检查是不是站间距太大、"
