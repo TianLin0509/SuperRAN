@@ -220,6 +220,78 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             alternatives=["none（不掐，虚高）", "head_tail（掐头去尾）"],
         ),
         Algorithm(
+            key="tx_rx_sinr",
+            name="发送侧 / 接收侧 SINR 分离",
+            stage="系统级",
+            choice="发送侧 = CQI 长期统计；接收侧 = 瞬时含干扰 SINR",
+            formula="MCS = select_mcs(SINR_tx + OLLA)；BLER = curve(MCS)@SINR_rx",
+            why="**这是干扰影响吞吐的第一性路径。** 发送端不知道瞬时干扰，"
+                "只有 CQI 反馈的粗略统计值；接收端实打实吃着干扰、SINR 更低、"
+                "于是误码；OLLA 把差值压回来。干扰越大，OLLA 收敛得越负。",
+            caveat="**发送侧别做成「完全无干扰」。** 那是极端假设——实测发送侧 40.7 dB、"
+                   "接收侧 12.7 dB，差 28 dB，OLLA 追不上，首传 BLER 飙到 0.85。"
+                   "CQI 是终端测的、本来就含干扰，只是平均掉了快变，"
+                   "所以发送侧取接收 SINR 的长期均值，两者只差约 1 dB。",
+            source="用户 2026-08-02 的现场描述；本项目 system.build_link_tables",
+        ),
+        Algorithm(
+            key="olla",
+            name="OLLA 外环链路自适应",
+            stage="系统级",
+            choice="ACK +0.01 dB / NACK −0.1 dB（现网基线）",
+            formula="稳态 BLER → step_up / (step_up + step_down) = 0.01/0.11 ≈ 9.1%",
+            why="外环用 ACK/NACK 把发送端不知道的那部分干扰补偿掉。"
+                "步长比例决定稳态 BLER，绝对大小决定收敛速度。",
+            caveat="**步长小收敛很慢**：每次 NACK 只压 0.1 dB，而 MCS 是整数档，"
+                   "小步长常常压不动一档。8 秒仿真里 BLER 还停在 0.16~0.22 而不是 9.1%。"
+                   "要看稳态结论就加长时长；要快收敛就临时调大步长"
+                   "（比例不变则稳态 BLER 不变）。未收敛时结果里会主动告警。",
+            source="用户 2026-08-02 给的现网基线",
+        ),
+        Algorithm(
+            key="neighbor_load",
+            name="邻区负载",
+            stage="系统级",
+            choice="按 PRB 利用率折算干扰（默认 30%）",
+            formula="SINR' = S / (η·I + N)，SIR' = SIR / η；"
+                    "等价于 IoT'_lin = 1 + η·(IoT_lin − 1)",
+            why="ChannelHub 的几何 SINR 按**所有邻区都在发**算，等于 100% PRB 利用率；"
+                "5G 典型是 10%/30%/50%。邻区没发的 PRB 上本小区根本不受干扰。",
+            caveat="**SINR 和 SIR 必须一起折算。** 只改 SINR 会让 IoT = SIR/(SIR−SINR) "
+                   "拿两个不同口径的量算，直接报 inf。"
+                   "另外现场说密集城区 IoT 常 >20 dB，实测 100% 负载下是 32.9 dB、"
+                   "10% 负载下只有 22.9 dB——**反过来说明那些小区的邻区负载接近满**。",
+            source="5G 典型 PRB 利用率；本项目 system.apply_neighbor_load",
+        ),
+        Algorithm(
+            key="rbg_granularity",
+            name="仿真粒度",
+            stage="信道生成",
+            choice="RBG（17 个），不是 RB（272 个）",
+            formula="RBG 内取中间那个 RB 作代表点",
+            why="一个 RBG 内的 16 个 RB 共用同一个 MCS、同一次调度决策、同一个预编码——"
+                "**RB 级的分辨率没有任何已实现的算法在用**。实测 rank 与 MCS 逐位相同、"
+                "谱效差 0.1%，建表快一倍。",
+            caveat="**取代表点而不是平均。** 平均会把频选衰落抹平、奇异值分布变平"
+                   "（信道条件数被人为改善），进而高估 rank。"
+                   "会受影响的只有频选调度与导频图案，两者都还没做。",
+            source="本项目 mumimo.rbg_reduce",
+        ),
+        Algorithm(
+            key="two_phase",
+            name="两相架构（性能）",
+            stage="系统级",
+            choice="第一相建表（SVD 只在这里）→ 第二相 TTI 主循环纯查表",
+            why="十万 TTI 的主循环里不能有任何矩阵运算。第一相逐 UE 逐快照把 "
+                "rank 1..4 的 SINR/MCS/谱效全算好，第二相只读表 + 算 PF 度量。"
+                "实测 100000 TTI × 8 UE **0.38 秒**。",
+            caveat="**MU 在主循环里是标量近似**：逐 TTI 真做配对要每 TTI 做 SVD + 求逆，"
+                   "跑不完。建表阶段用真实 su_mu_adaptation 测出 MU/SU 聚合比值，"
+                   "主循环按 ratio/K 折算。返回值带逐快照比值与离散度——"
+                   "离散度超过 30% 就不该用标量。",
+            source="本项目 system.build_link_tables / simulate",
+        ),
+        Algorithm(
             key="harq",
             name="HARQ",
             stage="系统级",
