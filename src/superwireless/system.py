@@ -572,7 +572,11 @@ def build_link_tables(
         # 宽带 PMI 是**慢时间尺度**的量（38.214 里它的上报周期远长于一个 TTI），
         # 逐快照重搜既慢又不符合物理。在时间平均信道上搜一次就是它该有的样子。
         h_mean = np.mean(np.stack(snaps_u), axis=0)
-        w_pmi = {r: _type1_precoder(h_mean, r) for r in range(1, max_rank + 1)}
+        # **只搜一次。** Type I 的选波束是**增量贪心**（选一层、投影掉、再选下一层），
+        # 所以 rank R 结果的前 r 列与直接搜 rank r **逐位相同**（实测偏差 0.0）。
+        # 逐 rank 各搜一遍白花 4 倍时间——实测码本搜索本来就占建表的 47%。
+        _w_all = _type1_precoder(h_mean, max_rank)
+        w_pmi = {r: _w_all[:, :, :r] for r in range(1, max_rank + 1)}
 
         sinr = np.zeros((n_s, max_rank))
         mcs = np.zeros((n_s, max_rank), dtype=int)
@@ -1025,6 +1029,13 @@ def simulate(
 
     from . import linkadapt as la  # noqa: PLC0415
 
+    # **调度器只能用基站自己估的谱效。** 用真实谱效等于让它预知信道，
+    # 它会自动绕开 CSI 老化最严重的用户，老化的代价就凭空消失了。
+    # 零时延时 best_se_gnb 与 best_se 逐位相同，行为不变。
+    # 在循环外解引用一次——这是每 TTI 每用户都要碰的量。
+    _sched_se = [t.best_se_gnb if t.best_se_gnb is not None else t.best_se
+                 for t in tables]
+
     for tti in range(sys_cfg.num_tti):
         if pattern[tti % len(pattern)] not in ("D", "S"):
             continue                                   # 上行/特殊时隙不调度下行
@@ -1042,12 +1053,8 @@ def simulate(
             continue
 
         # --- 调度判决 ---
-        # **调度器只能用基站自己估的谱效。** 用真实谱效等于让它预知信道，
-        # 它会自动绕开 CSI 老化最严重的用户，老化的代价就凭空消失了。
-        # 零时延时 best_se_gnb 与 best_se 逐位相同，行为不变。
-        inst_se = np.array([
-            (tables[u].best_se_gnb if tables[u].best_se_gnb is not None
-             else tables[u].best_se)[snap] for u in cand])
+        # 用的是 _sched_se：**基站自己估的**谱效（见主循环外的说明）
+        inst_se = np.array([_sched_se[u][snap] for u in cand])
         if sched.algorithm == "pf":
             metric = inst_se / np.maximum(r_avg[cand], 1e-9)
         elif sched.algorithm == "max_ci":
