@@ -476,9 +476,11 @@ def _olla() -> Family:
 
 
 def _families(cfg: dict[str, Any]) -> list[Family]:
+    from .algo_defs2 import extra_families  # noqa: PLC0415
+
     n_cell = int(cfg.get("num_sites", 1) or 1) * int(cfg.get("sectors_per_site", 1) or 1)
     est = str(cfg.get("channel_est_mode", "ls_linear"))
-    return [
+    return [*extra_families(cfg), 
         _receiver(n_cell > 1),
         _channel_est(est),
         _rank_mcs(),

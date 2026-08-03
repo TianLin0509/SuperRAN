@@ -969,55 +969,15 @@ def _families_panel(spec: dict[str, Any]) -> str:
     return "".join(out)
 
 
-def _algorithms_panel(spec: dict[str, Any]) -> str:
-    """「算法」页签：这次仿真用到的每一个算法，点开看细节。
+def _derivations_panel(spec: dict[str, Any]) -> str:
+    """对标量的逐步推导，供人工核对。
 
-    **一次仿真里嵌着十几个算法选择，平时全藏在代码里。** 用户看到的只有一个
-    "谱效 26.3"，但预编码用什么、MCS 怎么选、rank 怎么定、体验速率怎么掐，
-    每一个都会改变那个数字。这个页签把它们逐条摊开——用 ``<details>`` 折叠，
-    默认只显示"是什么/选了哪个"，点开才看公式、理由和失真条件。
-
-    纯 HTML，不依赖 JS——离线双击打开照样能展开。
+    **只给一个「偏差 −1.2%」是不可核对的。** 每一步的输入、公式、中间结果
+    全列出来，任何一步对不上都能当场指出。数字由代码现算，不是抄进来的常量。
     """
     from . import algorithms as alg  # noqa: PLC0415
 
-    items = alg.algorithm_list(spec["config"])
-    by_stage: dict[str, list[dict[str, Any]]] = {}
-    for it in items:
-        by_stage.setdefault(it["stage"], []).append(it)
-
-    out = ['<p class="lead">这次仿真实际用到的算法。<b>点任意一条展开</b>看公式、'
-           '为什么这么选、以及什么情况下它会让结论失真。</p>']
-    for st in alg.stages():
-        rows = by_stage.get(st)
-        if not rows:
-            continue
-        out.append(f'<h3>{_esc(st)}</h3>')
-        for it in rows:
-            body = []
-            if it.get("formula"):
-                body.append(f'<div class="fml">{_esc(it["formula"])}</div>')
-            if it.get("why"):
-                body.append(f'<p><b>为什么这么选。</b>{_bold(it["why"])}</p>')
-            if it.get("caveat"):
-                body.append(f'<div class="callout c-amber"><p><b>什么时候会失真。</b>'
-                            f'{_bold(it["caveat"])}</p></div>')
-            if it.get("alternatives"):
-                alts = "、".join(_esc(a) for a in it["alternatives"])
-                body.append(f'<p class="src">还可以选：{alts}</p>')
-            if it.get("source"):
-                body.append(f'<p class="src">依据：{_esc(it["source"])}</p>')
-            out.append(
-                f'<details class="algo"><summary><span class="an">{_esc(it["name"])}</span>'
-                f'<span class="ac">{_esc(it["choice"])}</span></summary>'
-                f'<div class="ab">{"".join(body)}</div></details>'
-            )
-    # --- 对标量的逐步推导，供人工核对 ---
-    out.append('<h3>对标量怎么算出来的</h3>'
-               '<p class="lead">**只给一个"偏差 −1.2%"是不可核对的。**'
-               '下面每一步的输入、公式、中间结果全列出来，'
-               '任何一步对不上都能当场指出。数字由代码现算，不是抄进来的常量。</p>'
-               .replace("**只给一个", "<b>只给一个").replace('是不可核对的。**', '是不可核对的。</b>'))
+    out: list[str] = ["<h3>对标量怎么算出来的</h3>"]
     for d in alg.derivations(spec["config"]):
         rows = "".join(
             f'<tr><td>{i}</td><td>{_esc(t)}</td><td><code>{_esc(f)}</code></td>'
@@ -1482,7 +1442,7 @@ def render_html(
 
 <section id="pn6">
 {_families_panel(spec)}
-{_algorithms_panel(spec)}
+{_derivations_panel(spec)}
 </section>
 
 <section id="pn7">

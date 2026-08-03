@@ -471,6 +471,7 @@ sect("9.8  仿真说明书")
 import re as _re  # noqa: E402
 import xml.etree.ElementTree as _ET  # noqa: E402
 
+from superwireless import algo_defs as _alg_defs  # noqa: E402
 from superwireless import spec as sp  # noqa: E402
 
 
@@ -491,7 +492,10 @@ _r1 = sp.write_spec(dict(pl.load_presets()["company_64t4r_multicell"]["config"])
                     num_samples=100, title="test-hex")
 _h1, _s1 = _svgs(_r1["html_path"])
 print(f"  hex: {_r1['headline'][:60]}")
-check(len(_s1) == 12, f"五张示意图 + 七张算法流程图，实得 {len(_s1)}")
+# 5 张示意图（阵列/拓扑/频域/TDD/剖面）+ 15 张算法流程图
+_n_fam = len(_alg_defs.families(dict(pl.load_presets()["company_64t4r_multicell"]["config"])))
+check(len(_s1) == 5 + _n_fam,
+      f"5 张示意图 + {_n_fam} 张算法流程图，实得 {len(_s1)}")
 for _i, _sv in enumerate(_s1):
     try:
         _ET.fromstring(_sv)
