@@ -138,13 +138,23 @@
 <div class="wrap">
 
 <h1>通宵成果与待审</h1>
-<p class="tagline">6 个 bug · 5 个新需求提案 · 8 个决策点等你拍板</p>
+<p class="tagline">7 个 bug · 5 个新需求提案 · 8 个决策点等你拍板</p>
 <p class="meta">2026-08-03 凌晨 · 十个套件 964 项全通过 · 所有数字来自实跑</p>
 
 <div class="callout c-red">
 <p><b>今晚最重要的一条发现，先说。</b> 实测 <b>CSI 老化会把 MU-MIMO 增益吃干净</b>：
-30 km/h 下 CSI 只滞后 <b>1 ms</b>，MU 和谱效就从 11.98 掉到 <b>6.03（−50%）</b>；
-60 km/h 掉到 4.52（−62%）。而真实 TDD 系统的 SRS→PDSCH 时延<b>本来就是几个 ms</b>。</p>
+30 km/h 下 CSI 滞后 <b>10 ms</b>，MU 和谱效就从 11.98 掉到 <b>6.03（−50%）</b>；
+60 km/h 掉到 4.52（−62%）。<b>而 10 ms 正好是常见的 SRS 周期。</b></p>
+<div class="callout c-amber" style="margin-top:12px">
+<p><b>这张表的时间轴我第一版标错了 10 倍，已更正。</b>
+ChannelHub 的多时隙输出不是连续 TTI，而是<b>连续的 SRS/CSI-RS 机会</b>——
+每个快照推进 <code>max(srs_per, csirs_per) × slot_duration</code>，默认
+10 × 0.5 ms = <b>5 ms</b>，我当成了一个 TTI（0.5 ms）。</p>
+<p>用 Jakes 模型验出来的：ρ(τ)=|J₀(2π·f_d·τ)| 的首零点在 3 km/h 时是 53 ms，
+实测极小值落在第 10 个快照 → 每快照 5.3 ms，对上。
+<b>更正后结论反而更可信</b>——原来的「1 ms 就掉一半」敏感得不合常理，
+而 10 ms 正是真实 SRS 周期的量级。</p>
+</div>
 <p><b>平台现在完全看不到这件事</b>——因为 CSI 反馈时延根本没建模，
 所有 MU 结论都默认基站拿到的是零时延的完美 CSI。
 这是提案 1，也是我认为今晚最该做的一件事。</p>
@@ -153,7 +163,7 @@
 <div class="toc">
 <strong>目录</strong>
 <ol>
-<li><a href="#s1">修掉的 6 个 bug</a></li>
+<li><a href="#s1">修掉的 7 个 bug</a></li>
 <li><a href="#s2">5 个新需求提案</a></li>
 <li><a href="#s3">要你拍板的 8 个决策点</a></li>
 <li><a href="#s4">今晚做完的功能</a></li>
@@ -161,7 +171,7 @@
 </div>
 
 
-<h2 id="s1">一、修掉的 6 个 bug</h2>
+<h2 id="s1">一、修掉的 7 个 bug</h2>
 
 <p class="lead">流程图写完之后逐条对照实现抓的。<b>其中 3 个会让整条仿真崩掉。</b></p>
 
@@ -202,14 +212,21 @@
 </table>
 </div>
 
-<div class="callout c-amber">
-<p><b>还有一个我没敢下结论的。</b> 量 CSI 老化时发现 <b>3 km/h 的信道相关系数
-在 7 ms 内就掉到 0.24</b>。按 2.6 GHz 算多普勒频移只有 7.2 Hz、相干时间约 59 ms，
-7 ms 内相关系数应该还在 0.95 以上。</p>
-<p>速度之间确实有区分度（1 ms 处 3/30/60/120 km/h 分别是 0.966/0.346/0.330/0.253），
-所以不是完全没建模。但低速下衰减太快，<b>可能是每 slot 重抽了小尺度衰落</b>，
-也可能是我的相关系数算法（整个信道矩阵拉平做内积）不合适。
-<b>这条会影响所有移动性结论，建议优先查。</b></p>
+<div class="callout c-green">
+<p><b>第 7 个 bug：我把快照间隔当成了一个 TTI，差 10 倍。</b>（已定位并修复）</p>
+<p>发现过程：3 km/h 的相关系数「7 ms 内掉到 0.24」看着不合理。
+先怀疑是每 slot 重抽小尺度衰落——查下来<b>不是</b>：
+相关随滞后单调下降（滞后 1 为 0.987、滞后≥8 为 0.374），
+而且 0.315→0.342→0.390→0.432 的回升正是 <b>J₀ 的负瓣</b>，
+形状完全是 Jakes。问题只在时间尺度。</p>
+<p>真因在 <code>internal_sim.py:3252</code>：多时隙输出的每个快照推进
+<code>speed × max(srs_per, csirs_per) × slot_duration</code>，
+默认 10 × 0.5 ms = <b>5 ms</b>——它们是连续的 SRS/CSI-RS 机会，不是连续 TTI。
+<b>ChannelHub 没错，是我读错了。</b></p>
+<p>已加 <code>system.snapshot_interval_ms()</code> 由配置算出来，
+默认值从拍脑袋的 10.0 改成正确的 5.0。
+<b>所有时间相关的结论（CSI 老化、多普勒、移动性）都受这一条影响</b>，
+上面那张表已按更正后的时间轴重标。</p>
 </div>
 
 
@@ -231,14 +248,14 @@
 </div>
 <p><b>实测证据（今晚跑的）：</b></p>
 <div class="tbl-wrap"><table>
-<thead><tr><th>速度</th><th>CSI 零时延</th><th>滞后 1 ms</th><th>滞后 2 ms</th><th>滞后 4 ms</th></tr></thead>
+<thead><tr><th>速度</th><th>CSI 零时延</th><th>滞后 10 ms</th><th>滞后 20 ms</th><th>滞后 40 ms</th></tr></thead>
 <tbody>
 <tr><td>3 km/h</td><td>11.96</td><td>11.04（−8%）</td><td>9.01（−25%）</td><td>5.64（−53%）</td></tr>
 <tr><td>30 km/h</td><td>11.98</td><td><b>6.03（−50%）</b></td><td>4.54（−62%）</td><td>4.22（−65%）</td></tr>
 <tr><td>60 km/h</td><td>12.00</td><td><b>4.52（−62%）</b></td><td>4.23（−65%）</td><td>4.52（−62%）</td></tr>
 <tr><td>120 km/h</td><td>12.06</td><td>4.27（−65%）</td><td>4.46（−63%）</td><td>4.39（−64%）</td></tr>
 </tbody></table></div>
-<p><b>真实 TDD 的 SRS→PDSCH 时延本来就是几个 ms</b>（SRS 周期 + 处理时延 + 调度时延）。
+<p><b>常见的 SRS 周期就是 10~20 ms</b>，再加处理与调度时延。
 所以现网 MU 增益上不去，CSI 老化极可能是主因之一——
 而平台现在<b>完全看不到这件事</b>，因为它默认基站拿到的是零时延完美 CSI。</p>
 <p><b>要做什么：</b>把 SRS 周期、处理时延、调度时延建成一条可配的时延链，

@@ -205,7 +205,16 @@ class SystemConfig:
     num_rbg: int = 17
     rb_per_rbg: int = 16
     tdd_pattern: str = "DDDSU"           # 只统计 D 时隙
-    snapshot_update_ms: float = 10.0     # 信道快照多久换一次
+    # **信道快照之间隔多久，由 ChannelHub 决定，不能拍脑袋。**
+    # internal_sim.py:3252 把 UE 每个"时隙"推进
+    #     speed × max(srs_periodicity, csirs_periodicity) × slot_duration_s
+    # 默认 10 × 0.5 ms = **5 ms**——它们是连续的 SRS/CSI-RS 机会，不是连续 TTI。
+    #
+    # 我原来拍了 10.0，差 2 倍；更要命的是在量 CSI 老化时把「滞后 1 个快照」
+    # 读成了 0.5 ms（一个 TTI），实际是 5 ms，**整整差 10 倍**。
+    # 验证方法：Jakes 的 ρ(τ)=|J0(2π·fd·τ)| 首零点在 τ=2.405/(2π·fd)，
+    # 3 km/h 时是 53 ms；实测极小值落在第 10 个快照 → 每快照 5.3 ms，对上。
+    snapshot_update_ms: float = 5.0
     seed: int = 0
 
     @property
@@ -314,6 +323,23 @@ def _iot(sinr_db: float, sir_db: float) -> float:
     if sir_db < sinr_db - 1e-6:
         return float("nan")
     return float(np.asarray(itf.iot_db(sinr_db, sir_db)).item())
+
+
+def snapshot_interval_ms(cfg: dict[str, Any]) -> float:
+    """由配置算出信道快照之间隔多久（ms）。
+
+    ChannelHub 的多时隙输出不是连续 TTI，而是**连续的 SRS/CSI-RS 机会**：
+    ``internal_sim.py:3252`` 把 UE 每个时隙推进
+    ``speed × max(srs_periodicity, csirs_periodicity) × slot_duration_s``。
+
+    默认 10 × 0.5 ms = 5 ms。**把它当成一个 TTI（0.5 ms）会让所有
+    时间相关的结论差 10 倍**——CSI 老化、多普勒、移动性全部受影响。
+    """
+    scs = float(cfg.get("subcarrier_spacing", 30_000) or 30_000)
+    slot_ms = 1.0 / (scs / 15_000.0)
+    per = max(int(cfg.get("srs_periodicity", 10) or 10),
+              int(cfg.get("csirs_periodicity", 10) or 10))
+    return slot_ms * per
 
 
 def group_samples_by_ue(n_samples: int, num_ues: int) -> list[list[int]]:

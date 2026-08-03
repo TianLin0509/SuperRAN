@@ -320,6 +320,18 @@ check(any("覆盖外" in n for n in _rz.notes), "notes 里点明覆盖外")
 check(abs(sysm.apply_neighbor_load(10.0, 12.0, 0.0)
           - sysm.interference_free_sinr(10.0, 12.0)) < 1e-6,
       "邻区负载 0 等价于无干扰")
+
+# **快照间隔是 5 ms 不是一个 TTI。** ChannelHub 的多时隙输出是连续的
+# SRS/CSI-RS 机会（每快照推进 max(srs_per,csirs_per)×slot_duration），
+# 当成一个 TTI 会让所有时间相关的结论差 10 倍。
+check(abs(sysm.snapshot_interval_ms({}) - 5.0) < 1e-9,
+      f"默认快照间隔 5 ms（实得 {sysm.snapshot_interval_ms({})}）")
+check(abs(sysm.snapshot_interval_ms({"srs_periodicity": 20}) - 10.0) < 1e-9,
+      "SRS 周期翻倍则快照间隔翻倍")
+check(abs(sysm.snapshot_interval_ms({"subcarrier_spacing": 15000}) - 10.0) < 1e-9,
+      "15 kHz SCS 的 slot 是 1 ms，快照间隔 10 ms")
+check(abs(sysm.SystemConfig().snapshot_update_ms - 5.0) < 1e-9,
+      "默认值就是算出来的那个，不是拍脑袋的 10.0")
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:
