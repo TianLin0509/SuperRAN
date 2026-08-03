@@ -20,15 +20,17 @@
 python tests/test_e2e.py         # 端到端 39 项
 python tests/test_mcp_server.py  # MCP 全链路 37 项
 python tests/test_raytracing.py  # 射线追踪与决策层 40 项
-python tests/test_linklevel.py   # 谱效、可信度、物理层、IRC 62 项
+python tests/test_linklevel.py   # 谱效、可信度、物理层、IRC 45 项
 python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
 python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应、单码字、RBG 粒度 63 项
-python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒、MU 47 项
-python tests/test_interference.py # IoT、测量域、场景预设、探测模式、说明书回传、文档计数 262 项
+python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒、MU 65 项
+python tests/test_interference.py # IoT、测量域、预设、说明书回传、算法页、文档计数 362 项
 python tests/test_csi_aging.py   # CSI 时延与老化、SRS 跳频、基站/真实视角分离 66 项
 ```
+
+共 **1018 项**，全绿才算通过。
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
 后前三个都要跑；改动 `linklevel.py` / `validate.py` / `calibration.py` /
