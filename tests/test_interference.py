@@ -630,8 +630,14 @@ check('const ST=' in _h1 and '"unit"' in _h1, "单位布局内嵌进页面")
 # **JS 语法回归。** payload 里要换行，早先写成 \n 要穿过两层 f-string，
 # 结果塌成真换行落进单引号字符串里 —— 整段脚本 SyntaxError、页面点不动，
 # 而 HTML 结构检查完全看不出来。现在用 String.fromCharCode(10)，不带转义。
-_js = _re.findall(r"<script>(.*?)</script>", _h1, _re.S)
-check(len(_js) == 1, "只有一段内联脚本")
+_all_js = _re.findall(r"<script>(.*?)</script>", _h1, _re.S)
+# 页面上现在有三段脚本：KaTeX 本体（第三方，不体检）、调参面板、KaTeX 升级器。
+# **只体检我们自己手写的那段**——第三方压缩产物里当然全是跨行引号与转义。
+_own = [x for x in _all_js if "katex" not in x[:400].lower()
+        and "const ST=" in x]
+check(len(_all_js) == 3, f"三段内联脚本：KaTeX 本体 + 调参面板 + 升级器（实得 {len(_all_js)}）")
+check(len(_own) == 1, "调参面板的脚本唯一可辨认")
+_js = _own
 _bad = []
 for _i, _ln in enumerate(_js[0].splitlines(), 1):
     _stripped = _re.sub(r"\\.", "", _ln)          # 去掉转义对
@@ -832,6 +838,49 @@ check(not any(ord(c) < 9 or 11 <= ord(c) < 32 for c in _ha),
 # 关键结论必须出现在页面上，而不只是藏在代码注释里
 for _phrase in ("12 dB", "信道求逆功控", "单码字", "缓冲区非空", "秩 1", "平均 rank 2.7"):
     check(_phrase in _ha, f"页面上写清了「{_phrase}」")
+
+# --- 公式渲染：KaTeX 排版 + MathML 兜底 ---
+# 用户 2026-08-03 批准内联 KaTeX（"内联如果只有 1MB，感觉完全可接受"）。
+# **两层而不是二选一**：KaTeX 靠 JS 渲染，脚本没跑起来时只剩裸 LaTeX，
+# 而那恰恰是最需要看懂公式的场合。所以容器里先放 MathML 兜底。
+from superwireless import katex as _kx  # noqa: E402
+
+check(_kx.available(), "内联 KaTeX 资产在位（缺了公式会静默退回 MathML）")
+_kxm = _kx.meta()
+check(_kxm.get("fonts") == 20, f"20 个 woff2 字体全部内联（实得 {_kxm.get('fonts')}）")
+_kb = (_kxm.get("css_bytes", 0) + _kxm.get("js_bytes", 0)) / 1024
+print(f"  KaTeX {_kxm.get('version')}：{_kb:.0f} KB")
+check(_kb < 1024, f"内联体积在 1 MB 预算内（{_kb:.0f} KB）")
+
+_tex = _re.findall(r'<span class="kx"[^>]*data-tex="([^"]*)"', _ha)
+check(len(_tex) >= 40, f"页面上至少 40 条公式（实得 {len(_tex)}）")
+check(_ha.count('class="kx"') == _ha.count("<math"),
+      f"每条公式都带 MathML 兜底（kx {_ha.count(chr(34) + 'kx' + chr(34))} "
+      f"vs math {_ha.count('<math')}）")
+check("katex.renderToString" in _ha, "KaTeX 升级脚本内联在页面里")
+check("data:font/woff2;base64," in _ha, "字体是 base64 内联的，不是外链")
+# **断网也要好看。** 引 CDN 的话离线打开公式就没了。
+for _host in ("cdn.jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com", "//fonts.g"):
+    check(_host not in _ha, f"页面不引外部资源（{_host}）")
+
+# --- 系统级旋钮：页面默认值必须和工具签名一致 ---
+# 漂了的话页面显示的就不是实际会跑的值，而这种不一致没有任何提示。
+import inspect as _insp  # noqa: E402
+
+from superwireless import server as _srv0  # noqa: E402
+
+_sig = _insp.signature(getattr(_srv0.sw_system_sim, "__wrapped__", _srv0.sw_system_sim))
+for _k, _v in sp._SIM_DEFAULTS.items():
+    _p = _sig.parameters.get(_k)
+    _d = _p.default if _p else None
+    if isinstance(_d, bool):
+        _d = "on" if _d else "off"
+    check(_p is not None and _d == _v,
+          f"面板默认值 {_k}={_v!r} 与 sw_system_sim 签名一致（签名 {_d!r}）")
+    check(_k in sp.editable_keys(), f"{_k} 在回传白名单里")
+for _k in ("neighbor_prb_util", "csi_aging", "srs_period_ms", "srs_hopping",
+           "olla_speedup"):
+    check(f'data-k="{_k}"' in _ha, f"改配置页上有 {_k} 控件")
 
 # --- 对标量的逐步推导，供人工核对 ---
 _dv = _alg.derivations({})

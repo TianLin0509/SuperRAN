@@ -60,6 +60,7 @@ from typing import Any
 import numpy as np
 
 from . import bridge as br
+from . import katex as _kx
 from .paths import artifacts_root
 
 # ---------------------------------------------------------------------------
@@ -300,6 +301,16 @@ def _bold(s: Any) -> str:
     for i, seg in enumerate(parts):
         out.append(f"<b>{seg}</b>" if i % 2 else seg)
     return "".join(out)
+
+
+def _plain(s: Any) -> str:
+    """去掉 markdown 强调标记，只留文字。
+
+    **SVG 的 ``<text>`` 不支持内联加粗**，把 ``**...**`` 原样写进去
+    就是在图上露出一对裸星号。这些描述字符串是和 HTML 共用的，
+    源头统一写 markdown，到 SVG 这一侧只能把标记去掉。
+    """
+    return str(s).replace("**", "")
 
 
 def _svg_array(spec: dict[str, Any]) -> str:
@@ -638,7 +649,36 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      ["ideal", "ls_linear", "ls_mmse"],
      "ideal=拿真值；ls_mmse 比 ls_linear 实测好 0.7~4.6 dB，导频越挤差距越大"),
     ("num_samples", "样本数", "number", (1, 5000, 1), "由 sw_sample_size 算，别拍脑袋"),
+    # --- 系统级仿真旋钮（sw_system_sim 用，不进 ChannelHub 的信道生成）---
+    ("neighbor_prb_util", "邻区 PRB 利用率", "number", (0.0, 1.0, 0.05),
+     "全网统一值；1.0 = 所有邻区 full buffer（几何 SINR 的原始假设）"),
+    ("neighbor_load_jitter", "负载抖动", "number", (0.0, 0.5, 0.01),
+     "实际值在配置值 ±这个比例内逐快照波动，默认 0.05"),
+    ("csi_aging", "CSI 老化", "select", ["on", "off"],
+     "关掉 = 零时延完美 CSI，那是上界不是现网，会高估 MU 增益"),
+    ("srs_period_ms", "SRS 周期 ms", "select", [5.0, 10.0, 20.0, 40.0],
+     "现网典型 10~20 ms"),
+    ("srs_hopping", "SRS 跳频", "select", ["on", "off"],
+     "38.211 C_SRS=57：每跳 16 RB、17 跳扫完全带。**老化的主导项**"),
+    ("csi_processing_delay_ms", "CSI 处理时延 ms", "number", (0.0, 20.0, 0.5),
+     "信道估计 + 预编码计算 + 调度下发"),
+    ("olla_speedup", "OLLA 步长放大", "number", (1.0, 50.0, 1.0),
+     "等比放大两个步长，稳态 BLER 不变、收敛更快、抖动更大。**出正式结论设回 1**"),
 )
+
+
+#: 系统级仿真的旋钮不在 ChannelHub 的信道生成配置里，页面上拿不到当前值。
+#: 给它们一份默认值，**必须和 sw_system_sim 的函数签名一致**——
+#: 两处漂了的话页面显示的就不是实际会跑的值，而这种不一致没有任何提示。
+_SIM_DEFAULTS: dict[str, Any] = {
+    "neighbor_prb_util": 0.3,
+    "neighbor_load_jitter": 0.05,
+    "csi_aging": "on",
+    "srs_period_ms": 10.0,
+    "srs_hopping": "on",
+    "csi_processing_delay_ms": 2.0,
+    "olla_speedup": 1.0,
+}
 
 
 def editable_keys() -> frozenset[str]:
@@ -669,11 +709,11 @@ def _interactive(spec: dict[str, Any], *, apply_url: str = "",
             if cur is None:
                 continue
         else:
-            cur = cfg.get(key)
+            cur = cfg.get(key, _SIM_DEFAULTS.get(key))
             if cur is None:
                 continue
         init[key] = cur
-        hint_html = f'<div class="ch">{_esc(hint)}</div>' if hint else ""
+        hint_html = f'<div class="ch">{_bold(hint)}</div>' if hint else ""
         if kind == "select":
             opts = list(spec_v)
             if cur not in opts:
@@ -874,9 +914,12 @@ def _flow_svg(flow: dict[str, Any]) -> str:
                    f'height="{BH}" rx="9"/>')
         out.append(f'<circle class="fno" cx="{LX + 16}" cy="{y + BH / 2:.0f}" r="11"/>')
         out.append(f'<text class="fnt" x="{LX + 16}" y="{y + BH / 2 + 4:.0f}">{i + 1}</text>')
-        out.append(f'<text class="fti" x="{LX + 36}" y="{y + 19}">{_esc(st["title"])}</text>')
+        # **先去掉强调标记再截断。** 反过来的话截断可能把一对 ** 切成一半，
+        # 剩下的那个就永远去不掉了。
+        out.append(f'<text class="fti" x="{LX + 36}" y="{y + 19}">'
+                   f'{_esc(_plain(st["title"]))}</text>')
         out.append(f'<text class="fds" x="{LX + 36}" y="{y + 35}">'
-                   f'{_esc(st["desc"][:74])}</text>')
+                   f'{_esc(_plain(st["desc"])[:74])}</text>')
         if i < len(steps) - 1:
             out.append(f'<line class="far" x1="{LX + 16}" y1="{y + BH}" '
                        f'x2="{LX + 16}" y2="{y + BH + GAP - 2}" marker-end="url(#fa)"/>')
@@ -901,10 +944,28 @@ def _flow_svg(flow: dict[str, Any]) -> str:
     return "".join(out)
 
 
-def _opt_html(o: dict[str, Any]) -> str:
-    """一个可选实现的卡片。当前选中的高亮。"""
+def _math(tex: str, *, display: bool = False) -> str:
+    """一条公式。**KaTeX 排版，MathML 兜底。**
+
+    KaTeX 靠 JS 在加载后渲染，脚本没跑起来时就只剩 ``data-tex`` 里的裸 LaTeX——
+    所以容器内容先放 MathML：没有 JS 也看得到排好版的公式，
+    **降级路径上任何一步都不会露出源码**。
+    """
     from . import mathml as mm  # noqa: PLC0415
 
+    return _kx.wrap(tex, mm.render(tex, block=display), display=display)
+
+
+def _kx_credit() -> str:
+    if not _kx.available():
+        return ""
+    m = _kx.meta()
+    return (f' · 公式由内联 KaTeX {_esc(str(m.get("version", "")))} 排版'
+            f'（MIT，离线可用）')
+
+
+def _opt_html(o: dict[str, Any]) -> str:
+    """一个可选实现的卡片。当前选中的高亮。"""
     cur = o.get("current")
     bits = [f'<div class="ohd"><span class="onm">{_esc(o["name"])}</span>'
             + ('<span class="ocur">当前采用</span>' if cur else "")
@@ -912,7 +973,7 @@ def _opt_html(o: dict[str, Any]) -> str:
     if o.get("summary"):
         bits.append(f'<p class="osum">{_bold(o["summary"])}</p>')
     if o.get("formula"):
-        bits.append(f'<div class="ofml">{mm.render(o["formula"])}</div>')
+        bits.append(f'<div class="ofml">{_math(o["formula"])}</div>')
     if o.get("detail"):
         bits.append(f"<p>{_bold(o['detail'])}</p>")
     kv = []
@@ -926,7 +987,6 @@ def _opt_html(o: dict[str, Any]) -> str:
 def _families_panel(spec: dict[str, Any]) -> str:
     """算法页签正文：按阶段分组，每族列全部实现、标出当前、配流程图。"""
     from . import algo_defs as ad  # noqa: PLC0415
-    from . import mathml as mm  # noqa: PLC0415
 
     fams = ad.families(spec["config"])
     out = ['<div class="callout c-blue"><p><b>这一页只读。</b>'
@@ -947,7 +1007,7 @@ def _families_panel(spec: dict[str, Any]) -> str:
             if f.get("intro"):
                 body.append(f'<p class="lead">{_bold(f["intro"])}</p>')
             if f.get("formula"):
-                body.append(f'<div class="ofml big">{mm.render(f["formula"])}</div>')
+                body.append(f'<div class="ofml big">{_math(f["formula"], display=True)}</div>')
             if f.get("flow"):
                 body.append('<h4>算法流程</h4>')
                 body.append(_flow_svg(f["flow"]))
@@ -1381,7 +1441,8 @@ def render_html(
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{_esc(spec["title"])}</title><style>{_CSS}</style></head>
+<title>{_esc(spec["title"])}</title><style>{_CSS}</style>
+{_kx.head_assets()}</head>
 <body><div class="wrap">
 
 <h1>{_esc(spec["title"])}</h1>
@@ -1456,8 +1517,10 @@ def render_html(
 
 </div></div>
 
-<footer>superwireless 仿真说明书 · 图与数均由本次配置生成，未经手工编辑</footer>
-</div></body></html>
+<footer>superwireless 仿真说明书 · 图与数均由本次配置生成，未经手工编辑{_kx_credit()}</footer>
+</div>
+{_kx.upgrade_script()}
+</body></html>
 """
 
 

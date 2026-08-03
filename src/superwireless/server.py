@@ -1481,6 +1481,12 @@ def sw_system_sim(
     trim: str = "tail",
     tdd_pattern: str = "DDDSU",
     neighbor_prb_util: float = 0.3,
+    neighbor_load_jitter: float = 0.05,
+    csi_aging: bool | str = True,
+    srs_period_ms: float = 10.0,
+    srs_hopping: bool | str = True,
+    csi_processing_delay_ms: float = 2.0,
+    olla_speedup: float = 1.0,
     seed: int = 0,
 ) -> dict[str, Any]:
     """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI。**
@@ -1518,6 +1524,20 @@ def sw_system_sim(
     neighbor_prb_util : **邻区 PRB 利用率**，默认 0.3。ChannelHub 的几何 SINR
         是按所有邻区都在发算的（等于 100%），真实网络 5G 典型是 10%/30%/50%。
         按 full buffer 算会把干扰放大到不真实的程度。1.0 退化成原行为。
+        **当前只支持全网统一值**——几何 SIR 是聚合量，拿不到逐邻区贡献。
+    neighbor_load_jitter : 实际生效负载在配置值 ±这个比例内逐快照波动，默认 0.05。
+        恒定负载会让所有快照的干扰完全一样，结果比现网干净。
+    csi_aging : **是否建模 CSI 反馈时延与老化**，默认开。关掉退化成零时延完美 CSI
+        ——那是个上界不是现网，MU 增益会被系统性高估。
+    srs_period_ms : SRS 周期，只接受 5 / 10 / 20 / 40 ms。
+    srs_hopping : SRS 跳频。默认开，对应 38.211 Table 6.4.1.4.3-1 的 C_SRS=57
+        （每跳 16 RB = 1 个 RBG，**17 跳**扫完 272 RB）。
+        **这是老化的主导项**：10 ms 周期下全带扫一遍要 170 ms。
+    csi_processing_delay_ms : 信道估计 + 预编码计算 + 调度下发的固定时延。
+    olla_speedup : OLLA 两个步长的**等比**放大系数，默认 1.0（现网基线 +0.01/−0.1）。
+        稳态 BLER = up/(up+down) 与它无关，放大只加快收敛、加大稳态抖动。
+        短仿真里基线常常压不动一档 MCS，可临时设 10；**出正式结论设回 1.0**。
+        非 1.0 时结果里会带一条显式告警。
     """
     from . import load as _load  # noqa: PLC0415
     from . import system as sysm  # noqa: PLC0415
@@ -1538,20 +1558,43 @@ def sw_system_sim(
         sir = [float(x) for x in np.asarray(ds.scalar("sir_dB"))]
     except Exception:  # noqa: BLE001
         sir = None
-    tables = sysm.build_link_tables(h_users, [float(x) for x in sinr], num_ues=n_ue,
-                                    geo_sir_db=sir, neighbor_load=float(neighbor_prb_util))
-    mu_gain = (sysm.measure_mu_gain(h_users, [float(x) for x in sinr], num_ues=n_ue)
+    # **快照间隔由配置算出来，不能拍脑袋。** ChannelHub 的多时隙输出是连续的
+    # SRS/CSI-RS 机会（默认 5 ms），不是连续 TTI——当成 TTI 会让所有时间相关的
+    # 结论差 10 倍，见 CLAUDE.md「多时隙的快照间隔是 5 ms」。
+    snap_ms = sysm.snapshot_interval_ms(ds.config)
+    # 说明书页面上的开关是 select，回传的是 "on"/"off" 字符串；
+    # 直接 bool() 的话 "off" 是**真值**，开关会失灵而且完全无声。
+    def _flag(v: Any) -> bool:
+        return v.strip().lower() not in ("off", "false", "0", "no", "") \
+            if isinstance(v, str) else bool(v)
+
+    try:
+        csi_cfg = sysm.ca.CsiConfig(
+            enabled=_flag(csi_aging), srs_period_ms=float(srs_period_ms),
+            hopping=_flag(srs_hopping),
+            processing_delay_ms=float(csi_processing_delay_ms))
+    except ValueError as exc:
+        return {"error": str(exc)}
+    load_rng = np.random.default_rng(int(seed) + 909)
+    tables = sysm.build_link_tables(
+        h_users, [float(x) for x in sinr], num_ues=n_ue, geo_sir_db=sir,
+        neighbor_load=float(neighbor_prb_util), csi=csi_cfg, snapshot_ms=snap_ms,
+        load_jitter_rng=(load_rng if float(neighbor_load_jitter) > 0 else None))
+    mu_gain = (sysm.measure_mu_gain(h_users, [float(x) for x in sinr], num_ues=n_ue,
+                                    csi=csi_cfg, snapshot_ms=snap_ms)
                if mu_enabled else {"ratio": 1.0, "measured": False,
                                    "note": "未开 MU"})
 
     res = sysm.simulate(
         tables,
         sys_cfg=sysm.SystemConfig(duration_s=float(duration_s),
-                                  tdd_pattern=tdd_pattern, seed=int(seed)),
+                                  tdd_pattern=tdd_pattern, seed=int(seed),
+                                  snapshot_update_ms=snap_ms),
         traffic=sysm.TrafficConfig(model=traffic_model, file_bytes=int(file_bytes),
                                    arrival_rate_hz=float(arrival_rate_hz)),
         sched=sysm.SchedulerConfig(algorithm=scheduler, pf_window_tti=int(pf_window_tti),
-                                   mu_enabled=bool(mu_enabled)),
+                                   mu_enabled=bool(mu_enabled),
+                                   olla_speedup=float(olla_speedup)),
         kpi=sysm.KpiConfig(trim=trim),
         mu_se_ratio=float(mu_gain["ratio"]),
     )
@@ -1559,6 +1602,37 @@ def sw_system_sim(
     out["dataset_id"] = dataset_id
     out["num_ues"] = len(tables)
     out["mu_gain"] = mu_gain
+    aging = sysm.ca.aging_summary(
+        csi_cfg, num_rbg=17, snapshot_ms=snap_ms,
+        speed_kmh=float(ds.config.get("ue_speed_kmh", 3.0) or 3.0))
+    out["csi_aging"] = aging
+    out["neighbor_load"] = sysm.NeighborLoadConfig(
+        prb_utilization=float(neighbor_prb_util),
+        jitter=float(neighbor_load_jitter), seed=int(seed)).as_dict()
+
+    # **让结论不成立的条件必须进 notes**，不能只躺在子字段里等人翻。
+    notes = list(out.get("notes") or [])
+    notes.extend(aging.get("warnings") or [])
+    _n_snap = int(tables[0].sinr_db.shape[0]) if tables else 0
+    if not csi_cfg.enabled:
+        notes.append("**CSI 老化已关闭**：预编码用的是零时延完美信道，"
+                     "这是上界不是现网——MU 增益会被系统性高估。")
+    elif _n_snap <= 1:
+        notes.append(
+            "**CSI 老化开着但测不出来**：这个数据集每个 UE 只有 1 个信道快照，"
+            "「陈旧信道」和「当前信道」是同一个矩阵，老化的效果恒为 0。"
+            "要看老化就得让每个 UE 有多个时间相关的快照——"
+            "生成时把 num_slots_per_sample 调到 8 以上，或让 num_samples 是 num_ues 的倍数。")
+    else:
+        notes.append(
+            f"CSI 老化已开：SRS {csi_cfg.srs_period_ms:g} ms"
+            f"{f'、{csi_cfg.hop_factor} 倍跳频' if csi_cfg.hopping else '、不跳频'}，"
+            f"全带扫一遍 {csi_cfg.full_sweep_ms:g} ms，平均 CSI 年龄 "
+            f"{csi_cfg.mean_age_ms:.0f} ms。")
+    if float(olla_speedup) != 1.0:
+        notes.append(sysm.SchedulerConfig(
+            olla_speedup=float(olla_speedup)).as_dict()["olla_speedup_warning"])
+    out["notes"] = notes
     out["num_samples"] = len(h_users)
     out["summary"] = res.text()
     out["hint"] = ("先把 summary 念给用户，再把 notes 里的每一条都说出来——"

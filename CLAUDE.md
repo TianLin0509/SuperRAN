@@ -27,6 +27,7 @@ python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 �
 python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应、单码字、RBG 粒度 63 项
 python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒、MU 47 项
 python tests/test_interference.py # IoT、测量域、场景预设、探测模式、说明书回传、文档计数 262 项
+python tests/test_csi_aging.py   # CSI 时延与老化、SRS 跳频、基站/真实视角分离 66 项
 ```
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
@@ -35,8 +36,15 @@ python tests/test_interference.py # IoT、测量域、场景预设、探测模�
 改动 `results.py` / `analysis.py` / `loader.py` 要跑 test_results；
 改动 `interference.py` / `scenario.py` / `presets.yaml` / `spec.py` / `bridge.py`
 要跑 test_interference（说明书与回传桥都在它第 9 节）；
-改动 `mumimo.py` 要跑 test_mumimo；改动 `system.py` 要跑 test_system；
-改动 `algorithms.py` 要跑 test_interference（算法页签在它第 9.10 节）。
+改动 `mumimo.py` 要跑 test_mumimo；改动 `system.py` 要跑 test_system + test_csi_aging；
+改动 `csi_aging.py` 要跑 test_csi_aging；
+改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）。
+
+公式渲染是**两层**：`katex.py` 内联 KaTeX（628 KB，资产由
+`python scripts/vendor_katex.py` 生成）负责排版，`mathml.py` 是没有 JS 时的兜底，
+两份内容一起写进每个 `.kx` 容器。改公式后要用 Node 真跑一遍
+（`katex.renderToString(..., {throwOnError:true})`）——MathML 解析器容忍的写法
+KaTeX 未必收，光看 Python 源码看不出来。
 
 ## 与 ChannelHub 的边界
 
@@ -541,6 +549,72 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 53/10 = 5.3 ms/快照——对上了。
 
 `system.snapshot_interval_ms(cfg)` 现在由配置算出来，别再硬编码。
+
+### CSI 老化：零时延恒等式是地基，rank 必须由基站自己选
+
+`csi_aging.rank_adaptation_aged` 用 `H_stale` 算预编码、用 `H_true` 评估。
+两条不变量必须一直成立，破了任何一条整个模型就不可解释：
+
+1. **零时延时逐位退化成原实现**。MMSE 后处理 SINR 在 `H_stale == H_true` 时
+   `H W = UΣ_r` 是对角的，逆的对角元正好给出 `σ_k²·P/rank/σ_n²`——
+   和 `mumimo.su_rank_adaptation` 的特征值公式**一模一样**（实测偏差 0.000000 dB）。
+   不成立就说明老化是叠加上去的第二套物理，那样任何"老化损失"都只是两套物理的差。
+2. **rank 由基站按陈旧 CSI 选**。拿真实 SINR 去挑 rank 等于让基站预知信道，
+   它会自动避开老化最狠的那个 rank，**损失被凭空抹掉一大半**。
+   同理 PF 调度的 `inst_se` 只能用 `best_se_gnb`，不能用 `best_se`。
+
+表里因此有两套量：`sinr/mcs/se`（真实，用于 BLER 与吞吐对账）与
+`se_gnb/best_se_gnb`（基站以为的，用于 rank 与调度）。零时延时两套逐位相同。
+
+### "17 倍跳频"是 38.211 里逐字有的
+
+`SRS_BW_TABLE` 第 57 行（`srs.py:118`）：`m_SRS=(272,16,4,4)`、`N=(1,17,4,1)`。
+取 `B_SRS=1`、`b_hop=0` 时每次 SRS 占 **16 RB 正好一个 RBG**，**17 跳**扫完 272 RB，
+和本项目 17 RBG × 16 RB 的载波配置 1:1 对上。实测 `srs_hopping_cycle_length` 返回 17、
+扫描顺序就是 RBG 0→16 循环。
+
+**跳频是老化的主导项**：`T_SRS=10 ms` 时全带扫一遍要 170 ms，
+某个 RBG 的年龄在 0~160 ms 之间轮转（平均 80 ms），而 2.6 GHz、30 km/h 的
+相干时间只有约 3 ms。实测 MU/SU 比值 0.816 → 0.449（−45%），SU 谱效 −27%；
+把信道换成慢变（ρ=0.99）后损失掉到 10%——**这条对照证明损失确实来自时变**。
+
+序列直接调 ChannelHub 的 `srs_rb_indices`，不自己写。**兜底路径的输出和标准实现
+碰巧一模一样**（C_SRS=57 就是顺序扫描），所以除了看 `hop_order()` 返回的 `source`
+没有任何办法发现自己没在用标准实现——测试因此直接断言 `source` 以 `channelhub:` 开头。
+`hop_order` 里要先 `_ensure_path()`，否则静默走兜底。
+
+### 测试信道所有用户统计相同时，MU/SU 比值是个死数
+
+`measure_mu_gain` 的噪声由小区统一锚定（物理正确），所以如果测试里各 UE 的信道
+统计完全一样，全员会落在同一个 MCS 上，`mu_se/su_se` 退化成流数比
+`(4 用户 × rank2)/(1 用户 × rank4) = 2.000` ——**扫遍 0 到 20 dB 全是 2.000**。
+看起来像"MU 增益与信噪比无关"，实际是上下双端饱和。
+
+测 MU 必须给各用户不同的路损（`test_csi_aging` 用 0 ~ −18 dB 的梯度）。
+
+### 发送侧 SINR 是 CQI 门限 + BF Gain，不是接收 SINR 的均值
+
+现场口径（用户 2026-08-03 确认）：`Γ(MCS(CQI)) + BFGain`。
+**CQI 是长期滤波的宽带量**（终端在真实信道上用 Type I 宽带 PMI 权测），
+**BF Gain 是瞬时量**（基站从自己的 SRS 信道算，`SINR_SVD − SINR_PMI`）。
+
+早先写成"接收 SINR 的长期均值"是个**事后诸葛亮**的量——它已经包含了 SVD 的
+实际增益，等于假设基站预先知道波束打得准不准。开 CSI 老化后这个错变得致命：
+老化的全部代价就是"基站以为打准了其实没有"，而那个口径直接把它抹平。
+
+两个实现细节：宽带 PMI 是慢时间尺度的量，逐 UE 逐 rank 在时间平均信道上搜一次
+码本就够（逐快照重搜既慢又不符合物理）；**CQI=0 不能退化成 −inf**，
+它的意思是"低于 CQI 表下界"而不是"这个用户不存在"，退回实测 PMI SINR。
+
+### 页面上的 select 回传的是字符串，bool() 会失灵
+
+说明书的开关控件回传 `"on"` / `"off"`，而 `"off"` 是 Python 真值——
+`bool("off")` 是 `True`，开关**完全无声地失效**。`sw_system_sim` 里的 `_flag()`
+负责把 `"off"/"false"/"0"/"no"/""` 都判成假。新加 select 型开关时记得走它。
+
+`spec._SIM_DEFAULTS` 给系统级旋钮提供页面默认值（它们不在 ChannelHub 的信道
+生成配置里），**必须和 `sw_system_sim` 的函数签名保持一致**——漂了的话页面显示
+的就不是实际会跑的值，而这种不一致没有任何提示。有一条测试逐个比对。
 
 ### 样本数不是用户数
 

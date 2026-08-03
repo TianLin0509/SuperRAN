@@ -31,6 +31,7 @@ from typing import Any, Literal
 
 import numpy as np
 
+from . import csi_aging as ca
 from . import mumimo as mu
 
 _EPS = 1e-12
@@ -122,17 +123,45 @@ class SchedulerConfig:
     olla_step_down_db: float = 0.1        # 稳态 BLER -> 0.01/(0.01+0.1) = 9.1%
     olla_min_db: float = -20.0
     olla_max_db: float = 3.0
+    # **加速收敛用的等比放大系数**（用户 2026-08-03 批准，条件是必须告知）。
+    # 两个步长同乘一个数，稳态 BLER = up/(up+down) **完全不变**，
+    # 变的只有收敛速度和稳态附近的抖动幅度。
+    # 现网基线 +0.01/−0.1 在整数 MCS 档上常常压不动一档，8 秒仿真里
+    # BLER 还停在 0.16~0.22；放大 10 倍能在同样时长内收敛，
+    # 代价是稳态抖动更大。**出正式结论时用 1.0。**
+    olla_speedup: float = 1.0
     mu_enabled: bool = True              # 是否允许 MU 配对（SU/MU 自适应）
     max_mu_users: int = 4
 
+    @property
+    def step_up(self) -> float:
+        return self.olla_step_up_db * max(float(self.olla_speedup), _EPS)
+
+    @property
+    def step_down(self) -> float:
+        return self.olla_step_down_db * max(float(self.olla_speedup), _EPS)
+
     def as_dict(self) -> dict[str, Any]:
-        return {"algorithm": self.algorithm, "pf_window_tti": self.pf_window_tti,
-                "mu_enabled": self.mu_enabled, "max_mu_users": self.max_mu_users,
-                "olla_enabled": self.olla_enabled,
-                "olla_steps_db": [self.olla_step_up_db, self.olla_step_down_db],
-                "olla_target_bler": round(
-                    self.olla_step_up_db / (self.olla_step_up_db
-                                            + self.olla_step_down_db), 3)}
+        d: dict[str, Any] = {
+            "algorithm": self.algorithm, "pf_window_tti": self.pf_window_tti,
+            "mu_enabled": self.mu_enabled, "max_mu_users": self.max_mu_users,
+            "olla_enabled": self.olla_enabled,
+            "olla_baseline_steps_db": [self.olla_step_up_db, self.olla_step_down_db],
+            "olla_speedup": self.olla_speedup,
+            "olla_effective_steps_db": [round(self.step_up, 6),
+                                        round(self.step_down, 6)],
+            "olla_target_bler": round(
+                self.olla_step_up_db / (self.olla_step_up_db
+                                        + self.olla_step_down_db), 3)}
+        if self.olla_speedup != 1.0:
+            d["olla_speedup_warning"] = (
+                f"**OLLA 步长已等比放大 {self.olla_speedup:g} 倍**"
+                f"（{self.olla_step_up_db:g}/{self.olla_step_down_db:g} → "
+                f"{self.step_up:g}/{self.step_down:g}）。稳态 BLER 不变"
+                f"（仍是 {self.olla_step_up_db / (self.olla_step_up_db + self.olla_step_down_db):.1%}），"
+                f"但稳态附近抖动更大。这是为了在短仿真里收敛，"
+                f"**出正式结论请把 olla_speedup 设回 1.0**。")
+        return d
 
 
 @dataclass
@@ -167,14 +196,41 @@ class NeighborLoadConfig:
         SINR' = S / (η·I + N)，其中 I = S/SIR、N = S/SNR
 
     ``prb_utilization = 1.0`` 时退化成原来的 full buffer 行为。
+
+    **当前只支持全网配同一个负载值**（用户 2026-08-03 定的口径）。
+    真实网络里各小区负载当然不同，但那要一张逐小区的负载表，
+    而 ChannelHub 的几何 SINR 只给出**聚合**的 SIR——拿不到"哪个邻区贡献了多少"，
+    没法把逐小区负载映射回来。所以现在是一个标量。
+
+    ``jitter`` 让**实际生效值**在配置值的 ±5% 内随机波动。这不是装饰：
+    现网负载本来就是逐 TTI 抖的，一个恒定值会让所有快照的干扰完全一样，
+    结果看起来比真实情况干净。波动是乘性的，``0.3 → [0.285, 0.315]``。
     """
 
     prb_utilization: float = 0.3          # 5G 典型：0.1 / 0.3 / 0.5
+    jitter: float = 0.05                  # 实际值在 ±5% 内波动（用户 2026-08-03）
+    seed: int = 0
+
+    def realized(self, n: int, rng: np.random.Generator | None = None) -> np.ndarray:
+        """抽 ``n`` 个实际生效的利用率。``jitter=0`` 时就是 n 份配置值。"""
+        r = rng if rng is not None else np.random.default_rng(self.seed)
+        base = float(self.prb_utilization)
+        if self.jitter <= 0:
+            return np.full(n, base)
+        lo, hi = base * (1.0 - self.jitter), base * (1.0 + self.jitter)
+        return np.clip(r.uniform(lo, hi, size=n), 0.0, 1.0)
 
     def as_dict(self) -> dict[str, Any]:
         return {"prb_utilization": self.prb_utilization,
+                "jitter": self.jitter,
+                "realized_range": [round(self.prb_utilization * (1 - self.jitter), 4),
+                                   round(self.prb_utilization * (1 + self.jitter), 4)],
+                "scope": "network_wide_single_value",
                 "note": ("邻区按这个 PRB 利用率折算干扰；1.0 等于假设所有邻区"
-                         "full buffer（ChannelHub 几何 SINR 的原始假设）")}
+                         "full buffer（ChannelHub 几何 SINR 的原始假设）。"
+                         f"实际生效值逐快照在 ±{self.jitter * 100:.0f}% 内波动。"
+                         "当前只支持全网统一值——几何 SIR 是聚合量，"
+                         "拿不到逐邻区的贡献，没法映射逐小区负载。")}
 
 
 def apply_neighbor_load(sinr_db: float, sir_db: float, utilization: float) -> float:
@@ -261,8 +317,18 @@ class UeLinkTable:
     # **发送侧与接收侧是两个 SINR。** 发送端一开始不知道干扰，
     # 按无干扰（或 CQI 反馈的粗略统计）选 MCS；接收端实打实吃着干扰。
     # 两者的差通过误码由 OLLA 收敛回来——这是干扰影响吞吐的第一性路径。
-    sinr_tx_db: np.ndarray | None = None  # [snapshot, rank] 无干扰，用于选 MCS
+    sinr_tx_db: np.ndarray | None = None  # [snapshot, rank] CQI 门限 + BF Gain
     mcs_tx: np.ndarray | None = None      # [snapshot, rank] 发送端据此定的 MCS
+    # --- 发送侧 SINR 的拆解，供审计与说明书引用 ---
+    bf_gain_db: np.ndarray | None = None   # [snapshot, rank] SVD − PMI（基站自算）
+    pmi_sinr_db: np.ndarray | None = None  # [snapshot, rank] Type I 权下的用户级 SINR
+    cqi_index: np.ndarray | None = None    # [rank] 长期滤波后上报的 CQI
+    csi_lag_snapshots: np.ndarray | None = None  # [snapshot] 平均 CSI 滞后（快照数）
+    # **基站以为的谱效**：rank 自适应与 PF 调度都只能看它，不能看真实值。
+    # 拿真实谱效去调度等于让基站预知信道，老化损失会被凭空抹掉一大半。
+    # 零时延时它与 ``se`` / ``best_se`` 逐位相同。
+    se_gnb: np.ndarray | None = None       # [snapshot, rank]
+    best_se_gnb: np.ndarray | None = None  # [snapshot]
 
 
 def la_sel(sinr_db: float, table: int, target_bler: float) -> int:
@@ -271,6 +337,44 @@ def la_sel(sinr_db: float, table: int, target_bler: float) -> int:
 
     return int(la.select_mcs(float(sinr_db), table=table,
                              target_bler=target_bler).index)
+
+
+def _type1_precoder(h_rbg: np.ndarray, rank: int) -> np.ndarray:
+    """38.214 Type I **宽带** PMI，强制到指定 rank。``[F,BS,UE]`` → ``[F,BS,rank]``。
+
+    宽带意味着全带共用一个权（``compute_precoder`` 内部就是在频率平均的信道上
+    搜码本再广播回各 RBG），这正对应用户口径里的**全带 CQI**——
+    不做子带 CQI、不做频选调度。
+    """
+    from . import linklevel as ll  # noqa: PLC0415
+
+    return ll.compute_precoder(np.asarray(h_rbg)[None], method="type1",
+                               max_rank=int(rank), rank_threshold=0.0).w
+
+
+def _cqi_of(sinr_db: float, target_bler: float) -> int:
+    """用户级 SINR → CQI index（38.214 Table 5.2.2.1-3，即 CQI 表 2）。"""
+    from . import linkadapt as la  # noqa: PLC0415
+
+    if not np.isfinite(sinr_db):
+        return 0
+    return int(la.select_cqi(float(sinr_db), table=2,
+                             target_bler=float(target_bler)))
+
+
+def _cqi_threshold_sinr(cqi_index: int, target_bler: float) -> float:
+    """CQI → 按谱效映射的初始 MCS → 该 MCS 在目标 BLER 下的 NewTx SINR 门限。
+
+    这是现场 TDD AMC 链路的前两步。CQI=0（不可调度）时返回 −inf，
+    让下游把它判成发不出去，而不是悄悄当成 MCS 0。
+    """
+    from . import bler_curves as bc  # noqa: PLC0415
+    from . import linkadapt as la  # noqa: PLC0415
+
+    m = la.cqi_to_mcs_by_se(int(cqi_index), cqi_table=2, mcs_table=3)
+    if not m["scheduled"]:
+        return float("-inf")
+    return float(bc.get_curve(int(m["mcs"]), "newtx").required_sinr_db(float(target_bler)))
 
 
 def _nan_safe(fn, values, *args) -> float:
@@ -371,6 +475,9 @@ def build_link_tables(
     num_snapshots: int = 1,
     num_ues: int | None = None,
     rb_per_rbg: int = 16,
+    csi: ca.CsiConfig | None = None,
+    snapshot_ms: float = 5.0,
+    load_jitter_rng: np.random.Generator | None = None,
 ) -> list[UeLinkTable]:
     """第一相：逐 UE 把 rank 1..max_rank 的 SINR / MCS / 谱效全部算好。
 
@@ -382,6 +489,10 @@ def build_link_tables(
     ``num_ues`` 给定时，按 :func:`group_samples_by_ue` 把样本合并成这么多个
     用户，同一 UE 的多个样本当作它的快照序列。**不给的话每个样本算一个用户**
     ——那通常不是你想要的，见该函数的说明。
+
+    ``csi`` 给定且 ``enabled`` 时走 CSI 老化：预编码用滞后若干个快照的信道，
+    评估用当前快照。逐 RBG 的滞后由 SRS 周期与跳频决定，见 :mod:`csi_aging`。
+    不给的话是零时延完美 CSI——**那是个上界，不是现网**。
     """
     sir_in = list(geo_sir_db) if geo_sir_db is not None else [float("nan")] * len(h_users)
     # 逐快照的几何量。**合并成一个均值会把动态范围压掉一半**——
@@ -415,16 +526,28 @@ def build_link_tables(
         # **SINR 和 SIR 必须一起折算。** 干扰降到 η 倍，SIR 就升高 1/η；
         # 只改 SINR 会让后面的 IoT = SIR/(SIR−SINR) 用两个不同口径的量算，
         # 直接报 inf。这和 CLAUDE.md 里「IoT 不是 snr 减 sinr」是同一类错。
-        _u_db = 10.0 * np.log10(max(neighbor_load, 1e-12))
-        _shift = lambda sr: (sr - _u_db) if np.isfinite(sr) and sr < 49.0 else sr  # noqa: E731
-        per_snap_sinr = [[apply_neighbor_load(g, sr, neighbor_load)
-                          for g, sr in zip(gs, ss, strict=True)]
-                         for gs, ss in zip(per_snap_sinr, per_snap_sir, strict=True)]
-        per_snap_sir = [[_shift(sr) for sr in ss] for ss in per_snap_sir]
+        #
+        # 负载**逐快照抖动**（NeighborLoadConfig.jitter，默认 ±5%）时，
+        # 每个快照拿自己那份 η——所以下面是逐元素而不是一个全局标量。
+        def _one(g: float, sr: float, u: float) -> tuple[float, float]:
+            u_db = 10.0 * np.log10(max(u, 1e-12))
+            new_sir = (sr - u_db) if np.isfinite(sr) and sr < 49.0 else sr
+            return apply_neighbor_load(g, sr, u), new_sir
+
+        loads = [
+            (load_jitter_rng.uniform(neighbor_load * 0.95, neighbor_load * 1.05, len(gs))
+             if load_jitter_rng is not None else np.full(len(gs), neighbor_load))
+            for gs in per_snap_sinr
+        ]
+        _pairs = [[_one(g, sr, float(u)) for g, sr, u in zip(gs, ss, us, strict=True)]
+                  for gs, ss, us in zip(per_snap_sinr, per_snap_sir, loads, strict=True)]
+        per_snap_sinr = [[p[0] for p in row] for row in _pairs]
+        per_snap_sir = [[p[1] for p in row] for row in _pairs]
         geo_sinr_db = [float(np.nanmean(v)) for v in per_snap_sinr]
         sir_in = [float(np.nanmean(v)) for v in per_snap_sir]
 
     out: list[UeLinkTable] = []
+    aging = csi is not None and csi.enabled
     for i, h in enumerate(h_users):
         hh = np.asarray(h)
         snaps = [hh[t:t + 1] for t in range(hh.shape[0])] if hh.ndim == 4 else [hh]
@@ -433,38 +556,109 @@ def build_link_tables(
             snaps = [snaps[t % len(snaps)] for t in range(num_snapshots)]
         n_s = len(snaps)
 
+        # --- 压成二维再降粒度，老化与 BF Gain 都在这个粒度上算 ---
+        _2d = [np.asarray(x).mean(axis=0) if np.asarray(x).ndim == 4 else np.asarray(x)
+               for x in snaps]
+        if rb_per_rbg > 1:
+            snaps_u = [mu.rbg_reduce(x, rb_per_rbg) for x in _2d]   # 每行 = 1 RBG
+            grp, rows_per_rbg = 1, 1
+        else:
+            snaps_u = _2d                                           # 每行 = 1 RB
+            grp, rows_per_rbg = mu.RB_PER_RBG, mu.RB_PER_RBG
+        n_rows = snaps_u[0].shape[0]
+        n_rbg_eff = max(1, int(np.ceil(n_rows / rows_per_rbg)))
+
+        # --- Type I 宽带 PMI：逐 UE 逐 rank 只搜一次码本 ---
+        # 宽带 PMI 是**慢时间尺度**的量（38.214 里它的上报周期远长于一个 TTI），
+        # 逐快照重搜既慢又不符合物理。在时间平均信道上搜一次就是它该有的样子。
+        h_mean = np.mean(np.stack(snaps_u), axis=0)
+        w_pmi = {r: _type1_precoder(h_mean, r) for r in range(1, max_rank + 1)}
+
         sinr = np.zeros((n_s, max_rank))
         mcs = np.zeros((n_s, max_rank), dtype=int)
         se = np.zeros((n_s, max_rank))
         sinr_tx = np.zeros((n_s, max_rank))
         mcs_tx = np.zeros((n_s, max_rank), dtype=int)
+        bf_gain = np.zeros((n_s, max_rank))
+        pmi_sinr = np.zeros((n_s, max_rank))
+        lag_used = np.zeros(n_s)
+        se_gnb = np.zeros((n_s, max_rank))       # 基站以为的谱效，rank 与调度都看它
+        rank_gnb = np.ones(n_s, dtype=int)
         _gs = per_snap_sinr[i] if i < len(per_snap_sinr) else [geo_sinr_db[i]]
         _ss = per_snap_sir[i] if i < len(per_snap_sir) else [sir_in[i]]
         for s, hs in enumerate(snaps):
             _g = _gs[s % len(_gs)]
-            _r = _ss[s % len(_ss)]
             # 逐快照用它自己的几何 SINR，不用 UE 的均值——保住动态范围
             npow = mu.noise_from_geometric_sinr(hs, _g)
-            rc = mu.su_rank_adaptation(hs, noise_power=npow, max_rank=max_rank,
-                                       table=table, target_bler=target_bler,
-                                       rb_per_rbg=rb_per_rbg)
+
+            # **基站看到的信道**：零时延时就是当前快照；开老化时逐 RBG 滞后。
+            if aging:
+                lag_rbg = ca.rbg_lag_snapshots(csi, n_rbg_eff, snapshot_ms=snapshot_ms,
+                                               snapshot_index=s, rb_per_rbg=rb_per_rbg)
+                lags = np.repeat(lag_rbg, rows_per_rbg)[:n_rows]
+                h_prec = ca.stale_channel(snaps_u, s, lags)
+                lag_used[s] = float(np.mean(lag_rbg))
+            else:
+                h_prec = snaps_u[s]
+
+            # 预编码用 h_prec、评估用当前快照。零时延时两者相同，
+            # 结果与 mumimo.su_rank_adaptation **逐位相同**（test_csi_aging 第 1 节）。
+            rc = ca.rank_adaptation_aged(h_prec, snaps_u[s], noise_power=npow,
+                                         max_rank=max_rank, table=table,
+                                         target_bler=target_bler, rb_per_rbg=grp)
             for c in rc.candidates:
                 r = c["rank"] - 1
                 sinr[s, r], mcs[s, r], se[s, r] = c["sinr_db"], c["mcs"], c["se"]
-            # 发送侧的 SINR 在循环外统一算 —— 它是**长期统计量**，不逐快照变
-        # --- 发送侧 SINR：CQI 反馈带来的**粗略统计**干扰信息 ---
-        # 发送端不知道瞬时干扰，但 CQI 是终端测的、本来就含干扰，
-        # 只是被平均掉了快变。所以发送侧 ≈ 该用户接收 SINR 的长期均值，
-        # 而不是"完全不知道干扰"。
+            for c in rc.gnb_candidates:
+                se_gnb[s, c["rank"] - 1] = c["se"]
+            rank_gnb[s] = rc.rank
+
+            # --- BF Gain = SVD − PMI，**两者都在基站自己的（陈旧）CSI 上算** ---
+            # 基站是从 SRS 拿的信道，它能自己算出 BF Gain，但算的是滞后那一刻的。
+            # 老化时这会让它**高估**增益（以为预编码是匹配的），于是 MCS 点高了，
+            # 误码上来，再由 OLLA 拉回去——这正是现网的机制。
+            w_svd_prec = ca.svd_precoder(h_prec)
+            for r in range(1, max_rank + 1):
+                p_per = 1.0 / r
+                s_svd = ca.mmse_stream_sinr(h_prec, w_svd_prec[:, :, :r],
+                                            power_per_stream=p_per, noise_power=npow)
+                s_pmi = ca.mmse_stream_sinr(h_prec, w_pmi[r],
+                                            power_per_stream=p_per, noise_power=npow)
+                g_svd = mu.user_sinr_db(s_svd, rb_per_rbg=grp)
+                g_pmi = mu.user_sinr_db(s_pmi, rb_per_rbg=grp)
+                bf_gain[s, r - 1] = g_svd - g_pmi
+                # CQI 是终端在**真实信道**上用 PMI 权测的，所以这里用当前快照
+                pmi_sinr[s, r - 1] = mu.user_sinr_db(
+                    ca.mmse_stream_sinr(snaps_u[s], w_pmi[r],
+                                        power_per_stream=p_per, noise_power=npow),
+                    rb_per_rbg=grp)
+
+        # --- 发送侧 SINR = CQI 门限 + BF Gain（用户 2026-08-03 定的口径）---
+        # 现场流程（CLAUDE.md 已固化）：
+        #   CQI → 按谱效映射初始 MCS → 该 MCS 的目标 BLER SINR 门限
+        #   → + BF Gain → 按 SINR 重映射 MCS → + OLLA → floor
+        # 这里只走到"+BF Gain"为止，OLLA 留在 TTI 主循环里逐 TTI 更新。
         #
-        # **做成"完全无干扰"是错的**：实测那样发送侧 40.7 dB、接收侧 12.7 dB，
-        # 差 28 dB，OLLA 的钳位根本追不上，首传 BLER 飙到 0.85。
-        # CQI 口径下两者只差瞬时起伏那几 dB，OLLA 正好能收敛掉。
-        sinr_tx = np.tile(sinr.mean(axis=0, keepdims=True), (n_s, 1))
-        for _s in range(n_s):
-            for _r in range(max_rank):
+        # **CQI 是长期滤波的宽带量**（终端上报周期远长于一个 TTI），
+        # 所以取该用户 PMI SINR 在全部快照上的均值再量化；
+        # **BF Gain 是瞬时的**，基站每次调度都能从自己的 CSI 算出来。
+        # 早先版本把发送侧写成"接收 SINR 的长期均值"，那是个事后诸葛亮的量——
+        # 它已经包含了 SVD 的增益，等于假设基站预先知道自己波束打得准不准。
+        cqi_idx = np.zeros(max_rank, dtype=int)
+        for _r in range(max_rank):
+            mean_pmi = float(np.nanmean(pmi_sinr[:, _r]))
+            cqi_idx[_r] = _cqi_of(mean_pmi, target_bler)
+            thr = _cqi_threshold_sinr(int(cqi_idx[_r]), target_bler)
+            # **CQI=0 不能退化成 −inf。** 它的意思是"低于 CQI 表下界"，
+            # 而不是"这个用户不存在"——真实接收 SINR 可能还有几个 dB。
+            # 退回实测 PMI SINR：粗糙但有限，OLLA 还能在它上面工作。
+            if not np.isfinite(thr):
+                thr = mean_pmi if np.isfinite(mean_pmi) else -20.0
+            sinr_tx[:, _r] = thr + bf_gain[:, _r]
+            for _s in range(n_s):
                 mcs_tx[_s, _r] = la_sel(sinr_tx[_s, _r], table, target_bler)
-        best = np.argmax(se, axis=1)
+        # **rank 由基站按自己的 CSI 挑**（零时延时 se_gnb 与 se 逐位相同）
+        best = rank_gnb - 1
         # **覆盖判定。** 用户级 SINR 连 MCS 0 的 10% BLER 门限都够不到时，
         # 这个快照下他根本调度不动——发了也是白发。必须显式标出来：
         # PF 的度量是 R_inst/R_avg，一个永远发不成功的用户 R_avg 会趋近 0，
@@ -483,6 +677,9 @@ def build_link_tables(
             iot_db=_nan_safe(np.nanmedian, [_iot(g, r) for g, r in
                                             zip(_gs, _ss, strict=False)]),
             sir_db=float(sir_in[i]), sinr_tx_db=sinr_tx, mcs_tx=mcs_tx,
+            bf_gain_db=bf_gain, pmi_sinr_db=pmi_sinr, cqi_index=cqi_idx,
+            csi_lag_snapshots=lag_used, se_gnb=se_gnb,
+            best_se_gnb=se_gnb[np.arange(n_s), best],
         ))
     return out
 
@@ -494,6 +691,9 @@ def measure_mu_gain(
     num_ues: int | None = None,
     max_mu_users: int = 4,
     max_snapshots: int = 4,
+    csi: ca.CsiConfig | None = None,
+    snapshot_ms: float = 5.0,
+    rb_per_rbg: int = 16,
 ) -> dict[str, Any]:
     """实测 MU 相对 SU 的小区谱效比，供 TTI 主循环使用。
 
@@ -505,20 +705,42 @@ def measure_mu_gain(
     **这是当前最大的简化，必须说清楚。** 它假设 MU 增益在时间上是稳定的，
     而真实的配对增益随用户瞬时信道起伏。返回值里带 ``per_snapshot``，
     比值的离散程度就是这个假设的可信度——波动大就说明不该用一个标量。
+
+    ``csi`` 开启老化时，配对的预编码走**陈旧信道**、评估走当前信道。
+    **MU 受老化的打击远重于 SU**：ZF 的全部价值就是把配对用户之间的干扰
+    零陷掉，而零陷是按基站以为的信道打的——信道一变，零陷就落空，
+    残余干扰直接进分母。SU 只是波束没对准，损失温和得多。
     """
     if num_ues is not None and num_ues < len(h_users):
         groups = group_samples_by_ue(len(h_users), num_ues)
         h_users = [np.asarray(h_users[g[0]]) for g in groups]
         geo_sinr_db = [float(np.nanmean([geo_sinr_db[i] for i in g])) for g in groups]
 
+    aging = csi is not None and csi.enabled
     ratios: list[float] = []
     modes: list[str] = []
     n = min(max_snapshots, max(1, min(np.asarray(h).shape[0] for h in h_users)))
+    # **两条路径必须同粒度，否则比的不是老化。** 早先老化侧降到 RBG、
+    # 完美侧留在 RB，su_mu_adaptation 内部又按 16 分组，等于两边口径不同，
+    # 算出来的"老化损失"里混着粒度差。现在一律留在 RB 粒度，
+    # 只把逐 RBG 的滞后展开到逐 RB（一跳本来就覆盖 16 个连续 RB）。
+    seq = [[np.asarray(h)[t] for t in range(np.asarray(h).shape[0])] for h in h_users]
+    n_rb = seq[0][0].shape[0] if seq and seq[0] else 1
+    n_rbg = max(1, int(np.ceil(n_rb / max(1, rb_per_rbg))))
     for t in range(n):
         snaps = [np.asarray(h)[t:t + 1] for h in h_users]
         npow = mu.noise_from_geometric_sinr(snaps[0], geo_sinr_db[0])
+        prec = None
+        if aging:
+            assert csi is not None
+            lag_rbg = ca.rbg_lag_snapshots(csi, n_rbg, snapshot_ms=snapshot_ms,
+                                           snapshot_index=t, rb_per_rbg=rb_per_rbg)
+            lags = np.repeat(lag_rbg, max(1, rb_per_rbg))[:n_rb]
+            # su_mu_adaptation 吃 [T,RB,BS,UE] 或 [RB,BS,UE]，补回一个时隙维
+            prec = [ca.stale_channel(s, t, lags)[None] for s in seq]
         try:
             dec = mu.su_mu_adaptation(snaps, noise_power=npow,
+                                      h_users_for_precoding=prec,
                                       max_mu_users=max_mu_users)
         except Exception:  # noqa: BLE001
             continue
@@ -534,10 +756,13 @@ def measure_mu_gain(
         "ratio": r, "measured": True, "per_snapshot": [round(x, 3) for x in ratios],
         "mode_share_mu": modes.count("MU") / len(modes),
         "relative_spread": round(spread, 3),
+        "csi_aging": bool(aging),
         "note": (f"**这是一个标量近似**：在 {len(ratios)} 个快照上真配了一遍取中位数，"
                  f"主循环按它折算，没有逐 TTI 重新配对。"
                  f"比值离散度 {spread * 100:.0f}%——超过 30% 就说明 MU 增益"
-                 f"随时间起伏很大，用一个标量会失真。"),
+                 f"随时间起伏很大，用一个标量会失真。"
+                 + ("配对预编码用的是**陈旧 CSI**（已开老化）。" if aging else
+                    "配对预编码用的是**零时延完美 CSI**，这是上界不是现网。")),
     }
 
 
@@ -817,7 +1042,12 @@ def simulate(
             continue
 
         # --- 调度判决 ---
-        inst_se = np.array([tables[u].best_se[snap] for u in cand])
+        # **调度器只能用基站自己估的谱效。** 用真实谱效等于让它预知信道，
+        # 它会自动绕开 CSI 老化最严重的用户，老化的代价就凭空消失了。
+        # 零时延时 best_se_gnb 与 best_se 逐位相同，行为不变。
+        inst_se = np.array([
+            (tables[u].best_se_gnb if tables[u].best_se_gnb is not None
+             else tables[u].best_se)[snap] for u in cand])
         if sched.algorithm == "pf":
             metric = inst_se / np.maximum(r_avg[cand], 1e-9)
         elif sched.algorithm == "max_ci":
@@ -907,13 +1137,13 @@ def simulate(
                 sent = tr.serve(u, tti, tb_bytes)
                 served[u] += sent
                 if sched.olla_enabled:      # ACK：小步上调
-                    olla_db[u] = min(olla_db[u] + sched.olla_step_up_db,
+                    olla_db[u] = min(olla_db[u] + sched.step_up,
                                      sched.olla_max_db)
             else:
                 nack_first[u] += 1
                 harq_pending[u] = (3, tb_bytes)
                 if sched.olla_enabled:      # NACK：大步下调
-                    olla_db[u] = max(olla_db[u] - sched.olla_step_down_db,
+                    olla_db[u] = max(olla_db[u] - sched.step_down,
                                      sched.olla_min_db)
 
         # --- PF 平均速率更新 ---

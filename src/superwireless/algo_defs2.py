@@ -295,7 +295,7 @@ def _neighbor() -> Family:
         key="neighbor_load",
         name="邻区负载",
         stage="系统级",
-        current="scaled",
+        current="jitter",
         config_key="neighbor_prb_util",
         intro="ChannelHub 的几何 SINR 是按**所有邻区都在发**算的，等于 100% PRB 利用率。"
               "真实网络 5G 典型是 10% / 30% / 50%。",
@@ -304,7 +304,11 @@ def _neighbor() -> Family:
         caveat="**SINR 和 SIR 必须一起折算。** 只改 SINR 会让 "
                "IoT = SIR/(SIR−SINR) 拿两个不同口径的量算，直接报 inf。"
                "另外实测现网密集城区 IoT &gt;20 dB 对应的是**接近满负载**："
-               "100% 负载下 32.9 dB、10% 负载下只有 22.9 dB。",
+               "100% 负载下 32.9 dB、10% 负载下只有 22.9 dB。"
+               "<br>**当前只支持全网统一值**（用户 2026-08-03 定）。"
+               "真实网络各小区负载当然不同，但那要一张逐小区负载表，"
+               "而 ChannelHub 的几何 SINR 只给**聚合**的 SIR——"
+               "拿不到「哪个邻区贡献了多少」，没法把逐小区负载映射回来。",
         source="5G 典型 PRB 利用率；本项目 system.apply_neighbor_load",
         options=[
             Option("scaled", "按 PRB 利用率线性折算",
@@ -313,6 +317,15 @@ def _neighbor() -> Family:
                    detail="邻区没在发的那些 PRB 上，本小区用户根本不受干扰。"
                           "η=1 时退化成原来的 full buffer 行为。",
                    when="默认（0.3）",
+                   cost="零"),
+            Option("jitter", "带 ±5% 抖动的线性折算",
+                   formula=r"\eta_s \sim \mathcal{U}\big(0.95\,\eta,\; 1.05\,\eta\big)",
+                   summary="每个快照抽一份自己的利用率",
+                   detail="恒定负载会让所有快照的干扰**完全一样**，结果比现网干净。"
+                          "真实网络的负载逐 TTI 就在抖。抖动是乘性的，"
+                          "0.3 → [0.285, 0.315]。<b>这是当前默认</b>"
+                          "（用户 2026-08-03：「实际结果可以在配置值 ±5% 范围内波动」）。",
+                   when="默认",
                    cost="零"),
             Option("full", "full buffer（η = 1）",
                    summary="所有邻区都在发",
@@ -371,12 +384,171 @@ def _two_phase() -> Family:
     )
 
 
+def _csi_aging() -> Family:
+    return Family(
+        key="csi_aging",
+        name="CSI 反馈时延与老化",
+        stage="发射",
+        current="srs_hop_17",
+        config_key="srs_period_ms",
+        intro="**基站永远不知道「现在」的信道。** TDD 下行靠互易性从上行 SRS 取 CSI，"
+              "所以从探测到发送之间隔着一整条时延链：SRS 发送 → 信道估计 → "
+              "预编码计算 → PDSCH 发送。这段时间信道一直在变。"
+              "平台在此之前默认零时延完美 CSI——预编码与评估用同一个矩阵，"
+              "SVD 永远精确匹配、ZF 零陷永远打得准，"
+              "**这系统性地高估 MU 增益**，因为 MU 的全部收益就建立在零陷打得准上。",
+        formula=r"W = \mathrm{SVD}(H_{t-\tau}), \quad "
+                r"\mathrm{SINR}_k = \frac{1}{\left[\left(I + "
+                r"\tfrac{P}{r} (H_t W)^H (H_t W)\right)^{-1}\right]_{kk}} - 1",
+        caveat="**零时延时这套公式必须逐位退化成 σ_k²·P/rank/σ_n²**，"
+               "也就是原来的 su_rank_adaptation 用的那个特征值公式——"
+               "因为那时 H_t W = UΣ_r 是对角的。这条恒等式是老化模型的地基，"
+               "不成立就说明它是叠加上去的第二套物理，任何「老化损失」都不可解释。"
+               "test_csi_aging 第 1 节实测最大偏差 0 dB。"
+               "<br>**另一个极易写错的地方：rank 必须由基站按自己的陈旧 CSI 选。** "
+               "拿真实 SINR 去挑 rank 等于让基站预知信道，它会自动避开老化最狠的 rank，"
+               "损失被凭空抹掉一大半。",
+        source="38.211 §6.4.1.4.3 与 Table 6.4.1.4.3-1；跳频序列直接调 ChannelHub 的 "
+               "srs_rb_indices，不自己重写",
+        options=[
+            Option("srs_hop_17", "SRS 跳频（C_SRS=57，17 跳 × 16 RB）",
+                   formula=r"\text{age}(k) = \big((n - k) \bmod 17\big) \cdot T_{SRS} "
+                           r"+ \delta_{proc}",
+                   summary="每次 SRS 只探 1 个 RBG，17 跳扫完全带",
+                   detail="38.211 Table 6.4.1.4.3-1 的 C_SRS=57 行："
+                          "m_SRS=(272,16,4,4)、N=(1,17,4,1)。取 B_SRS=1 时"
+                          "每次 SRS 占 <b>16 RB，正好 1 个 RBG</b>，"
+                          "要 <b>17 跳</b>才扫完 272 RB——和本项目的 17 RBG × 16 RB "
+                          "载波配置 1:1 对上。"
+                          "<br><b>这是老化的主导项</b>：T_SRS=10 ms 时全带扫一遍要 "
+                          "<b>170 ms</b>，某个 RBG 的 CSI 年龄在 0~160 ms 之间轮转，"
+                          "平均 80 ms。而 2.6 GHz、30 km/h 的相干时间只有约 3 ms。"
+                          "<br>年龄<b>随时间轮转</b>，不会有某几个 RBG 永远最差。",
+                   when="默认（现网为省上行开销、提高导频功率密度普遍开跳频）",
+                   cost="实测 MU/SU 比值 0.816 → 0.449（−45%），SU 谱效 −27%",
+                   source="38.211 Table 6.4.1.4.3-1 第 57 行"),
+            Option("srs_nohop", "不跳频（每次探全带）",
+                   formula=r"\text{age} = (t \bmod T_{SRS}) + \delta_{proc}",
+                   summary="全带年龄相同，只剩周期内相位 + 处理时延",
+                   detail="上行开销大得多（一次要占满 272 RB），"
+                          "但 CSI 新鲜得多。实测 SU 谱效只掉 10%（跳频掉 27%）。",
+                   when="SRS 资源充裕、或要单独看跳频的代价",
+                   cost="上行开销 × 17"),
+            Option("perfect", "零时延完美 CSI（关掉老化）",
+                   summary="预编码与评估用同一个信道矩阵",
+                   detail="<b>这是上界，不是现网。</b>保留它是为了能做 A/B 对比——"
+                          "老化的代价必须能被量出来，而不是悄悄混进所有结果里。",
+                   when="要上界基线时",
+                   cost="系统性高估 MU 增益"),
+        ],
+        flow=Flow(steps=[
+            ("定 SRS 周期", "5 / 10 / 20 / 40 ms，对应 38.331 的 sl10/20/40/80（30 kHz）"),
+            ("查跳频序列", "调 ChannelHub 的 srs_rb_indices（38.211 §6.4.1.4.3 完整跳频树），"
+                           "C_SRS=57 / B_SRS=1 给出 RBG 0→1→…→16 循环"),
+            ("算逐 RBG 年龄", "age(k) = ((n−k) mod 17)·T_SRS + 周期内相位 + 处理时延"),
+            ("量化成整数快照", "lag(k) = round(age(k) / 快照间隔)，快照间隔默认 5 ms"),
+            ("拼出基站以为的信道", "第 k 个 RBG 取自 lag(k) 个快照之前；"
+                                   "**越界钳到最早快照，绝不回绕**（回绕=拿未来当过去）"),
+            ("用陈旧信道算预编码", "W = SVD(H_stale)，逐 RBG"),
+            ("用当前信道评估", "SINR = MMSE(H_true, W)，失配表现为 BF 增益下降 + 流间泄漏"),
+            ("rank 也按陈旧 CSI 选", "基站不知道真实信道支持几流——"
+                                     "高速下「点了 rank4、实际只撑得住 rank1」正是老化损失的一环"),
+        ], branches=[
+            (0, "关掉老化", "H_stale = H_true，整条链退化成零时延，结果与原实现逐位相同"),
+            (3, "滞后全部量化成 0", "老化模型此时几乎不起作用，aging_summary 主动告警"),
+        ]),
+    )
+
+
+def _tx_sinr() -> Family:
+    return Family(
+        key="tx_sinr",
+        name="发送侧 SINR（CQI + BF Gain）",
+        stage="链路自适应",
+        current="cqi_bf",
+        config_key="",
+        intro="**发送侧和接收侧是两个 SINR。** 基站选 MCS 时手里只有 CQI 反馈和"
+              "它自己能算的 BF 增益；接收端实打实吃着干扰。两者的差由误码经 OLLA "
+              "收敛回来——这是干扰影响吞吐的第一性路径。",
+        formula=r"\mathrm{SINR}_{tx} = \underbrace{\Gamma\big(\mathrm{MCS}"
+                r"(\mathrm{CQI})\big)}_{\text{长期滤波的宽带上报}} + "
+                r"\underbrace{\overline{\mathrm{SINR}_{SVD} - \mathrm{SINR}_{PMI}}}"
+                r"_{\text{基站自算，逐次调度}}",
+        caveat="**CQI 是长期滤波的宽带量，BF Gain 是瞬时量**——这个分工不能混。"
+               "CQI 由终端在真实信道上用 PMI 权测得、上报周期远长于一个 TTI；"
+               "BF Gain 基站从自己的 SRS 信道算，所以开老化时它算的是"
+               "<b>滞后那一刻</b>的增益，会系统性高估（以为预编码是匹配的），"
+               "于是 MCS 点高了、误码上来、OLLA 再拉回去。"
+               "<br>早先版本把发送侧写成「接收 SINR 的长期均值」，"
+               "那是个<b>事后诸葛亮</b>的量：它已经包含了 SVD 的实际增益，"
+               "等于假设基站预先知道自己波束打得准不准。"
+               "<br><b>已核查的一处近似：</b>Type I 码本是在<b>时频平均后的信道</b>"
+               "上贪心选波束的（<code>measure.pmi_type_i</code>），"
+               "而教科书口径是在<b>空间协方差</b> "
+               "<code>R = Σ h hᴴ</code> 上选（相位不敏感）。"
+               "实测两者差 <b>0.2 ~ 1.0 dB</b>（协方差法略优），已知但没改——"
+               "改的是一个被多条路径共用的函数，为 1 dB 不值得。"
+               "另外 iid 瑞利信道上 BF 增益高达 13 dB <b>不是 bug 而是真实物理</b>："
+               "空间白信道没有结构，任何宽带码本波束都对不准；"
+               "换成有角度结构的多径信道后是 2.6 ~ 5 dB，正对得上现场量级。",
+        source="现场 TDD AMC 流程（用户 2026-08-03 确认）；38.214 §5.2.2",
+        options=[
+            Option("cqi_bf", "CQI 门限 + BF Gain",
+                   formula=r"\mathrm{CQI} \to \mathrm{MCS} \to \Gamma_{10\%} "
+                           r"\to +\,\mathrm{BFGain} \to \mathrm{MCS}' \to "
+                           r"+\,\mathrm{OLLA} \to \lfloor \cdot \rfloor",
+                   summary="现场口径：CQI 按谱效映射 MCS，取该 MCS 的目标 BLER SINR 门限，加 BF 增益",
+                   detail="CQI 用 38.214 Table 5.2.2.1-3（表 2，含 256QAM）。"
+                          "PMI 走 <b>Type I 宽带码本</b>——全带共用一个权，"
+                          "正对应现场的<b>全带 CQI</b>（不做子带 CQI、不做频选调度）。"
+                          "<br>宽带 PMI 是慢时间尺度的量，所以逐 UE 逐 rank 在时间平均信道上"
+                          "搜一次码本就够，不逐快照重搜。"
+                          "<br><b>CQI=0 不退化成 −inf</b>：它的意思是「低于 CQI 表下界」，"
+                          "不是「这个用户不存在」，退回实测 PMI SINR，OLLA 还能在它上面工作。",
+                   when="默认",
+                   cost="每 UE 每 rank 一次 Type I 码本搜索，约 40 ms"),
+            Option("rx_longterm", "接收 SINR 的长期均值（已弃用）",
+                   summary="拿接收侧 SINR 在快照上取均值当发送侧",
+                   detail="<b>事后诸葛亮</b>：这个量里已经含了 SVD 的实际增益，"
+                          "等于让基站预知波束打得准不准。开 CSI 老化后它的问题变得致命——"
+                          "老化的全部代价就是「基站以为打准了其实没有」，"
+                          "而这个口径直接把它抹平了。",
+                   when="不再使用",
+                   cost="抹掉 CSI 老化的主要损失"),
+            Option("interference_free", "完全无干扰（已弃用）",
+                   summary="按反推出的无干扰 SNR 选 MCS",
+                   detail="极端假设。实测发送侧 40.7 dB、接收侧 12.7 dB，<b>差 28 dB</b>，"
+                          "OLLA 的钳位根本追不上，首传 BLER 飙到 0.85。",
+                   when="不再使用",
+                   cost="OLLA 发散"),
+        ],
+        flow=Flow(steps=[
+            ("终端测 CQI", "用基站下发的 Type I 宽带 PMI 权，在**真实信道**上测，"
+                           "含干扰；长期滤波后上报一个宽带值"),
+            ("量化成 CQI index", "38.214 Table 5.2.2.1-3，满足 10% BLER 的最高档"),
+            ("CQI → 初始 MCS", "按谱效就近映射到 MCS 表 3"),
+            ("取该 MCS 的 SINR 门限", "该档 NewTx 曲线上 BLER=10% 对应的 SINR"),
+            ("基站自算 BF Gain", "同一信道、同一 rank、同一功率、同一接收机下 "
+                                 "SINR_SVD − SINR_PMI，逐 RBG 逐流在 dB 域平均；"
+                                 "**开老化时算的是陈旧信道上的增益**"),
+            ("相加得发送侧 SINR", "Γ(MCS(CQI)) + BF Gain"),
+            ("重映射 MCS", "按发送侧 SINR 选满足目标 BLER 的最高 MCS"),
+            ("加 OLLA 偏置", "逐 TTI 更新的 dB 域偏置，ACK +0.01 / NACK −0.1"),
+            ("接收端判误码", "用**真实**接收 SINR 查 BLER 曲线——发送侧与接收侧的差就在这里变成误码"),
+        ], branches=[
+            (1, "CQI = 0（低于表下界）", "退回实测 PMI SINR，不用 −inf"),
+        ], loop_back=(8, 7, "ACK/NACK 反馈驱动 OLLA，下一次调度生效")),
+    )
+
+
 def extra_families(cfg: dict[str, Any]) -> list[Family]:
     n_bs = int(cfg.get("num_bs_tx_ant", 64) or 64)
     return [
         _antenna(n_bs),
         _rbg(),
         _precoder_su(),
+        _csi_aging(),
+        _tx_sinr(),
         _traffic(),
         _exp_thp(),
         _harq(),
