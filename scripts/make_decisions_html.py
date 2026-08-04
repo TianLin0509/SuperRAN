@@ -277,7 +277,39 @@ def build(e2e: dict | None = None, olla: dict | None = None,
 <tr><td>小区体验速率 Mbps</td>{line('type1', 'thp', '{:.0f}')}</tr>
 <tr><td>5% 边缘 Mbps</td>{line('type1', 'edge', '{:.0f}')}</tr>
 </tbody></table></div>
-<p class="src">{sweep['note']}</p>
+
+<div class="callout c-green">
+<p><b>最值得看的一条：Type I 码本权对 CSI 老化几乎免疫</b>
+（体验速率变化 −1% ~ +14%），而 SVD 权掉 36% ~ 57%。</p>
+<p>原因很直接：<b>宽带 PMI 跟的是长期空间统计</b>——它在时间平均后的信道上
+搜码本，把输入整体推迟几个快照，时间平均几乎不变。而 <b>SVD 跟的是瞬时信道</b>，
+逐 RBG 的特征波束必须和当下的信道对齐，老化一来就失配。
+<b>自由度少 = 能算错的地方也少。</b></p>
+</div>
+
+<div class="callout c-amber">
+<p><b>但别因此改用码本。</b>零时延下 SVD 是 285~320 Mbps、Type I 只有
+100~131——码本的"稳"是稳在一个低得多的水平上。开老化后 SVD 仍然全面胜出
+（138~190 vs 100~131），只是优势从 3 km/h 的 <b>+45%</b> 缩到 60 km/h 的 <b>+10%</b>。</p>
+<p>真正的结论是：<b>高速场景下 SVD 的优势被老化吃掉大半，这时才值得考虑
+更鲁棒的权</b>（或者缩短 SRS 周期 / 关跳频）。低速下 SVD 毫无疑问。</p>
+</div>
+
+<div class="callout c-blue">
+<p><b>两个自洽性交叉验证。</b></p>
+<p><b>①</b> SVD 的 OLLA 偏置随老化一路压到 −3.2 ~ −5.0 dB，而 Type I 的
+OLLA <b>始终为正</b>（+0.04 ~ +2.10）。这不是巧合：Type I 发送时
+BF Gain 恒为 0（发射权就是 CQI 的参照权），发送侧 SINR 只有 CQI 门限、偏保守，
+所以 OLLA 往上推；SVD 则是把老化下被高估的 BF 增益往下压。
+<b>偏置的符号直接读出了两种权的估计偏向。</b></p>
+<p><b>②</b> 平均年龄 87 ms 处的相关系数 ρ：3 km/h 是 0.400，
+30 km/h 之后全部掉到 0.06~0.09。<b>这解释了为什么 SVD 的损失在 30 km/h 以上就饱和了</b>
+——CSI 已经完全去相关，再快也没有更多可失去的。</p>
+</div>
+
+<p class="src">{sweep['note']}
+Type I 的 IBLER 普遍低于目标 10%（0.043~0.081），是 MCS 整数档卡住的结果：
+偏置还在往上走，但下一档会一次性跨太多，于是稳在档间。</p>
 """
 
     return f"""{head()}
@@ -285,7 +317,7 @@ def build(e2e: dict | None = None, olla: dict | None = None,
 <div class="wrap">
 
 <h1>决策落地</h1>
-<p class="tagline">你的 8 个决策 + 5 个提案答复 → 全部落地</p>
+<p class="tagline">你的 8 个决策 + 5 个提案答复 → 全部落地；追加的 OLLA 步长、移动性扫描、PMI 权对比一并补上</p>
 <p class="meta">2026-08-04 · 十一个套件全通过 · 所有数字来自实跑</p>
 
 <div class="callout c-green">
@@ -299,7 +331,7 @@ def build(e2e: dict | None = None, olla: dict | None = None,
 <li><a href="#d1">8 个决策的落地情况</a></li>
 <li><a href="#d2">5 个提案的答复与处置</a></li>
 <li><a href="#d3">提案 1：CSI 老化怎么建的</a></li>
-<li><a href="#d4">实测：老化到底吃掉多少</a></li>
+<li><a href="#d4">实测：老化到底吃掉多少（含移动性扫描 × 发射权对比）</a></li>
 <li><a href="#d5">这一轮新踩的坑</a></li>
 </ol>
 </div>

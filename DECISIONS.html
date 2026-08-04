@@ -142,7 +142,7 @@
 <div class="wrap">
 
 <h1>决策落地</h1>
-<p class="tagline">你的 8 个决策 + 5 个提案答复 → 全部落地</p>
+<p class="tagline">你的 8 个决策 + 5 个提案答复 → 全部落地；追加的 OLLA 步长、移动性扫描、PMI 权对比一并补上</p>
 <p class="meta">2026-08-04 · 十一个套件全通过 · 所有数字来自实跑</p>
 
 <div class="callout c-green">
@@ -156,7 +156,7 @@
 <li><a href="#d1">8 个决策的落地情况</a></li>
 <li><a href="#d2">5 个提案的答复与处置</a></li>
 <li><a href="#d3">提案 1：CSI 老化怎么建的</a></li>
-<li><a href="#d4">实测：老化到底吃掉多少</a></li>
+<li><a href="#d4">实测：老化到底吃掉多少（含移动性扫描 × 发射权对比）</a></li>
 <li><a href="#d5">这一轮新踩的坑</a></li>
 </ol>
 </div>
@@ -282,8 +282,8 @@ SU 只是波束没对准，损失温和得多。</p>
 <div class="tbl-wrap"><table>
 <thead><tr><th>olla_speedup</th><th>理论稳态 BLER</th><th>实测首传 BLER</th>
 <th>平均 OLLA dB</th><th>小区体验 Mbps</th></tr></thead>
-<tbody><tr><td>× 1（现网基线）</td><td>0.091</td><td>0.394</td><td>-5.17</td><td>142.3</td></tr><tr><td>× 5</td><td>0.091</td><td>0.147</td><td>-5.84</td><td>146.3</td></tr><tr><td>× 10</td><td>0.091</td><td>0.125</td><td>-6.35</td><td>153.8</td></tr><tr><td>× 20</td><td>0.091</td><td>0.100</td><td>-4.04</td><td>142.5</td></tr></tbody></table></div>
-<p><b>理论稳态 BLER 一列恒为 0.091，一点没动</b>——因为它只取决于
+<tbody><tr><td>× 1（现网基线）</td><td>0.100</td><td>0.457</td><td>-4.93</td><td>138.3</td></tr><tr><td>× 5</td><td>0.100</td><td>0.158</td><td>-5.68</td><td>165.6</td></tr><tr><td>× 10</td><td>0.100</td><td>0.129</td><td>-5.13</td><td>143.0</td></tr><tr><td>× 20</td><td>0.100</td><td>0.112</td><td>-4.60</td><td>157.9</td></tr></tbody></table></div>
+<p><b>理论稳态 BLER 一列恒为 0.100，一点没动</b>——因为它只取决于
 <span class="kx" data-tex="s_{up}/(s_{up}+s_{down})"><math xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mi>s</mi><mrow><mi>u</mi><mi>p</mi></mrow></msub><mo>/</mo><mo stretchy="true">(</mo><msub><mi>s</mi><mrow><mi>u</mi><mi>p</mi></mrow></msub><mo>+</mo><msub><mi>s</mi><mrow><mi>d</mi><mi>o</mi><mi>w</mi><mi>n</mi></mrow></msub><mo stretchy="true">)</mo></mrow></math></span>，等比放大约分掉了。
 实测 BLER 收敛到理论值附近，而<b>体验速率几乎不变</b>。
 <b>放大只是更快到达同一个地方，不歪曲结论。</b></p>
@@ -306,6 +306,59 @@ SU 只是波束没对准，损失温和得多。</p>
 理论干净、实测也在 10% 上。</p>
 </div>
 <p class="src">这一组用 olla_speedup=20 保证 8 秒内收敛到稳态。</p>
+
+<h3>移动性扫描 × 发射权对比</h3>
+<p class="lead">同一 seed、同一撒点，<b>只改速度与发射权</b>。
+每格是「零时延 → 10 ms + 17 跳」，括号是老化造成的相对变化。
+为了让 3 秒仿真收敛到稳态，这一组统一用 <code>olla_speedup=20</code>。</p>
+<div class="tbl-wrap"><table>
+<thead><tr><th style="min-width:150px">指标</th><th>3 km/h</th><th>30 km/h</th><th>60 km/h</th><th>120 km/h</th></tr></thead>
+<tbody>
+<tr><td>Jakes 相干时间</td><td>33.5 ms</td><td>3.4 ms</td><td>1.7 ms</td><td>0.8 ms</td></tr>
+<tr><td>ρ（平均年龄 87 ms 处）</td><td>0.400</td><td>0.067</td><td>0.085</td><td>0.063</td></tr>
+<tr><td colspan="5" style="background:#f5f5f7"><b>SVD 发射权</b></td></tr>
+<tr><td>平均调度 MCS<br><span class="src">含 OLLA</span></td><td>10.22 → <b>6.35</b><br><span class='pill p-no'>-38%</span></td><td>9.64 → <b>5.58</b><br><span class='pill p-no'>-42%</span></td><td>9.66 → <b>5.15</b><br><span class='pill p-no'>-47%</span></td><td>9.36 → <b>4.93</b><br><span class='pill p-no'>-47%</span></td></tr>
+<tr><td>小区体验速率 Mbps</td><td>298 → <b>190</b><br><span class='pill p-no'>-36%</span></td><td>278 → <b>158</b><br><span class='pill p-no'>-43%</span></td><td>320 → <b>138</b><br><span class='pill p-no'>-57%</span></td><td>285 → <b>144</b><br><span class='pill p-no'>-49%</span></td></tr>
+<tr><td>5% 边缘 Mbps</td><td>101 → <b>61</b><br><span class='pill p-no'>-40%</span></td><td>121 → <b>58</b><br><span class='pill p-no'>-52%</span></td><td>121 → <b>50</b><br><span class='pill p-no'>-59%</span></td><td>106 → <b>47</b><br><span class='pill p-no'>-56%</span></td></tr>
+<tr><td>平均 OLLA dB</td><td>-0.24 → <b>-3.18</b><br><span class='pill p-info'>+1225%</span></td><td>-0.64 → <b>-4.60</b><br><span class='pill p-info'>+619%</span></td><td>+1.16 → <b>-4.92</b><br><span class='pill p-no'>-524%</span></td><td>-1.36 → <b>-5.04</b><br><span class='pill p-info'>+271%</span></td></tr>
+<tr><td colspan="5" style="background:#f5f5f7"><b>Type I 码本发射权</b></td></tr>
+<tr><td>平均调度 MCS</td><td>7.31 → <b>7.98</b><br><span class='pill p-info'>+9%</span></td><td>7.49 → <b>8.31</b><br><span class='pill p-info'>+11%</span></td><td>9.29 → <b>9.61</b><br><span class='pill p-info'>+3%</span></td><td>7.27 → <b>6.94</b><br><span class='pill p-info'>-4%</span></td></tr>
+<tr><td>小区体验速率 Mbps</td><td>128 → <b>131</b><br><span class='pill p-info'>+2%</span></td><td>109 → <b>111</b><br><span class='pill p-info'>+2%</span></td><td>110 → <b>125</b><br><span class='pill p-info'>+14%</span></td><td>102 → <b>101</b><br><span class='pill p-info'>-1%</span></td></tr>
+<tr><td>5% 边缘 Mbps</td><td>27 → <b>36</b><br><span class='pill p-info'>+32%</span></td><td>14 → <b>13</b><br><span class='pill p-info'>-7%</span></td><td>29 → <b>17</b><br><span class='pill p-no'>-42%</span></td><td>25 → <b>19</b><br><span class='pill p-no'>-25%</span></td></tr>
+</tbody></table></div>
+
+<div class="callout c-green">
+<p><b>最值得看的一条：Type I 码本权对 CSI 老化几乎免疫</b>
+（体验速率变化 −1% ~ +14%），而 SVD 权掉 36% ~ 57%。</p>
+<p>原因很直接：<b>宽带 PMI 跟的是长期空间统计</b>——它在时间平均后的信道上
+搜码本，把输入整体推迟几个快照，时间平均几乎不变。而 <b>SVD 跟的是瞬时信道</b>，
+逐 RBG 的特征波束必须和当下的信道对齐，老化一来就失配。
+<b>自由度少 = 能算错的地方也少。</b></p>
+</div>
+
+<div class="callout c-amber">
+<p><b>但别因此改用码本。</b>零时延下 SVD 是 285~320 Mbps、Type I 只有
+100~131——码本的"稳"是稳在一个低得多的水平上。开老化后 SVD 仍然全面胜出
+（138~190 vs 100~131），只是优势从 3 km/h 的 <b>+45%</b> 缩到 60 km/h 的 <b>+10%</b>。</p>
+<p>真正的结论是：<b>高速场景下 SVD 的优势被老化吃掉大半，这时才值得考虑
+更鲁棒的权</b>（或者缩短 SRS 周期 / 关跳频）。低速下 SVD 毫无疑问。</p>
+</div>
+
+<div class="callout c-blue">
+<p><b>两个自洽性交叉验证。</b></p>
+<p><b>①</b> SVD 的 OLLA 偏置随老化一路压到 −3.2 ~ −5.0 dB，而 Type I 的
+OLLA <b>始终为正</b>（+0.04 ~ +2.10）。这不是巧合：Type I 发送时
+BF Gain 恒为 0（发射权就是 CQI 的参照权），发送侧 SINR 只有 CQI 门限、偏保守，
+所以 OLLA 往上推；SVD 则是把老化下被高估的 BF 增益往下压。
+<b>偏置的符号直接读出了两种权的估计偏向。</b></p>
+<p><b>②</b> 平均年龄 87 ms 处的相关系数 ρ：3 km/h 是 0.400，
+30 km/h 之后全部掉到 0.06~0.09。<b>这解释了为什么 SVD 的损失在 30 km/h 以上就饱和了</b>
+——CSI 已经完全去相关，再快也没有更多可失去的。</p>
+</div>
+
+<p class="src">同一 seed / 同一撒点，只改速度与发射权。olla_speedup=20 以便 3 秒内收敛。
+Type I 的 IBLER 普遍低于目标 10%（0.043~0.081），是 MCS 整数档卡住的结果：
+偏置还在往上走，但下一档会一次性跨太多，于是稳在档间。</p>
 
 
 <h2 id="d5">五、这一轮新踩的坑</h2>
