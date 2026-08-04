@@ -1487,6 +1487,7 @@ def sw_system_sim(
     srs_hopping: bool | str = True,
     csi_processing_delay_ms: float = 2.0,
     olla_speedup: float = 1.0,
+    precoder: str = "svd",
     seed: int = 0,
 ) -> dict[str, Any]:
     """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI。**
@@ -1538,6 +1539,10 @@ def sw_system_sim(
         稳态 BLER = up/(up+down) 与它无关，放大只加快收敛、加大稳态抖动。
         短仿真里基线常常压不动一档 MCS，可临时设 10；**出正式结论设回 1.0**。
         非 1.0 时结果里会带一条显式告警。
+    precoder : **实际发射权**。``svd`` 逐 RBG 特征波束（理论最优，默认）；
+        ``type1`` 用 38.214 Type I 宽带码本当发射权。
+        码本自由度少，**在 CSI 老化下反而可能更耐受**——能算错的地方也少。
+        ``type1`` 时 BF Gain 恒为 0（发射权就是 CQI 的参照权）。
     """
     from . import load as _load  # noqa: PLC0415
     from . import system as sysm  # noqa: PLC0415
@@ -1576,10 +1581,14 @@ def sw_system_sim(
     except ValueError as exc:
         return {"error": str(exc)}
     load_rng = np.random.default_rng(int(seed) + 909)
-    tables = sysm.build_link_tables(
-        h_users, [float(x) for x in sinr], num_ues=n_ue, geo_sir_db=sir,
-        neighbor_load=float(neighbor_prb_util), csi=csi_cfg, snapshot_ms=snap_ms,
-        load_jitter_rng=(load_rng if float(neighbor_load_jitter) > 0 else None))
+    try:
+        tables = sysm.build_link_tables(
+            h_users, [float(x) for x in sinr], num_ues=n_ue, geo_sir_db=sir,
+            neighbor_load=float(neighbor_prb_util), csi=csi_cfg, snapshot_ms=snap_ms,
+            load_jitter_rng=(load_rng if float(neighbor_load_jitter) > 0 else None),
+            precoder=str(precoder))
+    except ValueError as exc:
+        return {"error": str(exc)}
     mu_gain = (sysm.measure_mu_gain(h_users, [float(x) for x in sinr], num_ues=n_ue,
                                     csi=csi_cfg, snapshot_ms=snap_ms)
                if mu_enabled else {"ratio": 1.0, "measured": False,
@@ -1606,6 +1615,12 @@ def sw_system_sim(
         csi_cfg, num_rbg=17, snapshot_ms=snap_ms,
         speed_kmh=float(ds.config.get("ue_speed_kmh", 3.0) or 3.0))
     out["csi_aging"] = aging
+    out["precoder"] = {
+        "transmit_weight": str(precoder),
+        "note": ("SVD 逐 RBG 特征波束" if precoder == "svd"
+                 else "38.214 Type I 宽带码本；BF Gain 恒为 0（发射权即参照权）"),
+        "cqi_reference_weight": "type1_wideband",
+    }
     out["neighbor_load"] = sysm.NeighborLoadConfig(
         prb_utilization=float(neighbor_prb_util),
         jitter=float(neighbor_load_jitter), seed=int(seed)).as_dict()

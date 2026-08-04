@@ -119,8 +119,11 @@ class SchedulerConfig:
     # 步长放大能加快收敛但会在稳态附近抖得更厉害——要快收敛就临时调大，
     # 出正式结论用基线值。
     olla_enabled: bool = True
+    # **步长比决定稳态 BLER，与步长绝对值无关。** 推导见 :func:`olla_step_down_for`。
+    # 用户 2026-08-02 给的现网粗估是 +0.01/−0.1，但那对应稳态 9.09% 而不是 10%；
+    # 2026-08-03 他自己也指出 NACK 应该是 −0.09 左右。按目标 10% 精确解就是 −0.09。
     olla_step_up_db: float = 0.01        # 现网基线（用户 2026-08-02）
-    olla_step_down_db: float = 0.1        # 稳态 BLER -> 0.01/(0.01+0.1) = 9.1%
+    olla_step_down_db: float = 0.09       # 稳态 BLER -> 0.01/(0.01+0.09) = 10.0%
     olla_min_db: float = -20.0
     olla_max_db: float = 3.0
     # **加速收敛用的等比放大系数**（用户 2026-08-03 批准，条件是必须告知）。
@@ -339,6 +342,31 @@ def la_sel(sinr_db: float, table: int, target_bler: float) -> int:
                              target_bler=target_bler).index)
 
 
+def olla_step_down_for(target_bler: float, step_up: float = 0.01) -> float:
+    """给定目标 IBLER 与 ACK 步长，反解 NACK 步长。
+
+    OLLA 是个随机逼近：ACK 加 ``s_up``、NACK 减 ``s_down``。偏置在期望漂移
+    为零时稳态::
+
+        (1 − p)·s_up = p·s_down   ⟹   p = s_up / (s_up + s_down)
+                                  ⟹   s_down = s_up · (1 − p) / p
+
+    **稳态 BLER 只取决于两个步长的比**，与绝对值无关——绝对值只影响收敛速度
+    和稳态附近的抖动（这正是 ``olla_speedup`` 能等比放大的原因）。
+
+    目标 10%、``s_up = 0.01`` 时 ``s_down = 0.09``。
+    **现网常说的 +0.01/−0.1 其实对应 9.09% 而不是 10%**，差得不多但不是一回事。
+
+    注意这是**连续偏置**下的理想稳态。实际 MCS 是整数档，偏置要累积到跨过
+    一整档才会真正改变发送，所以实测 BLER 会围绕理论值抖，且与信道的
+    档位间隔有关——:func:`simulate` 会把实测值报出来，别只信理论值。
+    """
+    p = float(target_bler)
+    if not 0.0 < p < 1.0:
+        raise ValueError(f"target_bler 必须在 (0,1)，收到 {target_bler}")
+    return float(step_up) * (1.0 - p) / p
+
+
 def _type1_precoder(h_rbg: np.ndarray, rank: int) -> np.ndarray:
     """38.214 Type I **宽带** PMI，强制到指定 rank。``[F,BS,UE]`` → ``[F,BS,rank]``。
 
@@ -478,6 +506,7 @@ def build_link_tables(
     csi: ca.CsiConfig | None = None,
     snapshot_ms: float = 5.0,
     load_jitter_rng: np.random.Generator | None = None,
+    precoder: str = "svd",
 ) -> list[UeLinkTable]:
     """第一相：逐 UE 把 rank 1..max_rank 的 SINR / MCS / 谱效全部算好。
 
@@ -493,7 +522,14 @@ def build_link_tables(
     ``csi`` 给定且 ``enabled`` 时走 CSI 老化：预编码用滞后若干个快照的信道，
     评估用当前快照。逐 RBG 的滞后由 SRS 周期与跳频决定，见 :mod:`csi_aging`。
     不给的话是零时延完美 CSI——**那是个上界，不是现网**。
+
+    ``precoder`` 决定**实际发射权**：``svd``（逐 RBG 特征波束，理论最优）
+    或 ``type1``（38.214 Type I 宽带码本）。注意 Type I 权在两种模式下都要算——
+    它是 CQI 与 BF Gain 的参照系；``precoder="type1"`` 只是把它同时当成发射权，
+    于是 BF Gain 恒为 0（发射权就是参照权）。
     """
+    if precoder not in ("svd", "type1"):
+        raise ValueError(f"precoder 只支持 'svd' / 'type1'，收到 {precoder!r}")
     sir_in = list(geo_sir_db) if geo_sir_db is not None else [float("nan")] * len(h_users)
     # 逐快照的几何量。**合并成一个均值会把动态范围压掉一半**——
     # 实测 40 个样本的 SINR 跨度 20.7 dB，按 UE 取均值后只剩 11.9 dB，
@@ -607,9 +643,13 @@ def build_link_tables(
 
             # 预编码用 h_prec、评估用当前快照。零时延时两者相同，
             # 结果与 mumimo.su_rank_adaptation **逐位相同**（test_csi_aging 第 1 节）。
+            # Type I 权是**在陈旧信道的时间平均上**搜的（宽带 PMI 本就是慢量），
+            # 所以它同样吃老化——只是自由度少，能算错的地方也少。
+            _wov = _w_all if precoder == "type1" else None
             rc = ca.rank_adaptation_aged(h_prec, snaps_u[s], noise_power=npow,
                                          max_rank=max_rank, table=table,
-                                         target_bler=target_bler, rb_per_rbg=grp)
+                                         target_bler=target_bler, rb_per_rbg=grp,
+                                         w_override=_wov)
             for c in rc.candidates:
                 r = c["rank"] - 1
                 sinr[s, r], mcs[s, r], se[s, r] = c["sinr_db"], c["mcs"], c["se"]
@@ -621,16 +661,19 @@ def build_link_tables(
             # 基站是从 SRS 拿的信道，它能自己算出 BF Gain，但算的是滞后那一刻的。
             # 老化时这会让它**高估**增益（以为预编码是匹配的），于是 MCS 点高了，
             # 误码上来，再由 OLLA 拉回去——这正是现网的机制。
-            w_svd_prec = ca.svd_precoder(h_prec)
+            # BF Gain 是**实际发射权**相对 PMI 参照权的增益。
+            # precoder="type1" 时两者是同一个权，所以它恒为 0——这不是特例处理，
+            # 是定义的直接后果：码本发送没有额外的 BF 增益可加。
+            w_tx_prec = _w_all if precoder == "type1" else ca.svd_precoder(h_prec)
             for r in range(1, max_rank + 1):
                 p_per = 1.0 / r
-                s_svd = ca.mmse_stream_sinr(h_prec, w_svd_prec[:, :, :r],
-                                            power_per_stream=p_per, noise_power=npow)
+                s_tx = ca.mmse_stream_sinr(h_prec, w_tx_prec[:, :, :r],
+                                           power_per_stream=p_per, noise_power=npow)
                 s_pmi = ca.mmse_stream_sinr(h_prec, w_pmi[r],
                                             power_per_stream=p_per, noise_power=npow)
-                g_svd = mu.user_sinr_db(s_svd, rb_per_rbg=grp)
+                g_tx = mu.user_sinr_db(s_tx, rb_per_rbg=grp)
                 g_pmi = mu.user_sinr_db(s_pmi, rb_per_rbg=grp)
-                bf_gain[s, r - 1] = g_svd - g_pmi
+                bf_gain[s, r - 1] = g_tx - g_pmi
                 # CQI 是终端在**真实信道**上用 PMI 权测的，所以这里用当前快照
                 pmi_sinr[s, r - 1] = mu.user_sinr_db(
                     ca.mmse_stream_sinr(snaps_u[s], w_pmi[r],

@@ -258,6 +258,65 @@ check(ca.coherence_time_ms(3.0) > 5 * ca.coherence_time_ms(30.0),
 check(abs(ca.jakes_correlation(0.0, 30.0) - 1.0) < 1e-12, "零滞后相关系数为 1")
 
 # ---------------------------------------------------------------------------
+section("7  OLLA 步长的稳态反解")
+# ---------------------------------------------------------------------------
+# 稳态条件：(1−p)·s_up = p·s_down ⟹ s_down = s_up·(1−p)/p
+# **只取决于两个步长的比**，绝对值只影响收敛速度——这正是 olla_speedup 的依据。
+for _p, _want in ((0.10, 0.09), (0.20, 0.04), (0.05, 0.19), (0.50, 0.01)):
+    _got = sy.olla_step_down_for(_p, 0.01)
+    check(abs(_got - _want) < 1e-9,
+          f"目标 IBLER {_p:.0%} 时 s_down = {_want}（实得 {_got:.4f}）")
+# 反过来代回去必须自洽
+for _sd in (0.04, 0.09, 0.19):
+    _p = 0.01 / (0.01 + _sd)
+    check(abs(sy.olla_step_down_for(_p, 0.01) - _sd) < 1e-9, f"s_down={_sd} 往返自洽")
+check(abs(sy.SchedulerConfig().as_dict()["olla_target_bler"] - 0.1) < 1e-9,
+      "默认步长 +0.01/−0.09 给出稳态 IBLER 10.0%（−0.1 只有 9.09%）")
+# 等比放大不改变稳态——这是 olla_speedup 的全部依据
+_a = sy.SchedulerConfig(olla_speedup=1.0).as_dict()["olla_target_bler"]
+_b = sy.SchedulerConfig(olla_speedup=25.0).as_dict()["olla_target_bler"]
+check(_a == _b, f"等比放大 25 倍后稳态 IBLER 不变（{_a} vs {_b}）")
+check(abs(sy.SchedulerConfig(olla_speedup=25.0).step_down - 0.09 * 25) < 1e-9,
+      "放大系数确实作用在生效步长上")
+for _bad in (0.0, 1.0, -0.1):
+    try:
+        sy.olla_step_down_for(_bad)
+        check(False, f"target_bler={_bad} 应当被拒")
+    except ValueError:
+        check(True, f"target_bler={_bad} 被拒")
+
+# ---------------------------------------------------------------------------
+section("8  Type I 码本当发射权（和 SVD 对比）")
+# ---------------------------------------------------------------------------
+_csi = ca.CsiConfig(srs_period_ms=10.0, hopping=True)
+tb_svd = sy.build_link_tables(hs, geo, num_snapshots=8, snapshot_ms=5.0,
+                              csi=_csi, precoder="svd")
+tb_pmi = sy.build_link_tables(hs, geo, num_snapshots=8, snapshot_ms=5.0,
+                              csi=_csi, precoder="type1")
+_se_svd = float(np.mean([t.best_se.mean() for t in tb_svd]))
+_se_pmi = float(np.mean([t.best_se.mean() for t in tb_pmi]))
+print(f"  老化下：SVD 权 {_se_svd:.3f}，Type I 权 {_se_pmi:.3f}")
+check(_se_svd > 0 and _se_pmi > 0, "两种发射权都能出结果")
+# **BF Gain 是发射权相对 PMI 参照权的增益**，type1 时两者同一个权，必须恒为 0
+check(all(np.allclose(t.bf_gain_db, 0.0, atol=1e-9) for t in tb_pmi),
+      "precoder='type1' 时 BF Gain 恒为 0（发射权就是参照权）")
+check(any((t.bf_gain_db > 0.5).any() for t in tb_svd),
+      "precoder='svd' 时 BF Gain 明显为正")
+try:
+    sy.build_link_tables(hs, geo, num_snapshots=8, precoder="dft")
+    check(False, "未知的 precoder 应当被拒")
+except ValueError:
+    check(True, "未知的 precoder 被拒（不静默退回默认）")
+# w_override 的形状必须校验，错了要早报而不是广播成奇怪的东西
+_hr = mu.rbg_reduce(_chan(rng), 16)
+try:
+    ca.rank_adaptation_aged(_hr, _hr, noise_power=0.05,
+                            w_override=np.zeros((3, 3, 2), dtype=complex))
+    check(False, "w_override 形状不匹配应当被拒")
+except ValueError:
+    check(True, "w_override 形状不匹配被拒")
+
+# ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 print(f"CSI 老化：{_n_pass} 通过，{_n_fail} 失败")
 print("=" * 70)

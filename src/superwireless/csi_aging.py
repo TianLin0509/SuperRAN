@@ -322,7 +322,8 @@ def rank_adaptation_aged(h_prec: np.ndarray, h_eval: np.ndarray, *,
                          noise_power: float, max_rank: int = mu.SU_MAX_RANK,
                          table: int = 3, target_bler: float = 0.1,
                          total_power: float = 1.0,
-                         rb_per_rbg: int = 1) -> AgedRankChoice:
+                         rb_per_rbg: int = 1,
+                         w_override: np.ndarray | None = None) -> AgedRankChoice:
     """预编码用 ``h_prec``、评估用 ``h_eval`` 的 rank 自适应。
 
     两者都是 ``[RBG, BS, UE]``（已经降过粒度）。除了预编码信道来源不同，
@@ -340,13 +341,24 @@ def rank_adaptation_aged(h_prec: np.ndarray, h_eval: np.ndarray, *,
     实际只撑得住 rank 1"——这是老化损失的重要一环，必须留在结果里。
 
     零时延时 ``h_prec is h_eval``，两套量逐位相同，退化成原来的行为。
+
+    ``w_override`` 给定时用它当发射权（形状 ``[F, N_tx, K]``，列单位范数），
+    不再从 ``h_prec`` 做 SVD——用来把**实际发送权换成 Type I 码本**，
+    看码本权在老化下是不是比 SVD 更耐受（自由度少，能算错的地方也少）。
+    注意它仍必须是从**陈旧** CSI 算出来的，否则又变成基站预知信道了。
     """
     hp = np.asarray(h_prec)
     he = np.asarray(h_eval)
     if hp.shape != he.shape:
         raise ValueError(f"预编码与评估信道形状必须一致，收到 {hp.shape} vs {he.shape}")
     r_max = max(1, min(int(max_rank), hp.shape[1], hp.shape[2]))
-    w_full = svd_precoder(hp)                          # [F, N_tx, K]
+    if w_override is not None:
+        w_full = np.asarray(w_override)
+        if w_full.shape[:2] != hp.shape[:2]:
+            raise ValueError(f"w_override 形状 {w_full.shape} 与信道 {hp.shape} 对不上")
+        r_max = max(1, min(r_max, w_full.shape[2]))
+    else:
+        w_full = svd_precoder(hp)                      # [F, N_tx, K]
 
     cands: list[dict[str, Any]] = []
     gnb: list[dict[str, Any]] = []

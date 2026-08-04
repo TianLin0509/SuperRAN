@@ -124,7 +124,8 @@ def proposals_rows() -> str:
     return "".join(out)
 
 
-def build(e2e: dict | None = None, olla: dict | None = None) -> str:
+def build(e2e: dict | None = None, olla: dict | None = None,
+          sweep: dict | None = None) -> str:
     e2e_block = ""
     if e2e:
         base = e2e["rows"][0]
@@ -194,6 +195,56 @@ def build(e2e: dict | None = None, olla: dict | None = None) -> str:
 <p class="src">非 1.0 时结果的 <code>notes</code> 里会带一条显式告警，已实测确认会出现。</p>
 """
     e2e_block += olla_block
+
+    if sweep:
+        by = {}
+        for r in sweep["rows"]:
+            by[(r["speed"], r["precoder"], r["csi"])] = r
+        speeds = sorted({r["speed"] for r in sweep["rows"]})
+        head_cells = "".join(f"<th>{s:g} km/h</th>" for s in speeds)
+
+        def line(prec: str, metric: str, fmt: str = "{:.2f}") -> str:
+            out = []
+            for s in speeds:
+                a = by.get((s, prec, "零时延"))
+                b = by.get((s, prec, "10ms+17跳"))
+                if not a or not b:
+                    out.append("<td>—</td>")
+                    continue
+                d = (b[metric] / a[metric] - 1) * 100 if a[metric] else float("nan")
+                cls = "p-no" if d < -25 else ("p-mid" if d < -10 else "p-info")
+                out.append(f"<td>{fmt.format(a[metric])} → <b>{fmt.format(b[metric])}</b>"
+                           f"<br><span class='pill {cls}'>{d:+.0f}%</span></td>")
+            return "".join(out)
+
+        rho_row = "".join(
+            f"<td>{by[(s, 'svd', '10ms+17跳')]['rho']:.3f}</td>" if (s, "svd", "10ms+17跳") in by
+            else "<td>—</td>" for s in speeds)
+        coh_row = "".join(
+            f"<td>{by[(s, 'svd', '10ms+17跳')]['coh_ms']:.1f} ms</td>"
+            if (s, "svd", "10ms+17跳") in by else "<td>—</td>" for s in speeds)
+        e2e_block += f"""
+<h3>移动性扫描 × 发射权对比</h3>
+<p class="lead">同一 seed、同一撒点，<b>只改速度与发射权</b>。
+每格是「零时延 → 10 ms + 17 跳」，括号是老化造成的相对变化。
+为了让 3 秒仿真收敛到稳态，这一组统一用 <code>olla_speedup=20</code>。</p>
+<div class="tbl-wrap"><table>
+<thead><tr><th style="min-width:150px">指标</th>{head_cells}</tr></thead>
+<tbody>
+<tr><td>Jakes 相干时间</td>{coh_row}</tr>
+<tr><td>ρ（平均年龄 87 ms 处）</td>{rho_row}</tr>
+<tr><td colspan="{len(speeds) + 1}" style="background:#f5f5f7"><b>SVD 发射权</b></td></tr>
+<tr><td>平均调度 MCS<br><span class="src">含 OLLA</span></td>{line('svd', 'mcs')}</tr>
+<tr><td>小区体验速率 Mbps</td>{line('svd', 'thp', '{:.0f}')}</tr>
+<tr><td>5% 边缘 Mbps</td>{line('svd', 'edge', '{:.0f}')}</tr>
+<tr><td>平均 OLLA dB</td>{line('svd', 'olla', '{:+.2f}')}</tr>
+<tr><td colspan="{len(speeds) + 1}" style="background:#f5f5f7"><b>Type I 码本发射权</b></td></tr>
+<tr><td>平均调度 MCS</td>{line('type1', 'mcs')}</tr>
+<tr><td>小区体验速率 Mbps</td>{line('type1', 'thp', '{:.0f}')}</tr>
+<tr><td>5% 边缘 Mbps</td>{line('type1', 'edge', '{:.0f}')}</tr>
+</tbody></table></div>
+<p class="src">{sweep['note']}</p>
+"""
 
     return f"""{head()}
 <body>
@@ -363,13 +414,15 @@ def main() -> int:
     # 而这些 JSON 是文档里每个数字的出处，丢了文档就成了无源之水。
     e2e_path = ROOT / "measurements" / "e2e_aging.json"
     olla_path = ROOT / "measurements" / "e2e_olla.json"
+    sweep_path = ROOT / "measurements" / "speed_precoder_sweep.json"
     e2e = json.loads(e2e_path.read_text(encoding="utf-8")) if e2e_path.exists() else None
     olla = json.loads(olla_path.read_text(encoding="utf-8")) if olla_path.exists() else None
+    sweep = json.loads(sweep_path.read_text(encoding="utf-8")) if sweep_path.exists() else None
     out = ROOT / "DECISIONS.html"
-    out.write_text(build(e2e, olla), encoding="utf-8")
+    out.write_text(build(e2e, olla, sweep), encoding="utf-8")
     kb = out.stat().st_size / 1024
     print(f"{out}  ({kb:.0f} KB, KaTeX {'内联' if kx.available() else '缺失'}"
-          f"{'，含端到端实测' if e2e else '，端到端实测待补'})")
+          f"{'，含端到端实测' + ('+速度扫描' if sweep else '') if e2e else '，端到端实测待补'})")
     return 0
 
 
