@@ -50,6 +50,9 @@ F_EIG = M(r"\sigma_k^2 P / r / \sigma_n^2")
 F_TSRS = M(r"T_{SRS}")
 F_AGE = M(r"\mathrm{age}(k) = \big((n-k) \bmod 17\big)\cdot T_{SRS} "
           r"+ (t \bmod T_{SRS}) + \delta_{proc}")
+F_OLLA_SS = M(r"(1-p)\,\delta_{up} = p\,\delta_{down}")
+F_OLLA_SD = M(r"\delta_{down} = \delta_{up}\cdot\frac{1-p}{p} "
+              r"= 0.01\cdot\frac{0.9}{0.1} = 0.09", block=True)
 
 
 # --- 8 个决策 -------------------------------------------------------------
@@ -64,12 +67,13 @@ DECISIONS = [
      "ok"),
     ("撒点", "ok，保持",
      "维持调 ChannelHub 的 <code>_place_ues</code>，与真跑逐位相同（误差 0.000000 m）。", "keep"),
-    ("OLLA 步长", "可以按比例放大，但要告知用户",
-     "新增 <code>olla_speedup</code>，<b>等比</b>放大两个步长。稳态 BLER = "
-     + F_STEADY +
-     " 与放大系数<b>无关</b>，所以 9.1% 不变，变的只有收敛速度与稳态抖动。"
-     "非 1.0 时结果的 <code>notes</code> 里会多出一条显式告警，写明"
-     "基线值、生效值、稳态 BLER，并提示出正式结论要设回 1.0。", "ok"),
+    ("OLLA 步长", "可以按比例放大，但要告知用户；<br>后续追加：NACK 应是 −0.09+，"
+     "要保证稳态 IBLER ≈ 0.1",
+     "两件事。<b>①</b> 步长按目标反解：稳态条件 " + F_OLLA_SS +
+     "，目标 10% 时 " + F_OLLA_SD + "。<b>默认已从 −0.1 改成 −0.09</b>"
+     "（−0.1 给的是 9.09%）。<b>②</b> 新增 <code>olla_speedup</code> <b>等比</b>放大，"
+     "稳态 BLER = " + F_STEADY + " 与放大系数<b>无关</b>（约分掉了），"
+     "变的只有收敛速度与稳态抖动；非 1.0 时 <code>notes</code> 里带显式告警。", "ok"),
     ("发送侧 SINR", "要 CQI + BF Gain",
      "已按现场链路重写：" + F_TXCHAIN +
      "。CQI 由终端在<b>真实信道</b>上用 Type I <b>宽带</b> PMI 权测得（对应你说的全带 CQI）、"
@@ -125,7 +129,7 @@ def proposals_rows() -> str:
 
 
 def build(e2e: dict | None = None, olla: dict | None = None,
-          sweep: dict | None = None) -> str:
+          sweep: dict | None = None, steady: dict | None = None) -> str:
     e2e_block = ""
     if e2e:
         base = e2e["rows"][0]
@@ -182,19 +186,49 @@ def build(e2e: dict | None = None, olla: dict | None = None,
             f"<td>{r['target']:.3f}</td><td>{r['bler']:.3f}</td>"
             f"<td>{r['olla']:+.2f}</td><td>{r['thp']:.1f}</td></tr>"
             for r in olla["rows"])
+        _t0 = olla["rows"][0]["target"]
         olla_block = f"""
 <h3>决策 3 的验证：放大步长确实不改变稳态</h3>
 <div class="tbl-wrap"><table>
 <thead><tr><th>olla_speedup</th><th>理论稳态 BLER</th><th>实测首传 BLER</th>
 <th>平均 OLLA dB</th><th>小区体验 Mbps</th></tr></thead>
 <tbody>{rows}</tbody></table></div>
-<p><b>理论稳态 BLER 一列恒为 0.091，一点没动</b>——因为它只取决于
-{F_STEADY2}，等比放大约掉了。
-实测 BLER 从 0.394 收敛到 0.100（≈ 理论值），而<b>体验速率几乎不变</b>
-（142.3 → 142.5 Mbps）。<b>放大只是更快到达同一个地方，不歪曲结论。</b></p>
-<p class="src">非 1.0 时结果的 <code>notes</code> 里会带一条显式告警，已实测确认会出现。</p>
+<p><b>理论稳态 BLER 一列恒为 {_t0:.3f}，一点没动</b>——因为它只取决于
+{F_STEADY2}，等比放大约分掉了。
+实测 BLER 收敛到理论值附近，而<b>体验速率几乎不变</b>。
+<b>放大只是更快到达同一个地方，不歪曲结论。</b></p>
+<p class="src">非 1.0 时结果的 <code>notes</code> 里会带一条显式告警，已实测确认会出现。
+这一组用的步长是 {olla.get('step_up', 0.01):g} / {olla.get('step_down', 0.09):g}。</p>
 """
     e2e_block += olla_block
+
+    if steady:
+        rows = "".join(
+            f"<tr><td>{'<b>' if abs(r['s_down'] - 0.09) < 1e-9 else ''}−{r['s_down']:g}"
+            f"{'（新默认）</b>' if abs(r['s_down'] - 0.09) < 1e-9 else ''}"
+            f"{'（旧默认）' if abs(r['s_down'] - 0.10) < 1e-9 else ''}</td>"
+            f"<td>{r['theory']:.4f}</td><td>{r['bler']:.4f}</td>"
+            f"<td>{(r['bler'] / r['theory'] - 1) * 100:+.1f}%</td>"
+            f"<td>{r['olla']:+.2f}</td><td>{r['mcs']:.2f}</td></tr>"
+            for r in steady["rows"])
+        e2e_block += f"""
+<h3>OLLA 步长的稳态标定（你追加的那个问题）</h3>
+<p class="lead">你说 NACK 应该是 −0.09+ 而不是 −0.1。<b>推导下来正好是 −0.09。</b></p>
+<p style="text-align:center">{F_OLLA_SD}</p>
+<div class="tbl-wrap"><table>
+<thead><tr><th>NACK 步长</th><th>理论稳态</th><th>实测 IBLER</th><th>偏差</th>
+<th>平均 OLLA dB</th><th>平均 MCS</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+<div class="callout c-amber">
+<p><b>实测一致地比理论高 4~5%（相对），六个取值全部如此。</b>
+不是噪声——是 MCS 整数档带来的系统性偏置：<code>select_mcs</code> 取的是
+「满足目标 BLER 的<b>最高</b>档」，天然偏激进半档。</p>
+<p>所以 <b>−0.09 实测落在 0.104</b>。要让实测正好 0.100 得取 ≈ −0.094，
+但那是拿本配置过拟合，换个信噪比工作点又不对了——<b>默认留 −0.09</b>，
+理论干净、实测也在 10% 上。</p>
+</div>
+<p class="src">{steady.get('note', '')}这一组用 olla_speedup=20 保证 8 秒内收敛到稳态。</p>
+"""
 
     if sweep:
         by = {}
@@ -415,11 +449,13 @@ def main() -> int:
     e2e_path = ROOT / "measurements" / "e2e_aging.json"
     olla_path = ROOT / "measurements" / "e2e_olla.json"
     sweep_path = ROOT / "measurements" / "speed_precoder_sweep.json"
+    steady_path = ROOT / "measurements" / "olla_steady.json"
     e2e = json.loads(e2e_path.read_text(encoding="utf-8")) if e2e_path.exists() else None
     olla = json.loads(olla_path.read_text(encoding="utf-8")) if olla_path.exists() else None
     sweep = json.loads(sweep_path.read_text(encoding="utf-8")) if sweep_path.exists() else None
+    steady = json.loads(steady_path.read_text(encoding="utf-8")) if steady_path.exists() else None
     out = ROOT / "DECISIONS.html"
-    out.write_text(build(e2e, olla, sweep), encoding="utf-8")
+    out.write_text(build(e2e, olla, sweep, steady), encoding="utf-8")
     kb = out.stat().st_size / 1024
     print(f"{out}  ({kb:.0f} KB, KaTeX {'内联' if kx.available() else '缺失'}"
           f"{'，含端到端实测' + ('+速度扫描' if sweep else '') if e2e else '，端到端实测待补'})")
