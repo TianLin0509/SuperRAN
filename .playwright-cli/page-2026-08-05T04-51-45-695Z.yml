@@ -1,0 +1,433 @@
+- generic [active] [ref=f1e1]:
+  - banner [ref=f1e2]:
+    - generic [ref=f1e3]:
+      - generic [ref=f1e4]:
+        - generic [ref=f1e5]: 5G NR · TDD · UL SRS FOR DOWNLINK RECIPROCITY
+        - heading "在 reuse-3 的时频梳码池上，再加一层“空域颜色”" [level=1] [ref=f1e6]
+        - generic [ref=f1e7]: 对“利用 SSB 波束关系重新排列 SRS 碰撞用户”的方案评审，以及一套不交换 UE 明细、仅交换聚合空域签名的轻量协同设计。
+      - generic [ref=f1e8]:
+        - strong [ref=f1e9]: 结论先行
+        - text: 思路成立，而且非常适合从现网小步落地。关键不是把“不同 SSB index”当成硬正交，而是把它升级为：同一受害小区坐标系内的、双向的、带置信度的软冲突判断。
+  - main [ref=f1e10]:
+    - generic [ref=f1e11]:
+      - generic [ref=f1e12]: 01 · 资源底座
+      - heading "现有 32 份资源单位，先保持不动" [level=2] [ref=f1e13]
+      - paragraph [ref=f1e14]: 方案最有价值的地方，是不改变既有 SRS 时频梳框架，只改变同一 PCI 模 3 资源池内“谁占哪一格”。
+      - generic [ref=f1e15]:
+        - generic [ref=f1e16]:
+          - generic [ref=f1e17]: "4"
+          - generic [ref=f1e18]: 20 ms 内 SRS slot：7 / 17 / 27 / 37
+        - generic [ref=f1e19]:
+          - generic [ref=f1e20]: "4"
+          - generic [ref=f1e21]: 每个 slot 的 symbol 10–13
+        - generic [ref=f1e22]:
+          - generic [ref=f1e23]: "2"
+          - generic [ref=f1e24]: 每个 symbol 的 comb 0 / comb 1
+      - heading "20 ms 时间轴" [level=3] [ref=f1e25]
+      - generic "40 个 slot 时间轴，其中 slot 7、17、27、37 为 SRS 机会" [ref=f1e26]:
+        - generic [ref=f1e27]:
+          - generic [ref=f1e28]: "0"
+          - generic [ref=f1e29]: "1"
+          - generic [ref=f1e30]: "2"
+          - generic [ref=f1e31]: "3"
+          - generic [ref=f1e32]: "4"
+          - generic [ref=f1e33]: "5"
+          - generic [ref=f1e34]: "6"
+          - generic [ref=f1e35]: "7"
+          - generic [ref=f1e36]: "8"
+          - generic [ref=f1e37]: "9"
+          - generic [ref=f1e38]: "10"
+          - generic [ref=f1e39]: "11"
+          - generic [ref=f1e40]: "12"
+          - generic [ref=f1e41]: "13"
+          - generic [ref=f1e42]: "14"
+          - generic [ref=f1e43]: "15"
+          - generic [ref=f1e44]: "16"
+          - generic [ref=f1e45]: "17"
+          - generic [ref=f1e46]: "18"
+          - generic [ref=f1e47]: "19"
+          - generic [ref=f1e48]: "20"
+          - generic [ref=f1e49]: "21"
+          - generic [ref=f1e50]: "22"
+          - generic [ref=f1e51]: "23"
+          - generic [ref=f1e52]: "24"
+          - generic [ref=f1e53]: "25"
+          - generic [ref=f1e54]: "26"
+          - generic [ref=f1e55]: "27"
+          - generic [ref=f1e56]: "28"
+          - generic [ref=f1e57]: "29"
+          - generic [ref=f1e58]: "30"
+          - generic [ref=f1e59]: "31"
+          - generic [ref=f1e60]: "32"
+          - generic [ref=f1e61]: "33"
+          - generic [ref=f1e62]: "34"
+          - generic [ref=f1e63]: "35"
+          - generic [ref=f1e64]: "36"
+          - generic [ref=f1e65]: "37"
+          - generic [ref=f1e66]: "38"
+          - generic [ref=f1e67]: "39"
+      - paragraph [ref=f1e68]: 按你给定的 20 ms / 40 slot 示意，相当于 30 kHz SCS 下 0.5 ms/slot。若实际 numerology 不同，核心方法不变，只需重映射资源索引。
+      - generic [ref=f1e69]:
+        - generic [ref=f1e70]:
+          - heading "一个 SRS slot = 8 份梳资源" [level=3] [ref=f1e71]
+          - generic [ref=f1e72]:
+            - generic [ref=f1e73]: Symbol
+            - generic [ref=f1e74]: Comb 0
+            - generic [ref=f1e75]: Comb 1
+            - generic [ref=f1e76]: "10"
+            - generic [ref=f1e77]: R0 ••••
+            - generic [ref=f1e78]: R1 ••••
+            - generic [ref=f1e79]: "11"
+            - generic [ref=f1e80]: R2 ••••
+            - generic [ref=f1e81]: R3 ••••
+            - generic [ref=f1e82]: "12"
+            - generic [ref=f1e83]: R4 ••••
+            - generic [ref=f1e84]: R5 ••••
+            - generic [ref=f1e85]: "13"
+            - generic [ref=f1e86]: R6 ••••
+            - generic [ref=f1e87]: R7 ••••
+          - paragraph [ref=f1e88]: 每格中的 4 个点代表 4 码分。它们是格内容量，不建议在跨小区模型里直接当成 4 倍“硬隔离资源”。
+        - generic [ref=f1e89]:
+          - heading "32 份资源的现有分区" [level=3] [ref=f1e90]
+          - generic "32 份资源：2 预留、6 长周期、24 常规分成三个池" [ref=f1e91]:
+            - generic [ref=f1e92]: 2预留
+            - generic [ref=f1e93]: 6长周期
+            - generic [ref=f1e94]: 8Pool 0
+            - generic [ref=f1e95]: 8Pool 1
+            - generic [ref=f1e96]: 8Pool 2
+          - paragraph [ref=f1e97]:
+            - generic [ref=f1e98]: 保留
+            - text: PCI mod 3 决定 Pool 0/1/2，三类小区时频完全错开。
+          - paragraph [ref=f1e99]:
+            - generic [ref=f1e100]: 新增
+            - text: 只在同一个 pool 的小区之间，对 8 个位置重新映射 UE。
+          - paragraph [ref=f1e101]:
+            - generic [ref=f1e102]: 阶段 1
+            - text: 2 个预留位与 6 个长周期位不参与空域复用，降低首版复杂度。
+    - generic [ref=f1e103]:
+      - generic [ref=f1e104]: 02 · 核心判断
+      - heading "你的直觉是对的，但“比较哪两个波束”必须说得极准" [level=2] [ref=f1e105]
+      - paragraph [ref=f1e106]: 如果你原意是“在受害小区 A 的波束坐标系里，比较 A 的服务 UE 与邻区 UE 指向 A 的波束”，方向完全正确；如果比较 A、B 两个小区各自的本地 SSB index 数字，则没有物理意义。
+      - generic [ref=f1e107]:
+        - generic [ref=f1e108]:
+          - generic [ref=f1e109]: 错误比较
+          - paragraph [ref=f1e110]: A 小区的 beam 1vs B 小区的 beam 3
+          - paragraph [ref=f1e111]: 两个编号属于两套本地码本。即使数字不同，主瓣方向仍可能重叠；即使数字相同，物理方向也可能完全不同。
+          - img "错误地跨小区比较本地 SSB 编号" [ref=f1e113]:
+            - generic [ref=f1e116]: Cell A
+            - generic [ref=f1e117]: Cell B
+            - generic [ref=f1e122]: A:b1
+            - generic [ref=f1e123]: B:b3
+            - generic [ref=f1e124]: 不可直接比
+        - generic [ref=f1e125]:
+          - generic [ref=f1e126]: 正确比较
+          - paragraph [ref=f1e127]:
+            - text: 在 Cell A 内比较：A:b
+            - subscript [ref=f1e128]: A
+            - text: (u) vs A:b
+            - subscript [ref=f1e129]: A
+            - text: (v)
+          - paragraph [ref=f1e130]: u 是 A 的服务 UE；v 是 B 的 UE，但 v 测量 Cell A 时能上报 A 的最佳/次佳 SSB。两者因此落在同一受害接收机的波束坐标系。
+          - img "在同一受害小区坐标系内比较波束" [ref=f1e132]:
+            - generic [ref=f1e134]: Victim Cell A
+            - generic [ref=f1e139]: u：A 的服务 UE
+            - generic [ref=f1e140]: v：B 的 UE
+            - generic [ref=f1e141]: A:b1(u)
+            - generic [ref=f1e142]: A:b3(v)
+            - generic [ref=f1e143]: 比较 L_A[1,3]，而不是比较 A:b1 与 B:b3
+      - generic [ref=f1e144]:
+        - strong [ref=f1e145]: 还要做双向判决。
+        - text: A 是否能承受 B 的 UE，只说明 A 侧安全；B 侧还要独立比较
+        - generic [ref=f1e146]:
+          - text: B:b
+          - subscript [ref=f1e147]: B
+          - text: (v)
+        - text: 与
+        - generic [ref=f1e148]:
+          - text: B:b
+          - subscript [ref=f1e149]: B
+          - text: (u)
+        - text: 。同一资源只有在两个方向都低风险时，才应被视为可复用。
+    - generic [ref=f1e150]:
+      - generic [ref=f1e151]: 03 · 轻量信息面
+      - heading "不交换 UE 明细，只交换“每个资源照亮了受害小区哪些波束”" [level=2] [ref=f1e152]
+      - paragraph [ref=f1e153]: 推荐把方案命名为 Directional Spatial SRS Map（D-SSRM，方向性空域 SRS 图）。每条邻区边单独维护一份 8 格地图，消息从 B→A 时只描述“B 当前占用每格的 UE，在 A 看来落在哪些 SSB 波束上”。
+      - generic [ref=f1e154]:
+        - generic [ref=f1e155]:
+          - heading "只在本小区维护" [level=3] [ref=f1e156]
+          - list [ref=f1e157]:
+            - listitem [ref=f1e158]: 服务 SSB 的 top-1 / top-2 beam mask
+            - listitem [ref=f1e159]: 对同 pool 强邻区的 victim-beam mask
+            - listitem [ref=f1e160]: 预测跨区 SRS 干扰等级：把 UE SRS 发射功率、邻区路径损耗合成 2 bit 档位
+            - listitem [ref=f1e161]: 测量置信度、年龄、移动性、当前资源与最短驻留时间
+            - listitem [ref=f1e162]:
+              - text: 本小区 4×4 波束泄漏矩阵 L
+              - subscript [ref=f1e163]: c
+        - generic [ref=f1e164]:
+          - heading "低频握手 / 配置变更" [level=3] [ref=f1e165]
+          - list [ref=f1e166]:
+            - listitem [ref=f1e167]: 8 格资源池的 pool hash / version
+            - listitem [ref=f1e168]: 协调 epoch 与时间基准
+            - listitem [ref=f1e169]: 受害小区 beam-config version
+            - listitem [ref=f1e170]: 可选：4 个 SSB 的 EIRP 档位或校准 profile ID
+          - paragraph [ref=f1e171]: 只有配置变化时重发，不占持续带宽。
+        - generic [ref=f1e172]:
+          - heading "动态 Xn 聚合签名" [level=3] [ref=f1e173]
+          - list [ref=f1e174]:
+            - listitem [ref=f1e175]: 每个同 pool 强邻区一份 8-entry map
+            - listitem [ref=f1e176]: resourceId 由数组位置隐含，不逐格携带
+            - listitem [ref=f1e177]: 事件触发增量 + 周期全量刷新
+            - listitem [ref=f1e178]: 可选 8-bit conflict bitmap 作闭环告警
+      - heading "单个资源 entry：建议固定 16 bit" [level=3] [ref=f1e179]
+      - generic "16 比特资源签名字段" [ref=f1e180]:
+        - generic [ref=f1e181]: 4 bitvictimBeamMask
+        - generic [ref=f1e182]: 2 bitintfClass
+        - generic [ref=f1e183]: 4 bitCDM mask
+        - generic [ref=f1e184]: 2 bitconfidence / age
+        - generic [ref=f1e185]: 1 bitmovable
+        - generic [ref=f1e186]: 3 bit预留
+      - paragraph [ref=f1e187]: 4 波束天然适合 4-bit mask：边界 UE 可以同时置 2 个 bit，避免 top-1 在波束边界来回跳。CDM occupancy 进入签名，是为了避免把码域理想正交当作跨小区的绝对保障。
+      - generic [ref=f1e188]:
+        - generic [ref=f1e189]:
+          - generic [ref=f1e190]: ≈20–24 B
+          - paragraph [ref=f1e191]: 每次 / 每强邻区：8 个 entry 共 16 B，加 4–8 B 的 epoch/version 头。这个估算只算应用层 payload，不含 XnAP/SCTP/IP 头。
+          - paragraph [ref=f1e192]: 若 100 ms 更新一次，约 200–240 B/s/邻区；即使每 20 ms 更新，也只是约 1.0–1.2 kB/s/邻区的应用层量级。
+        - generic [ref=f1e193]:
+          - heading "明确不交换" [level=3] [ref=f1e194]
+          - list [ref=f1e195]:
+            - listitem [ref=f1e196]: UE 永久身份、C-RNTI 或坐标
+            - listitem [ref=f1e197]: 逐 UE 原始 RSRP 列表和完整邻区表
+            - listitem [ref=f1e198]: 瞬时 CSI、完整协方差矩阵或天线域信道
+            - listitem [ref=f1e199]: 所有邻区的数据：只保留同 pool 且跨区耦合超过门限的“有害边”
+      - table [ref=f1e200]:
+        - rowgroup [ref=f1e201]:
+          - row [ref=f1e202]:
+            - columnheader "信息" [ref=f1e203]
+            - columnheader "为什么需要" [ref=f1e204]
+            - columnheader "怎么压缩" [ref=f1e205]
+            - columnheader "更新触发" [ref=f1e206]
+        - rowgroup [ref=f1e207]:
+          - row [ref=f1e208]:
+            - cell "victimBeamMask" [ref=f1e209]
+            - cell "把邻区 UE 映射到受害小区自己的波束域" [ref=f1e210]
+            - cell "4 波束 = 4 bit；top-2 直接置双 bit" [ref=f1e211]
+            - cell "beam mask 持续变化 2–3 次报告后" [ref=f1e212]
+          - row [ref=f1e213]:
+            - cell "intfClass" [ref=f1e214]
+            - cell "“方向错开”之外，还要区分强弱与近远效应" [ref=f1e215]
+            - cell [ref=f1e216]:
+              - text: 2 bit：无/弱/中/强；本地先把 P
+              - subscript [ref=f1e217]: SRS
+              - text: 与路径损耗折成等级
+            - cell "跨档，或 SRS 功控状态发生大变化" [ref=f1e218]
+          - row [ref=f1e219]:
+            - cell "CDM mask" [ref=f1e220]
+            - cell "同一时频梳格内仍有 4 码分占用关系" [ref=f1e221]
+            - cell "4 bit occupancy" [ref=f1e222]
+            - cell "格内用户或端口映射变化" [ref=f1e223]
+          - row [ref=f1e224]:
+            - cell "confidence / age" [ref=f1e225]
+            - cell "波束边界、测量陈旧、高速移动时不能乐观复用" [ref=f1e226]
+            - cell "2 bit 联合编码" [ref=f1e227]
+            - cell "测量变陈旧或恢复稳定" [ref=f1e228]
+          - row [ref=f1e229]:
+            - cell "movable" [ref=f1e230]
+            - cell "冲突时知道谁能让路，避免两个小区同时搬家" [ref=f1e231]
+            - cell "1 bit" [ref=f1e232]
+            - cell "调度约束变化" [ref=f1e233]
+    - generic [ref=f1e234]:
+      - generic [ref=f1e235]: 04 · 决策算法
+      - heading "用“软泄漏矩阵”替代“相同/不同”二值规则" [level=2] [ref=f1e236]
+      - paragraph [ref=f1e237]: SSB 是宽波束代理，不是接收波束的硬正交基。相邻 beam、旁瓣、阵列安装误差和 UE 波束都会让“index 不同”仍有干扰，因此应在每个受害小区本地维护一个很小的 4×4 风险矩阵。
+      - generic [ref=f1e238]:
+        - generic [ref=f1e239]:
+          - heading [level=3] [ref=f1e240]:
+            - text: L
+            - subscript [ref=f1e241]: c
+            - text: "[desired beam, aggressor footprint]"
+          - generic "示意性的四乘四波束泄漏矩阵" [ref=f1e242]:
+            - generic [ref=f1e243]: 目标 \ 干扰
+            - generic [ref=f1e244]: b0
+            - generic [ref=f1e245]: b1
+            - generic [ref=f1e246]: b2
+            - generic [ref=f1e247]: b3
+            - generic [ref=f1e248]: b0
+            - generic [ref=f1e249]: 高
+            - generic [ref=f1e250]: 中
+            - generic [ref=f1e251]: 低
+            - generic [ref=f1e252]: 中
+            - generic [ref=f1e253]: b1
+            - generic [ref=f1e254]: 中
+            - generic [ref=f1e255]: 高
+            - generic [ref=f1e256]: 中
+            - generic [ref=f1e257]: 低
+            - generic [ref=f1e258]: b2
+            - generic [ref=f1e259]: 低
+            - generic [ref=f1e260]: 中
+            - generic [ref=f1e261]: 高
+            - generic [ref=f1e262]: 中
+            - generic [ref=f1e263]: b3
+            - generic [ref=f1e264]: 中
+            - generic [ref=f1e265]: 低
+            - generic [ref=f1e266]: 中
+            - generic [ref=f1e267]: 高
+          - paragraph [ref=f1e268]: 这里只是初始先验示意，不是实测数值。首版可用“同波束高、相邻中、远离低”；后续由本小区的 SRS 残余干扰/NMSE 观测慢速校准，矩阵无需跨区交换。
+        - generic [ref=f1e269]:
+          - heading "每个 UE 对 8 个候选格打分" [level=3] [ref=f1e270]
+          - generic [ref=f1e271]: Cost_c(u,r) = Σ_n q_(n→c,r) · max L_c[a,b] + λ_switch · I(r ≠ r_old) + λ_CDM · codeRisk(r)其中 a ∈ servingBeamMask_c(u)，b ∈ victimBeamMask_(n→c,r)
+          - list [ref=f1e272]:
+            - listitem [ref=f1e273]: Σ 邻区：不能只看最强一个邻区后忽略多个中等干扰的叠加。
+            - listitem [ref=f1e274]: 切换惩罚：给当前资源一个“粘性”，避免用户与小区来回抖动。
+            - listitem [ref=f1e275]: 码域惩罚：码分优先在同小区内排，跨小区只作为附加自由度。
+      - heading "分布式、无中心联合优化的 6 步闭环" [level=3] [ref=f1e276]
+      - generic [ref=f1e277]:
+        - generic [ref=f1e278]:
+          - strong [ref=f1e279]: 筛邻区。
+          - text: 只保留 poolId 相同 且预测跨区 SRS 耦合超过进入门限的邻区；退出用更低门限，形成迟滞。
+        - generic [ref=f1e280]:
+          - strong [ref=f1e281]: 本地建 UE 标签。
+          - text: 服务 beam mask、对每个有害邻区的 victim-beam mask、2-bit 干扰等级、置信度与年龄。
+        - generic [ref=f1e282]:
+          - strong [ref=f1e283]: 聚合成方向性地图。
+          - text: 对每个资源格，把其上 UE 对某个受害邻区的 beam mask 做 OR，干扰等级取 max，CDM 形成 occupancy mask。
+        - generic [ref=f1e284]:
+          - strong [ref=f1e285]: 交换 8-entry D-SSRM。
+          - text: 不带 UE 身份；收到后，本地 UE 对 8 格独立评分，先用带粘性的贪心/最小代价匹配即可。
+        - generic [ref=f1e286]:
+          - strong [ref=f1e287]: 确定谁让路。
+          - text: 冲突资源的 owner 可由 hash(NCGI-A, NCGI-B, resource, epoch) 双方独立算出；非 owner 优先移动，epoch 轮换保证长期公平。
+        - generic [ref=f1e288]:
+          - strong [ref=f1e289]: 闭环校准。
+          - text: 受害小区用实际 SRS 后合并 SINR、估计 NMSE 或污染告警更新本地 L
+          - subscript [ref=f1e290]: c
+          - text: ；持续冲突可回 1-byte conflict bitmap。
+    - generic [ref=f1e291]:
+      - generic [ref=f1e292]: 05 · 为什么它能轻、还能稳
+      - heading "三个关键压缩：邻区裁剪、聚合签名、事件触发" [level=2] [ref=f1e293]
+      - generic [ref=f1e294]:
+        - generic [ref=f1e295]:
+          - heading "邻区不是“全量邻区”" [level=3] [ref=f1e296]
+          - paragraph [ref=f1e297]: 先按 PCI mod 3 资源池裁掉 2/3；再按预测 SRS 耦合门限裁掉弱边。复杂度跟“真正会撞的边数”走，而不是跟邻区表长度走。
+        - generic [ref=f1e298]:
+          - heading "消息不是“逐 UE 消息”" [level=3] [ref=f1e299]
+          - paragraph [ref=f1e300]: 无论一个格里有 1 个还是多个码分 UE，对某一受害邻区都压成 beam mask + max risk + CDM mask，一个 entry 固定 16 bit。
+        - generic [ref=f1e301]:
+          - heading "调度不是“每 20 ms 全重算”" [level=3] [ref=f1e302]
+          - paragraph [ref=f1e303]: 资源图可复用多个 20 ms 周期。建议起点是 100–500 ms 事件/增量更新，1 s 全量校准；高移动或低置信度用户直接退回保守策略。
+      - heading "必须内置的保守退路" [level=3] [ref=f1e304]
+      - table [ref=f1e305]:
+        - rowgroup [ref=f1e306]:
+          - row [ref=f1e307]:
+            - columnheader "不确定场景" [ref=f1e308]
+            - columnheader "不要做什么" [ref=f1e309]
+            - columnheader "推荐回退" [ref=f1e310]
+        - rowgroup [ref=f1e311]:
+          - row [ref=f1e312]:
+            - cell "邻区测量缺失或过期" [ref=f1e313]
+            - cell "不要默认“没有干扰”" [ref=f1e314]
+            - cell "victimBeamMask=1111、强风险，或放到保留/低碰撞资源" [ref=f1e315]
+          - row [ref=f1e316]:
+            - cell "top-1 与 top-2 接近" [ref=f1e317]
+            - cell "不要在两个 index 间频繁跳" [ref=f1e318]
+            - cell "同时置两个 bit，并加 2–3 次报告迟滞" [ref=f1e319]
+          - row [ref=f1e320]:
+            - cell "高速移动/切换边缘" [ref=f1e321]
+            - cell "不要追求细粒度空域复用" [ref=f1e322]
+            - cell "冻结映射或用传统 reuse-3 基线" [ref=f1e323]
+          - row [ref=f1e324]:
+            - cell "Xn 延迟、丢包或版本不一致" [ref=f1e325]
+            - cell "不要继续使用陈旧低风险判决" [ref=f1e326]
+            - cell "有效期超时后自动转为全波束 mask" [ref=f1e327]
+          - row [ref=f1e328]:
+            - cell "多个邻区同时中等干扰" [ref=f1e329]
+            - cell "不要只取最强邻区" [ref=f1e330]
+            - cell "风险按邻区求和；交互对象可按累计干扰贡献截断" [ref=f1e331]
+          - row [ref=f1e332]:
+            - cell "码域近远效应/时偏" [ref=f1e333]
+            - cell "不要把 CDM=4 当 4 倍硬正交" [ref=f1e334]
+            - cell "把 codeRisk 与功率差纳入代价，尾部 UE 优先时频/空域隔离" [ref=f1e335]
+    - generic [ref=f1e336]:
+      - generic [ref=f1e337]: 06 · 我对 idea 的判断
+      - heading "它的价值不是“再发明一套资源”，而是让现有 8 格产生可控的空间复用" [level=2] [ref=f1e338]
+      - generic [ref=f1e339]:
+        - generic [ref=f1e340]:
+          - heading "我认为很强的地方" [level=3] [ref=f1e341]
+          - list [ref=f1e342]:
+            - listitem [ref=f1e343]: 利用 TDD 空间互易性的现网可观测代理，不需要 UE 新增专用测量。
+            - listitem [ref=f1e344]: 作用范围只在同 mod-3 资源池，天然把问题规模压小。
+            - listitem [ref=f1e345]: 不要求多小区联合 CSI 或中心化全局求解，落地阻力低。
+            - listitem [ref=f1e346]: 可以 shadow mode 先记录“如果重排会怎样”，再逐步开环到闭环。
+            - listitem [ref=f1e347]: 与 4 码分兼容：时频、码、空域按优先级共同打分。
+        - generic [ref=f1e348]:
+          - heading "必须收紧的宣称" [level=3] [ref=f1e349]
+          - list [ref=f1e350]:
+            - listitem [ref=f1e351]: “SSB index 不同 ≈ 几乎无干扰”过强；SSB 只能作粗粒度空间颜色。
+            - listitem [ref=f1e352]: DL 邻区 SSB-RSRP 不是 UL SRS 干扰功率本身，还要叠加 UE SRS 功控与校准。
+            - listitem [ref=f1e353]:
+              - text: 传播互易不等于 RF 链与波束码本完全互易，设备校准误差要落进 L
+              - subscript [ref=f1e354]: c
+              - text: 与置信度。
+            - listitem [ref=f1e355]: 只看 top-1 邻区会漏掉聚合干扰，至少保留 top-2 条件掩码或累计贡献门限。
+            - listitem [ref=f1e356]: 这套方案的增益尚未经过门 1/2/3 的配对仿真与统计检验，不能先报百分比。
+      - generic [ref=f1e357]:
+        - strong [ref=f1e358]: 一句话定位：
+        - text: 这是一个“空间感知的分布式图着色”问题，但工程实现不需要交换图。每个小区只发 8 个资源的方向性占用签名，让邻居本地完成打分与重排。
+    - generic [ref=f1e359]:
+      - generic [ref=f1e360]: 07 · 验证路线
+      - heading "先证明“测量域污染下降”，再谈下行吞吐" [level=2] [ref=f1e361]
+      - paragraph [ref=f1e362]: SRS 是上行测量信号，目标却是改善 TDD 下行互易波束赋形。验证必须把测量域与业务域连起来，不能只看几何 SINR，也不能把香农谱效直接当吞吐。
+      - table [ref=f1e363]:
+        - rowgroup [ref=f1e364]:
+          - row [ref=f1e365]:
+            - columnheader "层次" [ref=f1e366]
+            - columnheader "主指标" [ref=f1e367]
+            - columnheader "对照" [ref=f1e368]
+            - columnheader "要扫的维度" [ref=f1e369]
+        - rowgroup [ref=f1e370]:
+          - row [ref=f1e371]:
+            - cell "测量域（主）" [ref=f1e372]
+            - cell "SRS post-combining SINR 5% 分位、信道估计 NMSE 95% 分位、污染超限率" [ref=f1e373]
+            - cell "现网固定映射；池内随机重排；仅 index≠；D-SSRM+L 矩阵" [ref=f1e374]
+            - cell "同 pool 强邻区数、波束边界、测量误差、CDM 时偏/近远效应" [ref=f1e375]
+          - row [ref=f1e376]:
+            - cell "下行链路（次）" [ref=f1e377]
+            - cell "BF Gain 误差、rank/MCS 误判、BLER、5% 用户吞吐" [ref=f1e378]
+            - cell "同一批信道、同一 CSI 口径下配对比较" [ref=f1e379]
+            - cell "3/30/60 km/h、100/300/500 ms 更新周期、SSB top-1/top-2" [ref=f1e380]
+          - row [ref=f1e381]:
+            - cell "工程成本" [ref=f1e382]
+            - cell "Xn 应用 payload、UE 测量报告量、资源变更率、超时回退率" [ref=f1e383]
+            - cell "无协同与全量逐 UE 协同" [ref=f1e384]
+            - cell "邻区裁剪门限、全量刷新周期、迟滞与驻留时间" [ref=f1e385]
+          - row [ref=f1e386]:
+            - cell "上界" [ref=f1e387]
+            - cell "与全 CSI/全协方差联合分配的差距" [ref=f1e388]
+            - cell "oracle 图着色或联合优化" [ref=f1e389]
+            - cell "4 SSB 粗分类损失、局部最优损失" [ref=f1e390]
+      - generic [ref=f1e391]:
+        - generic [ref=f1e392]: P0 · Shadow不改分配，只计算 risk 与假想映射；验证预测干扰等级是否能解释真实污染。
+        - generic [ref=f1e393]: P1 · 双小区闭环只对“强风险 + 高置信度”冲突搬移，保留传统映射作兜底。
+        - generic [ref=f1e394]: P2 · 多邻区自适应引入 4×4 学习矩阵、累计干扰、owner 轮换与 conflict bitmap。
+      - paragraph [ref=f1e395]: 正式仿真建议使用多小区、保留 SSB 采集、同时生成上/下行测量链路；先做 20 样本试点与信道体检，再按配对差值方差计算正式样本量。门禁通过前，不给“提升 X%”式结论。
+    - generic [ref=f1e396]:
+      - generic [ref=f1e397]: 08 · 标准依据与实现边界
+      - heading "尽量复用标准测量，Xn 上先走研究型私有消息" [level=2] [ref=f1e398]
+      - list [ref=f1e399]:
+        - listitem [ref=f1e400]:
+          - link "3GPP TS 38.211 / ETSI TS 138 211" [ref=f1e401] [cursor=pointer]:
+            - /url: https://www.etsi.org/deliver/etsi_TS/138200_138299/138211/19.01.00_60/ts_138211v190100p.pdf
+          - text: ：SRS 的 transmission comb offset、频域位置、跳频与周期/offset 等物理资源定义。
+        - listitem [ref=f1e402]:
+          - link "3GPP TS 38.331 / ETSI TS 138 331" [ref=f1e403] [cursor=pointer]:
+            - /url: https://www.etsi.org/deliver/etsi_ts/138300_138399/138331/18.05.01_60/ts_138331v180501p.pdf
+          - text: ：UE 可在测量报告中携带逐 SSB index 的 beam measurement information，包括 best beam 及配置允许的其他波束结果。
+        - listitem [ref=f1e404]:
+          - link "3GPP TS 38.213 / ETSI TS 138 213" [ref=f1e405] [cursor=pointer]:
+            - /url: https://www.etsi.org/deliver/etsi_ts/138200_138299/138213/17.03.00_60/ts_138213v170300p.pdf
+          - text: ：SRS 发射功率由功控、带宽、下行路径损耗估计等共同决定，因此不能只用邻区 SSB-RSRP 代替 UL 干扰等级。
+        - listitem [ref=f1e406]:
+          - link "3GPP TS 38.423 / ETSI TS 138 423" [ref=f1e407] [cursor=pointer]:
+            - /url: https://www.etsi.org/deliver/etsi_ts/138400_138499/138423/18.02.00_60/ts_138423v180200p.pdf
+          - text: ：XnAP 有非 UE 级资源状态过程，也明确允许 Private Message 用于厂商特性与新算法研究。D-SSRM 应视作候选私有扩展，而不是现有标准 IE。
+      - paragraph [ref=f1e408]: 规范链接用于说明“哪些观测与接口机制现成可用”。本文的 D-SSRM 字段、位宽、更新周期和算法均为工程设计建议，不是 3GPP 标准定义。
+  - contentinfo [ref=f1e409]: 方案评审稿 · 2026-08-05 · 自包含离线 HTML · 未运行定量仿真，不包含未经门禁验证的性能增益声明
