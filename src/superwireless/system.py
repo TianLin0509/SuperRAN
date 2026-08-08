@@ -33,8 +33,13 @@ import numpy as np
 
 from . import csi_aging as ca
 from . import mumimo as mu
+from . import rng as rg
 
 _EPS = 1e-12
+
+#: S 时隙折合成多少个下行 TTI。大部分符号是下行，但有 GP 与上行符号。
+#: **主循环与 dl_ratio 必须用同一个数**，否则实际调度的下行比报告的多。
+S_SLOT_DL_FRACTION = 0.7
 
 TrafficModel = Literal["full_buffer", "ftp3", "cbr", "bimodal"]
 SchedAlgorithm = Literal["pf", "rr", "max_ci"]
@@ -90,7 +95,17 @@ class TrafficConfig:
         return d
 
     def expected_prb_util(self, num_rbg: int = 17) -> float:
-        """这套分布折合出来的平均 PRB 利用率。现网口径约 30%。"""
+        """这套分布折合出来的平均 PRB 利用率。**这是设计意图，不是仿真结果。**
+
+        ``p_idle_tti`` **不驱动任何仿真行为**——它只出现在这个解析式里。
+        真实的空闲 TTI 来自"没有用户有数据"，由到达率与信道共同决定，
+        由主循环如实测出来（``cell.occupancy``）。
+
+        **强行按概率随机拒绝调度是假物理**：真实调度器不会在有数据时掷骰子
+        放弃这个 TTI。所以这个旋钮保留为对标锚点而不是输入，
+        实测与它偏离超过 10 个百分点时 :func:`simulate` 会在 ``notes`` 里告警——
+        那说明到达率没调到位，而不是仿真错了。
+        """
         p_mid = max(0.0, 1.0 - self.p_small_rbg - self.p_full_rbg)
         mid_mean = (2 + num_rbg - 1) / 2.0 / num_rbg     # 2~16 均匀的均值
         busy = (self.p_small_rbg * (1.0 / num_rbg)
@@ -288,7 +303,7 @@ class SystemConfig:
     def dl_ratio(self) -> float:
         """TDD 图案里下行时隙占比。S 时隙按 0.7 个下行折算（大部分符号是 D）。"""
         p = self.tdd_pattern.upper() or "D"
-        return (p.count("D") + 0.7 * p.count("S")) / len(p)
+        return (p.count("D") + S_SLOT_DL_FRACTION * p.count("S")) / len(p)
 
     def as_dict(self) -> dict[str, Any]:
         return {"duration_s": self.duration_s, "scs_khz": self.scs_khz,
@@ -316,6 +331,7 @@ class UeLinkTable:
     geo_sinr_db: float
     outage: np.ndarray | None = None     # [snapshot] 该快照下根本调度不动
     iot_db: float = float("nan")         # 干扰抬升：(I+N)/N，>20 dB 算高干扰
+    iot_sample_valid: float = 1.0        # 这个 UE 有多少比例的**快照**算得出 IoT
     sir_db: float = float("nan")
     # **发送侧与接收侧是两个 SINR。** 发送端一开始不知道干扰，
     # 按无干扰（或 CQI 反馈的粗略统计）选 MCS；接收端实打实吃着干扰。
@@ -523,6 +539,15 @@ def build_link_tables(
     评估用当前快照。逐 RBG 的滞后由 SRS 周期与跳频决定，见 :mod:`csi_aging`。
     不给的话是零时延完美 CSI——**那是个上界，不是现网**。
 
+    ``load_jitter_rng`` 只用来抽邻区负载的逐快照抖动，**应当来自
+    ``rng.RngBook(...).generator("neighbor_load")``**，不要在调用处写
+    ``default_rng(seed + 常数)``（NumPy 并行随机数文档把它标成
+    "UNSAFE! Do not do this!"）。
+
+    **除了它，本函数完全确定性**——SVD、码本搜索、MCS 查表都不含随机。
+    这正是 :func:`simulate_replications` 能"建一次表、重跑 n 次主循环"的前提；
+    ``tests/test_rng.py`` 第 8 节逐位断言了这条。
+
     ``precoder`` 决定**实际发射权**：``svd``（逐 RBG 特征波束，理论最优）
     或 ``type1``（38.214 Type I 宽带码本）。注意 Type I 权在两种模式下都要算——
     它是 CQI 与 BF Gain 的参照系；``precoder="type1"`` 只是把它同时当成发射权，
@@ -721,8 +746,15 @@ def build_link_tables(
             # **IoT 逐快照算再取中位，不能拿平均后的 SINR/SIR 去算。**
             # 两个量各自平均后相减，差值可以塌到 0，IoT 直接报 inf——
             # 实测逐样本算出来是 5~41 dB，从来不是 inf。
-            iot_db=_nan_safe(np.nanmedian, [_iot(g, r) for g, r in
-                                            zip(_gs, _ss, strict=False)]),
+            iot_db=_nan_safe(np.nanmedian, (_iots := [_iot(g, r) for g, r in
+                                                     zip(_gs, _ss, strict=False)])),
+            # **逐样本的有效率，不是逐用户。** 一个用户 8 个快照里 4 个算不出 IoT，
+            # nanmedian 照样给出有限值 → 这个用户被算成"有效" → 小区级有效率报 100%，
+            # 而实际一半样本被丢了。实测 ds_9625340c：逐用户 100%、逐样本只有 46%。
+            # 粒度错了的后果不是"少报一个警告"，是**报错了另一个警告**：
+            # 系统会去怪站间距和邻区负载，而真因是这个量本身在多时隙下就不成立。
+            iot_sample_valid=float(np.mean([np.isfinite(x) for x in _iots]))
+            if _iots else 0.0,
             sir_db=float(sir_in[i]), sinr_tx_db=sinr_tx, mcs_tx=mcs_tx,
             bf_gain_db=bf_gain, pmi_sinr_db=pmi_sinr, cqi_index=cqi_idx,
             csi_lag_snapshots=lag_used, se_gnb=se_gnb,
@@ -1023,12 +1055,21 @@ def simulate(
     sched: SchedulerConfig | None = None,
     kpi: KpiConfig | None = None,
     mu_se_ratio: float = 1.0,
+    rng: rg.RngBook | None = None,
     progress: Any = None,
 ) -> SystemResult:
     """跑 TTI 主循环。**这里没有任何矩阵运算**，全是查表加算术。
 
     ``mu_se_ratio`` 是 MU 相对 SU 的小区谱效比（由 :func:`mumimo.su_mu_adaptation`
     在第一相测出来）。>1 时调度器会在有足够用户排队时切到 MU。
+
+    ``rng`` 是 :class:`rng.RngBook`，**按用途分流**：话务到达、HARQ 误码抽样、
+    调度器决胜各拿一条互相独立的流。不给的话从 ``sys_cfg.seed`` 构造
+    ``RngBook(master_seed=sys_cfg.seed, replication=0)``，老调用方不用改。
+
+    **分流前是一个 rng 同时喂话务和 HARQ**，改一下 ``arrival_rate_hz`` 会让
+    HARQ 的伯努利序列整个错位——"话务模型的影响"里于是混着"HARQ 换了一批随机数"。
+    这类污染在结果里完全看不出来。分流后改话务只动话务流。
     """
     sys_cfg = sys_cfg or SystemConfig()
     traffic = traffic or TrafficConfig()
@@ -1036,17 +1077,25 @@ def simulate(
     kpi = kpi or KpiConfig()
     t0 = time.perf_counter()
 
+    book = rng if rng is not None else rg.RngBook(master_seed=int(sys_cfg.seed))
+    rng_traffic = book.generator("traffic")
+    rng_harq = book.generator("harq")
+    rng_sched = book.generator("scheduler")
+
     n_ue = len(tables)
-    rng = np.random.default_rng(sys_cfg.seed)
     # 小包只占 1 个 RBG：按该 RBG 的 RE 数 × 中等 MCS 谱效估承载
     # 1 个 RBG 一个 TTI 的承载：RB×12 子载波×12 数据符号×中等谱效
     _small_b = max(200, int(sys_cfg.rb_per_rbg * 12 * 12 * 3.0 / 8))
-    tr = _Traffic(traffic, n_ue, sys_cfg.tti_ms, rng, small_bytes=_small_b,
+    tr = _Traffic(traffic, n_ue, sys_cfg.tti_ms, rng_traffic, small_bytes=_small_b,
                   num_rbg=sys_cfg.num_rbg)
 
     n_rb = sys_cfg.num_rbg * sys_cfg.rb_per_rbg
     # 每 TTI 可用 RE：RB × 12 子载波 × 12 个数据符号（扣 DM-RS 与控制开销）
     re_per_tti = n_rb * 12 * 12
+    # **S 时隙不是满下行。** 主循环把 D 和 S 一视同仁地当整个下行 TTI 调度，
+    # 而 SystemConfig.dl_ratio 报告时又把 S 折成 0.7——同一个量两套口径，
+    # 于是"实际调度的下行"比"报告的下行"多。现在按同一个系数折 RE。
+    _re_of = {"D": re_per_tti, "S": int(re_per_tti * S_SLOT_DL_FRACTION)}
     snap_every = max(1, int(round(sys_cfg.snapshot_update_ms / sys_cfg.tti_ms)))
     n_snap = tables[0].sinr_db.shape[0]
 
@@ -1080,8 +1129,10 @@ def simulate(
                  for t in tables]
 
     for tti in range(sys_cfg.num_tti):
-        if pattern[tti % len(pattern)] not in ("D", "S"):
-            continue                                   # 上行/特殊时隙不调度下行
+        _slot = pattern[tti % len(pattern)]
+        if _slot not in ("D", "S"):
+            continue                                   # 上行时隙不调度下行
+        re_per_tti = _re_of[_slot]                     # S 时隙的 RE 少三成
         dl_tti += 1
         tr.step(tti)
         snap = (tti // snap_every) % n_snap
@@ -1104,7 +1155,17 @@ def simulate(
             metric = inst_se
         else:                                          # rr
             metric = np.array([-((tti + u) % n_ue) for u in cand], dtype=float)
-        order = np.argsort(-metric)
+        # **决胜（tie-break）要随机，不能按 UE 编号。** 度量打平时 argsort 稳定排序
+        # 恒把编号小的排前面，于是同信道、同队列的两个用户里编号小的**系统性**多拿
+        # 调度机会——PF 的公平性判据看不出来（它只看 R_avg，而 R_avg 确实被拉平了），
+        # 但逐用户 KPI 会带一个与编号相关的偏置。
+        # 只在**真有平局**时才抽签：没有平局时 lexsort 与 argsort 结果相同，
+        # 但抽签会白白消耗 scheduler 流，也让"没有平局的配置"变得不可复现比对。
+        _m = metric.tolist()
+        if len(_m) > 1 and len(set(_m)) < len(_m):
+            order = np.lexsort((rng_sched.random(len(_m)), -metric))
+        else:
+            order = np.argsort(-metric)
 
         # **SU 能一个 TTI 传完就不触发 MU**（用户 2026-08-02 的现场准则）——
         # 数据都发完了，配对没有意义，还白白引入用户间干扰。
@@ -1158,10 +1219,16 @@ def simulate(
                 left, size = pend
                 # 重传查 ReTx 曲线（合并增益体现在曲线本身更靠左）。
                 # 用上一次的 SINR 近似——真软合并要 LLR，本项目明确不做。
-                bler = _bler_lookup(int(tables[u].mcs[snap, r - 1]),
-                                    float(tables[u].sinr_db[snap, r - 1]), "retx")
+                #
+                # **查的必须是实发的 MCS，不是"这个 SINR 该用的 MCS"。**
+                # 早先写成 tables[u].mcs[snap, r-1]，那是拿真实 SINR 反查出来的
+                # **理想档**；而实发的 m 来自发送侧 SINR + OLLA，通常更高
+                # （首传之所以失败正是因为点高了，开 CSI 老化后更明显）。
+                # 用低档去查 ReTx 曲线 → BLER 偏低 → 重传几乎必然成功 →
+                # **残留 BLER 系统性偏低**，而这个偏差不会以任何方式报出来。
+                bler = _bler_lookup(m, float(tables[u].sinr_db[snap, r - 1]), "retx")
                 retx_cnt[u] += 1
-                if rng.random() > bler:
+                if rng_harq.random() > bler:
                     # **重传成功也要计入 served。** 早先这里漏了，
                     # 字节进了缓冲区却没进统计，对账差 4.5%。
                     served[u] += tr.serve(u, tti, size)
@@ -1183,7 +1250,7 @@ def simulate(
             sched_cnt[u] += 1
             mcs_sum[u] += m
             rank_sum[u] += r
-            if rng.random() > bler:
+            if rng_harq.random() > bler:
                 sent = tr.serve(u, tti, tb_bytes)
                 served[u] += sent
                 if sched.olla_enabled:      # ACK：小步上调
@@ -1287,6 +1354,8 @@ def simulate(
         "iot_db_median": _nan_safe(np.nanmedian, [t.iot_db for t in tables]),
         "iot_db_p5": _nan_safe(np.nanpercentile, [t.iot_db for t in tables], 5),
         "iot_db_p95": _nan_safe(np.nanpercentile, [t.iot_db for t in tables], 95),
+        "iot_sample_valid_share": float(np.mean(
+            [t.iot_sample_valid for t in tables])) if tables else 0.0,
         "iot_valid_ue_share": float(np.mean(
             [bool(np.isfinite(t.iot_db)) for t in tables])),
         "high_iot_ue_share": float(np.mean([
@@ -1328,6 +1397,19 @@ def simulate(
             f"**5% 边缘用户的 MCS 是 {cell['edge_mcs_p5']:.1f}，偏高**"
             "（现场经验通常 <5）。多半是撒点没覆盖到真正的边缘，"
             "或者邻区负载设得太低、干扰被低估了。")
+    # **p_idle_tti 是对标锚点，不是仿真输入。** 它只进解析式 expected_prb_util，
+    # 不生成任何空闲 TTI——真实的空闲来自"没人有数据"。两者差太多说明
+    # 到达率没调到位，得说出来，否则用户会以为设了 30% 就真是 30%。
+    if traffic.model == "bimodal":
+        _want_idle = float(traffic.p_idle_tti)
+        _got_idle = 1.0 - float(cell["occupancy"])
+        if abs(_got_idle - _want_idle) > 0.10:
+            notes.append(
+                f"**空闲 TTI 实测 {_got_idle:.0%}，而 p_idle_tti 设的是 "
+                f"{_want_idle:.0%}。** p_idle_tti **不驱动仿真**——它只是个对标锚点，"
+                f"真实的空闲 TTI 由到达率与信道决定。要对齐现网就调 "
+                f"arrival_rate_hz，改 p_idle_tti 只会改报告里的 expected_prb_util，"
+                f"不会改任何实际行为。")
     _tgt = cell["olla_target_bler"]
     if sched.olla_enabled and cell["bler_first_tx"] > _tgt * 1.6:
         notes.append(
@@ -1336,14 +1418,21 @@ def simulate(
             f"每次 NACK 只压 0.1 dB，而 MCS 是整数档、小步长常常压不动一档。"
             "要看稳态结论就加长 duration_s；要快收敛就临时把步长调大"
             "（比例不变则稳态 BLER 不变）。")
-    if cell["iot_valid_ue_share"] < 0.9:
+    # **判据必须是逐样本有效率。** 逐用户的那个恒等于 1（nanmedian 会把
+    # 半数 nan 的用户也算成有效），于是这条正确的告警从不触发，
+    # 反而触发下面那条"检查站间距"——把用户支使去查一个根本没问题的配置。
+    _iot_ok = cell.get("iot_sample_valid_share", 1.0)
+    if _iot_ok < 0.9:
         notes.append(
-            f"**只有 {cell['iot_valid_ue_share']:.0%} 的用户能算出有效 IoT。**"
-            "多半是生成时 num_slots_per_sample > 1——那时 sinr_dB 是各 slot 的"
+            f"**IoT 不可信：只有 {_iot_ok:.0%} 的样本算得出来**"
+            f"（逐用户口径会报 {cell['iot_valid_ue_share']:.0%}，那个数会骗人）。"
+            "根因是生成时 num_slots_per_sample > 1——那时 sinr_dB 是各 slot 的"
             "dB 均值、sir_dB 只取最后一个 slot，两者不同口径，"
             "会出现 SIR < SINR 这种物理上不可能的值。"
-            "**要看 IoT 就用 num_slots_per_sample=1 重新生成**"
-            "（实测同场景单时隙 IoT 中位 32.2 dB，多时隙算出来是 inf）。")
+            "**别去查站间距和邻区负载，配置没问题，是这个量本身在多时隙下不成立。**"
+            "要看 IoT 就用 num_slots_per_sample=1 单独生成一批"
+            "——但那批做不了系统级仿真（PF 拿不到时间分集、CSI 老化恒为 0），"
+            "**这两个需求当前无法在同一个数据集上同时满足**。")
     elif np.isfinite(cell["iot_db_median"]) and cell["iot_db_median"] < 3:
         notes.append(
             f"**IoT 中位只有 {cell['iot_db_median']:.1f} dB**，几乎是噪声受限。"
@@ -1356,7 +1445,9 @@ def simulate(
                 f"**这套 RBG 尺寸分布折合出来的 PRB 利用率是 {_u:.1%}，"
                 f"现网口径约 30%**。差在中间段——2~{sys_cfg.num_rbg - 1} 个 RBG "
                 f"均匀分布的均值是 {(2 + sys_cfg.num_rbg - 1) / 2 / sys_cfg.num_rbg:.2f}，"
-                "偏高。要对齐现网就调 p_idle_tti 或把中间段改成偏小的分布——"
+                "偏高，把中间段改成偏小的分布才能对齐。"
+                "**别指望调 p_idle_tti**——它不驱动仿真，只改这个报告数字，"
+                "真实的空闲 TTI 由 arrival_rate_hz 决定。"
                 "**这个参数我没有替你调，因为它直接决定负载**。")
     if traffic.model == "bimodal" and cell["small_pkt_experienced_mbps"] is None:
         notes.append(
@@ -1376,9 +1467,188 @@ def simulate(
     return SystemResult(
         config={"system": sys_cfg.as_dict(), "traffic": traffic.as_dict(),
                 "scheduler": sched.as_dict(), "kpi": kpi.as_dict(),
-                "mu_se_ratio": round(float(mu_se_ratio), 4)},
+                "mu_se_ratio": round(float(mu_se_ratio), 4),
+                "rng": book.as_dict()},
         cell=cell, users=[x.as_dict() for x in users],
         elapsed_s=time.perf_counter() - t0, notes=notes,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 多次重复：所有 KPI 带置信区间
+# ---------------------------------------------------------------------------
+@dataclass
+class ReplicationResult:
+    """n 次重复的汇总。**每个 KPI 都是 mean / std / ci95 / n_rep，不是一个裸数。**"""
+
+    runs: list[SystemResult]
+    books: list[rg.RngBook]
+    cell: dict[str, dict[str, Any]]
+    users: list[dict[str, Any]]
+    config: dict[str, Any]
+    elapsed_s: float
+    build_elapsed_s: float = 0.0
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def n_rep(self) -> int:
+        return len(self.runs)
+
+    def stat(self, key: str) -> rg.KpiStat:
+        """某个小区级 KPI 在各次重复上的分布，拿去做 A/B 用。"""
+        return rg.summarize([r.cell[key] for r in self.runs if key in r.cell], key)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"config": self.config, "cell": self.cell, "users": self.users,
+                "n_rep": self.n_rep,
+                "replications": [b.as_dict()["replication"] for b in self.books],
+                "elapsed_s": round(self.elapsed_s, 3),
+                "build_tables_s": round(self.build_elapsed_s, 3),
+                "notes": self.notes}
+
+    def text(self) -> str:
+        def _s(k: str) -> str:
+            d = self.cell.get(k) or {}
+            m, lo, hi = d.get("mean"), *(d.get("ci95") or [None, None])
+            if m is None:
+                return "n/a"
+            return f"{m:.2f}" if lo is None else f"{m:.2f} [{lo:.2f}, {hi:.2f}]"
+        head = (f"（{self.n_rep} 次重复，方括号内是 95% 置信区间）"
+                if self.n_rep > 1 else
+                "（**只跑了 1 次，下面所有数字都没有置信区间**，"
+                "不能用来做比较）")
+        return (
+            f"{head}\n"
+            f"小区体验速率 {_s('cell_experienced_mbps')} Mbps"
+            f"（5% 边缘 {_s('ue_experienced_p5_mbps')}）\n"
+            f"平均调度 MCS {_s('avg_mcs')}，平均 rank {_s('avg_rank')}，"
+            f"首传 BLER {_s('bler_first_tx')}"
+        )
+
+
+def simulate_replications(
+    tables: list[UeLinkTable],
+    *,
+    num_replications: int = 8,
+    master_seed: int = 0,
+    sys_cfg: SystemConfig | None = None,
+    traffic: TrafficConfig | None = None,
+    sched: SchedulerConfig | None = None,
+    kpi: KpiConfig | None = None,
+    mu_se_ratio: float = 1.0,
+    build_elapsed_s: float = 0.0,
+    progress: Any = None,
+) -> ReplicationResult:
+    """跑 n 次独立重复，所有 KPI 报 ``mean / std / ci95 / n_rep``。
+
+    **关键优化：只重跑 TTI 主循环，不重建链路表。** :func:`build_link_tables`
+    与随机种子完全无关（它只做 SVD、码本搜索、MCS 查表），所以建一次表就够了。
+    多跑 n 次的代价因此是 ``(n−1)·T_loop / (T_build + T_loop)``——
+    实测 ds_6e9715bc 上建表 5.14 s、单次主循环 0.99 s（交错 3 轮取中位，
+    建表轮间波动 11.3%、主循环 3.2%），n=8 是 13.0 s vs 单次 6.1 s，**多 113%**。
+    建表越贵这个比例越低：按 10.5 s / 1.1 s 算是 +66%。
+
+    重复实验换的是 ``replication``（对应 ns-3 的 ``RngRun``）而不是 ``master_seed``
+    （对应 ``RngSeed``），理由见 :mod:`rng` 的模块文档。
+
+    **这个置信区间覆盖什么、不覆盖什么，必须说清楚。** 各次重复共用同一批信道
+    与同一张链路表，所以区间反映的是**话务到达、HARQ 误码、调度决胜**这三条流。
+    邻区负载抖动在建表阶段就定死了，**它不进区间**。
+
+    这个取舍是量过的，不是拍的（``measurements/rng_replication.json``）：
+    64 次 replication（表固定）与 32 次 master seed 扫描（每次重建表、
+    负载抖动重抽）的变异系数对照——
+
+    ===========================  ==================  ==================
+    KPI                          replication (n=64)  master seed (n=32)
+    ===========================  ==================  ==================
+    ``cell_experienced_mbps``    9.40% [8.0, 11.4]   5.93% [4.8, 7.9]
+    ``ue_experienced_p5_mbps``   18.62% [15.9, 22.6] 18.93% [15.2, 25.2]
+    ``avg_mcs``                  8.14% [6.9, 9.9]    10.46% [8.4, 13.9]
+    ``avg_rank``                 2.86% [2.4, 3.5]    2.51% [2.0, 3.3]
+    ``bler_first_tx``            8.84% [7.5, 10.7]   10.59% [8.5, 14.1]
+    ===========================  ==================  ==================
+
+    方括号是**变异系数自身**的 95% 区间（χ²）。五个 KPI 里四个两列的区间重叠，
+    也就是说**冻结链路表并没有可分辨地把离散度报小**——系统级的主导方差就是
+    话务与 HARQ，正好是区间覆盖的那几条流。
+
+    顺带一个必须记住的量级：n=8 时变异系数自身的 95% 区间是 ``0.66×~2.04×``。
+    ``measurements/seed_variance.json`` 里那个 11.4% 是 8 个种子测的，
+    真值可能在 7.5%~23% 之间——**那张表上的 CoV 只精确到大约 2 倍**，
+    不要拿它去做精细比较。
+
+    信道实现本身的不确定度是**另一个、更大的方差分量**，要覆盖它得用不同 seed
+    重新生成数据集，本函数不做也做不到。
+    """
+    n = int(num_replications)
+    if n < 1:
+        raise ValueError(f"重复次数至少 1 次，收到 {n}")
+    t0 = time.perf_counter()
+    books = rg.replications(int(master_seed), n)
+    runs: list[SystemResult] = []
+    for i, bk in enumerate(books):
+        runs.append(simulate(tables, sys_cfg=sys_cfg, traffic=traffic, sched=sched,
+                             kpi=kpi, mu_se_ratio=mu_se_ratio, rng=bk))
+        if progress:
+            progress(i + 1, n)
+
+    cell = rg.summarize_runs([r.cell for r in runs])
+    # 用户级也带区间：只挑真正有意义的两个量，避免把 users 撑成一堵墙
+    users: list[dict[str, Any]] = []
+    for u in range(len(runs[0].users)):
+        row: dict[str, Any] = {"ue": u}
+        for k in ("geo_sinr_db", "iot_db"):
+            row[k] = runs[0].users[u].get(k)
+        for k in ("experienced_mbps", "avg_mcs", "bler_first_tx"):
+            row[k] = rg.summarize([r.users[u][k] for r in runs], k).as_dict()
+        users.append(row)
+
+    # notes 去重但保序。**按原文去重是不够的**：像"首传 BLER 0.287 高于目标"
+    # 这种 note 把逐次重复的数值嵌在文本里，8 次重复就是 8 条只差几个数字的
+    # 告警，把真正不同的那几条淹掉。所以去重键是**抹掉数字后的模板**，
+    # 保留第一条原文并标注命中了几次——数字不同这件事本身不是新信息。
+    import re  # noqa: PLC0415
+
+    _seen: dict[str, int] = {}
+    _order: list[tuple[str, str]] = []
+    for r in runs:
+        for s in r.notes:
+            k = re.sub(r"[0-9]+(?:\.[0-9]+)?", "#", s)
+            if k not in _seen:
+                _seen[k] = 0
+                _order.append((k, s))
+            _seen[k] += 1
+    notes = [(txt if _seen[k] <= 1 else
+              f"{txt}（{_seen[k]}/{n} 次重复都触发；上面的数值取自第 1 次）")
+             for k, txt in _order]
+    warn = rg.min_replications_note(n)
+    if warn:
+        notes.insert(0, warn)
+    # 相对区间最宽的那个 KPI 值得单独点名——它决定了这组数字能说到多细。
+    # **只在头条 KPI 里挑**：backlog_bytes 这类均值贴近 0 的量相对半宽动辄
+    # 几百个百分点（实测 140%），点名它只会把注意力引到一个没人要下结论的字段上。
+    _HEADLINE = ("cell_experienced_mbps", "ue_experienced_p5_mbps",
+                 "ue_experienced_median_mbps", "cell_served_mbps",
+                 "avg_mcs", "avg_rank", "bler_first_tx")
+    _worst = max(
+        ((k, v) for k, v in cell.items()
+         if k in _HEADLINE and v.get("rel_half_width") is not None and v.get("mean")),
+        key=lambda kv: kv[1]["rel_half_width"], default=None)
+    if _worst and _worst[1]["rel_half_width"] > 0.05:
+        notes.append(
+            f"**头条 KPI 里 {_worst[0]} 的 95% 置信区间最宽，半宽是均值的 "
+            f"{_worst[1]['rel_half_width']:.1%}**（n_rep={n}）——"
+            f"比这更小的差异，这次实验分辨不出来。要下更细的结论就加 num_replications，"
+            f"区间按 1/√n 收窄（注意还带 t 修正，收得比 1/√n 更快一些）。")
+
+    cfg = dict(runs[0].config)
+    cfg["rng"] = {**runs[0].config["rng"], "replication": f"0..{n - 1}",
+                  "num_replications": n}
+    return ReplicationResult(
+        runs=runs, books=books, cell=cell, users=users, config=cfg,
+        elapsed_s=time.perf_counter() - t0, build_elapsed_s=float(build_elapsed_s),
+        notes=notes,
     )
 
 

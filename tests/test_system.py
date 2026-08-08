@@ -332,6 +332,87 @@ check(abs(sysm.snapshot_interval_ms({"subcarrier_spacing": 15000}) - 10.0) < 1e-
       "15 kHz SCS 的 slot 是 1 ms，快照间隔 10 ms")
 check(abs(sysm.SystemConfig().snapshot_update_ms - 5.0) < 1e-9,
       "默认值就是算出来的那个，不是拍脑袋的 10.0")
+
+# ---------------------------------------------------------------------------
+sect("11  2026-08-07 自审修掉的三个口径 bug")
+# ---------------------------------------------------------------------------
+import inspect as _insp  # noqa: E402
+
+_src = _insp.getsource(sysm.simulate)
+
+# --- bug A：重传 BLER 查的必须是实发 MCS，不是真实 SINR 反查的理想档 ---
+# 用低档查 ReTx 曲线 → 重传几乎必然成功 → 残留 BLER 系统性偏低，
+# 而这个偏差不会以任何方式报出来。
+check('_bler_lookup(m, float(tables[u].sinr_db[snap, r - 1]), "retx")' in _src,
+      "重传 BLER 查的是实发 MCS m")
+check('_bler_lookup(int(tables[u].mcs[snap, r - 1]),' not in _src,
+      "旧的错误写法（拿理想档查重传）已经不在了")
+
+# --- bug B：S 时隙的 RE 与 dl_ratio 必须用同一个系数 ---
+check(abs(sysm.S_SLOT_DL_FRACTION - 0.7) < 1e-9, "S 时隙折合系数 0.7")
+check("_re_of[_slot]" in _src, "主循环按时隙类型取 RE，不是所有时隙一个数")
+_dd = sysm.SystemConfig(tdd_pattern="DDDD").dl_ratio
+_ds = sysm.SystemConfig(tdd_pattern="DDDS").dl_ratio
+check(abs(_dd - 1.0) < 1e-9 and abs(_ds - (3 + 0.7) / 4) < 1e-9,
+      f"dl_ratio 用同一个常量（DDDD={_dd:.3f}, DDDS={_ds:.3f}）")
+# 纯 D 与含 S 的图案，实发字节必须有可分辨的差——否则说明 S 还是被当成满下行
+_tb_s = fake_tables(n_ue=6, n_snap=6, seed=17)
+_rd = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern="DDDD"),
+                    traffic=sysm.TrafficConfig(model="full_buffer"))
+_rs = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern="SSSS"),
+                    traffic=sysm.TrafficConfig(model="full_buffer"))
+_bd = _rd.as_dict()["cell"]["cell_served_mbps"]
+_bs = _rs.as_dict()["cell"]["cell_served_mbps"]
+print(f"  全 D {_bd:.1f} Mbps vs 全 S {_bs:.1f} Mbps，比值 {_bs / max(_bd, 1e-9):.3f}")
+check(abs(_bs / max(_bd, 1e-9) - 0.7) < 0.06,
+      f"全 S 图案的吞吐约为全 D 的 0.7 倍（实得 {_bs / max(_bd, 1e-9):.3f}）")
+
+# --- bug C：p_idle_tti 是对标锚点不是仿真输入，偏离要告警 ---
+# **它从来不生成空闲 TTI**，改它只改报告里的解析式。不说清楚的话，
+# 用户会以为设了 30% 就真是 30%。
+_c0 = sysm.TrafficConfig(model="bimodal", p_idle_tti=0.30)
+_c1 = sysm.TrafficConfig(model="bimodal", p_idle_tti=0.90)
+_r0 = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, seed=3), traffic=_c0)
+_r1 = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, seed=3), traffic=_c1)
+check(abs(_r0.as_dict()["cell"]["occupancy"]
+          - _r1.as_dict()["cell"]["occupancy"]) < 1e-12,
+      "p_idle_tti 改了 0.30→0.90，实际占用率**逐位不变**（它确实不驱动仿真）")
+check(_c0.expected_prb_util() != _c1.expected_prb_util(),
+      "但它确实改变了报告里的 expected_prb_util —— 这正是容易被误读的地方")
+# --- bug D：IoT 有效率必须按**样本**算，不是按用户 ---
+# 一个用户 8 个快照里 4 个算不出 IoT，nanmedian 照样给有限值 → 该用户算"有效"
+# → 小区级报 100% → 正确的多时隙告警从不触发，反而触发"检查站间距"那条，
+# **把用户支使去查一个根本没问题的配置**。
+# 关键是**同一个用户身上有好有坏**——8 个样本按 group_samples_by_ue 并成 4 个 UE，
+# UE u 拿到样本 u（SIR 20，有效）和 u+4（SIR 5 < SINR，物理上不可能）。
+# 这样每个 UE 的 nanmedian 都是有限值，逐用户口径于是报 100%。
+_bad_g = [12.0] * 8
+_bad_s = [20.0] * 4 + [5.0] * 4
+_tb_iot = sysm.build_link_tables(
+    [np.stack([np.ones((8, 8, 2), dtype=complex) * (i % 4 + 1)] * 2) for i in range(8)],
+    _bad_g, geo_sir_db=_bad_s, num_ues=4, num_snapshots=2)
+_sv = [t.iot_sample_valid for t in _tb_iot]
+print(f"  逐样本有效率 {np.mean(_sv):.0%}（构造成一半不可能）")
+check(np.mean(_sv) < 0.9, f"逐样本口径抓得住（实得 {np.mean(_sv):.0%}）")
+check(all(np.isfinite(t.iot_db) for t in _tb_iot),
+      "而逐用户口径全都是有限值——正是它骗人的地方")
+_r_iot = sysm.simulate(_tb_iot, sys_cfg=sysm.SystemConfig(duration_s=1.0))
+_d_iot = _r_iot.as_dict()
+check(_d_iot["cell"]["iot_sample_valid_share"] < 0.9
+      and _d_iot["cell"]["iot_valid_ue_share"] > 0.9,
+      "小区级两个口径同时报出来，差异可见")
+_ntxt = "".join(_d_iot["notes"])
+check("IoT 不可信" in _ntxt, "触发的是「IoT 不可信」而不是「检查站间距」")
+check("检查是不是站间距太大" not in _ntxt, "误导性的那条被抑制了")
+
+# p_idle_tti=0.30（意图 30% 空闲）而实测接近全空，差得远 → 必须告警
+_hint = "".join(_r0.as_dict()["notes"])
+check("不驱动仿真" in _hint,
+      "实测空闲率与 p_idle_tti 差得远时，notes 里明说它不驱动仿真")
+# **既有的那条 PRB 利用率告警曾经在给错建议**（让人去调 p_idle_tti 对齐现网）
+check("别指望调 p_idle_tti" in _hint or "p_idle_tti 或把中间段" not in _hint,
+      "PRB 利用率告警不再建议去调那个不起作用的旋钮")
+
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:

@@ -25,12 +25,13 @@ python tests/test_gates.py       # 校准、标准表、三道门、统计判决
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
 python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应、单码字、RBG 粒度 63 项
-python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒、MU 65 项
+python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒、MU 80 项
 python tests/test_interference.py # IoT、测量域、预设、说明书回传、算法页、文档计数 362 项
-python tests/test_csi_aging.py   # CSI 时延与老化、SRS 跳频、基站/真实视角分离 66 项
+python tests/test_csi_aging.py   # CSI 时延与老化、SRS 跳频、基站/真实视角分离 84 项
+python tests/test_rng.py         # 随机数分流、重复实验、公共随机数、置信区间 107 项
 ```
 
-共 **1018 项**，全绿才算通过。
+共 **1227 项**，全绿才算通过。
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
 后前三个都要跑；改动 `linklevel.py` / `validate.py` / `calibration.py` /
@@ -38,8 +39,9 @@ python tests/test_csi_aging.py   # CSI 时延与老化、SRS 跳频、基站/真
 改动 `results.py` / `analysis.py` / `loader.py` 要跑 test_results；
 改动 `interference.py` / `scenario.py` / `presets.yaml` / `spec.py` / `bridge.py`
 要跑 test_interference（说明书与回传桥都在它第 9 节）；
-改动 `mumimo.py` 要跑 test_mumimo；改动 `system.py` 要跑 test_system + test_csi_aging；
-改动 `csi_aging.py` 要跑 test_csi_aging；
+改动 `mumimo.py` 要跑 test_mumimo；
+改动 `system.py` 要跑 test_system + test_csi_aging + test_rng；
+改动 `csi_aging.py` 要跑 test_csi_aging；改动 `rng.py` 要跑 test_rng + test_system；
 改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）。
 
 公式渲染是**两层**：`katex.py` 内联 KaTeX（628 KB，资产由
@@ -81,6 +83,103 @@ KaTeX 未必收，光看 Python 源码看不出来。
 `scipy/interpolate/_fitpack_impl.py` 的 `create_module`。
 
 调试时设 `SUPERWIRELESS_DEBUG=1`，会开 faulthandler 并打点到 stderr。
+
+### 系统级 KPI 不带置信区间就是在报噪声
+
+同一批信道、同一套配置**只改种子**跑 `sw_system_sim`，实测
+`cell_experienced_mbps` 的变异系数 **9.4%**（64 次重复）、
+`ue_experienced_p5_mbps` **18.6%**。**已经发生过把噪声当效应的事故**：
+上一轮报「Type I 权老化后 +14%」，而噪声 1σ 就有 11%。
+
+链路级早就有三道门（`gates.py`），系统级一直绕过去了——在 `system.py` 里搜
+`confidence|t_test|wilcoxon|paired` 命中数曾经是 0。现在 `simulate_replications`
+把每个 KPI 报成 `mean/std/ci95/n_rep`，`sw_system_sim` 默认 `num_replications=8`。
+**统计一律复用 `gates.paired_compare` / `gate_conclusion`，不另写一套。**
+
+四条不能忘的量级：
+
+* **n ≤ 5 时判决检验永远不可能显著。** 双侧 Wilcoxon 最小可达 p 是 `2/2^n`，
+  n=5 给 0.0625 > 0.05——**无论数据多干净都判不出显著**，而它照样会算出漂亮的
+  百分比。n=6 是硬下界，默认 8 留余量。
+* **"按 1/√n 收窄"精确成立的是标准误，不是置信区间半宽。** 半宽还乘着
+  `t_{0.975,n-1}`，小 n 时 t 大得多（t₃=3.18 vs t₁₅=2.13），实际收得**更快**：
+  n 4→16 是 0.357 而不是 0.5。混为一谈差 30%。
+* **变异系数自身也有置信区间。** n=8 时是 `0.66x ~ 2.04x`——
+  `measurements/seed_variance.json` 里那个 11.4% 的真值可能在 7.5%~23% 之间，
+  **只精确到大约 2 倍**，别拿它做精细比较。
+* **效应小于置信区间就不能下结论**，这和"区间跨零"是同一件事
+  （对称 t 区间 `mean ± h`，`|mean| < h` ⟺ 含 0）。
+  `rng.compare_replications` 的 `verdict` 只有 significant / inconclusive /
+  not_pairable 三种，inconclusive 时明确写"不要报这个百分比"。
+
+### `seed + 1` 的问题是撞车，不是相关
+
+原始猜想「seed 与 seed+1 会给出相关的流」在现代 numpy 上**是错的**，实测 200 对
+`default_rng(s)` / `default_rng(s+1)` 的最大 |r| 只有 0.07（噪声量级）——
+`SeedSequence` 用带雪崩效应的整数散列混合 entropy，相邻种子的初态相距极远。
+**这条主张证明不了就不能写进理由里。**
+
+真正的问题是 NumPy 并行随机数文档点名的那个：`root_seed + worker_id` 被标成
+"UNSAFE! Do not do this!"，因为**换一次 root 之后两批会撞车**。实测 base=100 与
+base=105 各取 8 条流，有 **3 对逐位相同**——不是"相关"，是同一条流被当成两次
+独立重复，而这在结果里完全看不出来。
+
+所以 `rng.py` 用两级：`master_seed`（≈ ns-3 的 `RngSeed`，换它 = 换一个宇宙）
++ `replication`（≈ `RngRun`，同一宇宙里的第 k 次重复）。ns-3 手册的原话是
+"the more statistically rigorous way to configure multiple independent
+replications is to use a fixed seed and to advance the run number"。
+**重复实验换 replication，别写 `seed+1`；要给只收 int 的外部接口就走
+`RngBook.integer_seed()`。**
+
+### 随机流要按用途分开，共用一个 rng 会串味
+
+分流前 `simulate()` 里**一个** `rng` 同时喂话务和 HARQ：改一下
+`arrival_rate_hz`，抽到的到达次数变了，后面 HARQ 的伯努利序列**整个错位**，
+于是"话务模型的影响"里混着"HARQ 换了一批随机数"。这类污染在结果里看不出来。
+
+现在五条流各管一摊：`channel` / `traffic` / `scheduler` / `harq` /
+`neighbor_load`。两个实现细节别改：
+
+* 流键是 **`zlib.crc32(名字)`**，不是名字在表里的下标（加一条流会把后面所有流
+  挪位），更不是 `hash()`（对 str **每进程随机加盐**，换进程就不可复现，
+  而本进程内自洽——最难查的一类）。
+* 用**显式 `spawn_key`** 而不是 `SeedSequence.spawn()`：后者有状态
+  （`n_children_spawned` 会推进），先要 `traffic` 还是先要 `harq` 拿到的流就不一样。
+  两者底层机制相同，`test_rng` 第 1 节逐位验证了等价性。
+
+### A/B 不用公共随机数等于白白把区间放宽 4 倍
+
+实测（PF 窗 100 vs 1000，n_rep=8，真实效应约 −10 Mbps）：
+
+| | 效应 | 95% CI | 半宽 | Wilcoxon p | 判决 |
+|---|---|---|---|---|---|
+| 公共随机数 | −10.64 | [−14.14, −7.15] | 3.49 | 0.0078 | **significant** |
+| 独立随机数 | −14.97 | [−28.66, −1.27] | 13.69 | 0.078 | inconclusive |
+
+**同一个真实效应，CRN 下判得出来，独立种子下判不出来。** 原理是
+`Var(a−b) = Var(a) + Var(b) − 2Cov(a,b)`，CRN 把那个协方差做正。
+做法就一句话：**两臂用同一个 `rng.replications(master, n)` 的返回值。**
+
+注意上表独立那一栏的区间其实不跨零，是判决以 Wilcoxon 为准才拦住的——
+和「门 3 的判决必须显式说清用哪个检验」是同一条。
+
+`rng.check_pairable` 照抄 `results.check_pairable` 的 ID 契约思想：系统级的
+"样本 ID" 就是 `(master_seed, replication)`，顺序错一位统计层面**不可观测**。
+没给 books 时 `crn` 返回 **None 而不是 True**——查不到不能当它对。
+
+### 建表与随机种子无关，所以只建一次
+
+`build_link_tables` 除了邻区负载抖动之外**完全确定性**（SVD、码本搜索、
+MCS 查表都不含随机），所以 n 次重复只重跑 TTI 主循环。代价是
+`(n−1)·T_loop / (T_build + T_loop)`——实测 ds_6e9715bc 建表 5.14 s、
+单次主循环 0.99 s，n=8 是 13.0 s vs 单次 6.1 s（**+113%**）；
+建表越贵比例越低，按 10.5 s / 1.1 s 算是 +66%。
+
+代价是**邻区负载抖动被冻结在表里，不进置信区间**。这个取舍量过：
+64 次 replication 与 32 次 master seed 扫描（每次重建表）的变异系数，
+五个 KPI 里四个的区间重叠——**冻结并没有可分辨地把离散度报小**，
+系统级的主导方差就是话务与 HARQ。数据在 `measurements/rng_replication.json`。
+**信道实现本身的不确定度是另一个更大的分量，那个只能重新 `sw_generate`。**
 
 ### 配对的有效性靠样本 ID，统计查不出错位
 
@@ -798,6 +897,42 @@ SINR / SIR / IoT **逐位相同**。
 ISD 100 m 38.3 dB / 200 m 24.9 / 500 m 4.4 / 1732 m 0.2；
 tx_power +16 dB 则 IoT +16 dB（SIR 一动不动）；NF 与带宽按噪声底精确换算。
 
+**更精确的根因（2026-08-07 查到）**：`_system_sinr.py:484` 是
+`n_dl_sched = max(1, round(ues_per_cell · pdsch_load))`，而默认预设
+21 UE / 21 小区给出 `ues_per_cell = 1`，于是 `round(1×0.5)=0` 被 `max(1,·)`
+兜成 **1**——每个干扰小区只随机抽**一个**波束。`pdsch_load` 0.5 与 1.0
+算出来都是 1，所以逐位相同。
+
+顺带一个**没人注意过的后果**：只抽一个波束意味着几何 SIR 里带着可观的
+抽签噪声。实测 42 个样本，`SIR_geo` 与按 RSRP 份额重构的 `SIR_rsrp` 之差
+标准差是 **4.74 dB**——**这部分不是物理，是抽签**。所有干扰类结论都含着它。
+
+### 逐小区干扰份额拿得到，只是 superwireless 没存
+
+**这条推翻了上面"只能靠聚合量"的旧判断**（原话是"几何 SIR 是聚合量，
+拿不到哪个邻区贡献了多少"）。存下来的确实只有聚合量，但分解是可恢复的。
+
+`_system_sinr.py:500` 的干扰求和式是
+
+    I = Σ_k rx_lin[k] · N_ant · avg_leak_k
+
+其中 `avg_leak_k` 是小区 k 在其 DFT 码本上被抽中波束的平均增益。
+**在整个码本上取平均时它跨小区是常数**（Parseval：Σ_b |w_b^H a|² = |a|²），
+所以**在期望意义上逐小区干扰份额精确等于 RSRP 份额**。
+而 `internal_sim.py:2896` 已经算出了全部 K 个小区的 RSRP（`rx_power_all_dbm`），
+只是 `generate._SCALAR_META_FIELDS` 只吃标量，这个**数组**字段被
+`_as_float` 变成 nan 丢掉了——全库搜 `rx_power_all` 命中数为 0。
+
+代价约 **168 字节/样本**。这让"逐小区负载"这类课题比原先估的便宜得多。
+
+**注意"期望意义"这个限定**：单次实现下 `avg_leak_k` 只是一个波束的抽样
+（见上一条的 `n_dl_sched=1`），所以 4.74 dB 的抽样噪声依然在。
+要拿它做逐小区干扰合成，得先把 `n_dl_sched` 的问题解决掉。
+
+**反过来，存 `h_interferers` 不值得**：`max_per_ue_intf_cells` 默认只存 3 个，
+设成 20 是 11.14 MB/样本（服务信道才 0.56 MB）；而干扰信道已经是秩 1 的、
+`precoded` 与 `isotropic` 逐位相同——**20 倍数据量买回来的空间自由度是假的**。
+
 ### 压 num_rb 探测场景是安全的，但 snr_dB 会撞夹逼
 
 同一 seed 下 `num_rb` 取 273 / 24 / 12，几何量**逐位相同**：sinr / sir / 路损 /
@@ -887,6 +1022,9 @@ ChannelHub 的 `doppler_hz` 来自**同一个 UE 相邻样本之间的位移**�
 - 新的表驱动 BLER → 原始常量放独立数据模块，必须有 SHA-256、全 MCS 覆盖、
   横轴/BLER 单调、目标门限覆盖检查；来源不是标准就不能塞进 `verify_tables`
 - 新的门禁判据 → `gates.py`（门 2/门 3）或 `validate.py`（门 1，会自动进门 1）
+- 新的随机流 → `rng.register_stream(名字, 用途)`，**别直接改 `STREAMS` 的顺序**
+  （流键来自名字的 crc32，加流不会扰动已有流；改顺序也不会，但改用途会）。
+  统计判决一律走 `rng.compare_replications`，它复用 `gates.py`，不要另写
 - 新的外部结果校验 → `results.check_pairable`，每条都必须是**硬拦截**不是告警
 - 新指标 → `analysis.KNOWN_METRICS` 加单位；自定义指标也支持，单位由调用方给
 - 新的标准查表值 → `spec38901.py`，**必须两条独立路径核对过**才录入

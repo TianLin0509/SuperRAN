@@ -331,7 +331,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 （§7.8.2 指标3，Annex A.1 圆周定义）、PRB 奇异值最大/次大/比值三条 CDF
 （指标4，10log10 尺度）。参考曲线在 R1-165974 / R1-165975 / R1-1909704。
 
-## MCP 工具（33 个）
+## MCP 工具（34 个）
 
 | 工具 | 作用 |
 |---|---|
@@ -438,12 +438,14 @@ python tests/test_gates.py       # 校准、标准表、三道门、统计判决
 python tests/test_results.py     # 外部算法结果契约、预注册 80 项
 python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
 python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应 63 项
-python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径 65 项
+python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径 80 项
 python tests/test_interference.py # IoT、测量域、预设、说明书、算法页、文档计数 362 项
-python tests/test_csi_aging.py   # CSI 时延与老化、SRS 跳频、基站/真实视角分离 66 项
+python tests/test_csi_aging.py   # CSI 时延与老化、SRS 跳频、基站/真实视角分离 84 项
+python tests/test_rng.py         # 随机数分流、多重复置信区间、公共随机数 107 项
+python tests/test_sysscenes.py   # 系统级场景预设、成对受控性、expect 诚实性 69 项
 ```
 
-共 **1018 项**。
+共 **1227 项**。
 
 ## 致谢
 

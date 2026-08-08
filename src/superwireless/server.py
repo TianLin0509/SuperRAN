@@ -158,6 +158,57 @@ def sw_capabilities() -> dict[str, Any]:
 
 
 @tool()
+def sw_system_scene(name: str | None = None) -> dict[str, Any]:
+    """**系统级场景预设：把一整套仿真条件打包成一个名字。**
+
+    不给 ``name`` 就列全部；给了就返回这个场景该怎么跑
+    （``generate`` 段喂 ``sw_generate``、``system`` 段喂 ``sw_system_sim``）。
+
+    信道侧有 20+ 个预设，一句 ``company_64t4r_multicell`` 就够了；系统级却要
+    手工填 ``duration_s`` / ``traffic_model`` / ``arrival_rate_hz`` /
+    ``neighbor_prb_util`` / ``csi_aging`` / ``srs_period_ms`` 八九个参数。
+    **后果不只是麻烦——每次跑都在拍参数，不同次之间参数不一致，结果没法横向比。**
+
+    比"一组默认值"多两样东西：
+
+    * ``expect`` **实测锚点**。``measured: false`` 时**不许有数值**——
+      preset 里的 label 是设计意图，写着"高干扰"实际只有 2 dB 的事发生过。
+    * ``pair_with`` **受控对照**。除了 ``pair_varies`` 列出的那一项，
+      两个场景其余参数**逐字相同**，否则差值归因不到任何一项上。
+      同时差三四个参数的两个场景不是对照组，只是两个场景。
+
+    **成对场景要用公共随机数跑**（两臂同一批 replication 流），
+    实测 95% 区间能窄 3.92 倍。
+    """
+    from . import sysscenes as ss  # noqa: PLC0415
+
+    if name is None:
+        bad = ss.check_pairs()
+        return _jsonable({
+            "scenes": ss.list_system_presets(),
+            "pair_check": "全部成对场景都是受控对比" if not bad else bad,
+            "hint": ("挑一个名字再调一次拿到完整参数。"
+                     "**成对的那些要两个都跑**——很多系统级结论必须靠 A/B 才立得住，"
+                     "而且两臂必须用同一批随机流（CRN）。"),
+        })
+    try:
+        sc = ss.resolve(name)
+    except (KeyError, ValueError) as exc:
+        return {"error": str(exc)}
+    exp = sc.get("expect") or {}
+    return _jsonable({
+        "name": name, "label": sc.get("label"), "summary": sc.get("summary"),
+        "answers": sc.get("answers"),
+        "generate": sc.generate_kwargs, "system": sc.sim_kwargs,
+        "expect": exp, "pair_with": sc.get("pair_with"),
+        "pair_varies": sc.get("pair_varies"),
+        "hint": (("**这个场景的 expect 还没实测**，别把 summary 里的定性说法"
+                  "当成实测值转述给用户。") if not exp.get("measured") else
+                 "expect 是实测锚点，跑出来差太多就说明配置没对上，要停下来查。"),
+    })
+
+
+@tool()
 def sw_list_presets(group: str | None = None) -> dict[str, Any]:
     """列出场景预设。预设只提供场景骨架，具体参数由 sw_plan 协商决定。
 
@@ -1489,8 +1540,9 @@ def sw_system_sim(
     olla_speedup: float = 1.0,
     precoder: str = "svd",
     seed: int = 0,
+    num_replications: int = 8,
 ) -> dict[str, Any]:
-    """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI。**
+    """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI，全部带置信区间。**
 
     这是和链路级完全不同的一层。链路级问"这个信道能跑多快"，
     系统级问"**这个小区里的用户实际体验到多快**"——把话务到达与结束、
@@ -1506,9 +1558,15 @@ def sw_system_sim(
     返回里 **cell 是小区级、users 是用户级**，两级都有：平均调度 MCS、
     平均 rank、首传 BLER、残留 BLER、体验速率的中位与 5% 边缘。
 
+    **每个 KPI 都是 ``{mean, std, ci95, n_rep, cv, rel_half_width}`` 而不是一个裸数**
+    ——同一批信道、同一套配置只改种子，实测 ``cell_experienced_mbps`` 的变异系数
+    有 **11.4%**（``measurements/seed_variance.json``），单次运行报出来的
+    "142.3 Mbps" 小数点后那位是假的。念数字前先看 ``rel_half_width``：
+    比它小的差异这次实验分辨不出来。
+
     ``notes`` 会主动报出让结论不成立的情况：队列积压未收敛、burst 样本太少、
-    信道快照不足（时间起伏被低估，PF 拿不到多用户分集）、字节对不上账。
-    **这些必须转述给用户，别只报好看的数字。**
+    信道快照不足（时间起伏被低估，PF 拿不到多用户分集）、字节对不上账、
+    置信区间过宽。**这些必须转述给用户，别只报好看的数字。**
 
     参数
     ----
@@ -1543,8 +1601,35 @@ def sw_system_sim(
         ``type1`` 用 38.214 Type I 宽带码本当发射权。
         码本自由度少，**在 CSI 老化下反而可能更耐受**——能算错的地方也少。
         ``type1`` 时 BF Gain 恒为 0（发射权就是 CQI 的参照权）。
+    seed : 实验批次的**主种子**（对应 ns-3 的 ``RngSeed``）。重复实验**不要**
+        靠改它——改它等于换一整个宇宙，两批之间没有任何"流不重叠"的保证。
+    num_replications : 独立重复次数（对应 ns-3 的 ``RngRun``），默认 **8**。
+        **这个默认值是算出来的，不是拍的**：
+
+        * n ≤ 5 时判决检验（Wilcoxon 符号秩）最小可达 p 是 ``2/2^n`` > 0.05，
+          **无论数据多干净都不可能宣告显著**——而它照样会算出漂亮的百分比。
+          n=6 是硬下界（p_min=0.031），8 留了余量（p_min=0.0078）。
+        * 代价不大：``build_link_tables`` 与随机种子无关，**只建一次表**，
+          重复的只是 TTI 主循环。代价比例是
+          ``(n−1)·T_loop / (T_build + T_loop)``，**随数据集大小变**——
+          实测建表 5.1 s / 主循环 1.0 s 时 8 次是 +113%，
+          建表 10.5 s / 主循环 1.1 s 时是 +67%。
+        * **收窄比 1/√n 快。** 区间半宽 = ``t(0.975,n−1)·σ/√n``，
+          t 因子本身也在缩（n=4 时 3.18、n=16 时 2.13），所以从 n=4 到 n=16
+          实测是 **0.36 倍**而不是 1/√n 的 0.5 倍。
+          写成"按 1/√n"会低估多跑几次的收益。
+          实测半宽/均值（从 64 次重复里重抽，见 ``measurements/rng_replication.json``）：
+          n=4 时 13.6%、**n=8 时 7.5%**、n=16 时 4.9%、n=32 时 3.4%。
+          8 是拐点——再翻倍只多拿 2.6 个百分点，却要多一倍墙钟。
+
+        设成 1 会退回"单次运行、无区间"，并在 ``notes`` 里明确告警。
     """
+    # 局部 import：本函数用得到 time / rng，但顶层已经很挤，
+    # 而且这个模块里就是这么写的（见下面 `_load` / `sysm`）。
+    import time  # noqa: PLC0415
+
     from . import load as _load  # noqa: PLC0415
+    from . import rng  # noqa: PLC0415
     from . import system as sysm  # noqa: PLC0415
 
     ds = _load(dataset_id)
@@ -1580,7 +1665,12 @@ def sw_system_sim(
             processing_delay_ms=float(csi_processing_delay_ms))
     except ValueError as exc:
         return {"error": str(exc)}
-    load_rng = np.random.default_rng(int(seed) + 909)
+    # **邻区负载抖动走它自己的随机流**，不是 `seed + 909`。
+    # `master + 常数` 正是 NumPy 并行随机数文档点名的反模式（"UNSAFE! Do not do
+    # this!"）：换一次 master 就可能和别的流撞上，而撞上之后两条流是**逐位相同**
+    # 的，不是"相关"——这种复用在结果里完全看不出来。见 rng.py 的模块文档。
+    load_rng = rng.RngBook(master_seed=int(seed)).generator("neighbor_load")
+    _t_build = time.perf_counter()
     try:
         tables = sysm.build_link_tables(
             h_users, [float(x) for x in sinr], num_ues=n_ue, geo_sir_db=sir,
@@ -1593,23 +1683,57 @@ def sw_system_sim(
                                     csi=csi_cfg, snapshot_ms=snap_ms)
                if mu_enabled else {"ratio": 1.0, "measured": False,
                                    "note": "未开 MU"})
+    build_s = time.perf_counter() - _t_build
 
-    res = sysm.simulate(
-        tables,
-        sys_cfg=sysm.SystemConfig(duration_s=float(duration_s),
-                                  tdd_pattern=tdd_pattern, seed=int(seed),
-                                  snapshot_update_ms=snap_ms),
-        traffic=sysm.TrafficConfig(model=traffic_model, file_bytes=int(file_bytes),
-                                   arrival_rate_hz=float(arrival_rate_hz)),
-        sched=sysm.SchedulerConfig(algorithm=scheduler, pf_window_tti=int(pf_window_tti),
-                                   mu_enabled=bool(mu_enabled),
-                                   olla_speedup=float(olla_speedup)),
-        kpi=sysm.KpiConfig(trim=trim),
-        mu_se_ratio=float(mu_gain["ratio"]),
-    )
+    # **建表只做一次，重复的只是 TTI 主循环。** build_link_tables 与随机种子
+    # 完全无关（SVD、码本搜索、MCS 查表都是确定性的），所以 n 次重复的边际成本
+    # 只有主循环那一份——这是置信区间能默认开着的唯一原因。
+    try:
+        res = sysm.simulate_replications(
+            tables,
+            num_replications=int(num_replications), master_seed=int(seed),
+            sys_cfg=sysm.SystemConfig(duration_s=float(duration_s),
+                                      tdd_pattern=tdd_pattern, seed=int(seed),
+                                      snapshot_update_ms=snap_ms),
+            traffic=sysm.TrafficConfig(model=traffic_model, file_bytes=int(file_bytes),
+                                       arrival_rate_hz=float(arrival_rate_hz)),
+            sched=sysm.SchedulerConfig(algorithm=scheduler,
+                                       pf_window_tti=int(pf_window_tti),
+                                       mu_enabled=bool(mu_enabled),
+                                       olla_speedup=float(olla_speedup)),
+            kpi=sysm.KpiConfig(trim=trim),
+            mu_se_ratio=float(mu_gain["ratio"]),
+            build_elapsed_s=build_s,
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
     out = res.as_dict()
     out["dataset_id"] = dataset_id
     out["num_ues"] = len(tables)
+    out["kpi_format"] = {
+        "shape": "cell / users 里的每个 KPI 都是 {mean, std, ci95, n_rep, cv, "
+                 "rel_half_width, min, max}，不是一个裸数",
+        "ci95": "95% 置信区间，t 分布（n 小时 t 比 z 宽 20%，用 z 会把区间报窄）",
+        "rel_half_width": "区间半宽 / 均值。**比它小的差异这次实验分辨不出来**",
+        "why": ("同一批信道、同一套配置只改种子，实测 cell_experienced_mbps 的"
+                "变异系数 11.4%（measurements/seed_variance.json）。"
+                "上一轮就发生过把 11.4% 的噪声报成「+14% 提升」的事故。"),
+    }
+    out["rng"] = {
+        **rng.RngBook(master_seed=int(seed)).as_dict(),
+        "num_replications": int(num_replications),
+        "stream_purposes": dict(rng.STREAMS),
+        "covered_by_ci": ["traffic", "harq", "scheduler"],
+        "not_covered_by_ci": ["channel", "neighbor_load"],
+        "ci_scope": ("各次重复共用同一批信道与同一张链路表（建表与种子无关，"
+                     "只建一次），所以区间覆盖的是话务到达、HARQ 误码、调度决胜"
+                     "这三条流的抽样噪声。冻结邻区负载抖动**实测没有可分辨地"
+                     "把离散度报小**（64 次 replication vs 32 次 master seed 扫描，"
+                     "五个 KPI 里四个的变异系数区间重叠，见 "
+                     "measurements/rng_replication.json）。"
+                     "**信道实现本身的不确定度是另一个、更大的方差分量**，"
+                     "要覆盖它得用不同 seed 重新 sw_generate 再比。"),
+    }
     out["mu_gain"] = mu_gain
     aging = sysm.ca.aging_summary(
         csi_cfg, num_rbg=17, snapshot_ms=snap_ms,
@@ -1650,8 +1774,25 @@ def sw_system_sim(
     out["notes"] = notes
     out["num_samples"] = len(h_users)
     out["summary"] = res.text()
-    out["hint"] = ("先把 summary 念给用户，再把 notes 里的每一条都说出来——"
-                   "那些是让这组数字不成立的条件。用户级明细在 users 里。")
+    out["timing"] = {
+        "build_tables_s": round(build_s, 3),
+        "tti_loops_s": round(res.elapsed_s, 3),
+        "per_replication_s": round(res.elapsed_s / max(res.n_rep, 1), 3),
+        "total_s": round(build_s + res.elapsed_s, 3),
+        "overhead_vs_single_run": (
+            round((build_s + res.elapsed_s)
+                  / max(build_s + res.elapsed_s / max(res.n_rep, 1), 1e-9) - 1.0, 3)),
+        "note": ("建表与随机种子无关，只做一次；重复的只有 TTI 主循环。"
+                 "overhead_vs_single_run 就是"
+                 "「跑 n 次比跑 1 次多花的比例」。"),
+    }
+    out["hint"] = ("先把 summary 念给用户（**带上方括号里的置信区间**），"
+                   "再把 notes 里的每一条都说出来——那些是让这组数字不成立的条件。"
+                   "**报差异之前先比一比 rel_half_width**：效应比区间半宽还小时"
+                   "只能说「分辨不出来」，不能报百分比。"
+                   "两组配置的正式对比用 rng.compare_replications()，"
+                   "它复用 gates.py 的配对检验并给出明确判决。"
+                   "用户级明细在 users 里。")
     return _jsonable(out)
 
 
