@@ -139,14 +139,21 @@ sys_urban_macro_field_csi:
   expect:
     measured: true
     dataset: ds_984082de
-    avg_mcs: 7.16
-    bler_first_tx: 0.394
-    cell_experienced_mbps: 142.3
-    ue_experienced_p5_mbps: 37.0
-    olla_db_mean: -5.17
+    n_replications: 8
+    avg_mcs: [7.99, 5.4]
+    avg_rank: [1.759, 2.2]
+    bler_first_tx: [0.358, 8.0]
+    cell_experienced_mbps: [119.62, 8.9]
+    cell_served_mbps: [61.15, 10.9]
+    ue_experienced_p5_mbps: [37.05, 10.5]
+    olla_db_mean: [-4.21, 8.2]
+    occupancy: [0.534, 8.5]
     note: >-
-      2026-08-04 实测（olla_speedup=1）。**这些是单次运行值，
-      变异系数约 11%**——多 seed 置信区间落地后要重测并改成 mean ± CI。
+      2026-08-07 实测，8 次重复。**替换了 2026-08-04 的单次运行值，
+      而且替换本身就是这项工作的价值证明**：旧的单次值 5% 边缘是 123.5，
+      新的 8 次均值是 101.3 —— 偏了 22%，是半宽的两倍，那次单跑抽到了离群样本。
+      与零时延对照组的差是 -52.7%，远大于两边各自 6~9% 的半宽，
+      **所以「CSI 老化吃掉一半体验速率」这个结论依然站得住**。
 
 sys_urban_macro_ideal_csi:
   group: 系统级 · CSI 时延对照
@@ -175,12 +182,21 @@ sys_urban_macro_ideal_csi:
   expect:
     measured: true
     dataset: ds_984082de
-    avg_mcs: 11.28
-    bler_first_tx: 0.154
-    cell_experienced_mbps: 265.6
-    ue_experienced_p5_mbps: 123.5
-    olla_db_mean: -0.71
-    note: 2026-08-04 实测。同上，单次运行值。
+    n_replications: 8
+    avg_mcs: [10.36, 2.2]
+    avg_rank: [1.743, 2.5]
+    bler_first_tx: [0.122, 9.9]
+    cell_experienced_mbps: [252.78, 6.1]
+    cell_served_mbps: [61.67, 10.9]
+    ue_experienced_p5_mbps: [101.35, 11.0]
+    occupancy: [0.282, 10.2]
+    olla_db_mean: [-0.27, 58.9]   # 均值贴近 0，相对半宽必然爆掉，看绝对值
+    note: >-
+      2026-08-07 实测，8 次重复。**olla_db_mean 那 58.9% 不是这一项不可信**——
+      均值只有 -0.27，相对半宽的分母太小，绝对半宽其实只有 0.16 dB。
+      **接近零的量一律看绝对区间，别看相对半宽。**
+      零时延下 OLLA 本就该贴近 0（发送侧估计准，外环没什么要修的），
+      这和现网配置那边被压到 -4.21 dB 正好互为印证。
 
 # ---------------------------------------------------------------------------
 # 三、现网话务画像
