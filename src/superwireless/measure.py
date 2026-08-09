@@ -134,9 +134,15 @@ def eigen_spectrum(r: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def condition_number(h: np.ndarray) -> float:
-    """时频平均信道的条件数（最大/最小奇异值）。衡量空间复用难度。"""
-    h_avg = np.asarray(h).mean(axis=(0, 1))  # [BS, UE]
-    s = np.linalg.svd(h_avg, compute_uv=False)
+    """宽带空间条件数。衡量空间复用难度。
+
+    对接收侧 Gram 矩阵 ``E[H^H H]`` 求特征值；不能先对复信道做时频
+    平均，否则相位旋转会把一个功率完全正常的信道抵消成零。
+    """
+    hh = np.asarray(h)
+    gram = np.einsum("tfbu,tfbv->uv", hh.conj(), hh) / max(
+        hh.shape[0] * hh.shape[1], 1)
+    s = np.sqrt(np.maximum(np.linalg.eigvalsh(gram).real, 0.0))[::-1]
     s = s[s > _EPS]
     if s.size < 2:
         return float("inf")
@@ -189,11 +195,11 @@ def dft_beam_matrix(n_ant: int, spacing_lambda: float = 0.5) -> np.ndarray:
 
 def beam_domain_rsrp_db(h: np.ndarray, spacing_lambda: float = 0.5) -> np.ndarray:
     """波束域 RSRP，[n_beams] dB。匹配滤波后各 DFT 波束的接收功率。"""
-    h = np.asarray(h)
-    h_avg = h.mean(axis=(0, 1))  # [BS, UE]
-    beams = dft_beam_matrix(h_avg.shape[0], spacing_lambda)
-    h_beam = beams.conj().T @ h_avg  # [n_beams, UE]
-    p = (np.abs(h_beam) ** 2).mean(axis=1)
+    hh = np.asarray(h)
+    beams = dft_beam_matrix(hh.shape[2], spacing_lambda)
+    # [T,RB,beam,UE]，先取功率再平均，避免跨时频的复相位相消。
+    h_beam = np.einsum("bk,tfbu->tfku", beams.conj(), hh)
+    p = (np.abs(h_beam) ** 2).mean(axis=(0, 1, 3))
     return 10.0 * np.log10(np.maximum(p, _EPS))
 
 
@@ -241,15 +247,16 @@ def srs_features(h: np.ndarray, spacing_lambda: float = 0.5) -> SRSFeatures:
 
 
 # ---------------------------------------------------------------------------
-# PMI —— 38.214 Type I 单面板码本
+# PMI —— Type-I-style 单面板列码本近似
 # ---------------------------------------------------------------------------
 
 
 def type_i_codebook(n1: int, o1: int, n2: int, o2: int, *, dual_pol: bool = True) -> np.ndarray:
-    """38.214 Type I 单面板码本 [ports, beams]。
+    """38.214 Type-I 单面板结构中的过采样 DFT/双极化**列集合**。
 
     水平/垂直各自的过采样 DFT 矢量做 Kronecker 积，双极化再拼 4 个 QPSK 同相因子。
-    数学与 ChannelHub bridge 的实现一致，便于交叉验证。
+    数学与 ChannelHub bridge 的实现一致，便于交叉验证。它不是完整的多层 PMI
+    矩阵集合；多层路径由 :func:`pmi_type_i` 增量选列，是明确的工程近似。
     """
     def _dft(n: int, o: int) -> np.ndarray:
         k = np.arange(n * o)
@@ -324,14 +331,16 @@ def pmi_type_i(
     o1: int = 4,
     o2: int = 4,
 ) -> PMIResult:
-    """在 38.214 Type I 码本上搜索 PMI。
+    """在 Type-I-style 单面板列集合上做宽带 PMI 近似搜索。
 
-    h : [T, RB, BS_ant, UE_ant]。按时频平均后逐层贪心选波束，
-    每选一层就把该方向从信道里投影掉，避免层间重复。
+    h : [T, RB, BS_ant, UE_ant]。按宽带发射协方差上的平均接收功率
+    逐层贪心选波束，每选一层就投影掉该方向，避免层间重复。
+    该贪心列组合不等同于完整枚举 38.214 多层 Type-I 码本，结果会显式标成近似。
     """
     h = np.asarray(h)
-    h_avg = h.mean(axis=(0, 1))  # [BS, UE]
-    n_ports = h_avg.shape[0]
+    if h.ndim != 4:
+        raise ValueError(f"h 应为 [T,RB,BS,UE]，收到 {h.shape}")
+    n_ports = h.shape[2]
 
     nh, nv, dual = _infer_layout(n_ports, n_h, n_v)
     o2_eff = o2 if nv > 1 else 1
@@ -342,14 +351,16 @@ def pmi_type_i(
         cb = type_i_codebook(n_ports, o1, 1, 1, dual_pol=False)
         nh, nv = n_ports, 1
 
-    # 逐层贪心：每层取匹配增益最大的码本列，再从信道中投影掉
-    residual = h_avg.copy()
+    # R_tx = E[H H^H]。逐层贪心：每层取平均接收功率最大的码本列，
+    # 再把该方向从协方差中投影掉。相比 mean(H)，它对任意公共相位旋转不变。
+    cols = np.transpose(h, (2, 0, 1, 3)).reshape(n_ports, -1)
+    residual = cols @ cols.conj().T / max(cols.shape[1], 1)
     indices: list[int] = []
     gains: list[float] = []
-    rank_cap = min(max_rank, n_ports, h_avg.shape[1])
+    rank_cap = min(max_rank, n_ports, h.shape[3])
 
     for _ in range(rank_cap):
-        metric = np.linalg.norm(cb.conj().T @ residual, axis=1)  # [beams]
+        metric = np.real(np.sum(cb.conj() * (residual @ cb), axis=0))
         if indices:
             metric[indices] = -np.inf
         best = int(np.argmax(metric))
@@ -357,9 +368,10 @@ def pmi_type_i(
         if g <= _EPS:
             break
         indices.append(best)
-        gains.append(20.0 * np.log10(max(g, _EPS)))
+        gains.append(10.0 * np.log10(max(g, _EPS)))
         w = cb[:, best : best + 1]
-        residual = residual - w @ (w.conj().T @ residual)
+        proj = np.eye(n_ports, dtype=np.complex128) - w @ w.conj().T
+        residual = proj @ residual @ proj.conj().T
 
     if not indices:  # 极端退化情形
         indices = [0]
@@ -382,20 +394,14 @@ def pmi_type_i(
 
 
 def channel_capacity_bps_hz(h: np.ndarray, snr_db: float) -> float:
-    """各 RB 的 MIMO 容量按频率平均，bit/s/Hz。等功率注水前的上界参考值。"""
-    h = np.asarray(h)
-    snr = 10.0 ** (snr_db / 10.0)
-    t, rb, bs, ue = h.shape
-    caps = []
-    for r in range(rb):
-        hm = h[:, r].mean(axis=0)  # [BS, UE]
-        s = np.linalg.svd(hm, compute_uv=False)
-        nrm = np.sum(s**2)
-        if nrm <= _EPS:
-            continue
-        s2 = s**2 / nrm * bs  # 归一到平均单位增益
-        caps.append(float(np.sum(np.log2(1.0 + snr * s2 / max(len(s), 1)))))
-    return float(np.mean(caps)) if caps else 0.0
+    """合成预波束 SNR 下的逐时频最优注水容量，bit/s/Hz。
+
+    这是兼容旧调用的薄包装。数据集的 ``sinr_dB`` 是已含阵列增益的几何量，
+    不能传到这里；应改用 ``Dataset.capacity()`` 的 rank-1 工作点标定。
+    """
+    from .linklevel import _noise_from_snr, capacity_upper_bound
+
+    return capacity_upper_bound(h, _noise_from_snr(h, float(snr_db)))
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +480,7 @@ MEASUREMENT_CATALOG: dict[str, str] = {
     "pdp": "时延功率谱：未归一化功率 + 真实时延轴 + RMS 时延扩展",
     "paths": "每条径/簇的时延、功率、角度（CDL 才有角度）",
     "srs": "SRS 侧空间特征：完整协方差、全部特征值、每天线增益、波束域 RSRP",
-    "pmi": "38.214 Type I 码本索引 + 预编码矩阵 + 秩",
+    "pmi": "Type-I-style 单面板列码本近似：列索引 + 预编码矩阵 + 秩",
     "rsrp": "每天线信道增益与波束域 RSRP（不截断）",
     "sinr": "信噪比 / 信干比 / 信干噪比等链路标量",
     "capacity": "MIMO 容量与条件数",

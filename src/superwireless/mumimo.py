@@ -93,7 +93,8 @@ def effective_user_channels(
 ) -> np.ndarray:
     """把每个用户的 MIMO 信道压成 ``streams_per_user`` 条等效行向量。
 
-    输入每个用户 ``[T, RB, BS_ant, UE_ant]``，输出 ``[K, S, RB, BS_ant]``。
+    输入每个用户 ``[1, RB, BS_ant, UE_ant]``（单个调度快照），输出
+    ``[K, S, RB, BS_ant]``。
 
     做法：在每个 RB 上对下行信道 ``H_u^H``（``[UE_ant, BS_ant]``）做 SVD，
     取前 S 个左奇异向量当接收合并权，得到等效行 ``u_s^H H_u^H = σ_s v_s^H``。
@@ -114,13 +115,18 @@ def effective_user_channels(
     _shapes = {tuple(np.asarray(h).shape[-3:]) for h in hs}
     if len(_shapes) > 1:
         raise ValueError(f"各用户的 [RB, BS, UE] 形状必须一致，实得 {sorted(_shapes)}")
+    bad_t = [int(h.shape[0]) for h in hs if h.ndim == 4 and h.shape[0] != 1]
+    if bad_t:
+        raise ValueError(
+            "MU 等效信道一次只接受一个调度快照（T=1）；多时隙请逐时隙调用再平均速率，"
+            "不能先平均复信道")
     n_rb = hs[0].shape[1]
     n_bs = hs[0].shape[2]
     s_max = int(streams_per_user)
 
     out = np.zeros((len(hs), s_max, n_rb, n_bs), dtype=np.complex128)
     for u, h in enumerate(hs):
-        hb = h.mean(axis=0) if h.ndim == 4 else h        # [RB, BS, UE]
+        hb = h[0] if h.ndim == 4 else h                  # [RB, BS, UE]
         for f in range(n_rb):
             dl = hb[f].conj().T                          # [UE, BS] 下行矩阵
             uu, sv, vh = np.linalg.svd(dl, full_matrices=False)
@@ -155,6 +161,30 @@ class Pairing:
             "dropped_by_corr": self.dropped_by_corr,
             "weights_used": self.weights_used,
         }
+
+
+def _wideband_user_vectors(h_eff: np.ndarray) -> np.ndarray:
+    """用 ``E_f[h_f^H h_f]`` 给每个用户构造相位不敏感的宽带主方向。
+
+    直接对复信道跨 RB 求均值会让不同子载波的公共相位相消：同一物理功率只因
+    每 RB 乘了 ``exp(jφ_f)``，用户强度和 SUS 配对就会改变。这里取第一流的
+    发射侧协方差主特征向量，向量范数为主特征值平方根；既保留宽带强度，又只
+    平均功率而不平均复幅度。它仍是宽带配对近似，不冒充逐 RB 最优配对。
+    """
+    he = np.asarray(h_eff)
+    if he.ndim != 4:
+        raise ValueError(f"h_eff 应为 [K,S,RB,BS]，收到 {he.shape}")
+    n_k, n_s, n_rb, n_bs = he.shape
+    if n_s < 1 or n_rb < 1 or n_bs < 1:
+        raise ValueError(f"h_eff 各维必须非空，收到 {he.shape}")
+    out = np.zeros((n_k, n_bs), dtype=np.complex128)
+    for k in range(n_k):
+        rows = he[k, 0]  # [RB,BS]
+        cov = rows.conj().T @ rows / n_rb
+        ev, vec = np.linalg.eigh(cov)
+        top = int(np.argmax(ev.real))
+        out[k] = np.sqrt(max(float(ev[top].real), 0.0)) * vec[:, top].conj()
+    return out
 
 
 def pair_users(
@@ -194,8 +224,8 @@ def pair_users(
     """
     he = np.asarray(h_eff)
     n_k, n_s, _n_rb, n_bs = he.shape
-    # 宽带配对：等效信道对 RB 平均后每用户拿一条主行向量
-    g = he.mean(axis=2)[:, 0, :]                          # [K, BS]
+    # 宽带配对：对 E_f[h^H h] 取主方向；不能跨 RB 直接平均复信道。
+    g = _wideband_user_vectors(he)                        # [K, BS]
     norms = np.linalg.norm(g, axis=1)
     w = np.ones(n_k) if weights is None else np.asarray(weights, dtype=float)
     if w.shape != (n_k,):
@@ -505,15 +535,12 @@ def noise_from_geometric_sinr(h: np.ndarray, sinr_db: float, *,
     前者几乎所有用户都判到 rank 4、MCS 顶格，一眼就能看出不对——
     但如果没有现网锚点作对照，它长得完全像一份正常结果。
     """
-    hb = np.asarray(h)
-    hb = hb.mean(axis=0) if hb.ndim == 4 else hb
-    n_rb = hb.shape[0]
-    step = max(1, n_rb // 32)                  # 抽样即可，σ₁ 在频域上很平
-    s1 = float(np.mean([
-        np.linalg.svd(hb[f].conj().T, compute_uv=False)[0] ** 2
-        for f in range(0, n_rb, step)
-    ]))
-    return s1 * float(total_power) / max(10.0 ** (float(sinr_db) / 10.0), _EPS)
+    # 单一真源放在 linklevel，SU 与系统仿真必须逐位使用同一个 rank-1 锚点。
+    # 局部 import 避免模块初始化时形成依赖环。
+    from .linklevel import rank1_reference_power
+
+    s1 = rank1_reference_power(h, total_power=total_power)
+    return s1 / max(10.0 ** (float(sinr_db) / 10.0), _EPS)
 
 
 @dataclass
@@ -576,10 +603,15 @@ def su_rank_adaptation(h: np.ndarray, *, noise_power: float,
     SINR 口径：SVD 预编码后逐流 ``|σ_k|²·(P/rank)/σ_n²``，
     再按 :func:`user_sinr_db` 压成一个数（单码字）。
     """
-    hb = np.asarray(h)
-    hb = hb.mean(axis=0) if hb.ndim == 4 else hb          # [RB, BS, UE]
-    if rb_per_rbg > 1:
-        hb = rbg_reduce(hb, rb_per_rbg)                   # 降到 RBG 粒度，省 16 倍 SVD
+    hh = np.asarray(h)
+    if hh.ndim == 3:
+        hh = hh[None]
+    if hh.ndim != 4:
+        raise ValueError(f"h 应为 [T,RB,BS,UE] 或 [RB,BS,UE]，收到 {hh.shape}")
+    # 时间是独立性能样本，不能先平均复信道。把每个时隙的频域行串起来，
+    # 等价于在共同 rank/MCS 下对全部时频资源做单码字聚合。
+    rows = [rbg_reduce(x, rb_per_rbg) if rb_per_rbg > 1 else x for x in hh]
+    hb = np.concatenate(rows, axis=0)
     n_rb = hb.shape[0]
     r_max = max(1, min(int(max_rank), hb.shape[1], hb.shape[2]))
 
@@ -673,7 +705,7 @@ def su_mu_adaptation(
 
     # --- MU 候选：贪心加人，每人 rank=mu_rank ---
     he_all = effective_user_channels(hp, streams_per_user=mu_rank)
-    order = list(np.argsort(-np.linalg.norm(he_all.mean(axis=2)[:, 0, :], axis=1)))
+    order = list(np.argsort(-np.linalg.norm(_wideband_user_vectors(he_all), axis=1)))
     cap = max(1, min(int(max_mu_users), n_k, he_all.shape[-1] // max(mu_rank, 1)))
 
     sel: list[int] = []

@@ -336,7 +336,7 @@ def check_pathloss_above_free_space(ds: Any, *, max_deficit_db: float = 5.0) -> 
     model = np.array([
         pathloss_38901_uma_los(float(d), fc, h_bs_m=h_bs)
         if (scen_los or los) else pathloss_38901_uma_nlos(float(d), fc, apply_los_floor=False)
-        for d, los in zip(d3[m], is_los[m])
+        for d, los in zip(d3[m], is_los[m], strict=True)
     ])
     fspl = np.array([free_space_pathloss(float(x), fc) for x in d3[m]])
     margin = model - fspl
@@ -493,17 +493,18 @@ def check_se_below_capacity(ds: Any, *, n: int = 5, snr_db: float = 20.0) -> Che
     )
 
 
-# 判定预编码排序所需的最小样本数。样本太少时相邻两档（尤其 Type I 与 DFT）
-# 的均值差远小于抽样噪声，会随机翻转——判定它只会制造假警报，而习惯了假警报
+# 判定预编码偏序所需的最小样本数。样本太少时受限码本与宽带上界的
+# 均值差可能被抽样噪声淹没——判定它只会制造假警报，而习惯了假警报
 # 的人会连真警报一起忽略。
 _ORDERING_MIN_N = 20
 
 
 def check_precoder_ordering(ds: Any, *, snr_db: float = 20.0, n: int = 24) -> Check:
-    """预编码方案的性能排序：SVD ≥ 宽带 SVD ≥ Type I 码本 ≥ DFT rank-1。
+    """检查有物理保证的预编码偏序。
 
-    这个排序有明确物理含义——逐 RB 最优 ≥ 全带共用一个 W ≥ 码本量化 ≥ 单层波束。
-    顺序反了说明某个实现有问题。
+    硬关系是逐 RB SVD ≥ 宽带 SVD ≥ 受限码本。Type I 与本项目的 DFT
+    波束来自不同码本，且 RI/层数不同，二者没有全局全序；把 ``TypeI ≥ DFT``
+    写成门禁会把合法场景误报成物理错误。这里两者都与宽带 SVD 比，彼此只报数。
 
     样本数不足 ``_ORDERING_MIN_N`` 时只报数不判定：这时相邻档位的差距被抽样
     噪声淹没，判定结果没有意义。
@@ -517,8 +518,8 @@ def check_precoder_ordering(ds: Any, *, snr_db: float = 20.0, n: int = 24) -> Ch
         res[m] = monte_carlo(ch, snr_db=snr_db, method=m).se_mean
 
     order = ["svd", "svd_wideband", "type1", "dft"]
-    seq = [res[m] for m in order]
-    txt = " ≥ ".join(f"{m}({res[m]:.2f})" for m in order)
+    txt = (f"svd({res['svd']:.2f}) ≥ svd_wideband({res['svd_wideband']:.2f}) ≥ "
+           f"max[type1({res['type1']:.2f}), dft({res['dft']:.2f})]")
     if k < _ORDERING_MIN_N:
         return Check(
             "预编码性能排序", True,
@@ -526,13 +527,14 @@ def check_precoder_ordering(ds: Any, *, snr_db: float = 20.0, n: int = 24) -> Ch
             measured=[round(res[m], 3) for m in order],
             severity="info",
         )
-    ok = all(seq[i] >= seq[i + 1] - 1e-6 for i in range(len(seq) - 1))
+    ok = (res["svd"] >= res["svd_wideband"] - 1e-6
+          and res["svd_wideband"] >= max(res["type1"], res["dft"]) - 1e-6)
     return Check(
         "预编码性能排序",
         ok,
         f"{k} 个样本，实测 {txt} bit/s/Hz",
         measured=[round(res[m], 3) for m in order],
-        expected="单调不增",
+        expected="svd ≥ svd_wideband ≥ max(type1, dft)；type1 与 dft 无硬排序",
         tolerance="允许 1e-6 数值误差",
     )
 

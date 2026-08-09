@@ -83,13 +83,15 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="precoder_su",
             name="单用户预编码",
             stage="发射",
-            choice="SVD（逐 RB 取前 rank 个右奇异向量）",
-            formula="H^H = U Σ V^H  →  W = V[:, :rank]，总功率归一到 1 按流均分",
-            why="SVD 是理想上界，用来和码本方案对比。Type I 码本已做秩自适应"
-                "（38.214 的 Type I 反馈里 RI 和 PMI 是一起报的）。",
-            caveat="用 h_true 做 SVD 是上界；真实系统只有 h_est。两者的差就是 CSI 代价。",
-            source="38.214 §5.2.2（Type I 码本）",
-            alternatives=["svd_wideband", "dft", "type1（38.214 码本）", "mrt"],
+            choice="逐 RB 协方差特征预编码（代码名 svd）",
+            formula="R_f = E_t[H_tf H_tf^H] → W_f = eigvec_top(R_f)，总功率按流均分",
+            why="T=1 时它等价于瞬时 SVD 发射特征向量；T>1 时用功率协方差求一组"
+                "相位不敏感的静态权，不能先平均复信道。",
+            caveat="h_true 给的是理想 CSI 乐观参考，不等于 Shannon 容量上界；"
+                   "容量上界要单独用逐时频注水计算。当前 type1 是 Type-I-style"
+                   "列码本子集/贪心多层近似，不是完整矩阵码本枚举。",
+            source="本项目 linklevel.compute_precoder；38.214 §5.2.2 为码本边界参考",
+            alternatives=["svd_wideband", "dft", "type1（列码本近似）", "mrt"],
         ),
         Algorithm(
             key="rank_adaptation",
@@ -208,16 +210,15 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="experienced_throughput",
             name="体验速率口径",
             stage="系统级",
-            choice="掐尾（3GPP TS 28.552 §5.1.1.3）",
-            formula="Thp = (V_total − V_last) / (T_buffer_nonempty − T_last)",
-            why="**分母是缓冲区非空的时间，不是被调度的 TTI 数**——排队等调度的时间"
-                "也算在体验里，那正是调度器压力的体现。"
-                "掐尾是因为清空缓冲区的那个 TTI 通常只用了一部分。",
-            caveat="按被调度 TTI 数算过一次：12 个用户各报 583 Mbps、小区合计 8.2 Gbps，"
-                   "而 100 MHz 小区物理峰值约 1.2 Gbps——等于每个用户都被算成独享整个小区。"
-                   "另外**小区体验速率是各用户的平均不是求和**，用户是时分复用的。",
-            source="3GPP TS 28.552 §5.1.1.3；运营商话统另有掐头去尾口径",
-            alternatives=["none（不掐，虚高）", "head_tail（掐头去尾）"],
+            choice="profile 分离：legacy trim / experience_v2 DRB busy-period",
+            formula="large: (ΣACK pieces − final piece)/(T_penultimate_ACK − T_first_TX)；"
+                    "small: (TBVol−PaddingVol)/fractional-slot",
+            why="experience_v2 把标准 burst 吞吐、到首次调度的等待、每个 FIFO 到达对象"
+                "的完成时延/PDB 分开记录；同一个 DRB busy period 可合并多个到达对象。",
+            caveat="legacy_v1 才使用 trim。experience_v2 中 NACK 字节留在队列，下一次"
+                   "仍按 NewTx 判错；当前没有 HARQ 软合并。小区体验速率是用户均值而非求和。",
+            source="ETSI TS 28.552 V19.5.0；本项目 experience.py",
+            alternatives=["legacy_v1 trim", "experience_v2 fractional_slot", "exclude"],
         ),
         Algorithm(
             key="tx_rx_sinr",
@@ -238,12 +239,12 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="olla",
             name="OLLA 外环链路自适应",
             stage="系统级",
-            choice="ACK +0.01 dB / NACK −0.1 dB（现网基线）",
-            formula="稳态 BLER → step_up / (step_up + step_down) = 0.01/0.11 ≈ 9.1%",
+            choice="ACK +0.01 dB / NACK −0.09 dB（项目基线）",
+            formula="稳态 BLER → step_up / (step_up + |step_down|) = 0.01/0.10 = 10%",
             why="外环用 ACK/NACK 把发送端不知道的那部分干扰补偿掉。"
                 "步长比例决定稳态 BLER，绝对大小决定收敛速度。",
-            caveat="**步长小收敛很慢**：每次 NACK 只压 0.1 dB，而 MCS 是整数档，"
-                   "小步长常常压不动一档。8 秒仿真里 BLER 还停在 0.16~0.22 而不是 9.1%。"
+            caveat="**步长小收敛很慢**：每次 NACK 只压 0.09 dB，而 MCS 是整数档，"
+                   "小步长常常压不动一档。短仿真里 BLER 可能还未回到 10%。"
                    "要看稳态结论就加长时长；要快收敛就临时调大步长"
                    "（比例不变则稳态 BLER 不变）。未收敛时结果里会主动告警。",
             source="用户 2026-08-02 给的现网基线",
@@ -295,12 +296,11 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="harq",
             name="HARQ",
             stage="系统级",
-            choice="首传查 NewTx 曲线，失败后查 ReTx 曲线，最多 4 次",
-            why="表 3 的源数据每档 MCS 有一条 NewTx 和一条 ReTx 曲线，"
-                "合并增益体现在 ReTx 曲线本身更靠左。",
-            caveat="**没有真正的软合并（Chase/IR）**——那需要 LLR，而比特级链路"
-                "本项目明确不做。多次重传会复用同一条 ReTx 曲线，"
-                "结果里保留 harq_model=newtx_then_retx_curve_reused 标明这一点。",
+            choice="legacy_v1 用 NewTx/ReTx 曲线；experience_v2 用 NACK 留队后 NewTx 重试",
+            why="两个 profile 显式分开：前者保留历史可复现行为，后者先保证 FIFO 字节与"
+                "按需资源守恒，不虚构尚未实现的 HARQ 进程状态。",
+            caveat="两者都没有真正的 Chase/IR 软合并。experience_v2 的重试不应解释成"
+                "标准 HARQ；要研究重传增益必须新增进程号、RV/软缓冲与丢弃上限。",
             source="公司 20B 曲线；软合并不做是用户 2026-08-02 定的边界",
         ),
     ]

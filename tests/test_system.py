@@ -13,6 +13,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.stdout.reconfigure(errors="replace")
 
+from superwireless import bler_curves as bc  # noqa: E402
+from superwireless import experience as expm  # noqa: E402
 from superwireless import mumimo as mu  # noqa: E402
 from superwireless import system as sysm  # noqa: E402
 
@@ -249,6 +251,11 @@ check(len(_g["per_snapshot"]) >= 2, "多个快照各测一次")
 check("标量近似" in _g["note"], "把这是个近似说清楚了")
 check("relative_spread" in _g, "离散度一起返回——它就是这个近似的可信度")
 
+_g_bad = sysm.measure_mu_gain(_hm[:1], [15.0], max_mu_users=4)
+check(_g_bad["measured"] is False, "单用户时 MU 增益明确标成未测得")
+check(bool(_g_bad.get("errors")), "MU 配对失败返回可审计错误，而不是静默吞掉")
+check("禁止用于仿真" in _g_bad["note"], "诊断占位 1.0 不冒充可用 MU 增益")
+
 # 比值 <= 1 时调度器不该切 MU（SU 无干扰且可到 rank4）
 _r_su = sysm.simulate(_T, sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=12),
                       traffic=sysm.TrafficConfig(model="full_buffer"),
@@ -348,6 +355,20 @@ check('_bler_lookup(m, float(tables[u].sinr_db[snap, r - 1]), "retx")' in _src,
 check('_bler_lookup(int(tables[u].mcs[snap, r - 1]),' not in _src,
       "旧的错误写法（拿理想档查重传）已经不在了")
 
+# --- bug D：公司 BLER 源曲线是 0.05 dB 网格，缓存不能粗化成 0.5 dB ---
+# MCS15 在 14.24 dB 的细网格值是 14.25 dB/2.53%，旧 0.5 dB 路径会取
+# 14.0 dB/13.2%，ACK/NACK 概率差五倍，不是可忽略的性能优化。
+_x_bler = 14.24
+_curve15 = bc.get_curve(15, "newtx")
+_want_bler = float(_curve15.evaluate(14.25)[0])
+_coarse_bler = float(_curve15.evaluate(14.0)[0])
+check(abs(sysm._bler_lookup(15, _x_bler) - _want_bler) < 1e-12,
+      "legacy 系统 BLER 缓存保持公司曲线 0.05 dB 分辨率")
+check(abs(expm._bler_lookup(15, _x_bler) - _want_bler) < 1e-12,
+      "experience_v2 BLER 缓存保持公司曲线 0.05 dB 分辨率")
+check(abs(_coarse_bler - _want_bler) > 0.05,
+      "反向哨兵：旧 0.5 dB 量化在瀑布区确会造成显著概率偏差")
+
 # --- bug B：S 时隙的 RE 与 dl_ratio 必须用同一个系数 ---
 check(abs(sysm.S_SLOT_DL_FRACTION - 0.7) < 1e-9, "S 时隙折合系数 0.7")
 check("_re_of[_slot]" in _src, "主循环按时隙类型取 RE，不是所有时隙一个数")
@@ -412,6 +433,147 @@ check("不驱动仿真" in _hint,
 # **既有的那条 PRB 利用率告警曾经在给错建议**（让人去调 p_idle_tti 对齐现网）
 check("别指望调 p_idle_tti" in _hint or "p_idle_tti 或把中间段" not in _hint,
       "PRB 利用率告警不再建议去调那个不起作用的旋钮")
+
+# ---------------------------------------------------------------------------
+sect("12  experience_v2：DRB busy-period、按需 RBG 与 Rel-19 小 burst")
+# ---------------------------------------------------------------------------
+
+# --- TBS 表：D/S × 28 MCS × rank1..4 × 17 RBG，反查必须给最小够用值 ---
+_lut = expm.TbsLookup.build(17, 16, sysm.S_SLOT_DL_FRACTION)
+check(_lut.values.shape == (2, 28, 4, 17),
+      f"TBS 表覆盖 D/S、28 MCS、rank1..4、17 RBG（实得 {_lut.values.shape}）")
+check(bool(np.all(np.diff(_lut.values, axis=-1) > 0)),
+      "全部 224 条 D/S×MCS×rank 序列严格递增")
+_minimal = True
+for _slot in ("D", "S"):
+    for _m in range(28):
+        for _rank in range(1, 5):
+            _row = _lut.row(_slot, _m, _rank)
+            for _n, _bytes in enumerate(_row, start=1):
+                _got, _fits = _lut.required_rbg(_slot, _m, _rank, int(_bytes))
+                _minimal &= _fits and _got == _n
+check(_minimal, "searchsorted 对每个表项都返回最小够用 RBG")
+_m12 = _lut.row("D", 12, 2)
+_nonlinear = float(_m12[-1] / (17 * _m12[0]) - 1.0)
+check(abs(_nonlinear - 0.011193141224100867) < 1e-9,
+      f"MCS12/rank2 的 17 RBG TBS 比线性外推高 1.119%（实得 {_nonlinear:.3%}）")
+
+# --- busy period 是 buffer 空→非空→空；期间新 arrival 合并，不按 file 硬切 ---
+_cls = sysm.TrafficClassConfig("small", 1.0, 100, 1.0, pdb_ms=10.0, is_small=True)
+_q = expm.DrbQueue(0, _cls)
+_q.arrive(0, 100)
+_first_obj = _q.active
+_q.arrive(1, 50)
+check(_q.active is _first_obj and _q.active.bytes_arrived == 150,
+      "非空期间的新文件并入同一个 DRB busy period")
+_q.transmit(2, 80, 60, ack=True)
+_q.transmit(4, 100, 90, ack=True)
+check(_q.active is None and len(_q.done) == 1 and _q.done[0].bytes_acked == 150,
+      "buffer 重新变空时才结束 busy period，ACK 字节完整")
+check(len(_q.done_items) == 2
+      and expm.arrival_item_metrics(_q.done_items[0], 0.5, 10.0) == (1.0, 2.5, False)
+      and expm.arrival_item_metrics(_q.done_items[1], 0.5, 10.0) == (1.5, 2.0, False),
+      "busy period 内每个 FIFO 到达对象单独记录首调度等待、完成时延与 PDB")
+
+# --- 28.552 large burst：首传起算，排除清空 buffer 的最后一段 ---
+_bp = expm.BusyPeriod(start_tti=0, traffic_class="large", pdb_ms=10,
+                      bytes_arrived=350, bytes_acked=350,
+                      first_tx_tti=2, last_ack_tti=7, tx_attempts=3,
+                      ack_events=[expm.AckEvent(2, 100, 100, 0),
+                                  expm.AckEvent(4, 200, 200, 0),
+                                  expm.AckEvent(7, 50, 100, 50)])
+_bm = expm.burst_metrics(_bp, 0.5)
+check(abs((_bm.throughput_mbps or 0) - 1.6) < 1e-9,
+      f"large burst 用首传→倒数第二 ACK 的 300 B/1.5 ms（实得 {_bm.throughput_mbps} Mbps）")
+check(_bm.queue_wait_ms == 1.0 and _bm.completion_delay_ms == 4.0,
+      "排队等待与 arrival→completion 时延单独上报，不混进标准吞吐")
+
+# --- Rel-19 小 burst：有效时间按 payload/TBVol 折成 slot 的一部分 ---
+_sp = expm.BusyPeriod(start_tti=3, traffic_class="small", pdb_ms=1,
+                      bytes_arrived=250, bytes_acked=250,
+                      first_tx_tti=3, last_ack_tti=3, tx_attempts=1,
+                      ack_events=[expm.AckEvent(3, 250, 1000, 750)])
+_sm = expm.burst_metrics(_sp, 0.5, "fractional_slot")
+check(abs((_sm.throughput_mbps or 0) - 16.0) < 1e-9
+      and _sm.throughput_kind == "rel19_fractional_slot",
+      f"小 burst 250/1000 TB 折成 0.125 ms，吞吐 16 Mbps（实得 {_sm.throughput_mbps}）")
+check(expm.burst_metrics(_sp, 0.5, "exclude").throughput_mbps is None,
+      "可显式保留旧式 exclude 口径，但不再声称小 burst 永远不可测")
+
+# --- 真正跑 experience_v2：一 TTI 多 UE、实际 RBG、scheduled-TBS PF、守恒 ---
+_ex_cfg = sysm.SystemConfig(evaluation_mode="experience", duration_s=0.8,
+                            seed=41, tdd_pattern="DDDSU")
+_ex_tr = sysm.TrafficConfig(model="mixed", small_ue_share=1.0,
+                            small_file_bytes=500, small_arrival_rate_hz=200.0,
+                            arrival_rate_hz=0.0)
+_ex = sysm.simulate(
+    _T, sys_cfg=_ex_cfg, traffic=_ex_tr,
+    sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False,
+                               pf_accounting="auto"),
+    kpi=sysm.KpiConfig(warmup_tti=0, small_burst_policy="fractional_slot"))
+check(_ex.config["system"]["model_version"] == "experience_v2"
+      and _ex.cell["pf_accounting"] == "scheduled_tbs",
+      "模式与 PF 口径显式版本化：experience_v2 / scheduled_tbs")
+check(_ex.diagnostics["tbs_lookup"]["entries"] == 3808,
+      "结果携带实际使用的 3808 项 TBS 表口径")
+check("[TTI,UE]" in _ex.diagnostics["crn_event_mapping"],
+      "ACK/NACK 与 tie-break 随机数按 [TTI,UE] 固定映射，A/B 调度分叉不串流")
+check(_ex.diagnostics["rbg_overlap_violations"] == 0
+      and _ex.diagnostics["max_rbg_in_any_tti"] <= 17,
+      "同 TTI RBG 不重叠且总分配不超过 17")
+check(_ex.cell["multi_ue_tti_share"] > 0,
+      f"按需分配后同一 TTI 确实能服务多个 UE（占比 {_ex.cell['multi_ue_tti_share']:.1%}）")
+check(_ex.cell["accounting_error_pct"] < 1e-9,
+      f"experience 字节守恒：arrived=acked+queued（误差 {_ex.cell['accounting_error_pct']}%）")
+check(_ex.cell["small_burst_fractional_mbps"] is not None,
+      "单 TTI 小 burst 用 Rel-19 fractional-slot KPI 得到可测样本")
+check(_ex.cell["small_queue_wait_ms_p95"] is not None
+      and _ex.cell["completed_arrival_objects"] > 0
+      and _ex.cell["class_arrival_kpis"]["small"]["is_small"],
+      "小包 FIFO 到达对象的等待/PDB 与 DRB busy-period 吞吐分层统计")
+check("small 到达对象等待 P95" in _ex.text(),
+      "experience_v2 单次结果摘要使用体验模式字段，不访问 legacy 专属字段")
+check(_ex.cell["resource_utilization"] <= _ex.cell["occupancy"] + 1e-12,
+      "resource utilization 与 busy-TTI occupancy 分开，不用 padding 伪装满带")
+_partial = [a for a in _ex.diagnostics["allocation_sample"] if a["n_rbg"] < 17]
+check(bool(_partial) and all(a["pf_credit_bytes"] == a["scheduled_bytes"] for a in _partial),
+      "只拿部分 RBG 的 UE 按实际 scheduled TBS 记 PF，不按全带记账")
+_by_tti: dict[int, set[int]] = {}
+_sample_overlap = False
+for _a in _ex.diagnostics["allocation_sample"]:
+    _seen = _by_tti.setdefault(_a["tti"], set())
+    _sample_overlap |= bool(_seen.intersection(_a["rbg_indices"]))
+    _seen.update(_a["rbg_indices"])
+check(not _sample_overlap, "allocation 明细中的 RBG bitmap 也逐 TTI 无重叠")
+
+# 反向控制只验证“口径真的错开”，不把收益方向写成单测硬门禁。
+_wrong = sysm.simulate(
+    _T, sys_cfg=_ex_cfg, traffic=_ex_tr,
+    sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False,
+                               pf_accounting="legacy_fullband"),
+    kpi=sysm.KpiConfig(warmup_tti=0))
+_wrong_partial = [a for a in _wrong.diagnostics["allocation_sample"] if a["n_rbg"] < 17]
+check(bool(_wrong_partial)
+      and any(a["pf_credit_bytes"] > a["scheduled_bytes"] for a in _wrong_partial),
+      "反向控制 legacy_fullband 确实会给部分带宽用户按全带记账；效果方向留给门3")
+
+# legacy 路径保持独立；不允许跨模式参数静默退化。
+check(sysm.SystemConfig().as_dict()["model_version"] == "legacy_v1",
+      "默认 capacity 路径仍标 legacy_v1，历史结果可复现")
+try:
+    sysm.simulate(_T, sys_cfg=sysm.SystemConfig(evaluation_mode="experience"),
+                  traffic=sysm.TrafficConfig(model="mixed"),
+                  sched=sysm.SchedulerConfig(mu_enabled=True))
+    check(False, "experience_v2 开 MU 时硬报错")
+except ValueError as _e:
+    check("只支持 SU" in str(_e), f"experience_v2 开 MU 时硬报错（{_e}）")
+try:
+    sysm.simulate(_T, sys_cfg=sysm.SystemConfig(evaluation_mode="experience"),
+                  traffic=sysm.TrafficConfig(model="bimodal"),
+                  sched=sysm.SchedulerConfig(mu_enabled=False))
+    check(False, "experience_v2 拒绝按目标 RBG 反推包长")
+except ValueError as _e:
+    check("请用 mixed" in str(_e), f"experience_v2 拒绝因果倒置的 bimodal（{_e}）")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)

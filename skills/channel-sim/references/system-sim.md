@@ -3,7 +3,7 @@
 **什么时候读这一份**：主文件「第 5 段」里的旋钮不够用、要解释某个 KPI
 是怎么算的、要调话务或邻区负载、或者 `notes` 报了一条你不确定怎么处理的。
 
-主文件里已经写死的三条不在这里重复：**每 UE 要 ≥8 个快照**、
+主文件里已经写死的三条不在这里重复：**每 UE 要 ≥8 个快照**（可由多个单时隙样本组成）、
 **`cell` 与 `users` 两级都要看**、**`notes` 逐条转述**。
 
 ## 完整签名
@@ -11,9 +11,14 @@
 ```python
 sw_system_sim(
     dataset_id,
-    duration_s=5.0, traffic_model="ftp3", file_bytes=500_000, arrival_rate_hz=2.0,
-    scheduler="pf", pf_window_tti=100, mu_enabled=False,
-    trim="tail", tdd_pattern="DDDSU",
+    evaluation_mode="capacity", duration_s=5.0,
+    traffic_model="ftp3", file_bytes=500_000, arrival_rate_hz=2.0,
+    small_ue_share=0.5, small_file_bytes=1_500, small_arrival_rate_hz=20.0,
+    small_pdb_ms=20.0, large_pdb_ms=300.0,
+    scheduler="pf", pf_window_tti=100, pf_accounting="auto",
+    qos_avg_rate_exponent=1.0, qos_instant_rate_exponent=1.0,
+    qos_delay_exponent=0.0, qos_priority_weighting="none", mu_enabled=False,
+    trim="tail", small_burst_policy="fractional_slot", tdd_pattern="DDDSU",
     neighbor_prb_util=0.3, neighbor_load_jitter=0.05,
     csi_aging=True, srs_period_ms=10.0, srs_hopping=True,
     csi_processing_delay_ms=2.0,
@@ -21,8 +26,17 @@ sw_system_sim(
 )
 ```
 
-主循环里**没有任何矩阵运算**，全是查表加算术——所以 40000 个 TTI 只要 0.2 秒。
-矩阵运算集中在 `build_link_tables` 建表那一相。
+## 先选模式：`capacity` 与 `experience`
+
+| `evaluation_mode` | 版本 | 调度/资源 | 失败包 | KPI 边界 | 用途 |
+|---|---|---|---|---|---|
+| `capacity` | `legacy_v1` | 历史全带口径，单次选择一个 SU（或标量 MU 近似） | NewTx 后复用 ReTx BLER 曲线，最多 4 次 | `trim=none/tail/head_tail` | 复现旧结果、满缓冲容量、公平性 |
+| `experience` | `experience_v2` | TBS 反查最小 RBG，同 TTI 可排多个 UE，尾料可留空 | NACK 字节留在 FIFO，下次仍按 NewTx 判错；无软合并/进程时序 | DRB busy-period + FIFO 到达对象；小 burst 可按 fractional slot | 大小包混跑、等待/PDB、按需分配 |
+
+两者是**两个评估 profile**，不是一个算法的快慢档。`experience_v2` 首版只支持 SU；
+`mu_enabled=True` 会硬报错。主循环都不做矩阵运算，矩阵运算集中在
+`build_link_tables` 建表相；体验模式多了逐 TTI 的 FIFO 与 RBG 分配，因此旧版的
+“40000 TTI 只要 0.2 秒”不能当成它的性能承诺。
 
 ## 重复实验与置信区间 `num_replications` / `seed`
 
@@ -56,8 +70,8 @@ sw_system_sim(
 
 ### 随机流是分开的
 
-`rng.STREAMS` 把随机数按用途分流：`channel`（生成与撒点）/ `traffic`（FTP3 泊松到达、
-bimodal 的 RBG 尺寸抽样）/ `scheduler`（度量打平时的随机决胜）/ `harq`（ACK/NACK 伯努利）
+`rng.STREAMS` 把随机数按用途分流：`channel`（生成与撒点）/ `traffic`（FTP3/mixed 泊松到达、
+legacy bimodal 的 RBG 尺寸抽样）/ `scheduler`（度量打平时的随机决胜）/ `harq`（ACK/NACK 伯努利）
 / `neighbor_load`（邻区利用率逐快照抖动）。
 
 **分流的好处非常具体**：改话务模型不会连带改变信道实现，A/B 才是受控的。
@@ -100,7 +114,7 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
 
 ### 区间覆盖什么、不覆盖什么
 
-各次重复共用**同一批信道与同一张链路表**，所以 `ci95` 覆盖的是**话务到达、HARQ 误码、
+各次重复共用**同一批信道与同一张链路表**，所以 `ci95` 覆盖的是**话务到达、ACK/NACK 抽样、
 调度决胜**这三条流。返回里的 `rng.covered_by_ci` / `not_covered_by_ci` / `ci_scope`
 把这件事显式写出来——**别把它当成"全部不确定度"**。
 
@@ -130,7 +144,8 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
 | 取值 | 是什么 | 什么时候用 |
 |---|---|---|
 | `ftp3` | 3GPP FTP Model 3，泊松到达的固定大小文件 | **默认**，评价体验速率的标准话务 |
-| `bimodal` | 现网话务两头高中间低：约 30% 只占 1 个 RBG 的小包、约 30% 占满全带宽、约 30% 的 TTI 根本没调度 | 要贴现网 PRB 利用率（约 30%）时 |
+| `mixed` | 一部分 UE 发 1500 B 小文件，另一部分 UE 发大文件；包长和到达率都是外生量 | **experience_v2 推荐**，验证“小包不再偷走整个 TTI” |
+| `bimodal` | legacy_v1 按目标 RBG 数反推包长的历史模型 | 只复现旧结果；experience_v2 因因果倒置会拒绝 |
 | `full_buffer` | 缓冲区永不空 | 只看容量上限。**体验速率在这个模型下没有意义** |
 | `cbr` | 恒定比特率 | 固定码率业务 |
 
@@ -138,19 +153,28 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
 返回的 `config.traffic.offered_load_mbps_per_ue` 直接给出每用户提供负载。
 **太高会积压**，`notes` 会拦（`backlog_bytes > 15%` 的到达量时报出来）。
 
-`bimodal` 是按**占用 RBG 数**分布，不是按文件大小。它的小包与大包体验速率
-分开报（`small_pkt_experienced_mbps` / `large_pkt_experienced_mbps`）；
-**小包的体验速率经常测不出来**——一个 TTI 就发完，3GPP 掐尾口径下没有可测量
-的时间。这不是 bug，是这个 KPI 的固有盲区，现网话统里同样测不到。
+`mixed` 由 `small_ue_share`、`small_file_bytes`、`small_arrival_rate_hz` 和大文件侧
+`file_bytes`、`arrival_rate_hz` 定义。大小 UE 的类别在仿真开始前固定，不由信道好坏或
+目标 RBG 数反推。只有大小混跑才有可识别的资源共享效应：全大包时每人仍要全带；
+全小包时没有大包体验可比较。
 
-## KPI 口径 `trim` / `warmup`
+## KPI 口径：legacy `trim` 与 experience busy-period
 
-- `trim="tail"`（默认）：排除清空缓冲区的最后一个 slice，时间与数据同时扣
-  （3GPP TS 28.552 §5.1.1.3）
-- `trim="head_tail"`：再排掉首个 TTI，运营商话统常用口径
-- `trim="none"`：不掐，数值虚高，不建议
-- 短于 `min_burst_tti=2` 的 burst 不计入；前 `warmup_tti=200` 个 TTI 不计入
-  （PF 的滑动均值要先收敛）
+`legacy_v1` 才读取 `trim`：`tail` 扣清空缓冲区的末 slice，`head_tail` 还把起点挪到
+首次调度，`none` 不扣。这是历史实现，用于复现，不再冒充 Rel-19 的唯一口径。
+
+`experience_v2` 忽略 `trim` 的数值作用，改用事件记录器：
+
+1. buffer 从空变非空创建 DRB busy period，之后到达的数据合并，直到 ACK 后重新为空。
+2. 大 burst 的标准吞吐时间从**第一次传输**开始，末端排除最终让 buffer 变空的 ACK piece；
+   从到达到首传的 queue wait 单独上报。
+3. 如果所有 buffered data 在一次初传 TB 内送完，`small_burst_policy="fractional_slot"`
+   用 `(TBVol-PaddingVol)/TBVol × slot` 折算有效时长；`exclude` 可显式保留旧式盲区。
+4. 每个 FTP/mixed 文件还是一个独立 FIFO arrival object，分别记录 first-schedule wait、
+   completion delay 与 PDB miss；一个 DRB busy period 可以包含多个 arrival object。
+
+因此 `small_queue_wait_ms_p95` / `small_completion_delay_ms_p95` /
+`small_pdb_miss_ratio` 与 busy-period throughput 是不同层级的指标，不能互换。
 
 **换口径数字会明显变，所以报数时必须带上用的是哪个 trim。**
 
@@ -191,12 +215,19 @@ ChannelHub 的几何 SINR 是按**所有邻区都在发**算出来的，等于 1
 ## 调度与 OLLA
 
 `scheduler="pf"` 比例公平，度量 `R_inst / R_avg`，`R_avg` 按 `pf_window_tti=100`
-的指数窗更新。窗太小接近 max-C/I（只喂近点用户），太大接近轮询（不利用信道起伏）。
+的指数窗更新。`legacy_v1` 的 `R_inst` 是历史全带 `best_se`；`experience_v2` 的默认
+`pf_accounting="scheduled_tbs"` 是这次实际分配的 TBS/TTI。**部分带宽 UE 若仍按全带
+记账，会让它的 PF 平均速率虚高最多约 17 倍，随后被错误饿死。**
+
+`scheduler="qos_pf"` 使用显式参数
+`w(priority) * R_inst^beta / R_avg^alpha * delay_factor^gamma`。默认
+`alpha=beta=1, gamma=0, w=1` 严格退化经典 PF；这只是参数化 QoS-PF，**不冒充尚未确认
+厂商定义的 EPF**。
 
 **基站按陈旧 CSI 选 rank 和调度**（`best_se_gnb`），不是按真实 SINR——
 拿真实 SINR 挑 rank 等于让基站预知信道，老化损失会被凭空抹掉一大半。
 
-OLLA 步长默认 **+0.01 / −0.09**，稳态 BLER = `up/(up+down)` = 正好 10%。
+OLLA 步长默认 ACK **+0.01**、NACK **−0.09**，稳态 BLER = `up/(up+down)` = 正好 10%。
 （现网口头常说的 −0.1 对应的是 9.09%。）
 **稳态与步长绝对值无关**，所以 `olla_speedup` 等比放大只改收敛速度与稳态抖动：
 实测 k=1 时 8 秒内 IBLER 还停在 0.394、k=20 收敛到 0.100，而体验速率
@@ -221,11 +252,16 @@ OLLA 步长默认 **+0.01 / −0.09**，稳态 BLER = `up/(up+down)` = 正好 10
 自适应因此全程选 SU。**这不是 bug**：SU 无干扰且能到 rank4，MU 硬顶 rank2
 且每人只分 1/K 功率，自由度富余时 SU 本来就该赢。
 
+若所有快照都配对失败，接口会返回硬错误和逐快照 `errors`，**不会再把 ratio=1.0
+当成成功结果继续跑**。此外 `experience_v2` 当前禁止 MU；上面这段只适用于 legacy_v1。
+
 ## 发射权 `precoder`
 
-- `svd`（默认）：逐 RBG 特征波束，理论最优
-- `type1`：用 38.214 Type I 宽带码本当发射权。码本自由度少，**在 CSI 老化下
-  反而可能更耐受**——能算错的地方也少。`type1` 时 BF Gain 恒为 0
+- `svd`（默认）：逐 RBG 协方差特征波束。单快照时等价于瞬时 SVD；多快照时是
+  `E[HHᴴ]` 上的一组静态权，**不是逐时隙 Shannon 容量上界**。
+- `type1`：Type-I-style 单面板宽带**列码本子集近似**。过采样 DFT/双极化列来自
+  Type-I 结构，多层用增量贪心列选择，尚未枚举 38.214 完整多层矩阵码本。码本自由度少，
+  在 CSI 老化下可能更耐受。`type1` 时 BF Gain 恒为 0
   （发射权就是 CQI 的参照权）
 
 CQI 的参照权始终是 `type1_wideband`，返回的 `precoder` 块会写明两者。
@@ -247,7 +283,7 @@ CQI 的参照权始终是 `type1_wideband`，返回的 `precoder` 块会写明�
 | 有效 IoT 用户 < 90% | 多半是 `num_slots_per_sample > 1` 导致 SIR 与 SINR 口径不同 |
 | IoT 中位 < 3 dB | 几乎是噪声受限，检查站间距或邻区负载 |
 | `bimodal` PRB 利用率偏离 30% | 折合负载和现网口径对不上 |
-| `bimodal` 小包体验速率为 None | 掐尾口径下单 slice burst 没有可测量的时间，固有盲区 |
+| legacy `bimodal` 小包体验速率为 None | legacy 掐尾口径下单 slice burst 没有可测量时间；experience 可改用 fractional slot |
 | `outage_ue > 0` | 有用户全程够不到 MCS 0 的门限，已从调度剔除——**这本身就是结论** |
 | 占用率 > 98% | 已过载，此时体验速率反映的是容量上限而不是用户体验 |
 | `olla_speedup != 1.0` | 步长被放大，稳态抖动更大，出正式结论要设回 1.0 |

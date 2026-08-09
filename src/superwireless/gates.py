@@ -524,6 +524,17 @@ def gate_conclusion(
        该报的是区间，不是点估计。
     """
     items: list[GateItem] = []
+    n_required = required_samples(paired.std_diff, abs(paired.mean_diff))
+    if n_required > 0:
+        ci_fix = (
+            f"加样本。当前 n={paired.n}，要让区间不跨零至少需要 "
+            f"{n_required} 个"
+        )
+    else:
+        ci_fix = (
+            "点估计差为 0，样本量公式不适用；若这是守恒/等价性检查，"
+            "请按不变量报告，不作方向性显著结论"
+        )
 
     items.append(
         GateItem(
@@ -531,9 +542,7 @@ def gate_conclusion(
             paired.ci_excludes_zero,
             f"差值均值 {paired.mean_diff:+.4f}，95% CI [{paired.ci_low:+.4f}, {paired.ci_high:+.4f}]"
             + ("" if paired.ci_excludes_zero else " —— 跨零，方向都不能确定"),
-            fix=f"加样本。当前 n={paired.n}，"
-            f"要让区间不跨零至少需要 "
-            f"{required_samples(paired.std_diff, abs(paired.mean_diff)) if paired.mean_diff else -1} 个",
+            fix=ci_fix,
         )
     )
 
@@ -837,26 +846,34 @@ def compare_arms(
     n = min(int(h_true.shape[0]), int(max_samples))
     intf = ds.h_interferers
 
-    # 不指定信噪比时用数据集自身逐样本的 SINR——那是这批信道真实的工作点。
+    # 不指定信噪比时用数据集自身逐样本的几何 SINR——但它已经包含服务波束
+    # 阵列增益，必须先锚到 rank-1 σ1²，不能当预波束 SNR 再叠一次 SVD 增益。
     # 强行给一个统一的 snr_db 会把不同位置的用户拉到同一工作点，
     # 抹掉场景本身的差异，也让"边缘用户"这类结论无从谈起。
-    sinr_per_sample = (
-        None if snr_db is not None else np.asarray(ds.sinr_dB, dtype=float)
-    )
-
     def run(arm: dict[str, Any]) -> np.ndarray:
         use_est = str(arm.get("csi", "ideal")) == "estimated"
         out = np.empty(n, dtype=float)
         for i in range(n):
             hi = h_true[i]
-            s = snr_db if snr_db is not None else float(sinr_per_sample[i])
+            op_kw: dict[str, Any]
+            if snr_db is None:
+                op = ds.geometric_impairment(i)
+                op_kw = {
+                    "noise_power": op.noise_power,
+                    "interference_cov": op.interference_cov,
+                    "operating_point": op.as_dict(),
+                }
+            else:
+                op_kw = {
+                    "snr_db": float(snr_db),
+                    "h_interferers": (intf[i] if intf is not None else None),
+                }
             out[i] = link_performance(
                 hi,
-                snr_db=s,
                 method=arm.get("method", "svd"),
                 receiver=arm.get("receiver", "mmse"),
                 h_for_precoding=(h_est[i] if use_est else None),
-                h_interferers=(intf[i] if intf is not None else None),
+                **op_kw,
             ).spectral_efficiency
         return out
 

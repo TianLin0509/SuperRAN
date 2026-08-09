@@ -65,29 +65,32 @@ def _precoder_su() -> Family:
         stage="发射",
         current="svd",
         config_key="precoder",
-        intro="把要发的几条流映射到多个发射天线上。SVD 是理想上界，码本是真实系统能做到的。",
-        formula=r"H^H = U \Sigma V^H, \quad W = V[:, 1{:}r]",
-        caveat="用 h_true 做 SVD 得到的是**上界**，真实系统只有 h_est。"
-               "两者的差就是 CSI 反馈的代价——这正是 CSI 类课题的落点。",
-        source="38.214 §5.2.2（Type I 码本）",
+        intro="把要发的流映射到发射端口。代码名 svd 的实现是协方差特征波束；"
+              "单快照时等价瞬时 SVD，多快照时是一组静态权。",
+        formula=r"R_f=E_t[H_{tf}H_{tf}^H], \quad W_f=\operatorname{eigvec}_{1:r}(R_f)",
+        caveat="用 h_true 是理想 CSI 乐观参考，但**不是 Shannon 容量上界**；"
+               "真正上界由逐时频注水容量单独给出。",
+        source="本项目 linklevel.compute_precoder；38.214 §5.2.2（码本边界）",
         options=[
-            Option("svd", "SVD（奇异值分解）",
-                   formula=r"W = V[:, 1{:}r], \quad \text{每流功率} = P/r",
-                   summary="取信道的前 r 个右奇异向量，理论最优",
-                   detail="逐 RB 做 SVD，取前 rank 个右奇异向量。"
-                          "**这是上界，不是可实现性能**——它要求发送端知道完整的瞬时信道。",
-                   when="要一个理想上界做对照",
+            Option("svd", "逐 RB 协方差特征预编码",
+                   formula=r"W_f = \operatorname{eigvec}_{1:r}(E_t[H_{tf}H_{tf}^H])",
+                   summary="T=1 等价瞬时 SVD；T>1 为相位不敏感的静态协方差波束",
+                   detail="每 RB 对时间样本的功率协方差做特征分解，不能先平均复信道。"
+                          "理想 CSI 时是乐观参考，但不等于逐时隙最优或容量上界。",
+                   when="要一个理想 CSI 特征波束参考",
                    cost="逐 RB 一次 SVD"),
             Option("svd_wideband", "宽带 SVD",
                    summary="全带宽共用一组预编码，而不是逐 RB 各算各的",
                    detail="更接近真实系统（反馈开销受限），比逐 RB SVD 低一些。",
                    when="要看宽带预编码的损失",
                    cost="一次 SVD"),
-            Option("type1", "Type I 码本（38.214）",
+            Option("type1", "Type-I-style 列码本近似",
                    formula=r"W \in \mathcal{W}_{DFT}, \quad "
                            r"(i_{1,1}, i_{1,2}, i_2) \to W",
                    summary="从 DFT 波束码本里选一个，**含秩自适应**",
-                   detail="38.214 的 Type I 反馈里 RI 和 PMI 是一起报的，"
+                   detail="列集合采用 Type-I 单面板的过采样 DFT/双极化结构；"
+                          "多层用增量贪心选列，**尚未枚举 38.214 完整多层矩阵码本**。"
+                          "38.214 的 Type I 反馈里 RI 和 PMI 是一起报的，"
                           "所以码本方案必须做秩自适应——早期版本把秩硬定成 max_rank，"
                           "在低秩信道上会输给 rank-1 的 DFT 波束，"
                           "看起来像「码本不如单波束」，其实是没做秩自适应。",
@@ -107,9 +110,9 @@ def _precoder_su() -> Family:
         ],
         flow=Flow(steps=[
             ("取用于预编码的信道", "h_true（上界）或 h_est（真实系统）——**这一步决定结论性质**"),
-            ("逐 RB 做 SVD", "H^H = U Σ V^H"),
+            ("逐 RB 构造功率协方差", "R_f = E_t[H_tf H_tf^H]，相位翻转不会相消"),
             ("秩判决", "按奇异值门限决定开几流（码本方案也必须做，不能硬定）"),
-            ("取前 rank 个右奇异向量", "W = V[:, :rank]"),
+            ("取前 rank 个发射端特征向量", "W = eigvec_top(R_f)"),
             ("功率归一", "总功率 P=1 在 rank 条流上均分"),
         ], branches=[(1, "用的是 h_est", "预编码不再匹配真实信道，损失即 CSI 代价")]),
     )
@@ -206,33 +209,40 @@ def _exp_thp() -> Family:
         key="experienced_throughput",
         name="体验速率口径",
         stage="系统级",
-        current="tail",
-        config_key="trim",
-        intro="**这是现网真正上报的 KPI，也是最容易算错的一个。** "
-              "它不是吞吐量的平均，只在有数据要发的那段时间里算，而且要掐头去尾。",
-        formula=r"Thp = \frac{V_{total} - V_{last}}{T_{buffer \neq \emptyset} - T_{last}}",
-        caveat="**分母是一段时间，不是被调度的 TTI 数。** 按后者算过一次，"
-               "12 个用户各报 583 Mbps、小区合计 8.2 Gbps——"
-               "而 100 MHz 小区物理峰值约 1.2 Gbps，等于每个用户都被算成独享整个小区。"
-               "另外**小区体验速率是各用户的平均不是求和**，用户是时分复用的。",
-        source="3GPP TS 28.552 §5.1.1.3",
+        current="experience_v2",
+        config_key="evaluation_mode",
+        intro="先分 profile：legacy_v1 的 trim 只为复现；experience_v2 用 DRB busy-period"
+              "事件与 FIFO 到达对象，二者不是同一 KPI 的精度开关。",
+        formula=(r"Thp_{large}=\frac{\sum V_{ACK}-V_{final}}{T_{penultimateACK}-T_{firstTX}},\quad "
+                 r"T_{small}=\frac{TBVol-PaddingVol}{TBVol}T_{slot}"),
+        caveat="**标准 burst 吞吐、到首次调度等待、arrival→completion 与 PDB miss"
+               "分层上报。** 小区体验速率是用户均值而非求和。experience_v2 的"
+               "NACK 字节留队但不做 HARQ 软合并。",
+        source="ETSI TS 28.552 V19.5.0；本项目 experience.py",
         options=[
-            Option("tail", "掐尾（3GPP 标准口径）",
+            Option("experience_v2", "DRB busy-period + fractional small burst",
+                   formula=r"buffer: empty\to nonempty\to empty",
+                   summary="大 burst 排除末 ACK piece；小 burst 用 TB padding 比例折时长",
+                   detail="排队等待单独从 arrival 到 first TX 计算；每个文件是一个 FIFO"
+                          "arrival object，即使多个文件落在同一 busy period 也各自算"
+                          "等待、完成时延和 PDB。",
+                   when="按需 RBG 与大小包混跑",
+                   cost="逐 TTI FIFO + RBG 分配",
+                   source="TS 28.552 V19.5.0"),
+            Option("tail", "legacy 掐尾（仅复现）",
                    formula=r"V \leftarrow V - V_{last}, \quad T \leftarrow T - T_{last}",
-                   summary="排除清空缓冲区的最后一个 slice",
-                   detail="那个 TTI 通常只用了一部分就把数据发完，算进去等于用"
-                          "半个 TTI 的时间去除半个 TTI 的数据，得到虚高的瞬时速率。"
-                          "**单 slice 的 burst 因此完全无法测量**——小包测不到体验速率"
-                          "不是 bug，是这个 KPI 的固有盲区。",
-                   when="对标 3GPP / 标准话统",
+                   summary="历史实现，排除清空缓冲区的末 slice",
+                   detail="只在 evaluation_mode=capacity 的 legacy_v1 生效；不再冒充"
+                          "Rel-19 唯一标准口径。单 slice 小包会不可测。",
+                   when="复现旧结果",
                    cost="零",
-                   source="TS 28.552 §5.1.1.3"),
-            Option("head_tail", "掐头去尾（运营商口径）",
+                   source="本项目 legacy_v1"),
+            Option("head_tail", "legacy 掐头去尾",
                    formula=r"T \leftarrow T_{last} - T_{first\_sched}",
                    summary="起点从数据到达挪到**首次被调度**",
                    detail="话务到达但还没被调度的等待时间**不计入分母**"
                           "（用户 2026-08-02 明确）。轻载时两者差别很大。",
-                   when="对标你们的现网话统",
+                   when="复现旧运营商口径",
                    cost="零"),
             Option("none", "不掐",
                    summary="含清空缓冲区的那个 TTI",
@@ -241,11 +251,11 @@ def _exp_thp() -> Family:
                    cost="零"),
         ],
         flow=Flow(steps=[
-            ("找出这个 burst 的边界", "数据到达 tti、首次被调度 tti、末次被调度 tti"),
-            ("定起点", "tail/none 从到达算；head_tail 从首次被调度算"),
-            ("扣掉最后一个 slice", "数据与时间同时扣——它把缓冲区清空了，不完整"),
-            ("太短的丢掉", "少于 2 个 slice 无法测量，整个 burst 不计入"),
-            ("按用户聚合", "该用户所有合格 burst 的速率取平均"),
+            ("识别 profile", "capacity→legacy_v1；experience→experience_v2"),
+            ("记录 busy period", "buffer 空→非空开始，ACK 后重新为空才结束"),
+            ("记录 FIFO arrival", "每个文件各自保留 arrival/firstTX/completion/PDB"),
+            ("计算大/小 burst", "大 burst 排末 ACK；单 TB 小 burst 用 padding 比例折时长"),
+            ("按层级聚合", "busy-period 吞吐与 arrival-object 时延分开"),
             ("按小区聚合", "**各用户体验速率的平均，不是求和**"),
         ], branches=[(4, "只有 1 个 slice", "丢弃——小包的固有盲区")]),
     )
@@ -389,7 +399,7 @@ def _two_phase() -> Family:
             ("第一相：测 MU/SU 比值", "在若干快照上跑真实的 SU/MU 自适应，取中位数"),
             ("第一相：判覆盖外", "用户级 SINR 够不到 MCS 0 门限的快照标出来"),
             ("第二相：TTI 主循环", "只读表 + 算 PF 度量 + 更新缓冲区，**无矩阵运算**"),
-            ("第二相：BLER 查表", "按 0.5 dB 量化后缓存，命中率接近 100%"),
+            ("第二相：BLER 查表", "按公司源曲线 0.05 dB 网格缓存，不降采样瀑布区"),
         ], branches=[(2, "MU 比值离散度 > 30%", "标量近似不成立，结果里告警")]),
     )
 
@@ -492,12 +502,10 @@ def _tx_sinr() -> Family:
                "<br>早先版本把发送侧写成「接收 SINR 的长期均值」，"
                "那是个<b>事后诸葛亮</b>的量：它已经包含了 SVD 的实际增益，"
                "等于假设基站预先知道自己波束打得准不准。"
-               "<br><b>已核查的一处近似：</b>Type I 码本是在<b>时频平均后的信道</b>"
-               "上贪心选波束的（<code>measure.pmi_type_i</code>），"
-               "而教科书口径是在<b>空间协方差</b> "
-               "<code>R = Σ h hᴴ</code> 上选（相位不敏感）。"
-               "实测两者差 <b>0.2 ~ 1.0 dB</b>（协方差法略优），已知但没改——"
-               "改的是一个被多条路径共用的函数，为 1 dB 不值得。"
+               "<br><b>已核查的一处近似：</b>宽带 PMI 已改为在发射空间协方差 "
+               "<code>R = E[H Hᴴ]</code> 上选，公共相位翻转不会让信道相消。"
+               "当前仍是 Type-I-style 单面板<b>列码本子集</b>：多层采用增量"
+               "贪心列选择，而非枚举 38.214 完整多层矩阵码本。"
                "另外 iid 瑞利信道上 BF 增益高达 13 dB <b>不是 bug 而是真实物理</b>："
                "空间白信道没有结构，任何宽带码本波束都对不准；"
                "换成有角度结构的多径信道后是 2.6 ~ 5 dB，正对得上现场量级。",
@@ -509,10 +517,10 @@ def _tx_sinr() -> Family:
                            r"+\,\mathrm{OLLA} \to \lfloor \cdot \rfloor",
                    summary="现场口径：CQI 按谱效映射 MCS，取该 MCS 的目标 BLER SINR 门限，加 BF 增益",
                    detail="CQI 用 38.214 Table 5.2.2.1-3（表 2，含 256QAM）。"
-                          "PMI 走 <b>Type I 宽带码本</b>——全带共用一个权，"
+                          "PMI 走 <b>Type-I-style 宽带列码本近似</b>——全带共用一个权，"
                           "正对应现场的<b>全带 CQI</b>（不做子带 CQI、不做频选调度）。"
-                          "<br>宽带 PMI 是慢时间尺度的量，所以逐 UE 逐 rank 在时间平均信道上"
-                          "搜一次码本就够，不逐快照重搜。"
+                          "<br>宽带 PMI 是慢时间尺度的量，所以逐 UE 在完整时频样本的"
+                          "功率协方差上搜一次，不逐快照重搜，也不平均复信道。"
                           "<br><b>CQI=0 不退化成 −inf</b>：它的意思是「低于 CQI 表下界」，"
                           "不是「这个用户不存在」，退回实测 PMI SINR，OLLA 还能在它上面工作。",
                    when="默认",
@@ -543,7 +551,7 @@ def _tx_sinr() -> Family:
                                  "**开老化时算的是陈旧信道上的增益**"),
             ("相加得发送侧 SINR", "Γ(MCS(CQI)) + BF Gain"),
             ("重映射 MCS", "按发送侧 SINR 选满足目标 BLER 的最高 MCS"),
-            ("加 OLLA 偏置", "逐 TTI 更新的 dB 域偏置，ACK +0.01 / NACK −0.1"),
+            ("加 OLLA 偏置", "逐 TTI 更新的 dB 域偏置，ACK +0.01 / NACK −0.09"),
             ("接收端判误码", "用**真实**接收 SINR 查 BLER 曲线——发送侧与接收侧的差就在这里变成误码"),
         ], branches=[
             (1, "CQI = 0（低于表下界）", "退回实测 PMI SINR，不用 −inf"),

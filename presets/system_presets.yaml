@@ -9,8 +9,11 @@
 # 2. pair_with 声明的对照组，除了 pair_varies 列出的那几项，其余必须逐字相同。
 #    sysscenes.check_pairs() 会强制校验——同时差三四个参数的两个场景不是对照组。
 #
-# 所有场景都要求 num_slots_per_sample >= 8：每个 UE 得有多个时间相关的快照，
-# 否则 PF 拿不到多用户分集、CSI 老化也测不出来（陈旧信道和当前信道是同一个矩阵）。
+# 所有场景都要求每 UE 的有效快照数
+# num_slots_per_sample * num_samples / num_ues >= 8。当前推荐 num_slots_per_sample=1
+# 且每 UE 至少 8 个样本，以绕开外部 ChannelHub 多时隙 SIR/SINR 聚合口径尚未统一的问题。
+# 2026-08-07 的数值锚点全部来自 physics audit 前的 legacy_v1，仅用于历史回归，
+# 不得当成 2026-08-09 修正后实现的当前验收值；expect.model_version 会显式标记。
 
 # ---------------------------------------------------------------------------
 # 一、负载对照组：满载 vs 轻载
@@ -36,6 +39,7 @@ sys_dense_urban_loaded:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
+    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 3.0
@@ -44,6 +48,7 @@ sys_dense_urban_loaded:
     srs_period_ms: 10.0
   expect:
     measured: true
+    model_version: legacy_v1_pre_physics_audit_20260809
     dataset: ds_9625340c
     n_replications: 8
     # 格式一律是 [均值, 95% 区间半宽占均值的百分比]。**半宽和数值不可分割**——
@@ -84,6 +89,7 @@ sys_dense_urban_light:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
+    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 1.0
@@ -92,6 +98,7 @@ sys_dense_urban_light:
     srs_period_ms: 10.0
   expect:
     measured: true
+    model_version: legacy_v1_pre_physics_audit_20260809
     dataset: ds_9625340c
     n_replications: 8
     avg_mcs: [7.84, 7.8]
@@ -130,6 +137,7 @@ sys_urban_macro_field_csi:
     num_slots_per_sample: 8
     ue_speed_kmh: 30.0
   system:
+    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 2.0
@@ -138,6 +146,7 @@ sys_urban_macro_field_csi:
     srs_period_ms: 10.0
   expect:
     measured: true
+    model_version: legacy_v1_pre_physics_audit_20260809
     dataset: ds_984082de
     n_replications: 8
     avg_mcs: [7.99, 5.4]
@@ -173,6 +182,7 @@ sys_urban_macro_ideal_csi:
     num_slots_per_sample: 8
     ue_speed_kmh: 30.0
   system:
+    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 2.0
@@ -181,6 +191,7 @@ sys_urban_macro_ideal_csi:
     srs_period_ms: 10.0
   expect:
     measured: true
+    model_version: legacy_v1_pre_physics_audit_20260809
     dataset: ds_984082de
     n_replications: 8
     avg_mcs: [10.36, 2.2]
@@ -207,8 +218,8 @@ sys_field_bimodal_traffic:
   summary: >-
     用户给的现网口径：小包（1 个 RBG）约占 30%、满包（17 个 RBG）约占 30%、
     中间 2~16 个 RBG 相对均匀，另有 30% 的 TTI 完全没调度。
-    **小包测不到体验速率**——3GPP 掐尾口径下一个 TTI 就发完的 burst
-    整个被丢掉，这不是 bug 是该 KPI 的固有盲区，结果里大包小包分开报。
+    这是 legacy_v1 按目标 RBG 数反推包长的历史画像；它的小包在 legacy trim 下
+    不可测。要研究真实大小文件竞争，请用 experience_v2 的 mixed 预设。
   answers:
     - 现网话务下 PRB 利用率是多少
     - 大包用户和小包用户的体验差多少
@@ -219,12 +230,14 @@ sys_field_bimodal_traffic:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
+    evaluation_mode: capacity
     duration_s: 5.0
     traffic_model: bimodal
     neighbor_prb_util: 0.3
     csi_aging: true
   expect:
     measured: true
+    model_version: legacy_v1_pre_physics_audit_20260809
     dataset: ds_6e9715bc
     n_replications: 8
     avg_mcs: [9.46, 4.8]
@@ -262,6 +275,7 @@ sys_mobility_60kmh:
     num_slots_per_sample: 8
     ue_speed_kmh: 60.0
   system:
+    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 2.0
@@ -271,6 +285,7 @@ sys_mobility_60kmh:
     olla_speedup: 20.0
   expect:
     measured: true
+    model_version: legacy_v1_pre_physics_audit_20260809
     dataset: ds_0ef213d2
     cell_experienced_mbps: 138.3
     ue_experienced_p5_mbps: 49.7
@@ -287,8 +302,8 @@ sys_capacity_full_buffer:
   group: 系统级 · 容量上界
   label: 满缓冲容量上界 · full buffer
   summary: >-
-    **体验速率在这个模型下没有意义**——缓冲区永不清空，3GPP 掐尾口径
-    找不到任何一个完整的 burst。它只用来看小区吞吐上界与调度器的公平性，
+    **体验速率在这个模型下没有意义**——缓冲区永不清空，找不到完整 busy period。
+    它只用来看小区吞吐上界与调度器的公平性，
     结果里只该引用 cell_served_mbps 与 Jain 公平度，不要引用体验速率。
   answers:
     - 这个小区的吞吐上界是多少
@@ -300,12 +315,14 @@ sys_capacity_full_buffer:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
+    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: full_buffer
     neighbor_prb_util: 0.3
     csi_aging: true
   expect:
     measured: true
+    model_version: legacy_v1_pre_physics_audit_20260809
     dataset: ds_6e9715bc
     n_replications: 8
     cell_served_mbps: [169.96, 0.2]
@@ -319,3 +336,132 @@ sys_capacity_full_buffer:
       measured_bursts=0。这验证了 summary 里那句话，**别把它当成 bug 去修**。
       注意所有区间都极窄（≤0.2%）——因为 full buffer 没有话务随机性，
       唯一的随机源只剩 HARQ 抽样。**这反过来说明其他场景那些宽区间主要来自话务**。
+
+# ---------------------------------------------------------------------------
+# 六、experience_v2：按需 RBG 的 PF 记账反向控制
+# ---------------------------------------------------------------------------
+sys_experience_mixed_pf:
+  group: 系统级 · 体验模式 PF 记账
+  label: 大小文件混跑 · scheduled-TBS PF（正确口径）
+  summary: >-
+    experience_v2 里同一 TTI 可给多个 UE 分 RBG，PF 平均速率必须按实际 scheduled TBS
+    更新。与反向控制组只差 pf_accounting，用于验证全带记账是否会饿死小文件 UE。
+  answers:
+    - 按需 RBG 后小文件用户的排队和完成时延是否改善
+    - PF 平均速率按全带记账会造成什么反向效果
+  channel_preset: company_64t4r_multicell
+  pair_with: sys_experience_mixed_pf_wrong_accounting
+  pair_varies: [pf_accounting]
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 1
+    ue_speed_kmh: 3.0
+  system:
+    evaluation_mode: experience
+    duration_s: 5.0
+    traffic_model: mixed
+    file_bytes: 500000
+    arrival_rate_hz: 5.0
+    small_ue_share: 0.5
+    small_file_bytes: 1500
+    small_arrival_rate_hz: 20.0
+    small_pdb_ms: 20.0
+    large_pdb_ms: 300.0
+    scheduler: pf
+    pf_window_tti: 100
+    pf_accounting: scheduled_tbs
+    mu_enabled: false
+    small_burst_policy: fractional_slot
+    tdd_pattern: DDDSU
+    neighbor_prb_util: 0.3
+    neighbor_load_jitter: 0.05
+    csi_aging: true
+    srs_period_ms: 10.0
+    srs_hopping: true
+    csi_processing_delay_ms: 2.0
+    olla_speedup: 1.0
+    precoder: svd
+    seed: 20260809
+    num_replications: 16
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_329edafb
+    result: artifacts/results/experience_pf_accounting_crn_n16.json
+    n_replications: 16
+    small_queue_wait_ms_p95: [0.5625, 16.18]
+    small_completion_delay_ms_p95: [6.6547, 8.77]
+    small_pdb_miss_ratio: [0.0035, 37.24]
+    large_burst_drb_throughput_mbps: [166.7553, 7.80]
+    resource_utilization: [0.7977, 7.99]
+    cell_served_mbps: [98.2491, 4.42]
+    accounting_error_pct: 0.0
+    note: >-
+      2026-08-09 正式 n=16 CRN。主指标 small FIFO 排队 P95：本臂 0.5625 ms，
+      故障注入臂 0.9562 ms，配对差 -0.3937 ms，95% CI [-0.5976,-0.1899]，
+      Wilcoxon p=0.00448，门3通过。完成时延差 -1.0953 ms、PDB miss 差
+      -0.0061 也通过；大 burst 吞吐、资源利用率、总承载和积压均不显著，
+      不得据此声称有方向性变化。两臂 32 次运行字节对账均为 0 误差。
+
+sys_experience_mixed_pf_wrong_accounting:
+  group: 系统级 · 体验模式 PF 记账
+  label: 大小文件混跑 · legacy full-band PF（故障注入）
+  summary: >-
+    故意把部分 RBG 用户按全带 best_se 更新 PF 平均速率的反向控制。它不是可部署方案，
+    只用于证明 scheduled-TBS 记账不变量确实被调度器使用。
+  answers:
+    - 错误的全带 PF 记账是否会拉长小文件用户等待
+    - 分配器是否真的在按需分 RBG
+  channel_preset: company_64t4r_multicell
+  pair_with: sys_experience_mixed_pf
+  pair_varies: [pf_accounting]
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 1
+    ue_speed_kmh: 3.0
+  system:
+    evaluation_mode: experience
+    duration_s: 5.0
+    traffic_model: mixed
+    file_bytes: 500000
+    arrival_rate_hz: 5.0
+    small_ue_share: 0.5
+    small_file_bytes: 1500
+    small_arrival_rate_hz: 20.0
+    small_pdb_ms: 20.0
+    large_pdb_ms: 300.0
+    scheduler: pf
+    pf_window_tti: 100
+    pf_accounting: legacy_fullband
+    mu_enabled: false
+    small_burst_policy: fractional_slot
+    tdd_pattern: DDDSU
+    neighbor_prb_util: 0.3
+    neighbor_load_jitter: 0.05
+    csi_aging: true
+    srs_period_ms: 10.0
+    srs_hopping: true
+    csi_processing_delay_ms: 2.0
+    olla_speedup: 1.0
+    precoder: svd
+    seed: 20260809
+    num_replications: 16
+  expect:
+    measured: true
+    model_version: experience_v2_fault_injection
+    dataset: ds_329edafb
+    result: artifacts/results/experience_pf_accounting_crn_n16.json
+    n_replications: 16
+    small_queue_wait_ms_p95: [0.9562, 24.27]
+    small_completion_delay_ms_p95: [7.7500, 9.60]
+    small_pdb_miss_ratio: [0.0096, 21.71]
+    large_burst_drb_throughput_mbps: [166.1883, 7.86]
+    resource_utilization: [0.7982, 8.05]
+    cell_served_mbps: [98.2321, 4.42]
+    accounting_error_pct: 0.0
+    note: >-
+      2026-08-09 正式 n=16 CRN 的反向控制。它故意给部分 RBG 用户按全带记 PF，
+      只用于验证不变量，**不得作为推荐配置**。与正确臂的主指标配对差及判决见
+      sys_experience_mixed_pf 和 result JSON。

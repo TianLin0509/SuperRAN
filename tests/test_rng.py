@@ -358,6 +358,11 @@ check(_c["verdict"] == "inconclusive", "纯噪声的两臂判为 inconclusive")
 check(_c["effect_exceeds_ci"] is False, "effect_exceeds_ci 明确为 False")
 check("不能下结论" in _c["verdict_text"] and "不要报这个百分比" in _c["verdict_text"],
       "判决语明确说「不能下结论，也不要报这个百分比」")
+_zero = rg.compare_replications(
+    np.zeros(8), np.zeros(8), metric="accounting_error_pct", unit="%",
+    arm_a="A", arm_b="B")
+check("nan%" not in _zero["verdict_text"] and "基线为 0" in _zero["verdict_text"],
+      "零基线不输出 nan%，明确说明相对百分比无定义")
 check("至少需要" in _c["verdict_text"], "顺带给出需要多少次重复才能站住")
 check(abs(_c["effect"]) < _c["ci95_half_width"],
       f"|效应| {abs(_c['effect']):.3f} < 半宽 {_c['ci95_half_width']:.3f}"

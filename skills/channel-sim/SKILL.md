@@ -123,7 +123,9 @@ digraph channel_sim {
 
 ## 第 4 段 · 链路级：谱效不是吞吐
 
-`sw_link_performance` / `ds.link()` 给的是香农上界，真实系统差 25~60%。
+`sw_link_performance` / `ds.link()` 给的是所选预编码/接收机的高斯码本谱效；
+返回里的逐时频注水 `capacity_bound` 才是 Shannon 容量上界。真实 MCS/TBS
+吞吐还会再低 25~60%。
 **要真实吞吐（Mbps）就用 `sw_throughput`**（有效 SINR → MCS/CQI → TBS → BLER →
 吞吐），它还给 5% 边缘用户吞吐；`sw_sweep_snr` 出谱效/吞吐 vs SNR 曲线。返回里
 `hint` 提示"大量样本压在最高档 MCS"时必须转述——限制来自 MCS 表不是算法。MCS 表
@@ -134,12 +136,26 @@ BF Gain / OLLA）→ `references/link-adaptation.md`
 
 **链路级问"这个信道能跑多快"，系统级问"这个小区里的用户实际体验到多快"。**
 用户提到**体验速率、话务、调度 / PF、BLER、小区容量、边缘用户体验、拥塞、"现网能到
-多少"**时，链路级答不了，必须切到系统级。它把话务到达与结束、调度器的多用户取舍、
-HARQ 重传、缓冲区排空全算进去，跑几秒连续 TTI（40000 TTI 实测 0.2 秒）。
-**体验速率是现网真正上报的 KPI，也是本项目最关心的那个数。**
+多少"**时，链路级答不了，必须切到系统级。
+
+**先选评估 profile；它们是两种模式，不是同一模式的两个精度参数：**
+
+- `evaluation_mode="capacity"` → `legacy_v1`：保留历史的全带调度、NewTx/ReTx 曲线
+  重传和 `trim` 口径，用于复现旧结果、看满缓冲容量与调度公平性。它一次调度按全带
+  记账，不可拿来验证“按需 RBG 后小包是否受益”。
+- `evaluation_mode="experience"` → `experience_v2`：按 TS 28.552 Rel-19 的 DRB
+  busy-period 记录事件；用 TBS 单调反查表求“恰够”的 RBG 数，同一 TTI 可服务多个 UE，
+  没有需求的尾料留空；PF 平均速率按**实际 scheduled TBS**更新。NACK 字节留在 FIFO
+  队列等待下一次 NewTx，当前不模拟 HARQ 软合并/进程时序。推荐 `traffic_model="mixed"`
+  让大小文件 UE 同场竞争；全大包会退化成全带，全小包没有大包体验可比较。
+
+两种 profile 的 KPI 名即使相似也不可直接拼在一张趋势图里；结果必须连同
+`model_version`、`pf_accounting` 和物理近似一起保存。
 
 **前置条件：每个 UE 要有多个时间相关的快照。** 生成时 `num_slots_per_sample >= 8`
-（或让 `num_samples` 是 `num_ues` 的 8 倍以上）。不满足时有两个后果，且都不报错：
+（或让 `num_samples` 是 `num_ues` 的 8 倍以上）。当前更稳妥的生成法是
+`num_slots_per_sample=1` 且 `num_samples/num_ues>=8`，绕开外部 ChannelHub 多时隙
+SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且都不报错：
 信道没有时间起伏，**PF 退化成轮询**，多用户分集整个拿不到；只有 1 个快照时「陈旧
 信道」与「当前信道」是同一个矩阵，**CSI 老化恒为 0**，`csi_aging=True` 开着也测不出
 老化代价。跑之前先 `sw_describe_dataset(dataset_id)` 对着 `num_ues` 算每 UE 几个快照。
@@ -153,13 +169,15 @@ HARQ 重传、缓冲区排空全算进去，跑几秒连续 TTI（40000 TTI 实�
 `cell_experienced_mbps` 是**各用户体验速率的平均，不是求和**（求和实测出现过
 8.2 Gbps 落在 100 MHz 小区上）；`ue_experienced_p5_mbps` 是 5% 边缘体验速率；
 `users[i]` 里 `experienced_mbps` / `avg_mcs` / `bler_first_tx` 带区间，
-`geo_sinr_db` / `iot_db` 取第 1 次重复的值。**体验速率的分母是「缓冲区非空的时间」**
-（含排队等调度的 TTI），**不是被调度的 TTI 数**：默认 `trim="tail"` 排除清空缓冲区的
-最后一个 slice（3GPP TS 28.552 §5.1.1.3），`head_tail` 再排掉首个 TTI——**换口径数字
-会明显变，报数必须带上 trim**。`traffic_model="full_buffer"` 下体验速率没有意义。
+`geo_sinr_db` / `iot_db` 取第 1 次重复的值。`legacy_v1` 才使用 `trim`；
+`experience_v2` 的大 burst 吞吐从首次传输计到倒数第二个 ACK piece，并把排队等待另报。
+单初传 TB 发完的小 burst 用 `(TBVol-PaddingVol)/TBVol × slot` 折算时长。
+`small_queue_wait_ms_p95`、`small_completion_delay_ms_p95`、`small_pdb_miss_ratio` 是
+每个 FIFO 到达对象的体验指标；DRB busy-period 吞吐与到达对象时延不能混成一个 KPI。
+`traffic_model="full_buffer"` 下没有完整 busy period，体验速率没有意义。
 
 **区间覆盖什么、不覆盖什么必须一起说。** 各次重复共用同一批信道与同一张链路表，
-`ci95` 只覆盖**话务到达、HARQ 误码、调度决胜**这三条流；**信道实现本身的不确定度是
+`ci95` 只覆盖**话务到达、ACK/NACK 抽样、调度决胜**这三条流；**信道实现本身的不确定度是
 另一个、更大的方差分量**，要覆盖它得换 `seed` 重新 `sw_generate` 再比。
 `num_replications <= 5` 时 Wilcoxon 最小可达 p 是 `2/2^n > 0.05`，**无论数据多干净
 都不可能宣告显著**；设成 1 退回"单次运行、无区间"，不能用来比较。重复实验
@@ -172,8 +190,11 @@ HARQ 重传、缓冲区排空全算进去，跑几秒连续 TTI（40000 TTI 实�
 不许压缩成"有些统计上的小问题"。** 用户说"就要一个数"时，数照给、notes 照转——
 他能豁免的是自己要不要看，不是你要不要说；他懂概念不等于他知道**这批数据**踩了。
 
-**最容易出错的默认值**：`num_replications=8`（**别调到 6 以下**，见上）、`neighbor_prb_util=0.3`（几何 SINR 按邻区 100% 满发算，不改会高估干扰）、`csi_aging=True`（**关掉是上界不是现网**，MU 增益被系统性高估）、`olla_speedup=1.0`（短仿真压不动 MCS 时可临时设 10，**出正式结论必须设回 1.0**）、`mu_enabled=False`（先看清 SU 基线）。
-队列积压就调低 `arrival_rate_hz`，burst 太少就加长 `duration_s`。
+**最容易出错的默认值**：`evaluation_mode="capacity"`（要研究按需 RBG 必须显式改成
+`experience`）、`num_replications=8`（**别调到 6 以下**，见上）、
+`neighbor_prb_util=0.3`、`csi_aging=True`、`olla_speedup=1.0`、`mu_enabled=False`。
+`experience_v2` 首版只支持 SU，开 MU 会硬报错；MU 增益测不出来也会硬报错，不再按 1.0
+静默降级。队列积压就调低到达率，burst 太少就加长 `duration_s`。
 全部参数逐项说明 → `references/system-sim.md`
 
 **系统级 A/B 必须用公共随机数（CRN），并且同样受 `<HARD-GATE>` 约束。**
@@ -181,7 +202,7 @@ HARQ 重传、缓冲区排空全算进去，跑几秒连续 TTI（40000 TTI 实�
 `cell_experienced_mbps` 差 10% 不是结论——这个量只改种子的变异系数就有 11.4%，
 **上一轮真发生过把 11.4% 的噪声报成「+14% 提升」的事故**。正确做法是两臂用
 **同一批 replication 流**（同数据集、同 `seed`、同 `num_replications`，第 k 次重复对应
-同一套话务与 HARQ 抽签），再走 `rng.compare_replications` 判决——它复用门 3 的
+同一套话务与 ACK/NACK 抽签），再走 `rng.compare_replications` 判决——它复用门 3 的
 `gates.paired_compare`，仍**以 Wilcoxon 为准**。实测 PF 窗 100 vs 1000、n_rep=8：
 **CRN 区间半宽 3.49、独立随机数 13.69，窄 3.92 倍**；同一个真实效应 CRN 判显著
 （p=0.0078），独立种子判成 inconclusive（p=0.078）。种子对不上时 `check_pairable`
@@ -204,7 +225,7 @@ HARQ 重传、缓冲区排空全算进去，跑几秒连续 TTI（40000 TTI 实�
 | "先跑完看哪个指标好看/换个指标也显著" | 那是在多个指标里挑赢的那个。先锁主指标，未预注册的只能标探索性 |
 | "自研算法我自己比过了，均值高很多" | 均值高不等于过门。走 sw_compare_results，标准和内置一样 |
 | "样本数一样，配对肯定对齐" | 顺序错位时长度也一样。门 2 是逐个比 ID 的 |
-| "谱效 30 bit/s/Hz，很高" | 那是香农上界。真实吞吐要打 4~6 折，跑 sw_throughput |
+| "谱效 30 bit/s/Hz，很高" | 那是高斯码本谱效，不是业务吞吐；先对照 capacity_bound，再跑 sw_throughput 看 MCS/TBS 吞吐 |
 | "生成太慢，减样本数" | 先试 workers；重配置能快 3 倍。减样本数是拿结论换时间 |
 | "他是负责人，他授权直接写增益，责任在他" | 他能豁免自己的判断，豁免不了这数怎么算的。写的人是你 |
 | "加个『未做配对检验』就说清楚了" | 进 PPT 的是数字，留在聊天记录里的是限定词。它保护的是你 |
@@ -227,7 +248,7 @@ HARQ 重传、缓冲区排空全算进去，跑几秒连续 TTI（40000 TTI 实�
 
 **生成时的拦截要当真。** `sw_generate` 返回 `status: "blocked"` 时说明这个参数组合跑得出结果但结果没有物理意义（最典型的是波束/定位任务配 TDL——TDL 没有每条径的角度，算法会输出一堆看似正常的垃圾且不报错）。转述 `message` 与 `suggestion` 等用户决定。
 
-**这里的测量量是物理量，不是训练特征。** PDP 不归一化、带真实时延轴；RSRP 不截断；SRS 给完整协方差与全部特征值；PMI 给 38.214 Type I 码本索引与预编码矩阵。用户提到 ChannelHub 的 16-token 特征时，那是另一套，别混用。
+**这里的测量量是物理量，不是训练特征。** PDP 不归一化、带真实时延轴；RSRP 不截断；SRS 给完整协方差与全部特征值；PMI 给 Type-I-style 单面板列码本子集近似的索引与预编码矩阵（多层是贪心近似，不冒充完整 38.214 矩阵码本）。用户提到 ChannelHub 的 16-token 特征时，那是另一套，别混用。
 
 **先小后大。** 正式实验前先跑 20 个样本确认流程通再放大；`sw_plan` 的 `estimated.size_mb` 超过 1 GB 时提醒用户。**信噪比不能直接设定**——它由路损、发射功率、撒点位置共同决定；要求特定区间时走拒绝采样，可能很慢甚至取不到样本。
 

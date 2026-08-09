@@ -99,14 +99,14 @@ w = ca.svd_precoder(hr1)[:, :, :1]
 got = ca.mmse_stream_sinr(hr1, w, power_per_stream=1.0, noise_power=0.05)
 sv = np.stack([np.linalg.svd(hr1[f].conj().T, compute_uv=False) for f in range(hr1.shape[0])])
 want = sv[:, :1] ** 2 / 0.05
-check(np.allclose(got, want, rtol=1e-5), "rank1 MMSE SINR = σ₁²·P/σ_n²（解析式）")
+check(np.allclose(got, want, rtol=1e-5), "rank1 MMSE SINR = sigma1^2 * P / sigma_n^2（解析式）")
 
 # ---------------------------------------------------------------------------
 section("2  38.211 跳频序列")
 # ---------------------------------------------------------------------------
 order, source = ca.hop_order(17, rb_per_rbg=16, hop_factor=17)
 check(source.startswith("channelhub:"), f"跳频序列来自 ChannelHub 的标准实现（{source}）")
-check(len(order) == 17, f"cycle = 17（C_SRS=57 / B_SRS=1 的 N₁）实测 {len(order)}")
+check(len(order) == 17, f"cycle = 17（C_SRS=57 / B_SRS=1 的 N1）实测 {len(order)}")
 check(sorted(order.tolist()) == list(range(17)), "17 跳恰好覆盖 17 个 RBG，不重不漏")
 check(order.tolist() == list(range(17)), f"扫描顺序是 RBG 0→16，实测 {order.tolist()[:5]}…")
 
@@ -222,7 +222,7 @@ check(all(np.allclose(t.best_se, t.best_se_gnb) for t in tb0),
 
 # 发送侧 SINR = CQI 门限 + BF Gain，必须是有限值
 allfin = all(np.isfinite(t.sinr_tx_db).all() for t in tb)
-check(allfin, "发送侧 SINR 全部有限（CQI=0 时退回实测 PMI SINR，不是 −inf）")
+check(allfin, "发送侧 SINR 全部有限（CQI=0 时退回实测 PMI SINR，不是 -inf）")
 check(all(t.bf_gain_db is not None and (t.bf_gain_db > 0).mean() > 0.9 for t in tb),
       "BF Gain 绝大多数为正（SVD 本就该赢过 Type I 码本）")
 check(all(t.cqi_index is not None and ((t.cqi_index >= 0) & (t.cqi_index <= 15)).all()
@@ -271,7 +271,7 @@ for _sd in (0.04, 0.09, 0.19):
     _p = 0.01 / (0.01 + _sd)
     check(abs(sy.olla_step_down_for(_p, 0.01) - _sd) < 1e-9, f"s_down={_sd} 往返自洽")
 check(abs(sy.SchedulerConfig().as_dict()["olla_target_bler"] - 0.1) < 1e-9,
-      "默认步长 +0.01/−0.09 给出稳态 IBLER 10.0%（−0.1 只有 9.09%）")
+      "默认步长 +0.01/-0.09 给出稳态 IBLER 10.0%（-0.1 只有 9.09%）")
 # 等比放大不改变稳态——这是 olla_speedup 的全部依据
 _a = sy.SchedulerConfig(olla_speedup=1.0).as_dict()["olla_target_bler"]
 _b = sy.SchedulerConfig(olla_speedup=25.0).as_dict()["olla_target_bler"]

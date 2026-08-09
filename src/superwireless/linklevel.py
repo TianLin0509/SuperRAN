@@ -6,7 +6,7 @@
     预编码 W  →  有效信道 H_eff = W^H · H  →  后处理 SINR  →  谱效
 
 **为什么不直接给一个"谱效"数字。** 谱效取决于三个独立选择：用什么预编码、
-用什么接收机、算不算干扰。同一批信道，SVD 理想预编码和 Type I 码本能差好几个
+用什么接收机、算不算干扰。同一批信道，协方差特征预编码和受限列码本能差好几个
 bit/s/Hz。把这三段摊开，对比才有意义——这也正是"你的方法要跟什么比"的落点。
 
 预编码与有效信道复用 ChannelHub 的 ``phy_sim.precoding``（与它的干扰投影逻辑
@@ -14,6 +14,7 @@ bit/s/Hz。把这三段摊开，对比才有意义——这也正是"你的方�
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -25,6 +26,21 @@ PrecoderMethod = Literal["svd", "svd_wideband", "dft", "type1", "mrt", "identity
 ReceiverType = Literal["mmse", "mrc", "zf", "irc"]
 InterferenceModel = Literal["isotropic", "precoded"]
 RuuSource = Literal["true", "sample"]
+
+
+def _tx_covariance(h: np.ndarray) -> np.ndarray:
+    """Return the wideband transmit covariance ``E[H H^H]``.
+
+    Time/frequency samples are *power* observations.  Averaging the complex
+    channel first is not equivalent: two otherwise identical snapshots with a
+    pi phase rotation would cancel to zero.  Keeping this helper here makes the
+    wideband MRT/DFT/Type-I paths use the same physically meaningful statistic.
+    """
+    hh = np.asarray(h)
+    if hh.ndim != 4:
+        raise ValueError(f"h 应为 [T, RB, BS_ant, UE_ant]，收到 {hh.shape}")
+    cols = np.transpose(hh, (2, 0, 1, 3)).reshape(hh.shape[2], -1)
+    return cols @ cols.conj().T / max(cols.shape[1], 1)
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +67,48 @@ class Precoder:
         }
 
 
+def _covariance_eigen_precoder(
+    h: np.ndarray, *, wideband: bool, max_rank: int, rank_threshold: float,
+    method: str,
+) -> Precoder:
+    """Build a phase-invariant static eigen-precoder from ``E[H H^H]``.
+
+    ``Precoder.w`` has no time axis, so for ``T>1`` the physically meaningful
+    static weight is based on temporal power covariance.  For ``T=1`` this is
+    exactly the left-singular-vector precoder (up to arbitrary column phase).
+    """
+    hh = np.asarray(h)
+    t, rb, bs, ue = hh.shape
+    min_dim = min(bs, ue)
+    rank_cap = max(1, min(int(max_rank), min_dim))
+    # Per-RB R_f = E_t[H_tf H_tf^H].  Do not average complex H over time.
+    cov_rb = np.einsum("tfbu,tfcu->fbc", hh, hh.conj()) / max(t, 1)
+    cov_eval = np.mean(cov_rb, axis=0, keepdims=True) if wideband else cov_rb
+    eigval, eigvec = np.linalg.eigh(cov_eval)
+    eigval = np.maximum(eigval.real[:, ::-1], 0.0)
+    eigvec = eigvec[:, :, ::-1]
+    singular = np.sqrt(eigval[:, :min_dim])
+    rank_each = np.ones(singular.shape[0], dtype=int)
+    for f, sv in enumerate(singular):
+        if sv.size and sv[0] > _EPS:
+            rank_each[f] = int(np.clip(
+                np.sum(sv > sv[0] * float(rank_threshold)), 1, rank_cap))
+    rank = int(rank_each[0] if wideband else
+               np.clip(np.median(rank_each), 1, rank_cap))
+    if wideband:
+        w0 = eigvec[0, :, :rank]
+        w = np.broadcast_to(w0[None], (rb, bs, rank)).copy()
+        # Diagnostics remain [RB,min_dim], matching the historical contract.
+        s_out = np.broadcast_to(singular[0][None], (rb, min_dim)).copy()
+    else:
+        w = eigvec[:, :, :rank].copy()
+        s_out = singular
+    norms = np.linalg.norm(w, axis=1, keepdims=True)
+    w = np.where(norms > _EPS, w / norms, w).astype(np.complex64)
+    return Precoder(w=w, rank=rank, method=method,
+                    singular_values=s_out.astype(np.float32))
+
+
 def compute_precoder(
     h: np.ndarray,
     *,
@@ -67,11 +125,12 @@ def compute_precoder(
     h : ``[T, RB, BS_ant, UE_ant]`` 复数信道。传理想信道得到的是上界，
         传估计信道得到的才是实际系统能做到的——两者的差就是估计误差的代价。
     method :
-        * ``svd``          逐 RB 做 SVD，取左奇异矢量。**理论最优**，是上界基线。
-        * ``svd_wideband`` 全带共用一个 W（由宽带协方差特征分解得到）。
-          反馈开销小得多，但有宽带损失，更贴近实际硬件。
+        * ``svd``          每 RB 用 ``E_t[H H^H]`` 的主特征向量。T=1 时严格等价
+          于瞬时 SVD；T>1 时是跨该时间窗的最优静态协方差波束，不冒充逐时隙上界。
+        * ``svd_wideband`` 全带/全时域共用一个协方差特征 W。反馈开销更小，
+          但有宽带损失，更贴近静态宽带权。
         * ``dft``          DFT 波束码本，rank-1。对应真实网络里的波束赋形。
-        * ``type1``        38.214 Type I 码本搜索，带量化损失。
+        * ``type1``        Type-I-style 单面板列码本近似，带量化损失。
         * ``mrt``          最大比传输，rank-1，对准最强方向。
         * ``identity``     不预编码，直接用天线端口。对照用。
 
@@ -82,34 +141,24 @@ def compute_precoder(
         raise ValueError(f"h 应为 [T, RB, BS_ant, UE_ant]，收到 {h.shape}")
 
     if method in ("svd", "svd_wideband"):
-        from .channelhub import _ensure_path
-
-        _ensure_path()
-        if method == "svd":
-            from msg_embedding.phy_sim.precoding import compute_dl_precoding  # noqa: PLC0415
-
-            r = compute_dl_precoding(h, max_rank=max_rank, rank_threshold=rank_threshold)
-        else:
-            from msg_embedding.phy_sim.precoding import (  # noqa: PLC0415
-                compute_dl_precoding_wideband,
-            )
-
-            r = compute_dl_precoding_wideband(h, max_rank=max_rank, rank_threshold=rank_threshold)
-        return Precoder(w=r.w_dl, rank=r.rank, method=method, singular_values=r.singular_values)
+        return _covariance_eigen_precoder(
+            h, wideband=(method == "svd_wideband"), max_rank=max_rank,
+            rank_threshold=rank_threshold, method=method)
 
     rb = h.shape[1]
     bs = h.shape[2]
-    h_avg = h.mean(axis=(0, 1))  # [BS, UE]
+    ue = h.shape[3]
+    r_tx = _tx_covariance(h)
 
     if method == "mrt":
-        u, s, _ = np.linalg.svd(h_avg, full_matrices=False)
-        w1 = u[:, :1]
+        eigval, eigvec = np.linalg.eigh(r_tx)
+        w1 = eigvec[:, int(np.argmax(eigval)) : int(np.argmax(eigval)) + 1]
         w1 = w1 / max(np.linalg.norm(w1), _EPS)
         w = np.broadcast_to(w1[None], (rb, bs, 1)).astype(np.complex64).copy()
         return Precoder(w=w, rank=1, method=method)
 
     if method == "identity":
-        rank = min(max_rank, bs)
+        rank = min(max_rank, bs, ue)
         eye = np.eye(bs, rank, dtype=np.complex64)
         w = np.broadcast_to(eye[None], (rb, bs, rank)).copy()
         return Precoder(w=w, rank=rank, method=method)
@@ -118,7 +167,7 @@ def compute_precoder(
         from .measure import dft_beam_matrix
 
         beams = dft_beam_matrix(bs)
-        metric = np.linalg.norm(beams.conj().T @ h_avg, axis=1)
+        metric = np.real(np.sum(beams.conj() * (r_tx @ beams), axis=0))
         best = int(np.argmax(metric))
         w1 = beams[:, best : best + 1]
         w = np.broadcast_to(w1[None], (rb, bs, 1)).astype(np.complex64).copy()
@@ -133,8 +182,9 @@ def compute_precoder(
         # 这里用与 SVD 同一套判据（奇异值相对最大值的门限），两者才可比；
         # 缺了这一步，Type I 会在低秩信道上输给 rank-1 的 DFT 波束，
         # 看起来像"码本不如单波束"，其实是没做秩自适应。
-        sv = np.linalg.svd(h_avg, compute_uv=False)
-        eff_rank = int(max((sv >= rank_threshold * sv[0]).sum(), 1))
+        ev = np.linalg.eigvalsh(r_tx).real[::-1]
+        eff_rank = int(max((ev >= (rank_threshold ** 2) * max(ev[0], _EPS)).sum(), 1))
+        eff_rank = min(eff_rank, ue)
         r = pmi_type_i(h, n_h=n_h, n_v=n_v, max_rank=min(max_rank, eff_rank))
         w = np.broadcast_to(r.precoder[None], (rb, *r.precoder.shape)).astype(np.complex64).copy()
         return Precoder(w=w, rank=r.rank, method=method, indices=list(r.indices))
@@ -172,6 +222,7 @@ class LinkPerformance:
     interference_rank: float | None = None
     interference_model: str | None = None
     r_uu_source: str | None = None
+    operating_point: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -192,17 +243,71 @@ class LinkPerformance:
                                   else round(float(self.interference_rank), 2)),
             "interference_model": self.interference_model,
             "r_uu_source": self.r_uu_source,
+            "operating_point": self.operating_point,
         }
 
 
 def _noise_from_snr(h: np.ndarray, snr_db: float) -> float:
-    """由信道平均增益和目标信噪比反推噪声功率。
+    """由信道平均增益和**合成的预波束 SNR**反推噪声功率。
 
     约定：SNR = E[|h|^2]·P_tx / N0，取 P_tx = 1。这样同一批信道在不同
     信噪比下的对比是干净的——只有噪声在变。
     """
     sig = float(np.mean(np.abs(np.asarray(h)) ** 2))
     return sig / max(10.0 ** (snr_db / 10.0), _EPS)
+
+
+def rank1_reference_power(h: np.ndarray, *, total_power: float = 1.0) -> float:
+    """返回 rank-1 最强特征波束的平均接收信号功率 ``E[σ₁²]·P``。
+
+    ChannelHub 的几何 ``sinr_dB`` 已经包含服务波束阵列增益。数据集默认工作点
+    因而必须锚到这个后波束功率，而不是单个信道系数的 ``mean(|h|²)``；后者再接
+    SVD 会把阵列增益计算两次。频域最多抽 32 个 RB，与系统仿真的标定口径一致。
+    """
+    hb = np.asarray(h)
+    if hb.ndim == 3:
+        hb = hb[None]
+    if hb.ndim != 4:
+        raise ValueError(f"h 应为 [T,RB,BS,UE] 或 [RB,BS,UE]，收到 {hb.shape}")
+    if not np.isfinite(total_power) or float(total_power) < 0:
+        raise ValueError(f"total_power 必须是有限非负数，收到 {total_power}")
+    n_rb = hb.shape[1]
+    step = max(1, n_rb // 32)
+    s1 = float(np.mean([
+        np.linalg.svd(hb[t, f], compute_uv=False)[0] ** 2
+        for t in range(hb.shape[0]) for f in range(0, n_rb, step)
+    ]))
+    return s1 * float(total_power)
+
+
+@dataclass(frozen=True)
+class GeometricImpairment:
+    """把 ChannelHub 几何 SINR 映射成链路级噪声/干扰的可审计结果。"""
+
+    noise_power: float
+    interference_cov: np.ndarray | None
+    signal_reference_power: float
+    total_impairment_power: float
+    interference_power: float
+    sinr_db: float
+    sir_db: float | None
+    model: str
+    note: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "mode": "dataset_geometric_sinr",
+            "anchor": "rank1_postbeam_sigma1_squared",
+            "sinr_db": round(float(self.sinr_db), 4),
+            "sir_db": None if self.sir_db is None else round(float(self.sir_db), 4),
+            "signal_reference_power": float(self.signal_reference_power),
+            "total_impairment_power": float(self.total_impairment_power),
+            "noise_power": float(self.noise_power),
+            "interference_power": float(self.interference_power),
+            "interference_covariance_used": self.interference_cov is not None,
+            "model": self.model,
+            "note": self.note,
+        }
 
 
 def post_equalizer_sinr(
@@ -244,53 +349,68 @@ def post_equalizer_sinr(
     这不是实现错了，是干扰真的白。
     """
     h_eff = np.asarray(h_eff)
-    if h_eff.ndim == 4:
-        h_eff = h_eff.mean(axis=0)  # 时间平均 -> [RB, rank, UE]
-    rb, rank, ue = h_eff.shape
+    if h_eff.ndim == 3:
+        h_tf = h_eff[None]
+    elif h_eff.ndim == 4:
+        h_tf = h_eff
+    else:
+        raise ValueError(f"h_eff 应为 [RB,rank,UE] 或 [T,RB,rank,UE]，收到 {h_eff.shape}")
+    n_t, rb, rank, ue = h_tf.shape
     p_per_layer = 1.0 / max(rank, 1)
 
-    out = np.zeros((rb, rank), dtype=np.float64)
-    for f in range(rb):
-        g = h_eff[f].conj().T  # [UE, rank]
-        r_n = np.eye(ue, dtype=np.complex128) * noise_power
-        if interference_cov is not None:
-            ic = np.asarray(interference_cov)
-            r_uu = ic[f] if ic.ndim == 3 else ic
-            if receiver == "irc":
-                r_n = r_n + r_uu            # 保留空间结构，才能打零陷
+    if not np.isfinite(noise_power) or float(noise_power) < 0:
+        raise ValueError(f"noise_power 必须是有限非负数，收到 {noise_power}")
+    out_tf = np.zeros((n_t, rb, rank), dtype=np.float64)
+    for t in range(n_t):
+        for f in range(rb):
+            g = h_tf[t, f].conj().T  # [UE, rank]
+            r_n = np.eye(ue, dtype=np.complex128) * max(float(noise_power), _EPS)
+            if interference_cov is not None:
+                ic = np.asarray(interference_cov)
+                r_uu = ic[f] if ic.ndim == 3 else ic
+                if receiver == "irc":
+                    r_n = r_n + r_uu            # 保留空间结构，才能打零陷
+                else:
+                    # **非 IRC 的接收机把干扰当白噪声。** 只取总功率摊到各天线，
+                    # 丢掉方向信息——这正是 IRC 要赢的那个基线。
+                    r_n = r_n + np.eye(ue, dtype=np.complex128) * (
+                        float(np.real(np.trace(r_uu))) / max(ue, 1)
+                    )
+
+            r_inv = np.linalg.pinv(r_n)
+            a = g.conj().T @ r_inv @ g  # [rank, rank]
+
+            if receiver in ("mmse", "irc"):
+                m = np.eye(rank, dtype=np.complex128) + p_per_layer * a
+                m_inv = np.linalg.pinv(m)
+                diag = np.real(np.diag(m_inv))
+                out_tf[t, f] = np.maximum(
+                    1.0 / np.maximum(diag, _EPS) - 1.0, 0.0)
+            elif receiver == "zf":
+                a_inv = np.linalg.pinv(a)
+                out_tf[t, f] = p_per_layer / np.maximum(
+                    np.real(np.diag(a_inv)), _EPS)
+            elif receiver == "mrc":
+                for k in range(rank):
+                    gk = g[:, k]
+                    sig = p_per_layer * float(np.real(gk.conj() @ r_inv @ gk)) ** 2
+                    # 层间干扰：其余层经同一 MRC 权后的泄漏
+                    leak = 0.0
+                    for j in range(rank):
+                        if j == k:
+                            continue
+                        leak += p_per_layer * abs(
+                            complex(gk.conj() @ r_inv @ g[:, j])) ** 2
+                    nz = float(np.real(gk.conj() @ r_inv @ gk))
+                    out_tf[t, f, k] = sig / max(leak + nz, _EPS)
             else:
-                # **非 IRC 的接收机把干扰当白噪声。** 只取总功率摊到各天线，
-                # 丢掉方向信息——这正是 IRC 要赢的那个基线。
-                r_n = r_n + np.eye(ue, dtype=np.complex128) * (
-                    float(np.real(np.trace(r_uu))) / max(ue, 1)
-                )
+                raise ValueError(f"未知接收机 {receiver!r}")
 
-        r_inv = np.linalg.pinv(r_n)
-        a = g.conj().T @ r_inv @ g  # [rank, rank]
-
-        if receiver in ("mmse", "irc"):
-            m = np.eye(rank, dtype=np.complex128) + p_per_layer * a
-            m_inv = np.linalg.pinv(m)
-            diag = np.real(np.diag(m_inv))
-            out[f] = np.maximum(1.0 / np.maximum(diag, _EPS) - 1.0, 0.0)
-        elif receiver == "zf":
-            a_inv = np.linalg.pinv(a)
-            out[f] = p_per_layer / np.maximum(np.real(np.diag(a_inv)), _EPS)
-        elif receiver == "mrc":
-            for k in range(rank):
-                gk = g[:, k]
-                sig = p_per_layer * float(np.real(gk.conj() @ r_inv @ gk)) ** 2
-                # 层间干扰：其余层经同一 MRC 权后的泄漏
-                leak = 0.0
-                for j in range(rank):
-                    if j == k:
-                        continue
-                    leak += p_per_layer * abs(complex(gk.conj() @ r_inv @ g[:, j])) ** 2
-                nz = float(np.real(gk.conj() @ r_inv @ gk))
-                out[f, k] = sig / max(leak + nz, _EPS)
-        else:
-            raise ValueError(f"未知接收机 {receiver!r}")
-    return out
+    if n_t == 1:
+        return out_tf[0]
+    # API 历史上返回 [RB,rank]。用速率等价 SINR 折叠时间，保证后续
+    # log2(1+SINR) 恰好等于逐时隙速率平均；绝不能先平均复信道。
+    return np.expm1(np.mean(np.log1p(out_tf), axis=0))
 
 
 def interference_covariance(
@@ -354,9 +474,9 @@ def interference_covariance(
     cov = np.zeros((rb, ue, ue), dtype=np.complex128)
     if r_uu_source == "true":
         for k in range(n_k):
-            hk = hi[k].mean(axis=0)        # [RB, BS, UE]
             for f in range(rb):
-                cov[f] += _cov_from(hk[f])
+                cov[f] += np.mean(
+                    np.stack([_cov_from(hi[k, t, f]) for t in range(n_t)]), axis=0)
         return cov
 
     # sample：把 T 个时隙当快照；不够就在真值上加抖动补足，
@@ -378,6 +498,94 @@ def interference_covariance(
         for f in range(rb):
             cov[f] += np.eye(ue) * (float(np.real(np.trace(cov[f]))) / max(ue, 1) * load)
     return cov
+
+
+def geometric_impairment(
+    h: np.ndarray,
+    sinr_db: float,
+    *,
+    sir_db: float | None = None,
+    h_interferers: np.ndarray | None = None,
+    total_power: float = 1.0,
+    interference_model: InterferenceModel = "precoded",
+    r_uu_source: RuuSource = "true",
+    r_uu_samples: int = 8,
+    diagonal_loading: float = 0.01,
+    seed: int | None = 0,
+) -> GeometricImpairment:
+    """把几何 ``SINR/SIR`` 标定成链路计算可直接使用的损伤功率。
+
+    ``sinr_dB`` 的信号项锚到 rank-1 后波束功率 ``E[σ₁²]·P``。若同时有可信的
+    ``sir_dB`` 与干扰信道，则按
+
+    ``I = S/10^(SIR/10)``, ``N = S/10^(SINR/10) - I``
+
+    分离噪声和干扰，并只用干扰信道提供协方差的空间/频率形状；协方差的平均
+    每接收天线功率会重新缩放到 ``I``。这样 MMSE 的白干扰基线与几何工作点同量纲，
+    IRC 才能只靠空间结构取得增益。缺少任一条件或标量不自洽时，不会把未标定的
+    干扰信道再叠一次，而是把 ``I+N`` 全部作为各向同性损伤。
+    """
+    s = rank1_reference_power(h, total_power=total_power)
+    sinr = float(sinr_db)
+    if not np.isfinite(sinr):
+        raise ValueError(f"sinr_db 必须是有限数，收到 {sinr_db}")
+    total = s / max(10.0 ** (sinr / 10.0), _EPS)
+
+    fallback_note = (
+        "几何 SINR 已含服务波束增益；缺少可自洽的 SIR/干扰协方差，"
+        "故将总损伤 I+N 作为白噪声，不重复叠加 h_interferers。"
+    )
+    if sir_db is None or h_interferers is None or not np.isfinite(float(sir_db)):
+        return GeometricImpairment(
+            noise_power=total, interference_cov=None,
+            signal_reference_power=s, total_impairment_power=total,
+            interference_power=0.0, sinr_db=sinr,
+            sir_db=None if sir_db is None else float(sir_db),
+            model="rank1_anchor_total_impairment_isotropic", note=fallback_note,
+        )
+
+    sir = float(sir_db)
+    interference = s / max(10.0 ** (sir / 10.0), _EPS)
+    tol = max(total, _EPS) * 1e-9
+    if interference > total + tol:
+        return GeometricImpairment(
+            noise_power=total, interference_cov=None,
+            signal_reference_power=s, total_impairment_power=total,
+            interference_power=0.0, sinr_db=sinr, sir_db=sir,
+            model="rank1_anchor_total_impairment_isotropic_inconsistent_sir",
+            note=(fallback_note + f" 当前 SIR={sir:.4f} dB 小于 SINR={sinr:.4f} dB，"
+                  "会推出负噪声，已显式回退。"),
+        )
+
+    raw = interference_covariance(
+        h_interferers, model=interference_model, r_uu_source=r_uu_source,
+        r_uu_samples=r_uu_samples, diagonal_loading=diagonal_loading, seed=seed,
+    )
+    ue = raw.shape[-1]
+    raw_power = float(
+        np.mean(np.real(np.trace(raw, axis1=1, axis2=2))) / max(ue, 1)
+    )
+    if not np.isfinite(raw_power) or raw_power <= _EPS:
+        return GeometricImpairment(
+            noise_power=total, interference_cov=None,
+            signal_reference_power=s, total_impairment_power=total,
+            interference_power=0.0, sinr_db=sinr, sir_db=sir,
+            model="rank1_anchor_total_impairment_isotropic_zero_interferer",
+            note=fallback_note + " 干扰协方差功率为零，已显式回退。",
+        )
+
+    scaled = raw * (interference / raw_power)
+    noise = max(total - interference, 0.0)
+    return GeometricImpairment(
+        noise_power=noise, interference_cov=scaled,
+        signal_reference_power=s, total_impairment_power=total,
+        interference_power=interference, sinr_db=sinr, sir_db=sir,
+        model="rank1_anchor_sinr_sir_spatial_split",
+        note=(
+            "S 取 rank-1 后波束 E[σ₁²]·P；SINR 给 I+N，SIR 给 I；"
+            "h_interferers 只提供空间/频率形状并按几何 I 重标定。"
+        ),
+    )
 
 
 def effective_rank(cov: np.ndarray, threshold: float = 0.01) -> float:
@@ -405,25 +613,78 @@ def effective_rank(cov: np.ndarray, threshold: float = 0.01) -> float:
     return float(np.mean(ranks)) if ranks else 0.0
 
 
-def capacity_upper_bound(h: np.ndarray, noise_power: float) -> float:
-    """容量上界 ``mean_rb log2 det(I + H H^H / (rank·N0))``，bit/s/Hz。
+def capacity_upper_bound(
+    h: np.ndarray,
+    noise_power: float,
+    *,
+    interference_cov: np.ndarray | None = None,
+) -> float:
+    """Perfect-CSI MIMO capacity with per-resource water-filling, bit/s/Hz.
 
-    等功率分配、理想接收机、无干扰。任何实际方案都不该超过它——
-    这条性质本身就是一个可用的自检。
+    Total transmit power is one on every time/frequency resource, matching the
+    SU/MU paths.  A former implementation spread that power across *all* channel
+    modes.  That is a baseline, not an upper bound: concentrating power on fewer
+    strong modes can beat it.  Here each ``[T,RB]`` realization is water-filled
+    over its singular modes and capacities are then averaged non-coherently.
     """
-    h = np.asarray(h)
-    h_avg = h.mean(axis=0)  # [RB, BS, UE]
-    rb = h_avg.shape[0]
-    caps = []
-    for f in range(rb):
-        hm = h_avg[f]  # [BS, UE]
-        g = hm.conj().T  # [UE, BS]
-        n_str = min(g.shape)
-        m = np.eye(g.shape[0]) + (g @ g.conj().T) / max(n_str * noise_power, _EPS)
-        sign, logdet = np.linalg.slogdet(m)
-        if sign > 0:
-            caps.append(float(logdet / np.log(2)))
-    return float(np.mean(caps)) if caps else 0.0
+    hh = np.asarray(h)
+    if hh.ndim == 3:
+        hh = hh[None]
+    if hh.ndim != 4:
+        raise ValueError(f"h 应为 [T,RB,BS,UE] 或 [RB,BS,UE]，收到 {hh.shape}")
+    if not np.isfinite(noise_power) or float(noise_power) < 0:
+        raise ValueError(f"noise_power 必须是有限非负数，收到 {noise_power}")
+    n0 = max(float(noise_power), _EPS)
+
+    # 无有色干扰时保留批量 SVD 快路径。给定 R_uu 时先以
+    # R_n = N0 I + R_uu 白化接收端，再对等效奇异模做注水；这才是同一损伤口径下
+    # 的容量上界，不能在性能里算了干扰、在“上界”里又把干扰丢掉。
+    normalized_noise = n0
+    if interference_cov is None:
+        gains = (np.linalg.svd(hh, compute_uv=False) ** 2).reshape(
+            -1, min(hh.shape[-2:]))
+    else:
+        cov = np.asarray(interference_cov, dtype=np.complex128)
+        if cov.ndim == 2:
+            cov = np.broadcast_to(cov[None], (hh.shape[1], *cov.shape))
+        if cov.shape != (hh.shape[1], hh.shape[3], hh.shape[3]):
+            raise ValueError(
+                "interference_cov 应为 [UE,UE] 或 [RB,UE,UE]，"
+                f"收到 {cov.shape}，信道为 {hh.shape}"
+            )
+        gains_list: list[np.ndarray] = []
+        eye = np.eye(hh.shape[3], dtype=np.complex128)
+        for t in range(hh.shape[0]):
+            for f in range(hh.shape[1]):
+                rn = n0 * eye + 0.5 * (cov[f] + cov[f].conj().T)
+                ev, vec = np.linalg.eigh(rn)
+                scale = max(float(np.max(np.abs(ev))), _EPS)
+                if float(np.min(ev)) < -1e-9 * scale:
+                    raise ValueError("interference_cov 不是正半定矩阵")
+                inv_sqrt = (vec * (1.0 / np.sqrt(np.maximum(ev, _EPS)))[None, :]) @ vec.conj().T
+                gains_list.append(np.linalg.svd(hh[t, f] @ inv_sqrt, compute_uv=False) ** 2)
+        gains = np.stack(gains_list)
+        normalized_noise = 1.0
+
+    # Closed-form active-set water filling. Total transmit power is one.
+    inv = np.where(
+        gains > _EPS, normalized_noise / np.maximum(gains, _EPS), np.inf)
+    order = np.argsort(inv, axis=1)
+    inv_s = np.take_along_axis(inv, order, axis=1)
+    k = np.arange(1, inv_s.shape[1] + 1, dtype=float)[None, :]
+    levels = (1.0 + np.cumsum(inv_s, axis=1)) / k
+    n_active = np.sum(levels > inv_s, axis=1).astype(int)
+    caps = np.zeros(gains.shape[0], dtype=float)
+    valid_rows = np.flatnonzero(n_active > 0)
+    if valid_rows.size:
+        ka = n_active[valid_rows]
+        mu = levels[valid_rows, ka - 1]
+        power_s = np.maximum(mu[:, None] - inv_s[valid_rows], 0.0)
+        power = np.zeros_like(power_s)
+        np.put_along_axis(power, order[valid_rows], power_s, axis=1)
+        caps[valid_rows] = np.sum(
+            np.log2(1.0 + power * gains[valid_rows] / n0), axis=1)
+    return float(np.mean(caps)) if caps.size else 0.0
 
 
 def link_performance(
@@ -437,6 +698,7 @@ def link_performance(
     rank_threshold: float = 0.1,
     h_for_precoding: np.ndarray | None = None,
     h_interferers: np.ndarray | None = None,
+    interference_cov: np.ndarray | None = None,
     n_h: int | None = None,
     n_v: int | None = None,
     interference_model: InterferenceModel = "precoded",
@@ -444,6 +706,7 @@ def link_performance(
     r_uu_samples: int = 8,
     diagonal_loading: float = 0.01,
     seed: int | None = 0,
+    operating_point: dict[str, Any] | None = None,
 ) -> LinkPerformance:
     """一站式：预编码 → 有效信道 → 逐层 SINR → 谱效。
 
@@ -453,9 +716,13 @@ def link_performance(
     h_for_precoding : 用于**计算预编码**的信道，默认与 h 相同。
         传估计信道即可评估"用有误差的 CSI 做预编码"的代价——
         这是 CSI 反馈类课题最核心的对比。
-    snr_db / noise_power : 二选一。给 snr_db 时按信道平均增益反推噪声。
+    snr_db / noise_power : 二选一。``snr_db`` 是显式合成的**预波束 SNR**，按
+        ``mean(|h|²)`` 反推噪声；数据集几何 SINR 必须先经
+        :func:`geometric_impairment` 标定，再传 ``noise_power``。
     h_interferers : ``[K-1, T, RB, BS_ant, UE_ant]``，给定则计入干扰，
         得到真正的 SINR。
+    interference_cov : 已经标定功率的 ``[RB,UE,UE]`` 干扰协方差；与
+        ``h_interferers`` 互斥。
     receiver : ``mmse`` 把干扰当白噪声（基线），``irc`` 用完整空间协方差打零陷。
         两者公式相同，差别只在 ``R_n``——见 ``post_equalizer_sinr``。
     interference_model / r_uu_source : 见 ``interference_covariance``。
@@ -464,6 +731,8 @@ def link_performance(
     谱效口径：``SE = mean_rb Σ_layer log2(1 + SINR[rb, layer])``。
     """
     h = np.asarray(h)
+    if h_interferers is not None and interference_cov is not None:
+        raise ValueError("h_interferers 与 interference_cov 只能给一个")
     if noise_power is None:
         if snr_db is None:
             raise ValueError("snr_db 与 noise_power 至少给一个")
@@ -476,7 +745,7 @@ def link_performance(
     )
     h_eff = effective_channel(h, prec.w)
 
-    intf_cov = None
+    intf_cov = None if interference_cov is None else np.asarray(interference_cov)
     intf_power = 0.0
     intf_rank: float | None = None
     if h_interferers is not None:
@@ -485,10 +754,15 @@ def link_performance(
             r_uu_source=r_uu_source, r_uu_samples=r_uu_samples,
             diagonal_loading=diagonal_loading, seed=seed,
         )
+    if intf_cov is not None:
         ue = intf_cov.shape[-1]
-        intf_power = float(
-            np.mean(np.real(np.trace(intf_cov, axis1=1, axis2=2))) / max(ue, 1)
-        )
+        if intf_cov.ndim == 2:
+            intf_power = float(np.real(np.trace(intf_cov))) / max(ue, 1)
+        else:
+            intf_power = float(
+                np.mean(np.real(np.trace(intf_cov, axis1=1, axis2=2)))
+                / max(ue, 1)
+            )
         intf_rank = effective_rank(intf_cov)
 
     sinr_lin = post_equalizer_sinr(
@@ -505,13 +779,21 @@ def link_performance(
         method=prec.method,
         receiver=receiver,
         precoder_indices=prec.indices,
-        capacity_bound=capacity_upper_bound(h, noise_power),
+        capacity_bound=capacity_upper_bound(
+            h, noise_power, interference_cov=intf_cov),
         sinr_per_rb_db=10.0 * np.log10(np.maximum(sinr_lin, _EPS)),
         noise_power=float(noise_power),
         interference_power=intf_power,
         interference_rank=intf_rank,
-        interference_model=(interference_model if h_interferers is not None else None),
-        r_uu_source=(r_uu_source if h_interferers is not None else None),
+        interference_model=(
+            interference_model if h_interferers is not None
+            else ("provided_covariance" if interference_cov is not None else None)
+        ),
+        r_uu_source=(
+            r_uu_source if h_interferers is not None
+            else ("provided" if interference_cov is not None else None)
+        ),
+        operating_point=operating_point,
     )
 
 
@@ -536,6 +818,7 @@ class MonteCarloResult:
     method: str
     receiver: str
     per_sample_se: np.ndarray = field(repr=False, default_factory=lambda: np.empty(0))
+    operating_point_mode: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -550,6 +833,7 @@ class MonteCarloResult:
             "relative_ci_width": round(self.relative_ci_width, 4),
             "method": self.method,
             "receiver": self.receiver,
+            "operating_point_mode": self.operating_point_mode,
         }
 
 
@@ -563,9 +847,11 @@ def monte_carlo(
     max_rank: int = 4,
     channels_for_precoding: np.ndarray | None = None,
     interferers: np.ndarray | None = None,
+    interference_covariances: Sequence[np.ndarray | None] | None = None,
     ci_target: float = 0.05,
     n_h: int | None = None,
     n_v: int | None = None,
+    operating_point_mode: str | None = None,
 ) -> MonteCarloResult:
     """在一批样本上跑蒙特卡洛，返回均值、置信区间与收敛判断。
 
@@ -573,11 +859,19 @@ def monte_carlo(
     （默认 5%）。不收敛说明样本量不够，此时两个方案的差异可能只是噪声——
     这是蒙特卡洛仿真最容易犯的错，所以这里默认就算。
 
-    ``noise_powers`` 可逐样本给（例如用各样本自身的 SINR 反推），
-    否则用统一的 ``snr_db``。
+    ``noise_powers`` 与 ``interference_covariances`` 可逐样本给（例如由数据集
+    几何 SINR/SIR 标定），否则用统一的合成预波束 ``snr_db``。
     """
     ch = np.asarray(channels)
     n = ch.shape[0]
+    if interferers is not None and interference_covariances is not None:
+        raise ValueError("interferers 与 interference_covariances 只能给一个")
+    if noise_powers is not None and len(noise_powers) != n:
+        raise ValueError(f"noise_powers 长度应为 {n}，收到 {len(noise_powers)}")
+    if interference_covariances is not None and len(interference_covariances) != n:
+        raise ValueError(
+            f"interference_covariances 长度应为 {n}，"
+            f"收到 {len(interference_covariances)}")
     se = np.zeros(n)
     sinr = np.zeros(n)
     ranks: dict[int, int] = {}
@@ -593,6 +887,8 @@ def monte_carlo(
             kw["h_for_precoding"] = channels_for_precoding[i]
         if interferers is not None:
             kw["h_interferers"] = interferers[i]
+        if interference_covariances is not None and interference_covariances[i] is not None:
+            kw["interference_cov"] = interference_covariances[i]
         r = link_performance(ch[i], **kw)
         se[i] = r.spectral_efficiency
         sinr[i] = float(np.mean(r.sinr_per_layer_db))
@@ -620,6 +916,11 @@ def monte_carlo(
         method=method,
         receiver=receiver,
         per_sample_se=se,
+        operating_point_mode=(
+            operating_point_mode
+            or ("per_sample_impairment" if noise_powers is not None
+                else "synthetic_prebeam_snr")
+        ),
     )
 
 
@@ -627,12 +928,16 @@ def compare_precoders(
     channels: np.ndarray,
     *,
     methods: tuple[PrecoderMethod, ...] = ("svd", "svd_wideband", "type1", "dft"),
-    snr_db: float = 20.0,
+    snr_db: float | None = 20.0,
+    noise_powers: np.ndarray | None = None,
     receiver: ReceiverType = "mmse",
     max_rank: int = 4,
     channels_for_precoding: np.ndarray | None = None,
+    interferers: np.ndarray | None = None,
+    interference_covariances: Sequence[np.ndarray | None] | None = None,
     n_h: int | None = None,
     n_v: int | None = None,
+    operating_point_mode: str | None = None,
 ) -> dict[str, Any]:
     """同一批信道上横向对比多种预编码方案。
 
@@ -642,8 +947,12 @@ def compare_precoders(
     out: dict[str, Any] = {}
     for m in methods:
         r = monte_carlo(
-            channels, snr_db=snr_db, method=m, receiver=receiver, max_rank=max_rank,
-            channels_for_precoding=channels_for_precoding, n_h=n_h, n_v=n_v,
+            channels, snr_db=snr_db, noise_powers=noise_powers,
+            method=m, receiver=receiver, max_rank=max_rank,
+            channels_for_precoding=channels_for_precoding,
+            interferers=interferers,
+            interference_covariances=interference_covariances,
+            n_h=n_h, n_v=n_v, operating_point_mode=operating_point_mode,
         )
         out[m] = r.as_dict()
     if "svd" in out:

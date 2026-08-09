@@ -466,6 +466,7 @@ def compare_replications(
     effect = paired.mean_diff
     rel = effect / sb.mean if abs(sb.mean) > _EPS else float("nan")
     rel_hw = hw / abs(sb.mean) if abs(sb.mean) > _EPS else float("nan")
+    rel_text = f"（{rel:+.1%}）" if np.isfinite(rel) else "（基线为 0，不报相对百分比）"
 
     # **效应小于置信区间就拒绝下结论**，而不是照报百分比。
     # 还要再过一次 gates 的判决检验（以 Wilcoxon 为准，见 gates.PairedResult）——
@@ -475,7 +476,7 @@ def compare_replications(
     if significant:
         verdict = "significant"
         vtext = (f"{arm_a} 相对 {arm_b}：{metric} {sa.mean:.3f} vs {sb.mean:.3f} {unit}，"
-                 f"差值 {effect:+.3f}（{rel:+.1%}），95% CI "
+                 f"差值 {effect:+.3f}{rel_text}，95% CI "
                  f"[{paired.ci_low:+.3f}, {paired.ci_high:+.3f}]，n_rep={paired.n}，"
                  f"{'Wilcoxon 符号秩检验' if paired.decision_test == 'wilcoxon' else '配对 t 检验'}"
                  f" p={paired.decision_p_value:.3g}。**效应大于置信区间半宽 "
@@ -491,7 +492,7 @@ def compare_replications(
         need = gt.required_samples(paired.std_diff, abs(effect)) if abs(effect) > _EPS else -1
         verdict = "inconclusive"
         vtext = (f"{arm_a} 相对 {arm_b}：{metric} {sa.mean:.3f} vs {sb.mean:.3f} {unit}，"
-                 f"点估计差 {effect:+.3f}（{rel:+.1%}），但 **{'；'.join(why)}**。"
+                 f"点估计差 {effect:+.3f}{rel_text}，但 **{'；'.join(why)}**。"
                  f"**不能下结论，也不要报这个百分比**——"
                  f"n_rep={paired.n} 的实验分辨不出这么小的差异。"
                  + (f"要让这个效应站住至少需要 {need} 次重复"

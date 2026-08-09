@@ -68,6 +68,18 @@ check(bool(_pr.dropped_by_corr), "被剔除的用户如实记录，不是静默�
 check(all(c <= 0.5 + 1e-9 for c in _pr.correlations),
       f"入选者与已选集的相关都不超过门限（实得 {np.round(_pr.correlations, 3)}）")
 
+# 每个 RB 的公共复相位不携带功率/方向信息，不能改变宽带用户强度或配对。
+_phase = np.exp(1j * _rng.uniform(-np.pi, np.pi, size=(_hec.shape[0], _hec.shape[2])))
+_hec_rot = _hec * _phase[:, None, :, None]
+_pr_rot = mu.pair_users(_hec_rot, criterion="sus", max_users=4, corr_threshold=0.5)
+check(_pr_rot.users == _pr.users
+      and _pr_rot.dropped_by_corr == _pr.dropped_by_corr
+      and np.allclose(_pr_rot.correlations, _pr.correlations, atol=1e-10),
+      "逐 RB 任意公共相位旋转不改变 SUS 配对（宽带只平均功率协方差）")
+check(np.allclose(np.linalg.norm(mu._wideband_user_vectors(_hec_rot), axis=1),
+                  np.linalg.norm(mu._wideband_user_vectors(_hec), axis=1), atol=1e-10),
+      "逐 RB 相位翻转不让宽带用户强度凭空相消")
+
 _pr_all = mu.pair_users(_hec, criterion="all")
 check(len(_pr_all.users) == 5, "all 准则不做筛选")
 _pr_one = mu.pair_users(_hec, criterion="best_single")

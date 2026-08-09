@@ -76,14 +76,16 @@ try:
 except KeyError:
     check(True, "未知场景名被拒（带可用清单）")
 
-# **每 UE 至少 8 个快照**：少于这个数 PF 拿不到多用户分集、
-# CSI 老化的「陈旧信道」和「当前信道」会是同一个矩阵，效果恒为 0。
+# **每 UE 至少 8 个快照**：既可以来自一个样本的多时隙，也可以来自同一 UE 的
+# 多个单时隙样本。当前更推荐后者，避免外部 ChannelHub 多时隙 SIR/SINR 聚合错口径。
 for name, s in scenes.items():
     g = s["generate"]
     n_slots = int(g.get("num_slots_per_sample", 1))
-    check(n_slots >= 8, f"{name} 的 num_slots_per_sample={n_slots} >= 8")
     check(int(g["num_samples"]) % int(g["num_ues"]) == 0,
           f"{name} 的样本数能被 UE 数整除（ChannelHub 硬约束）")
+    snaps_per_ue = n_slots * int(g["num_samples"]) // int(g["num_ues"])
+    check(snaps_per_ue >= 8,
+          f"{name} 每 UE 有 {snaps_per_ue} 个有效快照（要求 >=8）")
 
 # ---------------------------------------------------------------------------
 section("3  成对场景的受控性")
@@ -96,7 +98,7 @@ check(not bad, f"全部成对场景都是受控对比（{len(bad)} 处违规）"
 pairs = [(n, s["pair_with"]) for n, s in scenes.items() if s.get("pair_with")]
 check(len(pairs) >= 4, f"至少两对对照组（实得 {len(pairs) // 2} 对）")
 for a, b in pairs:
-    check(scenes[b].get("pair_with") == a, f"{a} ↔ {b} 双向指认")
+        check(scenes[b].get("pair_with") == a, f"{a} <-> {b} 双向指认")
 
 # **负向测试：校验器真的拦得住吗。** 只断言"当前合规"是不够的——
 # 一个永远返回空列表的 check_pairs 也能让上面全绿。
@@ -142,7 +144,9 @@ section("4  expect 的诚实性")
 # CLAUDE.md：「preset 里的 label 是设计意图，写着「高干扰」实际只有 2 dB 的事
 # 发生过」。所以没测过就必须标 measured: false，不许拿设计意图充数。
 _num_keys = ("avg_mcs", "bler_first_tx", "cell_experienced_mbps",
-             "ue_experienced_p5_mbps", "olla_db_mean", "iot_db_median")
+             "ue_experienced_p5_mbps", "olla_db_mean", "iot_db_median",
+             "small_queue_wait_ms_p95", "small_completion_delay_ms_p95",
+             "small_pdb_miss_ratio")
 for name, s in scenes.items():
     e = s["expect"]
     check("measured" in e, f"{name} 的 expect 显式标了 measured")

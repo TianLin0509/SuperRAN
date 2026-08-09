@@ -69,7 +69,7 @@ print("主导秩 %d，最大特征值 %.3e" % (f.dominant_rank, f.eigenvalues[0]
 # f.beam_rsrp_db  [n_beams] DFT 波束域 RSRP
 ''',
     "pmi": '''
-# ── PMI（38.214 Type I 码本索引，非 MAE token）──────────────
+# ── PMI（Type-I-style 单面板列码本子集近似，非 MAE token）──
 w = ds.pmi(0)
 print("PMI 索引 %s，秩 %d，码本大小 %d" % (w.indices, w.rank, w.codebook_size))
 # w.indices    每层选中的码本列号

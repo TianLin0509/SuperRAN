@@ -13,10 +13,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from superwireless import generate as gen  # noqa: E402
 from superwireless import linklevel as ll  # noqa: E402
+from superwireless import load  # noqa: E402
+from superwireless import mumimo as mu  # noqa: E402
 from superwireless import physical as ph  # noqa: E402
 from superwireless import plan as pl  # noqa: E402
-from superwireless import validate as va  # noqa: E402
-from superwireless import load  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -56,6 +56,25 @@ check(r.spectral_efficiency <= r.capacity_bound * 1.001, "谱效不超容量上�
 check(len(r.sinr_per_layer_db) == r.rank, "逐层 SINR 数量等于 rank")
 check(r.sinr_per_rb_db.shape[0] == ds.h_true.shape[2], "逐 RB SINR 维度正确")
 
+# Dataset 默认工作点是 ChannelHub 几何 SINR，已经含服务波束阵列增益。
+# 它必须锚到 rank-1 σ1²；显式 snr_db 才走合成预波束 SNR 的旧路径。
+geo = float(ds.sinr_dB[0])
+op = ds.geometric_impairment(0)
+expected_n0 = mu.noise_from_geometric_sinr(ds.h_true[0], geo)
+check(np.isclose(op.noise_power, expected_n0, rtol=1e-12),
+      "Dataset 默认噪声与系统仿真共用 rank-1 几何 SINR 锚点")
+r_geo = ds.link(0, method="svd", max_rank=1, rank_threshold=0.0)
+check(abs(float(r_geo.sinr_per_layer_db[0]) - geo) < 0.25,
+      "rank-1 默认后波束 SINR 锚在数据集几何 SINR（不重复计阵列增益）")
+r_synthetic = ds.link(0, snr_db=geo, method="svd", max_rank=1, rank_threshold=0.0)
+check(np.isclose(r_synthetic.noise_power, ll._noise_from_snr(ds.h_true[0], geo)),
+      "显式 snr_db 保持合成预波束 SNR 语义")
+check(r_synthetic.spectral_efficiency > r_geo.spectral_efficiency,
+      "把几何 SINR 错当预波束 SNR 会显著高估谱效，反向哨兵有效")
+check(np.isclose(ds.capacity(0), ll.capacity_upper_bound(
+    ds.h_true[0], op.noise_power, interference_cov=op.interference_cov)),
+      "Dataset.capacity 使用同一几何损伤口径的注水上界")
+
 # 信噪比越高谱效越高
 se_lo = ll.link_performance(ds.h_true[0], snr_db=5.0).spectral_efficiency
 se_hi = ll.link_performance(ds.h_true[0], snr_db=30.0).spectral_efficiency
@@ -92,10 +111,10 @@ cmp = ll.compare_precoders(ds.h_true[:20], snr_db=20.0, n_h=8, n_v=2)
 print(f"  {'方案':<14}{'谱效':>9}{'vs SVD':>9}{'收敛':>7}")
 for m, v in cmp.items():
     print(f"  {m:<14}{v['se_mean']:>9.3f}{v['vs_svd_pct']:>8.0f}%{str(v['converged']):>7}")
-order = ["svd", "svd_wideband", "type1", "dft"]
-seq = [cmp[m]["se_mean"] for m in order if m in cmp]
-check(all(seq[i] >= seq[i + 1] - 1e-6 for i in range(len(seq) - 1)),
-      "SVD ≥ 宽带SVD ≥ TypeI ≥ DFT")
+check(cmp["svd"]["se_mean"] >= cmp["svd_wideband"]["se_mean"] - 1e-6
+      and cmp["svd_wideband"]["se_mean"]
+      >= max(cmp["type1"]["se_mean"], cmp["dft"]["se_mean"]) - 1e-6,
+      "SVD ≥ 宽带SVD ≥ max(TypeI, DFT)；两种码本之间不伪造全序")
 check(cmp["svd"]["vs_svd_pct"] == 100.0, "SVD 作为基准是 100%")
 
 # ---------------------------------------------------------------------------
@@ -118,7 +137,7 @@ print(f"  理想 CSI {ideal.se_mean:.3f} → 数据集估计 CSI {est.se_mean:.3
 
 # 人为注入不同程度的 CSI 误差，才看得出趋势
 tau_s = float(summ["tau_rms_ns"]) * 1e-9
-print(f"\n  人为劣化 CSI 后的谱效（10 个样本，SNR=20dB）：")
+print("\n  人为劣化 CSI 后的谱效（10 个样本，SNR=20dB）：")
 print(f"    {'导频间隔':<10}{'CSI NMSE':>11}{'谱效':>10}{'相对理想':>10}")
 base = ll.monte_carlo(ds.h_true[:10], snr_db=20.0, method="svd").se_mean
 trend = []

@@ -560,7 +560,8 @@ async def sw_link_performance(
     参数
     ----
     methods : 默认对比 ``["svd", "svd_wideband", "type1", "dft"]``。
-        SVD 是理论上界，Type I 是 3GPP 码本，DFT 是单层波束。
+        ``svd`` 是逐 RB 协方差特征波束（单快照时等价瞬时 SVD）；
+        ``type1`` 是 Type-I-style 单面板列码本子集近似；DFT 是单层波束。
         用户自研方案应当和这几个在同一批信道上比。
     use_estimated_csi : True 时用估计信道计算预编码、用理想信道评估性能，
         得到的是"CSI 有误差时的实际代价"——CSI 反馈类课题的核心对比。
@@ -581,18 +582,16 @@ def _link_perf_sync(
 ) -> dict[str, Any]:
     import numpy as np
 
-    from . import linklevel as ll
     from . import loader as ld
 
     ds = ld.load(dataset_id)
     ms = tuple(methods or ("svd", "svd_wideband", "type1", "dft"))
-    snr = float(snr_db) if snr_db is not None else float(np.median(ds.sinr_dB))
-
-    kw: dict[str, Any] = {"snr_db": snr, "receiver": receiver}
+    explicit_snr = None if snr_db is None else float(snr_db)
+    kw: dict[str, Any] = {"snr_db": explicit_snr, "receiver": receiver}
     if use_estimated_csi:
         kw["channels_for_precoding"] = ds.h_est
 
-    cmp = ll.compare_precoders(ds.h_true, methods=ms, **kw)
+    cmp = ds.compare_precoders(methods=ms, **kw)
     best = max(cmp.items(), key=lambda kv: kv[1]["se_mean"])
     unconverged = [m for m, v in cmp.items() if not v["converged"]]
 
@@ -600,14 +599,36 @@ def _link_perf_sync(
         {
             "dataset_id": dataset_id,
             "n_samples": int(ds.n),
-            "snr_db": round(snr, 2),
+            "snr_db": None if explicit_snr is None else round(explicit_snr, 2),
+            "dataset_sinr_db": (
+                {
+                    "p5": round(float(np.percentile(ds.sinr_dB, 5)), 2),
+                    "median": round(float(np.median(ds.sinr_dB)), 2),
+                    "p95": round(float(np.percentile(ds.sinr_dB, 95)), 2),
+                }
+                if explicit_snr is None else None
+            ),
+            "operating_point": (
+                {
+                    "mode": "dataset_geometric_sinr_per_sample",
+                    "anchor": "rank1_postbeam_sigma1_squared",
+                    "interference": (
+                        "SIR 标量 + 已标定空间协方差（条件满足时）"
+                        if ds.h_interferers is not None
+                        else "总损伤 I+N 作为各向同性噪声"
+                    ),
+                }
+                if explicit_snr is None
+                else {"mode": "synthetic_prebeam_snr", "snr_db": explicit_snr}
+            ),
             "receiver": receiver,
             "csi_for_precoding": "estimated" if use_estimated_csi else "ideal",
             "results": cmp,
             "best_method": best[0],
             "note": (
                 "谱效口径：SE = mean_rb Σ_layer log2(1 + 后处理SINR)。"
-                "SVD 为理论上界，vs_svd_pct 是相对它的百分比。"
+                "vs_svd_pct 是相对逐 RB 协方差特征波束的百分比；真正的容量上界"
+                "由 water-filling capacity 单独给出，不能把 svd 曲线冒充容量上界。"
             ),
             "warning": (
                 f"这些方案的置信区间还没收敛到 5%：{unconverged}。"
@@ -1522,14 +1543,26 @@ def sw_await_config(timeout_s: float = 90.0, spec_id: str | None = None) -> dict
 @tool()
 def sw_system_sim(
     dataset_id: str,
+    evaluation_mode: str = "capacity",
     duration_s: float = 5.0,
     traffic_model: str = "ftp3",
     file_bytes: int = 500_000,
     arrival_rate_hz: float = 2.0,
+    small_ue_share: float = 0.5,
+    small_file_bytes: int = 1_500,
+    small_arrival_rate_hz: float = 20.0,
+    small_pdb_ms: float = 20.0,
+    large_pdb_ms: float = 300.0,
     scheduler: str = "pf",
     pf_window_tti: int = 100,
+    pf_accounting: str = "auto",
+    qos_avg_rate_exponent: float = 1.0,
+    qos_instant_rate_exponent: float = 1.0,
+    qos_delay_exponent: float = 0.0,
+    qos_priority_weighting: str = "none",
     mu_enabled: bool = False,
     trim: str = "tail",
+    small_burst_policy: str = "fractional_slot",
     tdd_pattern: str = "DDDSU",
     neighbor_prb_util: float = 0.3,
     neighbor_load_jitter: float = 0.05,
@@ -1546,14 +1579,13 @@ def sw_system_sim(
 
     这是和链路级完全不同的一层。链路级问"这个信道能跑多快"，
     系统级问"**这个小区里的用户实际体验到多快**"——把话务到达与结束、
-    调度器的多用户取舍、HARQ 重传、缓冲区排空全算进去。
+    调度器的多用户取舍与缓冲区排空全算进去；legacy_v1 走 NewTx/ReTx 曲线重传，
+    experience_v2 的 NACK 字节留队后按 NewTx 重试，当前不做 HARQ 软合并。
 
-    **体验速率是现网真正上报的 KPI**，不是吞吐量的平均：
-
-    * 只在"有数据要发"的时间段里算
-    * 分母是**缓冲区非空的时间**（含排队等调度的 TTI），不是被调度的 TTI 数
-    * ``trim="tail"``：排除清空缓冲区的最后一个 slice（3GPP TS 28.552 §5.1.1.3）
-    * ``trim="head_tail"``：再排除首个 TTI（运营商话统的掐头去尾口径）
+    ``capacity`` 保留历史 ``legacy_v1`` 的全带/trim 口径以复现旧结果；
+    ``experience`` 的 ``experience_v2`` 才使用 28.552 Rel-19 DRB busy-period：
+    起点是首传、排队等待另报、末段 ACK piece 排除，并为单时隙小 burst 提供
+    TBVol/PaddingVol 的 fractional-slot 口径。两套结果不可混为同一指标。
 
     返回里 **cell 是小区级、users 是用户级**，两级都有：平均调度 MCS、
     平均 rank、首传 BLER、残留 BLER、体验速率的中位与 5% 边缘。
@@ -1570,15 +1602,29 @@ def sw_system_sim(
 
     参数
     ----
-    dataset_id : 已生成的数据集。**建议生成时 num_slots_per_sample >= 8**，
-        否则信道没有时间起伏，PF 调度退化成轮询。
+    dataset_id : 已生成的数据集。每个 UE 建议至少 8 个时间快照。
+        在 ChannelHub 修复多时隙 SIR/SINR 聚合前，优先用
+        ``num_slots_per_sample=1`` 且 ``num_samples/num_ues>=8``，既保留时间序列，
+        又避免门 1 的 IoT 自洽性失败。
     duration_s : 仿真时长，3~20 秒。40000 TTI 实测 0.2 秒跑完。
+    evaluation_mode : ``capacity`` 保留 legacy_v1 的全带调度口径；
+        ``experience`` 使用 experience_v2：DRB busy-period、按需 RBG、多 UE/TTI、
+        scheduled-TBS PF 与 Rel-19 小 burst KPI。两者是两个评估 profile，
+        不是一个算法的精度开关。
     traffic_model : ``ftp3``（3GPP FTP Model 3，评价体验速率的标准话务）/
+        ``mixed``（experience_v2 推荐：大小 UE 混跑，包长与到达率外生定义）/
         ``bimodal``（**现网话务两头高中间低**：绝大部分是只占 1 个 RBG 的小包
         和占满全带宽的大包，两者的体验速率分开报）/
         ``full_buffer``（**体验速率在这个模型下没有意义**，缓冲区永不空）/ ``cbr``
     arrival_rate_hz : 每用户每秒到达几个文件。控制负载——太高会积压，
         ``notes`` 会拦。
+    pf_accounting : ``auto`` 会在 legacy_v1 使用历史 best_se，在 experience_v2
+        使用实际 scheduled TBS。``acked_goodput`` 只供研究，不是默认 PF 口径。
+    qos_* : ``qos_pf`` 的显式参数化形式
+        ``w(priority) * R_inst^beta / R_avg^alpha * delay^gamma``。默认
+        alpha=beta=1、gamma=0、w=1，严格退化成经典 PF；它不是未确认定义的 EPF。
+    small_burst_policy : experience_v2 默认 ``fractional_slot``，按 28.552 Rel-19
+        的 TB volume / padding volume 折算单时隙小 burst；``exclude`` 保留旧式盲区。
     mu_enabled : 是否允许 MU 配对。默认关，先看清 SU 基线。
     neighbor_prb_util : **邻区 PRB 利用率**，默认 0.3。ChannelHub 的几何 SINR
         是按所有邻区都在发算的（等于 100%），真实网络 5G 典型是 10%/30%/50%。
@@ -1593,12 +1639,14 @@ def sw_system_sim(
         （每跳 16 RB = 1 个 RBG，**17 跳**扫完 272 RB）。
         **这是老化的主导项**：10 ms 周期下全带扫一遍要 170 ms。
     csi_processing_delay_ms : 信道估计 + 预编码计算 + 调度下发的固定时延。
-    olla_speedup : OLLA 两个步长的**等比**放大系数，默认 1.0（现网基线 +0.01/−0.1）。
+    olla_speedup : OLLA 两个步长的**等比**放大系数，默认 1.0；本项目基础步长
+        +0.01/−0.09 精确对应 10% 稳态 BLER（现网口头 +0.01/−0.1 对应 9.09%）。
         稳态 BLER = up/(up+down) 与它无关，放大只加快收敛、加大稳态抖动。
         短仿真里基线常常压不动一档 MCS，可临时设 10；**出正式结论设回 1.0**。
         非 1.0 时结果里会带一条显式告警。
-    precoder : **实际发射权**。``svd`` 逐 RBG 特征波束（理论最优，默认）；
-        ``type1`` 用 38.214 Type I 宽带码本当发射权。
+    precoder : **实际发射权**。``svd`` 在系统建表的单快照上逐 RBG 做 SVD
+        （默认；不是跨时隙 Shannon 容量上界）；``type1`` 用 Type-I-style
+        单面板宽带列码本近似当发射权，多层采用增量贪心而非完整矩阵码本枚举。
         码本自由度少，**在 CSI 老化下反而可能更耐受**——能算错的地方也少。
         ``type1`` 时 BF Gain 恒为 0（发射权就是 CQI 的参照权）。
     seed : 实验批次的**主种子**（对应 ns-3 的 ``RngSeed``）。重复实验**不要**
@@ -1633,6 +1681,9 @@ def sw_system_sim(
     from . import system as sysm  # noqa: PLC0415
 
     ds = _load(dataset_id)
+    mode = str(evaluation_mode).strip().lower()
+    if mode not in ("capacity", "experience"):
+        return {"error": "evaluation_mode 只支持 capacity / experience"}
     try:
         h = ds.h_true
         sinr = np.asarray(ds.scalar("sinr_dB"))
@@ -1683,6 +1734,11 @@ def sw_system_sim(
                                     csi=csi_cfg, snapshot_ms=snap_ms)
                if mu_enabled else {"ratio": 1.0, "measured": False,
                                    "note": "未开 MU"})
+    if mu_enabled and not mu_gain.get("measured"):
+        return {
+            "error": "已启用 MU，但没有任何快照完成 MU/SU 配对；已停止，未用 1.0 静默降级。",
+            "mu_gain": mu_gain,
+        }
     build_s = time.perf_counter() - _t_build
 
     # **建表只做一次，重复的只是 TTI 主循环。** build_link_tables 与随机种子
@@ -1692,16 +1748,29 @@ def sw_system_sim(
         res = sysm.simulate_replications(
             tables,
             num_replications=int(num_replications), master_seed=int(seed),
-            sys_cfg=sysm.SystemConfig(duration_s=float(duration_s),
+            sys_cfg=sysm.SystemConfig(evaluation_mode=mode,
+                                      duration_s=float(duration_s),
                                       tdd_pattern=tdd_pattern, seed=int(seed),
                                       snapshot_update_ms=snap_ms),
             traffic=sysm.TrafficConfig(model=traffic_model, file_bytes=int(file_bytes),
-                                       arrival_rate_hz=float(arrival_rate_hz)),
+                                       arrival_rate_hz=float(arrival_rate_hz),
+                                       small_ue_share=float(small_ue_share),
+                                       small_file_bytes=int(small_file_bytes),
+                                       small_arrival_rate_hz=float(small_arrival_rate_hz),
+                                       small_pdb_ms=float(small_pdb_ms),
+                                       large_pdb_ms=float(large_pdb_ms)),
             sched=sysm.SchedulerConfig(algorithm=scheduler,
-                                       pf_window_tti=int(pf_window_tti),
-                                       mu_enabled=bool(mu_enabled),
-                                       olla_speedup=float(olla_speedup)),
-            kpi=sysm.KpiConfig(trim=trim),
+                                        pf_window_tti=int(pf_window_tti),
+                                        pf_accounting=pf_accounting,
+                                        qos_avg_rate_exponent=float(qos_avg_rate_exponent),
+                                        qos_instant_rate_exponent=float(
+                                            qos_instant_rate_exponent),
+                                        qos_delay_exponent=float(qos_delay_exponent),
+                                        qos_priority_weighting=str(qos_priority_weighting),
+                                        mu_enabled=_flag(mu_enabled),
+                                        olla_speedup=float(olla_speedup)),
+            kpi=sysm.KpiConfig(trim=trim,
+                               small_burst_policy=small_burst_policy),
             mu_se_ratio=float(mu_gain["ratio"]),
             build_elapsed_s=build_s,
         )
@@ -1742,7 +1811,7 @@ def sw_system_sim(
     out["precoder"] = {
         "transmit_weight": str(precoder),
         "note": ("SVD 逐 RBG 特征波束" if precoder == "svd"
-                 else "38.214 Type I 宽带码本；BF Gain 恒为 0（发射权即参照权）"),
+                 else "Type-I-style 宽带列码本近似；BF Gain 恒为 0（发射权即参照权）"),
         "cqi_reference_weight": "type1_wideband",
     }
     out["neighbor_load"] = sysm.NeighborLoadConfig(

@@ -2,16 +2,14 @@
 
 **这一层回答的问题和链路级不一样。** 链路级问"这个信道能跑多快"，
 系统级问"**这个小区里的用户实际体验到多快**"——后者要把话务的到达与结束、
-调度器在多用户间的取舍、HARQ 重传、缓冲区排空全部算进去。
+调度器在多用户间的取舍与缓冲区排空算进去。``legacy_v1`` 保留历史
+NewTx/ReTx 曲线重传；``experience_v2`` 的 NACK 字节留队后按 NewTx 重试，
+当前没有 HARQ 软合并或进程时序。
 
-体验速率是现网真正上报的 KPI，它**不是**吞吐量的平均：
-
-* 只在"有数据要发"的时间段里算（没数据的时候不算你慢）
-* **掐尾**——把清空缓冲区的那个 TTI 排除掉（3GPP TS 28.552 §5.1.1.3）。
-  不掐的话，一个只用半个 TTI 就发完的小包会被算成"半个 TTI 的速率"，
-  数值虚高得离谱。
-* **掐头**——运营商话统里通常还会排除首个 TTI（含调度时延与 BSR 上报往返）。
-  两种口径都实现了，见 :class:`KpiConfig`。
+本文件保留历史 ``legacy_v1`` 口径以复现旧结果；它的 ``tail/head_tail`` 是
+项目早期的近似实现，不能再冒充 28.552。标准化的 DRB busy-period、首传起点、
+末段排除与 Rel-19 小 burst 折算在 :mod:`superwireless.experience` 的
+``experience_v2`` 路径实现，两种模式的结果会显式带版本号。
 
 架构上分两相，这是能跑十万 TTI 的关键：
 
@@ -41,14 +39,50 @@ _EPS = 1e-12
 #: **主循环与 dl_ratio 必须用同一个数**，否则实际调度的下行比报告的多。
 S_SLOT_DL_FRACTION = 0.7
 
-TrafficModel = Literal["full_buffer", "ftp3", "cbr", "bimodal"]
-SchedAlgorithm = Literal["pf", "rr", "max_ci"]
+EvaluationMode = Literal["capacity", "experience"]
+TrafficModel = Literal["full_buffer", "ftp3", "cbr", "bimodal", "mixed"]
+SchedAlgorithm = Literal["pf", "qos_pf", "rr", "max_ci"]
+PfAccounting = Literal["auto", "legacy_best_se", "scheduled_tbs",
+                       "acked_goodput", "legacy_fullband"]
+PriorityWeighting = Literal["none", "inverse_priority"]
 ThroughputTrim = Literal["none", "tail", "head_tail"]
+SmallBurstPolicy = Literal["fractional_slot", "exclude"]
 
 
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class TrafficClassConfig:
+    """experience 模式的一类 DRB 业务。
+
+    ``ue_share`` 决定多少 UE 使用该类业务；包长与到达过程是外生业务量，
+    **不能用“希望占几个 RBG”反推**——实际需要的 RBG 还取决于 MCS/rank。
+    ``priority`` 越小优先级越高，沿用 5QI 的方向；``resource_type`` 只在
+    ``qos_pf`` 下决定是否启用 HOL/PDB 时延因子。
+    """
+
+    name: str
+    ue_share: float
+    file_bytes: int
+    arrival_rate_hz: float
+    priority: int = 50
+    pdb_ms: float = 100.0
+    resource_type: str = "non_GBR"
+    cbr_mbps: float = 0.0
+    is_small: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name, "ue_share": self.ue_share,
+            "file_bytes": self.file_bytes,
+            "arrival_rate_hz": self.arrival_rate_hz,
+            "priority": self.priority, "pdb_ms": self.pdb_ms,
+            "resource_type": self.resource_type,
+            "cbr_mbps": self.cbr_mbps, "is_small": self.is_small,
+        }
+
+
 @dataclass
 class TrafficConfig:
     """话务模型。
@@ -74,6 +108,15 @@ class TrafficConfig:
     p_small_rbg: float = 0.30            # 只占 1 个 RBG
     p_full_rbg: float = 0.30             # 占满全部 RBG
     p_idle_tti: float = 0.30             # 根本没有调度的 TTI 占比
+    # --- experience_v2：外生定义的 mixed 业务（默认大小 UE 各半）---
+    small_ue_share: float = 0.5
+    small_file_bytes: int = 1_500
+    small_arrival_rate_hz: float = 20.0
+    small_priority: int = 20
+    small_pdb_ms: float = 20.0
+    large_priority: int = 80
+    large_pdb_ms: float = 300.0
+    classes: tuple[TrafficClassConfig, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         d = {"model": self.model}
@@ -92,7 +135,48 @@ class TrafficConfig:
                            "另有约 30% 的 TTI 根本没有调度。"
                            "**小包测不到体验速率**——一个 TTI 就发完，"
                            "3GPP 掐尾口径下没有可测量的时间。")}
+        elif self.model == "mixed":
+            d |= {
+                "classes": [c.as_dict() for c in self.resolved_classes()],
+                "note": ("按 UE 分配外生业务类；包长、到达率、PDB 与优先级先定义，"
+                         "实际 RBG 占用由该用户当时的 MCS/rank 与 TBS 反查决定。"),
+            }
         return d
+
+    def resolved_classes(self) -> tuple[TrafficClassConfig, ...]:
+        """把简化输入解析成 experience 模式使用的业务类。"""
+        if self.classes:
+            return tuple(self.classes)
+        if self.model == "mixed":
+            share = min(max(float(self.small_ue_share), 0.0), 1.0)
+            return (
+                TrafficClassConfig(
+                    name="small", ue_share=share,
+                    file_bytes=max(1, int(self.small_file_bytes)),
+                    arrival_rate_hz=max(0.0, float(self.small_arrival_rate_hz)),
+                    priority=int(self.small_priority), pdb_ms=float(self.small_pdb_ms),
+                    resource_type="delay_critical_GBR", is_small=True),
+                TrafficClassConfig(
+                    name="large", ue_share=1.0 - share,
+                    file_bytes=max(1, int(self.file_bytes)),
+                    arrival_rate_hz=max(0.0, float(self.arrival_rate_hz)),
+                    priority=int(self.large_priority), pdb_ms=float(self.large_pdb_ms),
+                    resource_type="non_GBR", is_small=False),
+            )
+        if self.model == "cbr":
+            return (TrafficClassConfig(
+                name="cbr", ue_share=1.0, file_bytes=1, arrival_rate_hz=0.0,
+                priority=50, pdb_ms=100.0, resource_type="GBR",
+                cbr_mbps=float(self.cbr_mbps)),)
+        if self.model == "full_buffer":
+            return (TrafficClassConfig(
+                name="full_buffer", ue_share=1.0, file_bytes=1 << 50,
+                arrival_rate_hz=0.0, priority=50, pdb_ms=0.0),)
+        # ftp3：单一大流；bimodal 只属于 legacy 路径，experience 会显式拒绝。
+        return (TrafficClassConfig(
+            name="large", ue_share=1.0, file_bytes=max(1, int(self.file_bytes)),
+            arrival_rate_hz=max(0.0, float(self.arrival_rate_hz)),
+            priority=int(self.large_priority), pdb_ms=float(self.large_pdb_ms)),)
 
     def expected_prb_util(self, num_rbg: int = 17) -> float:
         """这套分布折合出来的平均 PRB 利用率。**这是设计意图，不是仿真结果。**
@@ -127,10 +211,22 @@ class SchedulerConfig:
 
     algorithm: SchedAlgorithm = "pf"
     pf_window_tti: int = 100
+    # ``auto``：capacity/legacy 用 best_se，experience_v2 用实际 scheduled TBS。
+    # acked_goodput 是研究型口径，NACK 时给 0 会反向抬高坏链路用户优先级，
+    # 所以不作为默认。
+    pf_accounting: PfAccounting = "auto"
+    # qos_pf = w(priority) * R_inst^beta / R_avg^alpha * delay_factor^gamma。
+    # 默认 alpha=beta=1、gamma=0、w=1，严格退化成经典 PF；现场 EPF 定义
+    # 未确认前，不把业务权重或时延权重偷偷打开。
+    qos_avg_rate_exponent: float = 1.0       # alpha
+    qos_instant_rate_exponent: float = 1.0   # beta
+    qos_delay_exponent: float = 0.0          # gamma
+    qos_priority_weighting: PriorityWeighting = "none"
     # --- OLLA（外环链路自适应）---
     # 发送端按无干扰选 MCS，接收端吃着干扰误码，OLLA 把偏置压下来。
     # 步长按目标 BLER 不对称：ACK 加 up、NACK 减 down，
-    # 稳态时 BLER → up/(up+down)。**现网基线是 +0.01/−0.1**（≈9.1% BLER）。
+    # 稳态时 BLER → up/(up+down)。现网口头值 +0.01/−0.1 对应约 9.1%；
+    # 本项目默认用 +0.01/−0.09，精确对应 10%。
     # 步长放大能加快收敛但会在稳态附近抖得更厉害——要快收敛就临时调大，
     # 出正式结论用基线值。
     olla_enabled: bool = True
@@ -162,6 +258,11 @@ class SchedulerConfig:
     def as_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
             "algorithm": self.algorithm, "pf_window_tti": self.pf_window_tti,
+            "pf_accounting": self.pf_accounting,
+            "qos_avg_rate_exponent": self.qos_avg_rate_exponent,
+            "qos_instant_rate_exponent": self.qos_instant_rate_exponent,
+            "qos_delay_exponent": self.qos_delay_exponent,
+            "qos_priority_weighting": self.qos_priority_weighting,
             "mu_enabled": self.mu_enabled, "max_mu_users": self.max_mu_users,
             "olla_enabled": self.olla_enabled,
             "olla_baseline_steps_db": [self.olla_step_up_db, self.olla_step_down_db],
@@ -189,14 +290,20 @@ class KpiConfig:
     trim: ThroughputTrim = "tail"
     min_burst_tti: int = 2               # 短于这个的 burst 不计入体验速率
     warmup_tti: int = 200                # 前多少个 TTI 不计入统计（PF 均值要收敛）
+    small_burst_policy: SmallBurstPolicy = "fractional_slot"
 
     def as_dict(self) -> dict[str, Any]:
         return {"trim": self.trim, "min_burst_tti": self.min_burst_tti,
                 "warmup_tti": self.warmup_tti,
+                "small_burst_policy": self.small_burst_policy,
+                "experience_standard": "3GPP TS 28.552 Rel-19",
                 "trim_note": {
-                    "none": "不掐，含清空缓冲区的那个 TTI（数值虚高，不建议）",
-                    "tail": "掐尾：排除清空缓冲区的最后一个 TTI（3GPP TS 28.552 §5.1.1.3）",
-                    "head_tail": "掐头去尾：再排除首个 TTI（运营商话统常用口径）",
+                    "none": "legacy：从到达算到清空，含最后一个 TTI",
+                    "tail": ("legacy：从到达算、排除清空 TTI；它包含首传前排队，"
+                             "不是 TS 28.552 的 T2 起点"),
+                    "head_tail": ("legacy 掐头去尾，最接近 28.552："
+                                  "从首次调度开始并排除清空 TTI；"
+                                  "experience_v2 改用 DRB busy-period 事件记录器"),
                 }[self.trim]}
 
 
@@ -274,6 +381,7 @@ def apply_neighbor_load(sinr_db: float, sir_db: float, utilization: float) -> fl
 
 @dataclass
 class SystemConfig:
+    evaluation_mode: EvaluationMode = "capacity"
     duration_s: float = 5.0
     scs_khz: int = 30                    # 30 kHz → slot 0.5 ms
     num_rbg: int = 17
@@ -306,7 +414,10 @@ class SystemConfig:
         return (p.count("D") + S_SLOT_DL_FRACTION * p.count("S")) / len(p)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"duration_s": self.duration_s, "scs_khz": self.scs_khz,
+        return {"evaluation_mode": self.evaluation_mode,
+                "model_version": ("experience_v2" if self.evaluation_mode == "experience"
+                                  else "legacy_v1"),
+                "duration_s": self.duration_s, "scs_khz": self.scs_khz,
                 "tti_ms": self.tti_ms, "num_tti": self.num_tti,
                 "num_rbg": self.num_rbg, "rb_per_rbg": self.rb_per_rbg,
                 "num_rb": self.num_rbg * self.rb_per_rbg,
@@ -348,6 +459,7 @@ class UeLinkTable:
     # 零时延时它与 ``se`` / ``best_se`` 逐位相同。
     se_gnb: np.ndarray | None = None       # [snapshot, rank]
     best_se_gnb: np.ndarray | None = None  # [snapshot]
+    mcs_table: int = 3                     # experience_v2 当前只接受公司表 3
 
 
 def la_sel(sinr_db: float, table: int, target_bler: float) -> int:
@@ -384,15 +496,23 @@ def olla_step_down_for(target_bler: float, step_up: float = 0.01) -> float:
 
 
 def _type1_precoder(h_rbg: np.ndarray, rank: int) -> np.ndarray:
-    """38.214 Type I **宽带** PMI，强制到指定 rank。``[F,BS,UE]`` → ``[F,BS,rank]``。
+    """Type-I-style 单面板**宽带列码本近似**，强制到指定 rank。
 
-    宽带意味着全带共用一个权（``compute_precoder`` 内部就是在频率平均的信道上
-    搜码本再广播回各 RBG），这正对应用户口径里的**全带 CQI**——
-    不做子带 CQI、不做频选调度。
+    接受 ``[F,BS,UE]`` 或 ``[T,F,BS,UE]``，返回 ``[F,BS,rank]``。
+
+    宽带意味着全带共用一个权（``compute_precoder`` 在 ``E[H H^H]`` 上搜列码本
+    再广播回各 RBG），这正对应用户口径里的**全带 CQI**。当前实现复用了
+    38.214 Type-I 单面板的过采样 DFT/双极化列，但多层 PMI 用增量贪心列选择，
+    **不是完整枚举 38.214 的多层矩阵码本**；不做子带 CQI、不做频选调度。
     """
     from . import linklevel as ll  # noqa: PLC0415
 
-    return ll.compute_precoder(np.asarray(h_rbg)[None], method="type1",
+    hh = np.asarray(h_rbg)
+    if hh.ndim == 3:
+        hh = hh[None]
+    if hh.ndim != 4:
+        raise ValueError(f"h_rbg 应为 [F,BS,UE] 或 [T,F,BS,UE]，收到 {hh.shape}")
+    return ll.compute_precoder(hh, method="type1",
                                max_rank=int(rank), rank_threshold=0.0).w
 
 
@@ -548,8 +668,8 @@ def build_link_tables(
     这正是 :func:`simulate_replications` 能"建一次表、重跑 n 次主循环"的前提；
     ``tests/test_rng.py`` 第 8 节逐位断言了这条。
 
-    ``precoder`` 决定**实际发射权**：``svd``（逐 RBG 特征波束，理论最优）
-    或 ``type1``（38.214 Type I 宽带码本）。注意 Type I 权在两种模式下都要算——
+    ``precoder`` 决定**实际发射权**：``svd``（每个 RBG 的单快照 SVD 特征波束）
+    或 ``type1``（Type-I-style 宽带列码本近似）。注意 Type I 参照权在两种模式下都要算——
     它是 CQI 与 BF Gain 的参照系；``precoder="type1"`` 只是把它同时当成发射权，
     于是 BF Gain 恒为 0（发射权就是参照权）。
     """
@@ -578,8 +698,8 @@ def build_link_tables(
                              for _ in range(x.shape[0] if x.ndim == 4 else 1)])
         h_users = merged_h
         per_snap_sinr, per_snap_sir = merged_g, merged_s
-        geo_sinr_db = [float(np.nanmean(v)) for v in merged_g]
-        sir_in = [float(np.nanmean(v)) for v in merged_s]
+        geo_sinr_db = [_nan_safe(np.mean, v) for v in merged_g]
+        sir_in = [_nan_safe(np.mean, v) for v in merged_s]
 
     # **邻区不是 full buffer。** 按 PRB 利用率折算干扰后再建表——
     # 折算必须发生在算 SINR/MCS/rank 之前，事后乘系数是补不回来的。
@@ -591,6 +711,12 @@ def build_link_tables(
         # 负载**逐快照抖动**（NeighborLoadConfig.jitter，默认 ±5%）时，
         # 每个快照拿自己那份 η——所以下面是逐元素而不是一个全局标量。
         def _one(g: float, sr: float, u: float) -> tuple[float, float]:
+            # 只有同口径且 SIR>SINR 才能从两者反解出非负噪声。早期代码在
+            # 口径错配时保留 SINR、却仍单独抬高 SIR，制造了新的不自洽量。
+            if np.isfinite(g) and np.isfinite(sr) and sr < 49.0:
+                n_lin = 10.0 ** (-g / 10.0) - 10.0 ** (-sr / 10.0)
+                if n_lin <= 0:
+                    return g, sr
             u_db = 10.0 * np.log10(max(u, 1e-12))
             new_sir = (sr - u_db) if np.isfinite(sr) and sr < 49.0 else sr
             return apply_neighbor_load(g, sr, u), new_sir
@@ -604,8 +730,8 @@ def build_link_tables(
                   for gs, ss, us in zip(per_snap_sinr, per_snap_sir, loads, strict=True)]
         per_snap_sinr = [[p[0] for p in row] for row in _pairs]
         per_snap_sir = [[p[1] for p in row] for row in _pairs]
-        geo_sinr_db = [float(np.nanmean(v)) for v in per_snap_sinr]
-        sir_in = [float(np.nanmean(v)) for v in per_snap_sir]
+        geo_sinr_db = [_nan_safe(np.mean, v) for v in per_snap_sinr]
+        sir_in = [_nan_safe(np.mean, v) for v in per_snap_sir]
 
     out: list[UeLinkTable] = []
     aging = csi is not None and csi.enabled
@@ -629,14 +755,17 @@ def build_link_tables(
         n_rows = snaps_u[0].shape[0]
         n_rbg_eff = max(1, int(np.ceil(n_rows / rows_per_rbg)))
 
-        # --- Type I 宽带 PMI：逐 UE 逐 rank 只搜一次码本 ---
+        # --- Type-I-style 宽带 PMI 近似：逐 UE 只搜一次列码本 ---
         # 宽带 PMI 是**慢时间尺度**的量（38.214 里它的上报周期远长于一个 TTI），
-        # 逐快照重搜既慢又不符合物理。在时间平均信道上搜一次就是它该有的样子。
-        h_mean = np.mean(np.stack(snaps_u), axis=0)
+        # 逐快照重搜既慢又不符合物理。在跨快照/频率的功率协方差上搜一次。
+        # 宽带/慢时标 PMI 看的是 E[H H^H] 上的平均接收功率，不能先对复信道
+        # 跨时间求均值（相位翻转会抵消成零）。compute_precoder/type1 会在完整
+        # [T,F,BS,UE] 序列上构造协方差。
+        h_wideband = np.stack(snaps_u)
         # **只搜一次。** Type I 的选波束是**增量贪心**（选一层、投影掉、再选下一层），
         # 所以 rank R 结果的前 r 列与直接搜 rank r **逐位相同**（实测偏差 0.0）。
         # 逐 rank 各搜一遍白花 4 倍时间——实测码本搜索本来就占建表的 47%。
-        _w_all = _type1_precoder(h_mean, max_rank)
+        _w_all = _type1_precoder(h_wideband, max_rank)
         w_pmi = {r: _w_all[:, :, :r] for r in range(1, max_rank + 1)}
 
         sinr = np.zeros((n_s, max_rank))
@@ -668,7 +797,7 @@ def build_link_tables(
 
             # 预编码用 h_prec、评估用当前快照。零时延时两者相同，
             # 结果与 mumimo.su_rank_adaptation **逐位相同**（test_csi_aging 第 1 节）。
-            # Type I 权是**在陈旧信道的时间平均上**搜的（宽带 PMI 本就是慢量），
+            # Type I 参照权是**在陈旧信道的协方差上**搜的（宽带 PMI 本就是慢量），
             # 所以它同样吃老化——只是自由度少，能算错的地方也少。
             _wov = _w_all if precoder == "type1" else None
             rc = ca.rank_adaptation_aged(h_prec, snaps_u[s], noise_power=npow,
@@ -718,7 +847,7 @@ def build_link_tables(
         # 它已经包含了 SVD 的增益，等于假设基站预先知道自己波束打得准不准。
         cqi_idx = np.zeros(max_rank, dtype=int)
         for _r in range(max_rank):
-            mean_pmi = float(np.nanmean(pmi_sinr[:, _r]))
+            mean_pmi = _nan_safe(np.mean, pmi_sinr[:, _r])
             cqi_idx[_r] = _cqi_of(mean_pmi, target_bler)
             thr = _cqi_threshold_sinr(int(cqi_idx[_r]), target_bler)
             # **CQI=0 不能退化成 −inf。** 它的意思是"低于 CQI 表下界"，
@@ -758,7 +887,7 @@ def build_link_tables(
             sir_db=float(sir_in[i]), sinr_tx_db=sinr_tx, mcs_tx=mcs_tx,
             bf_gain_db=bf_gain, pmi_sinr_db=pmi_sinr, cqi_index=cqi_idx,
             csi_lag_snapshots=lag_used, se_gnb=se_gnb,
-            best_se_gnb=se_gnb[np.arange(n_s), best],
+            best_se_gnb=se_gnb[np.arange(n_s), best], mcs_table=int(table),
         ))
     return out
 
@@ -789,15 +918,31 @@ def measure_mu_gain(
     **MU 受老化的打击远重于 SU**：ZF 的全部价值就是把配对用户之间的干扰
     零陷掉，而零陷是按基站以为的信道打的——信道一变，零陷就落空，
     残余干扰直接进分母。SU 只是波束没对准，损失温和得多。
+
+    若没有任何快照能完成 MU 配对，本函数返回 ``measured=False`` 和逐快照
+    ``errors``，**不会把 1.0 当成实测增益**。调用方在 ``mu_enabled=True`` 时
+    必须把它视为硬错误；保留 ``ratio=1.0`` 只为让诊断对象保持固定字段结构。
     """
     if num_ues is not None and num_ues < len(h_users):
         groups = group_samples_by_ue(len(h_users), num_ues)
         h_users = [np.asarray(h_users[g[0]]) for g in groups]
-        geo_sinr_db = [float(np.nanmean([geo_sinr_db[i] for i in g])) for g in groups]
+        geo_sinr_db = [_nan_safe(np.mean, [geo_sinr_db[i] for i in g]) for g in groups]
 
     aging = csi is not None and csi.enabled
     ratios: list[float] = []
     modes: list[str] = []
+    errors: list[dict[str, Any]] = []
+    if len(h_users) < 2 or max_mu_users < 2:
+        return {
+            "ratio": 1.0,
+            "measured": False,
+            "errors": [{
+                "snapshot": None,
+                "type": "ValueError",
+                "message": "MU 至少需要 2 个候选用户且 max_mu_users>=2",
+            }],
+            "note": "MU 增益未测得；这个 1.0 只是诊断占位值，禁止用于仿真。",
+        }
     n = min(max_snapshots, max(1, min(np.asarray(h).shape[0] for h in h_users)))
     # **两条路径必须同粒度，否则比的不是老化。** 早先老化侧降到 RBG、
     # 完美侧留在 RB，su_mu_adaptation 内部又按 16 分组，等于两边口径不同，
@@ -821,14 +966,23 @@ def measure_mu_gain(
             dec = mu.su_mu_adaptation(snaps, noise_power=npow,
                                       h_users_for_precoding=prec,
                                       max_mu_users=max_mu_users)
-        except Exception:  # noqa: BLE001
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            errors.append({
+                "snapshot": int(t),
+                "type": type(exc).__name__,
+                "message": str(exc),
+            })
             continue
         if dec.su_se > 0:
             ratios.append(dec.mu_se / dec.su_se)
             modes.append(dec.mode)
     if not ratios:
-        return {"ratio": 1.0, "measured": False,
-                "note": "配对测不出来（用户数或天线数不足），MU 按 1.0 处理"}
+        return {
+            "ratio": 1.0,
+            "measured": False,
+            "errors": errors,
+            "note": "MU 增益没有任何有效快照；这个 1.0 只是诊断占位值，禁止用于仿真。",
+        }
     r = float(np.median(ratios))
     spread = float(np.std(ratios) / max(abs(r), _EPS))
     return {
@@ -836,9 +990,11 @@ def measure_mu_gain(
         "mode_share_mu": modes.count("MU") / len(modes),
         "relative_spread": round(spread, 3),
         "csi_aging": bool(aging),
+        "errors": errors,
         "note": (f"**这是一个标量近似**：在 {len(ratios)} 个快照上真配了一遍取中位数，"
                  f"主循环按它折算，没有逐 TTI 重新配对。"
-                 f"比值离散度 {spread * 100:.0f}%——超过 30% 就说明 MU 增益"
+                 + (f"另有 {len(errors)} 个快照失败，错误明细已返回。" if errors else "")
+                 + f"比值离散度 {spread * 100:.0f}%——超过 30% 就说明 MU 增益"
                  f"随时间起伏很大，用一个标量会失真。"
                  + ("配对预编码用的是**陈旧 CSI**（已开老化）。" if aging else
                     "配对预编码用的是**零时延完美 CSI**，这是上界不是现网。")),
@@ -1023,13 +1179,34 @@ class SystemResult:
     users: list[dict[str, Any]]
     elapsed_s: float
     notes: list[str] = field(default_factory=list)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"config": self.config, "cell": self.cell, "users": self.users,
-                "elapsed_s": round(self.elapsed_s, 3), "notes": self.notes}
+        out = {"config": self.config, "cell": self.cell, "users": self.users,
+               "elapsed_s": round(self.elapsed_s, 3), "notes": self.notes}
+        if self.diagnostics:
+            out["diagnostics"] = self.diagnostics
+        return out
 
     def text(self) -> str:
         c = self.cell
+        if self.config.get("system", {}).get("model_version") == "experience_v2":
+            def _v(key: str, digits: int = 2) -> str:
+                value = c.get(key)
+                return "n/a" if value is None else f"{float(value):.{digits}f}"
+
+            return (
+                f"DRB 体验速率 {_v('drb_throughput_rel19_mbps')} Mbps"
+                f"（大 burst {_v('large_burst_drb_throughput_mbps')}、"
+                f"小 burst 折算 {_v('small_burst_fractional_mbps')}）\n"
+                f"small 到达对象等待 P95 {_v('small_queue_wait_ms_p95')} ms，"
+                f"完成时延 P95 {_v('small_completion_delay_ms_p95')} ms，"
+                f"PDB miss {_v('small_pdb_miss_ratio', 4)}\n"
+                f"平均调度 MCS {_v('avg_mcs', 1)}，平均 rank {_v('avg_rank')}，"
+                f"NewTx 尝试 BLER {_v('newtx_attempt_bler', 3)}；"
+                f"资源利用率 {_v('resource_utilization', 3)}，"
+                f"同 TTI 多 UE 占比 {_v('multi_ue_tti_share', 3)}"
+            )
         return (
             f"小区体验速率 {c['cell_experienced_mbps']:.2f} Mbps"
             f"（用户中位 {c['ue_experienced_median_mbps']:.2f}、"
@@ -1069,7 +1246,8 @@ def simulate(
 
     **分流前是一个 rng 同时喂话务和 HARQ**，改一下 ``arrival_rate_hz`` 会让
     HARQ 的伯努利序列整个错位——"话务模型的影响"里于是混着"HARQ 换了一批随机数"。
-    这类污染在结果里完全看不出来。分流后改话务只动话务流。
+    这类污染在结果里完全看不出来。分流后改话务只动话务流；HARQ 与调度决胜还按
+    ``[TTI, UE]`` 固定索引，A/B 调度顺序分叉也不会把后续事件的随机数错位。
     """
     sys_cfg = sys_cfg or SystemConfig()
     traffic = traffic or TrafficConfig()
@@ -1078,11 +1256,42 @@ def simulate(
     t0 = time.perf_counter()
 
     book = rng if rng is not None else rg.RngBook(master_seed=int(sys_cfg.seed))
-    rng_traffic = book.generator("traffic")
-    rng_harq = book.generator("harq")
-    rng_sched = book.generator("scheduler")
+    if sys_cfg.evaluation_mode not in ("capacity", "experience"):
+        raise ValueError("evaluation_mode 只支持 capacity / experience")
+    if sys_cfg.evaluation_mode == "experience":
+        # 独立路径把两种 profile 的资源分配与 KPI 语义彻底隔开。
+        from . import experience as ex  # noqa: PLC0415
 
+        run = ex.simulate_experience(
+            tables, sys_cfg=sys_cfg, traffic_cfg=traffic, sched=sched, kpi=kpi,
+            book=book, s_slot_fraction=S_SLOT_DL_FRACTION, progress=progress)
+        return SystemResult(
+            config={"system": sys_cfg.as_dict(), "traffic": traffic.as_dict(),
+                    "scheduler": sched.as_dict(), "kpi": kpi.as_dict(),
+                    "mu_se_ratio": 1.0, "rng": book.as_dict(),
+                    "physical_approximations": {
+                        "sinr": "wideband; no per-RBG frequency-selective scheduling",
+                        "harq": "none; NACK payload retries later as NewTx",
+                        "allocator": "priority_then_fit; one priority sort per DL TTI",
+                        "crn_event_mapping": "harq and scheduler tie-break indexed by [TTI,UE]",
+                        "tbs_resources": ("38.214 TBS quantization with company MCS table 3; "
+                                          "12 data symbols/RB and S-slot 0.7 scaling"),
+                        "type1": ("single-panel Type-I-style beam-column subset; "
+                                  "greedy multi-layer approximation"),
+                    }},
+            cell=run.cell, users=run.users, elapsed_s=run.elapsed_s,
+            notes=run.notes, diagnostics=run.diagnostics)
+    if sched.pf_accounting not in ("auto", "legacy_best_se"):
+        raise ValueError("capacity/legacy_v1 只支持 pf_accounting=auto 或 legacy_best_se；"
+                         "scheduled_tbs 请使用 evaluation_mode='experience'")
+    if sched.algorithm == "qos_pf":
+        raise ValueError("qos_pf 只属于 evaluation_mode='experience'")
+    if traffic.model == "mixed":
+        raise ValueError("mixed 话务只属于 evaluation_mode='experience'")
     n_ue = len(tables)
+    rng_traffic = book.generator("traffic")
+    harq_draw = book.generator("harq").random((int(sys_cfg.num_tti), n_ue))
+    scheduler_draw = book.generator("scheduler").random((int(sys_cfg.num_tti), n_ue))
     # 小包只占 1 个 RBG：按该 RBG 的 RE 数 × 中等 MCS 谱效估承载
     # 1 个 RBG 一个 TTI 的承载：RB×12 子载波×12 数据符号×中等谱效
     _small_b = max(200, int(sys_cfg.rb_per_rbg * 12 * 12 * 3.0 / 8))
@@ -1163,7 +1372,7 @@ def simulate(
         # 但抽签会白白消耗 scheduler 流，也让"没有平局的配置"变得不可复现比对。
         _m = metric.tolist()
         if len(_m) > 1 and len(set(_m)) < len(_m):
-            order = np.lexsort((rng_sched.random(len(_m)), -metric))
+            order = np.lexsort((scheduler_draw[tti, cand], -metric))
         else:
             order = np.argsort(-metric)
 
@@ -1228,7 +1437,7 @@ def simulate(
                 # **残留 BLER 系统性偏低**，而这个偏差不会以任何方式报出来。
                 bler = _bler_lookup(m, float(tables[u].sinr_db[snap, r - 1]), "retx")
                 retx_cnt[u] += 1
-                if rng_harq.random() > bler:
+                if harq_draw[tti, u] > bler:
                     # **重传成功也要计入 served。** 早先这里漏了，
                     # 字节进了缓冲区却没进统计，对账差 4.5%。
                     served[u] += tr.serve(u, tti, size)
@@ -1250,7 +1459,7 @@ def simulate(
             sched_cnt[u] += 1
             mcs_sum[u] += m
             rank_sum[u] += r
-            if rng_harq.random() > bler:
+            if harq_draw[tti, u] > bler:
                 sent = tr.serve(u, tti, tb_bytes)
                 served[u] += sent
                 if sched.olla_enabled:      # ACK：小步上调
@@ -1451,11 +1660,10 @@ def simulate(
                 "**这个参数我没有替你调，因为它直接决定负载**。")
     if traffic.model == "bimodal" and cell["small_pkt_experienced_mbps"] is None:
         notes.append(
-            "**小包的体验速率测不出来**：它们在一个 TTI 内就发完了，"
-            "而 3GPP TS 28.552 的掐尾口径要排除清空缓冲区的那个 slice，"
-            "单 slice 的 burst 因此没有可测量的时间。"
-            "**这不是 bug，是这个 KPI 的固有盲区**——现网话统里小包同样测不到，"
-            "它们的体验由调度时延而非速率决定。要看小包体验请看调度时延分布。")
+            "**legacy_v1 的小包体验速率测不出来**：历史 trim 实现会排除"
+            "清空缓冲区的末 slice，单 slice burst 因而没有时间分母。"
+            "这只是 legacy 复现口径的盲区；要按 TS 28.552 Rel-19 的小 burst"
+            "fractional-slot 口径与 FIFO 等待/PDB，请改用 evaluation_mode='experience'。")
     if cell["outage_ue"]:
         notes.append(
             f"**{cell['outage_ue']} 个用户全程处于覆盖外**（用户级 SINR 够不到 MCS 0 的门限），"
@@ -1468,7 +1676,8 @@ def simulate(
         config={"system": sys_cfg.as_dict(), "traffic": traffic.as_dict(),
                 "scheduler": sched.as_dict(), "kpi": kpi.as_dict(),
                 "mu_se_ratio": round(float(mu_se_ratio), 4),
-                "rng": book.as_dict()},
+                "rng": {**book.as_dict(),
+                        "event_mapping": "harq and scheduler tie-break indexed by [TTI,UE]"}},
         cell=cell, users=[x.as_dict() for x in users],
         elapsed_s=time.perf_counter() - t0, notes=notes,
     )
@@ -1598,10 +1807,20 @@ def simulate_replications(
     users: list[dict[str, Any]] = []
     for u in range(len(runs[0].users)):
         row: dict[str, Any] = {"ue": u}
-        for k in ("geo_sinr_db", "iot_db"):
+        for k in ("geo_sinr_db", "iot_db", "traffic_class"):
             row[k] = runs[0].users[u].get(k)
-        for k in ("experienced_mbps", "avg_mcs", "bler_first_tx"):
-            row[k] = rg.summarize([r.users[u][k] for r in runs], k).as_dict()
+        for k in ("experienced_mbps", "served_mbps", "avg_mcs", "avg_rank",
+                  "bler_first_tx", "completed_bursts", "queue_wait_p95_ms",
+                  "completion_delay_p95_ms", "pdb_miss_ratio",
+                  "completed_arrival_objects", "arrival_queue_wait_p95_ms",
+                  "arrival_completion_delay_p95_ms", "arrival_pdb_miss_ratio",
+                  "busy_period_first_schedule_wait_p95_ms",
+                  "busy_period_completion_delay_p95_ms"):
+            vals = [r.users[u].get(k) for r in runs]
+            vals = [x for x in vals if isinstance(x, (int, float))
+                    and not isinstance(x, bool)]
+            if vals:
+                row[k] = rg.summarize(vals, k).as_dict()
         users.append(row)
 
     # notes 去重但保序。**按原文去重是不够的**：像"首传 BLER 0.287 高于目标"
@@ -1653,28 +1872,29 @@ def simulate_replications(
 
 
 _BLER_CACHE: dict[tuple[int, int, str], float] = {}
+_BLER_CACHE_STEP_DB = 0.05
 
 
 def _bler_lookup(mcs: int, sinr_db: float, tx_mode: str = "newtx") -> float:
-    """查表 BLER，按 0.5 dB 量化后缓存——主循环里会被叫十万次。
+    """查表 BLER，按源曲线 0.05 dB 网格量化后缓存。
 
-    量化到 0.5 dB 是有意的：BLER 曲线在门限附近很陡，但 0.5 dB 的分辨率
-    足够（一档 MCS 的间隔约 1~2 dB），而缓存命中率因此接近 100%。
+    公司曲线的原始横轴步长就是 0.05 dB。旧实现按 0.5 dB 缓存，在瀑布区会把
+    工作点最多平移 0.25 dB，足以显著改变 ACK/NACK；缓存不能以牺牲源数据一个
+    数量级的分辨率为代价。
     """
     # **nan 要在这里兜住。** int(round(nan*2)) 直接 ValueError，
     # 而 nan SINR 是能真到这儿的（被拒样本、全零信道、几何 SINR 缺失）。
     # 一个用户的一个快照能把整条系统级仿真挂掉，报的错还看不出是谁。
     if sinr_db != sinr_db:                      # nan
         return 1.0                              # 发不出去
-    key = (int(mcs), int(round(min(max(sinr_db, -60.0), 60.0) * 2)), tx_mode)
+    clipped = min(max(float(sinr_db), -60.0), 60.0)
+    key = (int(mcs), int(round(clipped / _BLER_CACHE_STEP_DB)), tx_mode)
     v = _BLER_CACHE.get(key)
     if v is None:
         from . import bler_curves as bc  # noqa: PLC0415
 
-        try:
-            v = float(np.atleast_1d(
-                bc.get_curve(int(mcs), tx_mode).evaluate(key[1] / 2.0))[0])
-        except Exception:  # noqa: BLE001
-            v = 0.1
+        v = float(np.atleast_1d(
+            bc.get_curve(int(mcs), tx_mode).evaluate(
+                key[1] * _BLER_CACHE_STEP_DB))[0])
         _BLER_CACHE[key] = float(min(max(v, 0.0), 1.0))
     return _BLER_CACHE[key]

@@ -289,7 +289,7 @@ def check_pairable(a: ResultArtifact, b: ResultArtifact) -> list[dict[str, Any]]
     elif a.sample_ids_sha256 != b.sample_ids_sha256:
         # 长度一样但 ID 序列不同 —— 最隐蔽的一种错配
         ida, idb = a.ids(), b.ids()
-        first = next((i for i, (x, y) in enumerate(zip(ida, idb)) if x != y), None)
+        first = next((i for i, (x, y) in enumerate(zip(ida, idb, strict=True)) if x != y), None)
         same_set = set(ida) == set(idb)
         issues.append(
             {
@@ -356,7 +356,7 @@ IDS = results.sample_ids("{dataset_id}", ds.n)
 # ===========================================================================
 #  你的算法写在这里
 # ===========================================================================
-def my_algorithm(h_est, h_true, sinr_db):
+def my_algorithm(h_est, h_true, operating_point):
     """对单个样本算出一个指标值。
 
     参数
@@ -364,7 +364,9 @@ def my_algorithm(h_est, h_true, sinr_db):
     h_est   : [T, RB, BS_ant, UE_ant] 估计信道（带导频与噪声，贴近实际系统）
     h_true  : 同形，理想信道。**只用来评估性能，不要拿它算预编码**
               —— 那等于让自己的方法提前知道答案，门 2 会拦
-    sinr_db : 该样本的工作点信噪比（标量，dB）
+    operating_point : 该样本经标定的几何工作点。``sinr_db`` 已含阵列增益，
+              所以这里直接使用它给出的 noise_power / interference_cov，
+              不能再把 sinr_db 当预波束 SNR 传入链路函数。
 
     返回
     ----
@@ -374,18 +376,26 @@ def my_algorithm(h_est, h_true, sinr_db):
     from superwireless.linklevel import link_performance
 
     r = link_performance(
-        h_true, snr_db=float(sinr_db), method="svd",
+        h_true,
+        noise_power=operating_point.noise_power,
+        interference_cov=operating_point.interference_cov,
+        operating_point=operating_point.as_dict(),
+        method="svd",
         h_for_precoding=h_est,          # 预编码只看估计信道
     )
     return float(r.spectral_efficiency)
 
 
-def baseline(h_est, h_true, sinr_db):
-    """基线。这里用 38.214 Type I 码本，**同样只看估计信道**。"""
+def baseline(h_est, h_true, operating_point):
+    """基线。这里用 Type-I-style 单面板列码本近似，**同样只看估计信道**。"""
     from superwireless.linklevel import link_performance
 
     r = link_performance(
-        h_true, snr_db=float(sinr_db), method="type1",
+        h_true,
+        noise_power=operating_point.noise_power,
+        interference_cov=operating_point.interference_cov,
+        operating_point=operating_point.as_dict(),
+        method="type1",
         h_for_precoding=h_est,
     )
     return float(r.spectral_efficiency)
@@ -394,12 +404,13 @@ def baseline(h_est, h_true, sinr_db):
 # ===========================================================================
 #  跑两个臂
 # ===========================================================================
-h_true, h_est, sinr = ds.h_true, ds.h_est, ds.sinr_dB
+h_true, h_est = ds.h_true, ds.h_est
 
 mine, base = [], []
 for i in range(ds.n):
-    mine.append(my_algorithm(h_est[i], h_true[i], sinr[i]))
-    base.append(baseline(h_est[i], h_true[i], sinr[i]))
+    op = ds.geometric_impairment(i)
+    mine.append(my_algorithm(h_est[i], h_true[i], op))
+    base.append(baseline(h_est[i], h_true[i], op))
     if (i + 1) % 50 == 0:
         print(f"  {{i + 1}}/{{ds.n}}")
 

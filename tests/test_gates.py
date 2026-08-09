@@ -246,7 +246,10 @@ check(pz.t_stat == 0.0, "全零差值 t 统计量为 0（回归：曾为 nan）"
 check(not pz.decision_significant, "全零差值判为不显著")
 check((pz.ci_low, pz.ci_high) == (0.0, 0.0), "全零差值置信区间为 [0, 0]")
 check(n_rw == 0, "全零差值不产生 RuntimeWarning（回归）")
-check(not g.gate_conclusion(pz).passed, "全零差值不过门 3")
+gz = g.gate_conclusion(pz)
+check(not gz.passed, "全零差值不过门 3")
+check(all("-1 个" not in i.fix for i in gz.items),
+      "全零差值不输出荒谬的负样本数，改按不变量解释")
 
 # ④ 恒定非零差值：方向确定，应当显著
 pk = g.paired_compare(np.full(20, 5.5), np.full(20, 5.0))

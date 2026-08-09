@@ -164,7 +164,7 @@ class Dataset:
         return [measure.srs_features(h) for h in self.h_true]
 
     def pmi(self, index: int | None = None, *, max_rank: int = 4) -> Any:
-        """38.214 Type I 码本索引 + 预编码矩阵 + 秩（不是 MAE token）。"""
+        """Type-I-style 单面板列码本子集近似的索引、预编码矩阵与秩。"""
         if index is not None:
             return measure.pmi_type_i(self.h_true[index], max_rank=max_rank)
         return [measure.pmi_type_i(h, max_rank=max_rank) for h in self.h_true]
@@ -206,13 +206,21 @@ class Dataset:
         return measure.path_structure(self.channel_model or "CDL-C", tau_s)
 
     def capacity(self, index: int | None = None) -> Any:
-        """MIMO 容量 bit/s/Hz，按各样本自身的信噪比算。"""
+        """逐时频最优注水 MIMO 容量，按各样本几何工作点算，bit/s/Hz。"""
+        from . import linklevel as ll
+
         if index is not None:
-            return measure.channel_capacity_bps_hz(self.h_true[index], float(self.sinr_dB[index]))
+            op = self.geometric_impairment(index)
+            return ll.capacity_upper_bound(
+                self.h_true[index], op.noise_power,
+                interference_cov=op.interference_cov)
         return np.asarray(
             [
-                measure.channel_capacity_bps_hz(h, float(s))
-                for h, s in zip(self.h_true, self.sinr_dB, strict=True)
+                ll.capacity_upper_bound(
+                    self.h_true[i], op.noise_power,
+                    interference_cov=op.interference_cov)
+                for i in range(self.n)
+                for op in (self.geometric_impairment(i),)
             ]
         )
 
@@ -222,6 +230,27 @@ class Dataset:
         return np.asarray([measure.condition_number(h) for h in self.h_true])
 
     # ---- 链路性能：预编码 → SINR → 谱效 ----
+    def geometric_impairment(self, index: int = 0) -> Any:
+        """把该样本的几何 SINR/SIR 标定成噪声与空间干扰协方差。
+
+        默认工作点锚到 rank-1 后波束功率，防止把 ChannelHub 已包含的阵列增益
+        再经 SVD 计算一次。返回值可直接传给 ``link_performance``。
+        """
+        from . import linklevel as ll
+
+        idx = int(index)
+        if idx < 0 or idx >= self.n:
+            raise IndexError(f"sample index must be 0..{self.n - 1}, got {index}")
+        try:
+            sir = float(np.asarray(self.scalar("sir_dB"))[idx])
+        except KeyError:
+            sir = None
+        hi = self.h_interferers[idx] if self.h_interferers is not None else None
+        return ll.geometric_impairment(
+            self.h_true[idx], float(np.asarray(self.sinr_dB)[idx]),
+            sir_db=sir, h_interferers=hi,
+        )
+
     def link(self, index: int = 0, **kw: Any) -> Any:
         """单样本的链路性能。见 :func:`superwireless.linklevel.link_performance`。
 
@@ -230,8 +259,17 @@ class Dataset:
         """
         from . import linklevel as ll
 
-        kw.setdefault("snr_db", float(self.sinr_dB[index]))
-        if self.h_interferers is not None:
+        explicit_power = kw.get("snr_db") is not None or kw.get("noise_power") is not None
+        if not explicit_power:
+            if kw.get("interference_cov") is not None:
+                raise ValueError("显式 interference_cov 必须同时给 noise_power 或 snr_db")
+            kw.pop("snr_db", None)
+            op = self.geometric_impairment(index)
+            kw["noise_power"] = op.noise_power
+            if op.interference_cov is not None:
+                kw["interference_cov"] = op.interference_cov
+            kw["operating_point"] = op.as_dict()
+        elif self.h_interferers is not None and "interference_cov" not in kw:
             kw.setdefault("h_interferers", self.h_interferers[index])
         return ll.link_performance(self.h_true[index], **kw)
 
@@ -243,10 +281,15 @@ class Dataset:
         """
         from . import linklevel as ll
 
-        if "snr_db" not in kw and "noise_powers" not in kw:
-            sig = np.mean(np.abs(self.h_true) ** 2, axis=(1, 2, 3, 4))
-            kw["noise_powers"] = sig / np.maximum(10.0 ** (self.sinr_dB / 10.0), 1e-30)
-        if self.h_interferers is not None:
+        default_geometry = kw.get("snr_db") is None and "noise_powers" not in kw
+        if default_geometry:
+            kw.pop("snr_db", None)
+            ops = [self.geometric_impairment(i) for i in range(self.n)]
+            kw["noise_powers"] = np.asarray([op.noise_power for op in ops])
+            kw["interference_covariances"] = [op.interference_cov for op in ops]
+            kw["operating_point_mode"] = "dataset_geometric_rank1_anchor"
+        elif (self.h_interferers is not None
+              and "interference_covariances" not in kw):
             kw.setdefault("interferers", self.h_interferers)
         return ll.monte_carlo(self.h_true, **kw)
 
@@ -254,7 +297,16 @@ class Dataset:
         """同一批信道上横向对比 SVD / 宽带 SVD / Type I 码本 / DFT 波束。"""
         from . import linklevel as ll
 
-        kw.setdefault("snr_db", float(np.median(self.sinr_dB)))
+        default_geometry = kw.get("snr_db") is None and "noise_powers" not in kw
+        if default_geometry:
+            kw.pop("snr_db", None)
+            ops = [self.geometric_impairment(i) for i in range(self.n)]
+            kw["noise_powers"] = np.asarray([op.noise_power for op in ops])
+            kw["interference_covariances"] = [op.interference_cov for op in ops]
+            kw["operating_point_mode"] = "dataset_geometric_rank1_anchor"
+        elif (self.h_interferers is not None
+              and "interference_covariances" not in kw):
+            kw.setdefault("interferers", self.h_interferers)
         return ll.compare_precoders(self.h_true, **kw)
 
     def validate(self, **kw: Any) -> Any:
@@ -285,7 +337,8 @@ class Dataset:
     def link_adaptation(self, index: int = 0, **kw: Any) -> Any:
         """单样本的链路自适应：有效 SINR → MCS/CQI → TBS → 真实吞吐。
 
-        与 ``ds.link()`` 的区别：那个给的是香农谱效（上界），这个给的是
+        与 ``ds.link()`` 的区别：那个给的是所选预编码/接收机的高斯码本谱效，
+        其 ``capacity_bound`` 才是注水上界；这里给的是
         **调制受限 + 码率离散 + 有限码长之后真正能拿到的吞吐**。
         """
         from . import linkadapt as la
@@ -293,11 +346,21 @@ class Dataset:
 
         kw.setdefault("n_prb", int(self.h_true.shape[2]))
         snr = kw.pop("snr_db", None)
+        link_kw: dict[str, Any] = {}
         if snr is None:
-            snr = float(np.asarray(self.sinr_dB)[index])
-        r = ll.link_performance(self.h_true[index], snr_db=snr,
-                                method=kw.pop("method", "svd"),
-                                receiver=kw.pop("receiver", "mmse"))
+            op = self.geometric_impairment(index)
+            link_kw.update({
+                "noise_power": op.noise_power,
+                "interference_cov": op.interference_cov,
+                "operating_point": op.as_dict(),
+            })
+        else:
+            link_kw["snr_db"] = float(snr)
+            if self.h_interferers is not None:
+                link_kw["h_interferers"] = self.h_interferers[index]
+        r = ll.link_performance(
+            self.h_true[index], method=kw.pop("method", "svd"),
+            receiver=kw.pop("receiver", "mmse"), **link_kw)
         kw.setdefault("layers", r.rank)
         # 逐 RB 逐层的后处理 SINR 拉平——链路到系统映射就是要吃掉这个频选起伏
         return la.link_adaptation(np.asarray(r.sinr_per_rb_db).ravel(), **kw)
@@ -339,17 +402,26 @@ class Dataset:
             out.update({"dataset_id": self.dataset_id, "sample_index": idx})
             return out
 
-        snr = float(np.asarray(self.sinr_dB)[idx]) if snr_db is None else float(snr_db)
         h_eval = self.h_true[idx]
         h_precoding = self.h_est[idx] if use_estimated_csi else h_eval
         common: dict[str, Any] = {
-            "snr_db": snr,
             "receiver": "mmse",
             "h_for_precoding": h_precoding,
             "n_h": n_h,
             "n_v": n_v,
         }
-        if self.h_interferers is not None:
+        if snr_db is None:
+            op = self.geometric_impairment(idx)
+            common.update({
+                "noise_power": op.noise_power,
+                "interference_cov": op.interference_cov,
+                "operating_point": op.as_dict(),
+            })
+            physical_sinr = float(np.asarray(self.sinr_dB)[idx])
+        else:
+            physical_sinr = float(snr_db)
+            common["snr_db"] = physical_sinr
+        if snr_db is not None and self.h_interferers is not None:
             common["h_interferers"] = self.h_interferers[idx]
 
         # CQI was measured with the Type-I/PMI weight, so its RI defines the scheduled
@@ -378,7 +450,9 @@ class Dataset:
         out.update({
             "dataset_id": self.dataset_id,
             "sample_index": idx,
-            "physical_sinr_db": snr,
+            "physical_sinr_db": physical_sinr,
+            "operating_point": pmi.operating_point or {
+                "mode": "synthetic_prebeam_snr", "snr_db": physical_sinr},
             "csi_for_precoding": "estimated" if use_estimated_csi else "ideal",
             "pmi_indices": pmi.precoder_indices,
         })
