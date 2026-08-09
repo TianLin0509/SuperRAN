@@ -284,6 +284,7 @@ def burst_metrics(burst: BusyPeriod, tti_ms: float,
 @dataclass(frozen=True)
 class Allocation:
     tti: int
+    snapshot: int
     ue: int
     traffic_class: str
     slot: str
@@ -296,6 +297,15 @@ class Allocation:
     acked_bytes: int
     padding_bytes: int
     pf_credit_bytes: int
+    queue_bytes_before: int
+    required_rbg: int
+    fits_in_fullband: bool
+    potential_fullband_bytes: int
+    pf_average_before_bytes: float
+    scheduler_metric: float
+    base_tx_sinr_db: float
+    olla_before_db: float
+    mcs_without_olla: int
     sinr_db: float
     bler: float
     ack: bool
@@ -304,6 +314,10 @@ class Allocation:
         d = dict(self.__dict__)
         d["rbg_indices"] = list(self.rbg_indices)
         d["sinr_db"] = round(self.sinr_db, 4)
+        d["base_tx_sinr_db"] = round(self.base_tx_sinr_db, 4)
+        d["olla_before_db"] = round(self.olla_before_db, 4)
+        d["pf_average_before_bytes"] = round(self.pf_average_before_bytes, 6)
+        d["scheduler_metric"] = round(self.scheduler_metric, 6)
         d["bler"] = round(self.bler, 6)
         return d
 
@@ -528,6 +542,7 @@ def simulate_experience(
     rbg_hist: list[int] = []
     allocation_sample: list[Allocation] = []
     allocation_limit = 256
+    allocation_recent: deque[Allocation] = deque(maxlen=allocation_limit)
     max_rbg_in_tti = overlap_violations = 0
     class_alloc_rbg: dict[str, int] = {}
     class_acked: dict[str, int] = {}
@@ -553,17 +568,26 @@ def simulate_experience(
 
         rank_of: dict[int, int] = {}
         mcs_of: dict[int, int] = {}
+        base_tx_sinr_of: dict[int, float] = {}
+        mcs_without_olla_of: dict[int, int] = {}
         potential = np.zeros(len(cand), dtype=float)
         delay_factor = np.ones(len(cand), dtype=float)
         priority_factor = np.ones(len(cand), dtype=float)
         for i, u in enumerate(cand):
             rank = int(tables[u].best_rank[snap])
             if tables[u].sinr_tx_db is not None and sched.olla_enabled:
-                tx_sinr = float(tables[u].sinr_tx_db[snap, rank - 1]) + olla_db[u]
+                base_tx_sinr = float(tables[u].sinr_tx_db[snap, rank - 1])
+                tx_sinr = base_tx_sinr + olla_db[u]
                 mcs = int(la.select_mcs(tx_sinr, table=3, target_bler=0.1).index)
+                mcs_without_olla = int(la.select_mcs(
+                    base_tx_sinr, table=3, target_bler=0.1).index)
             else:
+                base_tx_sinr = float(tables[u].sinr_db[snap, rank - 1])
                 mcs = int(tables[u].mcs[snap, rank - 1])
+                mcs_without_olla = mcs
             rank_of[u], mcs_of[u] = rank, mcs
+            base_tx_sinr_of[u] = base_tx_sinr
+            mcs_without_olla_of[u] = mcs_without_olla
             potential[i] = lookup.tbs_bytes(slot, mcs, rank, sys_cfg.num_rbg)
             c = tr.queues[u].traffic_class
             if str(getattr(sched, "qos_priority_weighting", "none")) == \
@@ -592,6 +616,7 @@ def simulate_experience(
             metric = np.zeros(len(cand), dtype=float)
         order = _ordered_candidates(metric, cand, tti, str(sched.algorithm),
                                     n_ue, scheduler_draw[tti, cand])
+        cand_pos = {int(u): i for i, u in enumerate(cand)}
 
         remaining = int(sys_cfg.num_rbg)
         cursor = tti % int(sys_cfg.num_rbg)
@@ -603,9 +628,11 @@ def simulate_experience(
             if remaining <= 0:
                 break
             u = int(cand[int(oi)])
+            pos = cand_pos[u]
             rank, mcs = rank_of[u], mcs_of[u]
+            queue_before = tr.bytes_left(u)
             n_need, _fits = lookup.required_rbg(
-                slot, mcs, rank, tr.bytes_left(u))
+                slot, mcs, rank, queue_before)
             n_alloc = min(n_need, remaining)
             tb_bytes = lookup.tbs_bytes(slot, mcs, rank, n_alloc)
             payload = min(tr.bytes_left(u), tb_bytes)
@@ -619,6 +646,7 @@ def simulate_experience(
             sinr = float(tables[u].sinr_db[snap, rank - 1])
             bler = _bler_lookup(mcs, sinr)
             ack = bool(harq_draw[tti, u] > bler)
+            olla_before = float(olla_db[u])
             acked = tr.transmit(u, tti, tb_bytes, payload, ack=ack)
             pad = max(0, tb_bytes - payload)
             if accounting == "scheduled_tbs":
@@ -646,13 +674,22 @@ def simulate_experience(
             class_alloc_rbg[cls] = class_alloc_rbg.get(cls, 0) + n_alloc
             class_acked[cls] = class_acked.get(cls, 0) + acked
             alloc = Allocation(
-                tti=tti, ue=u, traffic_class=cls, slot=slot,
+                tti=tti, snapshot=snap, ue=u, traffic_class=cls, slot=slot,
                 rbg_indices=indices, n_rbg=n_alloc, mcs=mcs, rank=rank,
                 scheduled_bytes=tb_bytes, payload_bytes=payload,
                 acked_bytes=acked, padding_bytes=pad, pf_credit_bytes=int(credit),
+                queue_bytes_before=int(queue_before), required_rbg=int(n_need),
+                fits_in_fullband=bool(_fits),
+                potential_fullband_bytes=int(potential[pos]),
+                pf_average_before_bytes=float(r_avg[u]),
+                scheduler_metric=float(metric[pos]),
+                base_tx_sinr_db=float(base_tx_sinr_of[u]),
+                olla_before_db=olla_before,
+                mcs_without_olla=int(mcs_without_olla_of[u]),
                 sinr_db=sinr, bler=bler, ack=ack)
             if len(allocation_sample) < allocation_limit:
                 allocation_sample.append(alloc)
+            allocation_recent.append(alloc)
             rbg_hist.append(n_alloc)
             allocated_rbg += n_alloc
             allocated_rbg_equiv += n_alloc * slot_fraction
@@ -687,6 +724,9 @@ def simulate_experience(
     class_arrival_kpis: dict[str, dict[str, Any]] = {}
     measured_bursts = completed_bursts = 0
     completed_arrival_objects = 0
+    pdb_decidable_objects = 0
+    pdb_right_censored_objects = 0
+    deadline_missed_incomplete_objects = 0
     warmup = int(kpi.warmup_tti)
     for u, q in enumerate(tr.queues):
         done = [b for b in q.done if b.start_tti >= warmup]
@@ -701,7 +741,22 @@ def simulate_experience(
                         for item in done_items]
         waits = [x[0] for x in item_metrics if x[0] is not None]
         completes = [x[1] for x in item_metrics if x[1] is not None]
-        pflags = [x[2] for x in item_metrics if x[2] is not None]
+        completed_pflags = [x[2] for x in item_metrics if x[2] is not None]
+        incomplete_items = [item for item in q.items if item.arrival_tti >= warmup]
+        pdb_ms = float(q.traffic_class.pdb_ms)
+        # 未完成对象不能一律从 PDB 分母消失。仿真结束时已经到达/越过 deadline
+        # 的对象是“确定 miss”；尚未到 deadline 的才是右删失，不能武断判成成功。
+        overdue_incomplete = [
+            item for item in incomplete_items
+            if pdb_ms > 0
+            and (int(sys_cfg.num_tti) - int(item.arrival_tti))
+            * float(sys_cfg.tti_ms) >= pdb_ms
+        ]
+        right_censored = [
+            item for item in incomplete_items
+            if pdb_ms > 0 and item not in overdue_incomplete
+        ]
+        pflags = [*completed_pflags, *([True] * len(overdue_incomplete))]
         svals = [m.throughput_mbps for m in metrics
                  if m.throughput_kind == "rel19_fractional_slot"
                  and m.throughput_mbps is not None]
@@ -718,10 +773,14 @@ def simulate_experience(
         pdb_flags.extend(bool(x) for x in pflags)
         completed_bursts += len(done)
         completed_arrival_objects += len(done_items)
+        pdb_decidable_objects += len(pflags)
+        pdb_right_censored_objects += len(right_censored)
+        deadline_missed_incomplete_objects += len(overdue_incomplete)
         measured_bursts += len(thp)
         ue_thp = float(np.mean(thp)) if thp else 0.0
         is_small_class = bool(q.traffic_class.is_small)
-        if not is_small_class and thp:
+        experience_eligible = bool(tr.unbounded or done_items or incomplete_items)
+        if not is_small_class and experience_eligible:
             large_user_thp.append(ue_thp)
         target_wait = small_wait if is_small_class else large_wait
         target_completion = small_completion if is_small_class else large_completion
@@ -732,23 +791,33 @@ def simulate_experience(
         cls_name = str(q.traffic_class.name)
         cls_row = class_arrival_kpis.setdefault(
             cls_name, {"wait": [], "completion": [], "pdb": [], "completed": 0,
+                       "pdb_decidable": 0, "right_censored": 0,
+                       "deadline_missed_incomplete": 0,
                        "is_small": is_small_class})
         cls_row["wait"].extend(float(x) for x in waits)
         cls_row["completion"].extend(float(x) for x in completes)
         cls_row["pdb"].extend(bool(x) for x in pflags)
         cls_row["completed"] += len(done_items)
+        cls_row["pdb_decidable"] += len(pflags)
+        cls_row["right_censored"] += len(right_censored)
+        cls_row["deadline_missed_incomplete"] += len(overdue_incomplete)
         users.append({
             "ue": u,
             "traffic_class": str(q.traffic_class.name),
             "geo_sinr_db": round(float(tables[u].geo_sinr_db), 4),
             "iot_db": round(float(tables[u].iot_db), 4),
             "experienced_mbps": ue_thp,
+            "experience_kpi_eligible": experience_eligible,
+            "experience_kpi_measured": bool(thp),
             "large_burst_experienced_mbps": _mean(lvals),
             "small_burst_fractional_mbps": _mean(svals),
             "served_mbps": float(served[u] * 8 / max(sys_cfg.duration_s, _EPS) / 1e6),
             "bursts": len(thp),
             "completed_bursts": len(done),
             "completed_arrival_objects": len(done_items),
+            "pdb_decidable_arrival_objects": len(pflags),
+            "pdb_right_censored_arrival_objects": len(right_censored),
+            "deadline_missed_incomplete_arrival_objects": len(overdue_incomplete),
             "arrival_queue_wait_p95_ms": _pct(waits, 95),
             "arrival_completion_delay_p95_ms": _pct(completes, 95),
             "arrival_pdb_miss_ratio": float(np.mean(pflags)) if pflags else None,
@@ -769,7 +838,13 @@ def simulate_experience(
             "queued_bytes": int(q.queued_bytes),
         })
 
-    user_exp = [float(u["experienced_mbps"]) for u in users if int(u["bursts"]) > 0]
+    # 只平均“有完成 burst 的 UE”会把完全饿死的 UE 从分布中删掉，算法越差反而
+    # 越容易留下漂亮样本。只要观测窗内有外生到达，该 UE 就进入 zero-inclusive
+    # 分布；没有到达的空闲 UE 不计，避免把话务随机性误当调度失败。
+    user_exp = [float(u["experienced_mbps"]) for u in users
+                if bool(u["experience_kpi_eligible"])]
+    user_exp_completed_only = [float(u["experienced_mbps"]) for u in users
+                               if bool(u["experience_kpi_measured"])]
     offered = int(tr.offered_bytes)
     backlog = int(tr.backlog_bytes)
     acked_total = int(np.sum(served))
@@ -784,6 +859,10 @@ def simulate_experience(
         name: {
             "is_small": bool(row["is_small"]),
             "completed_arrival_objects": int(row["completed"]),
+            "pdb_decidable_arrival_objects": int(row["pdb_decidable"]),
+            "pdb_right_censored_arrival_objects": int(row["right_censored"]),
+            "deadline_missed_incomplete_arrival_objects": int(
+                row["deadline_missed_incomplete"]),
             "queue_wait_ms_p50": _pct(row["wait"], 50),
             "queue_wait_ms_p95": _pct(row["wait"], 95),
             "queue_wait_ms_p99": _pct(row["wait"], 99),
@@ -796,9 +875,15 @@ def simulate_experience(
     }
     cell = {
         "cell_experienced_mbps": _mean(user_exp) or 0.0,
+        "cell_experienced_completed_only_mbps": (
+            _mean(user_exp_completed_only) or 0.0),
         "ue_experienced_mean_mbps": _mean(user_exp) or 0.0,
         "ue_experienced_median_mbps": _pct(user_exp, 50) or 0.0,
         "ue_experienced_p5_mbps": _pct(user_exp, 5) or 0.0,
+        "ue_experience_eligible": int(len(user_exp)),
+        "ue_experience_measured": int(len(user_exp_completed_only)),
+        "ue_experience_measured_share": float(
+            len(user_exp_completed_only) / max(len(user_exp), 1)),
         "drb_throughput_rel19_mbps": _mean(all_thp),
         "large_burst_drb_throughput_mbps": _mean(large_thp),
         "large_flow_drb_throughput_p5_mbps": _pct(large_user_thp, 5),
@@ -864,6 +949,10 @@ def simulate_experience(
         "measured_bursts": int(measured_bursts),
         "completed_bursts": int(completed_bursts),
         "completed_arrival_objects": int(completed_arrival_objects),
+        "pdb_decidable_arrival_objects": int(pdb_decidable_objects),
+        "pdb_right_censored_arrival_objects": int(pdb_right_censored_objects),
+        "deadline_missed_incomplete_arrival_objects": int(
+            deadline_missed_incomplete_objects),
         "offered_mbps": (None if tr.unbounded else
                          float(offered * 8 / max(sys_cfg.duration_s, _EPS) / 1e6)),
         "backlog_bytes": backlog,
@@ -894,6 +983,9 @@ def simulate_experience(
         "DRB throughput 按 buffer busy period；queue/completion/PDB 按 FIFO "
         "arrival object（mixed/FTP 为文件，CBR 为每 TTI 字节块）。1500 B small "
         "类可作小包代理，large FTP 文件的 PDB 不能冒充逐 PDCP SDU 时延。",
+        "完成时延分位数只含已完成对象；PDB miss 分母还纳入仿真结束时已超过"
+        "deadline 的未完成对象，未到 deadline 的对象单列为右删失。用户体验速率"
+        "采用有到达 UE 的 zero-inclusive 分布，避免饿死 UE 从统计中消失。",
     ]
     if str(sched.algorithm) == "qos_pf":
         notes.append(
@@ -917,6 +1009,7 @@ def simulate_experience(
     diagnostics = {
         "tbs_lookup": lookup.as_dict(),
         "allocation_sample": [a.as_dict() for a in allocation_sample],
+        "allocation_recent_sample": [a.as_dict() for a in allocation_recent],
         "allocation_sample_limit": allocation_limit,
         "max_rbg_in_any_tti": int(max_rbg_in_tti),
         "rbg_overlap_violations": int(overlap_violations),

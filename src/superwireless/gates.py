@@ -305,6 +305,46 @@ def paired_compare(a: np.ndarray, b: np.ndarray) -> PairedResult:
     )
 
 
+def paired_cluster_means(
+    a: np.ndarray, b: np.ndarray, cluster_ids: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, list[Any]]:
+    """Collapse repeated observations to independent cluster-level pairs.
+
+    Paired tests require independent *pairs*. Multiple fading draws at the
+    same UE position are repeated measurements, not extra independent UEs.
+    Average all finite A/B pairs inside each cluster, preserving first-seen
+    cluster order, before calling :func:`paired_compare`.
+    """
+    av = np.asarray(a, dtype=float).reshape(-1)
+    bv = np.asarray(b, dtype=float).reshape(-1)
+    ids = np.asarray(cluster_ids, dtype=object).reshape(-1)
+    if av.shape != bv.shape or av.shape != ids.shape:
+        raise ValueError(
+            "cluster 配对要求 a/b/cluster_ids 等长，收到 "
+            f"{av.shape}/{bv.shape}/{ids.shape}"
+        )
+    groups: dict[Any, list[int]] = {}
+    for i, cluster_id in enumerate(ids.tolist()):
+        try:
+            hash(cluster_id)
+        except TypeError as exc:
+            raise ValueError("cluster_id 必须可哈希") from exc
+        groups.setdefault(cluster_id, []).append(i)
+
+    a_cluster: list[float] = []
+    b_cluster: list[float] = []
+    kept_ids: list[Any] = []
+    for cluster_id, indices in groups.items():
+        ai, bi = av[indices], bv[indices]
+        valid = np.isfinite(ai) & np.isfinite(bi)
+        if not np.any(valid):
+            continue
+        a_cluster.append(float(np.mean(ai[valid])))
+        b_cluster.append(float(np.mean(bi[valid])))
+        kept_ids.append(cluster_id)
+    return np.asarray(a_cluster), np.asarray(b_cluster), kept_ids
+
+
 # ---------------------------------------------------------------------------
 # 配置差分
 # ---------------------------------------------------------------------------

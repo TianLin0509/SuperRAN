@@ -391,18 +391,19 @@ sys_experience_mixed_pf:
     result: artifacts/results/experience_pf_accounting_crn_n16.json
     n_replications: 16
     small_queue_wait_ms_p95: [0.5625, 16.18]
-    small_completion_delay_ms_p95: [6.6547, 8.77]
-    small_pdb_miss_ratio: [0.0035, 37.24]
-    large_burst_drb_throughput_mbps: [166.7553, 7.80]
-    resource_utilization: [0.7977, 7.99]
-    cell_served_mbps: [98.2491, 4.42]
+    small_completion_delay_ms_p95: [6.6422, 8.48]
+    small_pdb_miss_ratio: [0.0018, 66.95]
+    large_burst_drb_throughput_mbps: [169.7562, 8.55]
+    resource_utilization: [0.7741, 9.46]
+    cell_served_mbps: [98.1332, 4.93]
     accounting_error_pct: 0.0
     note: >-
-      2026-08-09 正式 n=16 CRN。主指标 small FIFO 排队 P95：本臂 0.5625 ms，
-      故障注入臂 0.9562 ms，配对差 -0.3937 ms，95% CI [-0.5976,-0.1899]，
-      Wilcoxon p=0.00448，门3通过。完成时延差 -1.0953 ms、PDB miss 差
-      -0.0061 也通过；大 burst 吞吐、资源利用率、总承载和积压均不显著，
-      不得据此声称有方向性变化。两臂 32 次运行字节对账均为 0 误差。
+      2026-08-09 原理修复后正式 n=16 CRN。主指标 small FIFO 排队 P95：本臂
+      0.5625 ms，故障注入臂 1.2109 ms，配对差 -0.6484 ms，95% CI
+      [-0.9616,-0.3352]，Wilcoxon p=0.00322，门3通过。完成时延差
+      -1.4937 ms、PDB miss 差 -0.0072 也通过。预注册外的 secondary 大 burst
+      吞吐名义差 +2.7104 Mbps、CI [0.5181,4.9027]，未做多重性校正，不升级成
+      主结论；资源利用率、总承载和积压不显著。两臂 32 次运行字节对账均为 0。
 
 sys_experience_mixed_pf_wrong_accounting:
   group: 系统级 · 体验模式 PF 记账
@@ -454,12 +455,12 @@ sys_experience_mixed_pf_wrong_accounting:
     dataset: ds_329edafb
     result: artifacts/results/experience_pf_accounting_crn_n16.json
     n_replications: 16
-    small_queue_wait_ms_p95: [0.9562, 24.27]
-    small_completion_delay_ms_p95: [7.7500, 9.60]
-    small_pdb_miss_ratio: [0.0096, 21.71]
-    large_burst_drb_throughput_mbps: [166.1883, 7.86]
-    resource_utilization: [0.7982, 8.05]
-    cell_served_mbps: [98.2321, 4.42]
+    small_queue_wait_ms_p95: [1.2109, 26.34]
+    small_completion_delay_ms_p95: [8.1359, 10.52]
+    small_pdb_miss_ratio: [0.0091, 40.28]
+    large_burst_drb_throughput_mbps: [167.0458, 8.09]
+    resource_utilization: [0.7738, 9.44]
+    cell_served_mbps: [98.1410, 4.91]
     accounting_error_pct: 0.0
     note: >-
       2026-08-09 正式 n=16 CRN 的反向控制。它故意给部分 RBG 用户按全带记 PF，

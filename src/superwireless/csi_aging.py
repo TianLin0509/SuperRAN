@@ -244,7 +244,11 @@ def rbg_lag_snapshots(cfg: CsiConfig, num_rbg: int, *, snapshot_ms: float,
         return np.zeros(num_rbg, dtype=int)
     age = rbg_age_ms(cfg, num_rbg, snapshot_index * float(snapshot_ms),
                      rb_per_rbg=rb_per_rbg)
-    return np.maximum(0, np.round(age / max(float(snapshot_ms), _EPS))).astype(int)
+    # 必须向上取整。四舍五入会把 2 ms / 5 ms 量化成 0，等于在测量已经发生
+    # 之前使用当前信道；例如 7 ms 还会被缩成 5 ms。离散快照无法表示精确年龄
+    # 时，只能取“不新于真实测量”的最近快照，才能守住因果性。
+    ratio = np.maximum(age, 0.0) / max(float(snapshot_ms), _EPS)
+    return np.maximum(0, np.ceil(ratio - 1e-12)).astype(int)
 
 
 def stale_channel(snaps: list[np.ndarray], snapshot_index: int,

@@ -24,8 +24,9 @@ _EPS = 1e-30
 
 PrecoderMethod = Literal["svd", "svd_wideband", "dft", "type1", "mrt", "identity"]
 ReceiverType = Literal["mmse", "mrc", "zf", "irc"]
-InterferenceModel = Literal["isotropic", "precoded"]
+InterferenceModel = Literal["isotropic", "precoded", "victim_aligned"]
 RuuSource = Literal["true", "sample"]
+RankSelection = Literal["max_se", "threshold"]
 
 
 def _tx_covariance(h: np.ndarray) -> np.ndarray:
@@ -69,7 +70,7 @@ class Precoder:
 
 def _covariance_eigen_precoder(
     h: np.ndarray, *, wideband: bool, max_rank: int, rank_threshold: float,
-    method: str,
+    method: str, forced_rank: int | None = None,
 ) -> Precoder:
     """Build a phase-invariant static eigen-precoder from ``E[H H^H]``.
 
@@ -93,8 +94,9 @@ def _covariance_eigen_precoder(
         if sv.size and sv[0] > _EPS:
             rank_each[f] = int(np.clip(
                 np.sum(sv > sv[0] * float(rank_threshold)), 1, rank_cap))
-    rank = int(rank_each[0] if wideband else
-               np.clip(np.median(rank_each), 1, rank_cap))
+    rank = (int(np.clip(forced_rank, 1, rank_cap)) if forced_rank is not None else
+            int(rank_each[0] if wideband else
+                np.clip(np.median(rank_each), 1, rank_cap)))
     if wideband:
         w0 = eigvec[0, :, :rank]
         w = np.broadcast_to(w0[None], (rb, bs, rank)).copy()
@@ -117,6 +119,7 @@ def compute_precoder(
     rank_threshold: float = 0.1,
     n_h: int | None = None,
     n_v: int | None = None,
+    forced_rank: int | None = None,
 ) -> Precoder:
     """计算预编码矩阵。
 
@@ -143,7 +146,7 @@ def compute_precoder(
     if method in ("svd", "svd_wideband"):
         return _covariance_eigen_precoder(
             h, wideband=(method == "svd_wideband"), max_rank=max_rank,
-            rank_threshold=rank_threshold, method=method)
+            rank_threshold=rank_threshold, method=method, forced_rank=forced_rank)
 
     rb = h.shape[1]
     bs = h.shape[2]
@@ -158,7 +161,8 @@ def compute_precoder(
         return Precoder(w=w, rank=1, method=method)
 
     if method == "identity":
-        rank = min(max_rank, bs, ue)
+        rank = min(forced_rank if forced_rank is not None else max_rank,
+                   max_rank, bs, ue)
         eye = np.eye(bs, rank, dtype=np.complex64)
         w = np.broadcast_to(eye[None], (rb, bs, rank)).copy()
         return Precoder(w=w, rank=rank, method=method)
@@ -183,7 +187,9 @@ def compute_precoder(
         # 缺了这一步，Type I 会在低秩信道上输给 rank-1 的 DFT 波束，
         # 看起来像"码本不如单波束"，其实是没做秩自适应。
         ev = np.linalg.eigvalsh(r_tx).real[::-1]
-        eff_rank = int(max((ev >= (rank_threshold ** 2) * max(ev[0], _EPS)).sum(), 1))
+        eff_rank = (int(forced_rank) if forced_rank is not None else
+                    int(max((ev >= (rank_threshold ** 2)
+                             * max(ev[0], _EPS)).sum(), 1)))
         eff_rank = min(eff_rank, ue)
         r = pmi_type_i(h, n_h=n_h, n_v=n_v, max_rank=min(max_rank, eff_rank))
         w = np.broadcast_to(r.precoder[None], (rb, *r.precoder.shape)).astype(np.complex64).copy()
@@ -223,6 +229,8 @@ class LinkPerformance:
     interference_model: str | None = None
     r_uu_source: str | None = None
     operating_point: dict[str, Any] | None = None
+    rank_selection: str = "threshold"
+    rank_candidates: list[dict[str, float | int]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -244,6 +252,8 @@ class LinkPerformance:
             "interference_model": self.interference_model,
             "r_uu_source": self.r_uu_source,
             "operating_point": self.operating_point,
+            "rank_selection": self.rank_selection,
+            "rank_candidates": self.rank_candidates,
         }
 
 
@@ -429,10 +439,12 @@ def interference_covariance(
 
     ``model`` —— 干扰小区在发什么
     ------------------------------
-    * ``"precoded"``（默认）：干扰小区**朝它自己的用户打波束**，
-      到达我们这里的是 ``H_k w_k``，空间上有色、秩等于干扰小区的流数。
-      这是真实系统的样子，也是 IRC 之所以有效的物理前提。
-      ``w_k`` 取该干扰信道的主奇异向量（等价于"邻区在好好服务它自己的用户"）。
+    * ``"precoded"``（默认）：邻区波束与受害 UE 的交叉信道**统计独立**。
+      数据集没有保存邻区被服务 UE 的信道，因而不能从受害 UE 的 ``H_k`` 反推
+      邻区实际波束；这里按 ``seed`` 生成单位范数宽带波束，并在同一快照的所有
+      RB 上复用。几何 SIR 决定总干扰功率，本函数只提供空间/频率形状。
+    * ``"victim_aligned"``：故障复现/上界诊断。用受害 UE 交叉信道的主左奇异
+      向量发射，等于假设邻区故意把波束对准受害 UE；它不是“服务自己用户”。
     * ``"isotropic"``：干扰小区**各向同性**发射，``R_uu = (1/N_bs)·Σ H_k^H H_k``。
 
     两者差别不是细节。各向同性会把 ``R_uu`` 洗白、把秩抬到满，
@@ -453,15 +465,29 @@ def interference_covariance(
     if hi.ndim != 5:
         raise ValueError(f"h_interferers 需要 [K-1, T, RB, BS, UE]，实得 {hi.shape}")
     n_k, n_t, rb, _bs, ue = hi.shape
-    rng = np.random.default_rng(seed)
+    beams: np.ndarray | None = None
+    if model == "precoded":
+        # 每个干扰源使用独立、可复现的随机流。这样给输入追加第 K 个干扰源时，
+        # 前 K-1 个源的波束不会改变，R_uu(K)-R_uu(K-1) 仍严格是 PSD。
+        beams = np.empty((n_k, n_t, _bs), dtype=np.complex128)
+        for k in range(n_k):
+            child_seed = None if seed is None else np.random.SeedSequence([int(seed), k])
+            rng_k = np.random.default_rng(child_seed)
+            z = (rng_k.standard_normal((n_t, _bs))
+                 + 1j * rng_k.standard_normal((n_t, _bs)))
+            beams[k] = z / np.maximum(np.linalg.norm(z, axis=1, keepdims=True), _EPS)
 
-    def _cov_from(hk_f: np.ndarray) -> np.ndarray:
+    def _cov_from(hk_f: np.ndarray, beam: np.ndarray | None = None) -> np.ndarray:
         """单个干扰小区在单个 RB 上的贡献，``hk_f`` 是 ``[BS, UE]``。"""
         if model == "isotropic":
             return hk_f.conj().T @ hk_f / max(hk_f.shape[0], 1)
-        # precoded：邻区朝它自己的用户打主特征波束
-        u, s, _vh = np.linalg.svd(hk_f, full_matrices=False)
-        w = u[:, :1]                       # [BS, 1] 主发射方向，单位范数
+        if model == "victim_aligned":
+            u, _s, _vh = np.linalg.svd(hk_f, full_matrices=False)
+            w = u[:, :1]                   # 故障复现：波束对准受害 UE
+        else:
+            if beam is None:
+                raise RuntimeError("precoded 干扰模型缺少独立邻区波束")
+            w = np.asarray(beam).reshape(-1, 1)
         y = (w.conj().T @ hk_f).ravel()    # [UE] 到达本终端的干扰空间签名
         # 功率归一到与各向同性同一口径：迹相同，只是分布不同。
         # 不归一的话 precoded 会同时改变干扰"强度"和"方向"，
@@ -476,22 +502,22 @@ def interference_covariance(
         for k in range(n_k):
             for f in range(rb):
                 cov[f] += np.mean(
-                    np.stack([_cov_from(hi[k, t, f]) for t in range(n_t)]), axis=0)
+                    np.stack([_cov_from(
+                        hi[k, t, f], None if beams is None else beams[k, t])
+                        for t in range(n_t)]), axis=0)
         return cov
 
-    # sample：把 T 个时隙当快照；不够就在真值上加抖动补足，
-    # 保证"样本数不足 -> 协方差奇异 -> 必须对角加载"这条物理如实体现。
-    n_s = max(int(r_uu_samples), 1)
+    # sample：只能使用输入里真实存在的快照。过去在 T 不够时给同一个信道加 5%
+    # 人工抖动来“补样本”，会凭空抬高协方差秩，让 IRC 获得不存在的信息。
+    # 样本不足导致的奇异性必须由对角加载处理，不能伪造新观测。
+    n_s = min(max(int(r_uu_samples), 1), n_t)
+    sample_idx = range(n_t - n_s, n_t)
     for k in range(n_k):
         for f in range(rb):
             acc = np.zeros((ue, ue), dtype=np.complex128)
-            for s_i in range(n_s):
-                hk_f = hi[k, s_i % n_t, f]
-                if s_i >= n_t:             # 快照不够，用独立小抖动代替新时刻
-                    hk_f = hk_f + (rng.standard_normal(hk_f.shape)
-                                   + 1j * rng.standard_normal(hk_f.shape)
-                                   ) * 0.05 * float(np.std(np.abs(hk_f)))
-                acc += _cov_from(hk_f)
+            for s_i in sample_idx:
+                acc += _cov_from(
+                    hi[k, s_i, f], None if beams is None else beams[k, s_i])
             cov[f] += acc / n_s
     load = float(diagonal_loading)
     if load > 0:
@@ -683,7 +709,7 @@ def capacity_upper_bound(
         power = np.zeros_like(power_s)
         np.put_along_axis(power, order[valid_rows], power_s, axis=1)
         caps[valid_rows] = np.sum(
-            np.log2(1.0 + power * gains[valid_rows] / n0), axis=1)
+            np.log2(1.0 + power * gains[valid_rows] / normalized_noise), axis=1)
     return float(np.mean(caps)) if caps.size else 0.0
 
 
@@ -707,6 +733,7 @@ def link_performance(
     diagonal_loading: float = 0.01,
     seed: int | None = 0,
     operating_point: dict[str, Any] | None = None,
+    rank_selection: RankSelection = "max_se",
 ) -> LinkPerformance:
     """一站式：预编码 → 有效信道 → 逐层 SINR → 谱效。
 
@@ -738,13 +765,6 @@ def link_performance(
             raise ValueError("snr_db 与 noise_power 至少给一个")
         noise_power = _noise_from_snr(h, snr_db)
 
-    h_p = np.asarray(h_for_precoding) if h_for_precoding is not None else h
-    prec = compute_precoder(
-        h_p, method=method, max_rank=max_rank, rank_threshold=rank_threshold,
-        n_h=n_h, n_v=n_v,
-    )
-    h_eff = effective_channel(h, prec.w)
-
     intf_cov = None if interference_cov is None else np.asarray(interference_cov)
     intf_power = 0.0
     intf_rank: float | None = None
@@ -765,14 +785,62 @@ def link_performance(
             )
         intf_rank = effective_rank(intf_cov)
 
+    h_p = np.asarray(h_for_precoding) if h_for_precoding is not None else h
+    if rank_selection not in ("max_se", "threshold"):
+        raise ValueError(f"rank_selection 只支持 'max_se'/'threshold'，收到 {rank_selection!r}")
+    rank_candidates: list[dict[str, float | int]] = []
+    if rank_selection == "threshold" or method in ("mrt", "dft"):
+        prec = compute_precoder(
+            h_p, method=method, max_rank=max_rank, rank_threshold=rank_threshold,
+            n_h=n_h, n_v=n_v,
+        )
+    else:
+        # Rank 必须按发送端可获得的 h_p 选择，再固定该权到 h_true 上评估。
+        # 旧的“奇异值超过最大值 10% 就开层”不看 N0/I：同一信道在低 SNR 与
+        # 高 SNR 会选同一个 rank，弱层分走功率后甚至让总谱效下降。
+        r_cap = max(1, min(int(max_rank), h_p.shape[-2], h_p.shape[-1]))
+        prec = None
+        best_score = -np.inf
+        # SVD/identity 的列天然按强到弱排列；Type-I-style 搜索是增量贪心，rank R
+        # 的前 r 列也与单独搜 rank r 相同。一次搜满后切前缀，避免把码本搜索
+        # 无意义地重复四遍。
+        full = compute_precoder(
+            h_p, method=method, max_rank=r_cap,
+            rank_threshold=rank_threshold, n_h=n_h, n_v=n_v,
+            forced_rank=r_cap,
+        )
+        for requested_rank in range(1, full.rank + 1):
+            cand = Precoder(
+                w=full.w[:, :, :requested_rank], rank=requested_rank,
+                method=full.method, singular_values=full.singular_values,
+                indices=(None if full.indices is None
+                         else full.indices[:requested_rank]),
+            )
+            pred_sinr = post_equalizer_sinr(
+                effective_channel(h_p, cand.w), noise_power,
+                receiver=receiver, interference_cov=intf_cov)
+            score = float(np.mean(np.sum(
+                np.log2(1.0 + np.maximum(pred_sinr, 0.0)), axis=1)))
+            rank_candidates.append({
+                "rank": int(cand.rank), "predicted_se": round(score, 6)})
+            if score > best_score + 1e-12:
+                best_score, prec = score, cand
+        if prec is None:  # pragma: no cover - r_cap 至少为 1
+            raise RuntimeError("rank 候选为空")
+    h_eff = effective_channel(h, prec.w)
+
     sinr_lin = post_equalizer_sinr(
         h_eff, noise_power, receiver=receiver, interference_cov=intf_cov
     )
     se_rb = np.log2(1.0 + np.maximum(sinr_lin, 0.0))  # [RB, rank]
     se_per_layer = se_rb.mean(axis=0)
 
+    # 报告的逐层 SINR 必须能反算出上面的逐层谱效。线性 SINR 先平均会被
+    # 频选尖峰抬高；正确口径是速率等效 SINR：exp(E[ln(1+SINR)])-1。
+    sinr_rate_equiv = np.expm1(np.mean(np.log1p(np.maximum(sinr_lin, 0.0)), axis=0))
+
     return LinkPerformance(
-        sinr_per_layer_db=10.0 * np.log10(np.maximum(sinr_lin.mean(axis=0), _EPS)),
+        sinr_per_layer_db=10.0 * np.log10(np.maximum(sinr_rate_equiv, _EPS)),
         spectral_efficiency=float(se_per_layer.sum()),
         se_per_layer=se_per_layer,
         rank=prec.rank,
@@ -794,6 +862,8 @@ def link_performance(
             else ("provided" if interference_cov is not None else None)
         ),
         operating_point=operating_point,
+        rank_selection=rank_selection,
+        rank_candidates=rank_candidates,
     )
 
 
@@ -896,7 +966,13 @@ def monte_carlo(
 
     mean = float(se.mean())
     std = float(se.std(ddof=1)) if n > 1 else 0.0
-    half = 1.96 * std / max(np.sqrt(n), 1.0)
+    if n > 1:
+        from scipy.stats import t as student_t  # noqa: PLC0415
+
+        critical = float(student_t.ppf(0.975, n - 1))
+        half = critical * std / np.sqrt(n)
+    else:
+        half = 0.0
     rel = (2 * half / max(abs(mean), _EPS)) if n > 1 else float("inf")
 
     return MonteCarloResult(

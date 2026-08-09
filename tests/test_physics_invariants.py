@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from scipy.stats import t as student_t
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -137,6 +138,40 @@ for method in ("identity", "mrt", "dft", "type1", "svd"):
     check(r.spectral_efficiency <= r.capacity_bound * (1.0 + 1e-7),
           f"{method} 谱效不超过逐时频最优注水容量")
 
+# SISO 有色损伤可解析：白化后奇异值已经含 1/(N+I)，容量公式不能再除一次 N。
+h_siso = np.ones((1, 1, 1, 1), dtype=np.complex64)
+c_colored = ll.capacity_upper_bound(
+    h_siso, 0.5, interference_cov=np.array([[1.5]], dtype=np.complex128))
+check(abs(c_colored - np.log2(1.0 + 1.0 / 2.0)) < 1e-10,
+      "有色容量白化后不重复除噪声（SISO 解析值精确一致）")
+
+# 报告 SINR 必须逐层复原报告 SE；线性平均 SINR 在频选信道上做不到这一点。
+h_freq = np.array([[[[0.1]]], [[[10.0]]]], dtype=np.complex64).transpose(1, 0, 2, 3)
+r_freq = ll.link_performance(
+    h_freq, noise_power=1.0, method="identity", max_rank=1)
+se_from_reported_sinr = np.log2(1.0 + 10.0 ** (r_freq.sinr_per_layer_db[0] / 10.0))
+check(abs(se_from_reported_sinr - r_freq.se_per_layer[0]) < 1e-10,
+      "逐层报告的是速率等效 SINR，可精确反算逐层谱效")
+
+# Rank 必须随工作点变化：弱第二层在低 SNR 会分走功率，高 SNR 才值得开启。
+h_rank = np.zeros((1, 1, 2, 2), dtype=np.complex64)
+h_rank[0, 0] = np.diag([1.0, 0.2])
+r_low = ll.link_performance(
+    h_rank, noise_power=1.0, method="svd", max_rank=2)
+r_high = ll.link_performance(
+    h_rank, noise_power=1e-4, method="svd", max_rank=2)
+check(r_low.rank == 1 and r_high.rank == 2,
+      f"Rank 按预计谱效自适应工作点（低 SNR={r_low.rank} / 高 SNR={r_high.rank}）")
+
+# 小样本均值 CI 用 Student-t；n=3 时不能偷用 1.96 把区间缩窄。
+mc_small = ll.monte_carlo(
+    np.asarray([h_siso, 2 * h_siso, 4 * h_siso]),
+    noise_powers=np.ones(3), method="identity", max_rank=1)
+expected_half = float(student_t.ppf(0.975, 2) * mc_small.se_std / np.sqrt(3))
+actual_half = (mc_small.se_ci95[1] - mc_small.se_ci95[0]) / 2.0
+check(abs(actual_half - expected_half) < 1e-10,
+      "n=3 蒙特卡洛均值 CI 使用 Student-t 临界值")
+
 
 # ---------------------------------------------------------------------------
 section("4  干扰协方差必须 Hermitian/PSD，新增干扰贡献不能是负功率")
@@ -150,6 +185,26 @@ check(float(np.min(np.linalg.eigvalsh(c3).real)) >= -1e-9,
       "R_uu 是正半定")
 check(float(np.min(np.linalg.eigvalsh(c3 - c2).real)) >= -1e-7,
       "增加一个干扰源只会增加一个 PSD 协方差贡献")
+
+# 数据集没有邻区被服务 UE 的信道。默认波束必须独立于受害 UE；旧口径另留成
+# victim_aligned 故障复现，不能再冒充“邻区服务自己的用户”。
+hi_aniso = np.zeros((1, 1, 1, 2, 2), dtype=np.complex64)
+hi_aniso[0, 0, 0] = np.diag([10.0, 1.0])
+c_ind = ll.interference_covariance(hi_aniso, model="precoded", seed=7)
+c_victim = ll.interference_covariance(hi_aniso, model="victim_aligned", seed=7)
+check(not np.allclose(c_ind, c_victim),
+      "默认邻区波束与受害 UE 交叉信道独立，不再偷偷做 victim-aligned")
+
+# 只有一个真实快照时，请求 100 个样本也只能用 1 个；不得加人工抖动造新秩。
+c_s1 = ll.interference_covariance(
+    hi_aniso, model="precoded", r_uu_source="sample",
+    r_uu_samples=1, diagonal_loading=0.0, seed=11)
+c_s100 = ll.interference_covariance(
+    hi_aniso, model="precoded", r_uu_source="sample",
+    r_uu_samples=100, diagonal_loading=0.0, seed=11)
+check(np.allclose(c_s1, c_s100, atol=1e-12)
+      and np.linalg.matrix_rank(c_s100[0], tol=1e-10) == 1,
+      "R_uu 样本估计只用真实快照，快照不足不再用 5% 抖动伪造秩")
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +308,56 @@ check(pf.cell["accounting_error_pct"] == 0.0
       and pf.diagnostics["rbg_overlap_violations"] == 0
       and 0.0 <= pf.cell["resource_utilization"] <= 1.0,
       "体验模式字节守恒、RBG 不重叠、资源利用率在 [0,1]")
+
+# 未来快照无论怎么改，都不能改变 snapshot 0 的 PMI 权、BF gain 或 CQI。
+h0 = np.zeros((17, 4, 2), dtype=np.complex64)
+h0[:, 0, 0], h0[:, 1, 1] = 1.0, 0.7
+h_future_a = np.zeros_like(h0)
+h_future_a[:, 2, 0], h_future_a[:, 3, 1] = 20.0, 15.0
+h_future_b = np.zeros_like(h0)
+h_future_b[:, 1, 0], h_future_b[:, 0, 1] = 25.0, 18.0
+ta = sy.build_link_tables(
+    [np.stack([h0, h_future_a])], [10.0], num_snapshots=2,
+    max_rank=2, rb_per_rbg=1)[0]
+tb = sy.build_link_tables(
+    [np.stack([h0, h_future_b])], [10.0], num_snapshots=2,
+    max_rank=2, rb_per_rbg=1)[0]
+check(np.allclose(ta.bf_gain_db[0], tb.bf_gain_db[0], atol=1e-10)
+      and np.allclose(ta.pmi_sinr_db[0], tb.pmi_sinr_db[0], atol=1e-10),
+      "snapshot 0 的 PMI/BF gain 不读取未来信道")
+check(np.array_equal(ta.cqi_index_per_snapshot[0], tb.cqi_index_per_snapshot[0])
+      and np.allclose(ta.sinr_tx_db[0], tb.sinr_tx_db[0], atol=1e-10),
+      "snapshot 0 的 CQI 滤波与发送 SINR 不读取未来样本")
+
+# 过载观测窗：超过 deadline 仍未完成的是确定 miss；未到 deadline 的才右删失。
+over_cfg = sy.SystemConfig(
+    evaluation_mode="experience", duration_s=0.25, tdd_pattern="DDDSU")
+over = sy.simulate(
+    tables[:1], sys_cfg=over_cfg,
+    traffic=sy.TrafficConfig(model="cbr", cbr_mbps=1000.0),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False,
+                             pf_accounting="scheduled_tbs"),
+    kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(91, 0))
+check(over.cell["deadline_missed_incomplete_arrival_objects"] > 0
+      and over.cell["pdb_right_censored_arrival_objects"] > 0
+      and over.cell["pdb_decidable_arrival_objects"]
+      > over.cell["completed_arrival_objects"],
+      "PDB 分母纳入已超时未完成对象，并把未到 deadline 的对象单列右删失")
+check(over.cell["ue_experience_eligible"] == 1
+      and over.cell["ue_experience_measured"] == 0
+      and over.cell["cell_experienced_mbps"] == 0.0,
+      "有到达但无完成 burst 的饿死 UE 以 0 留在体验分布中")
+
+# legacy/capacity 路径也必须在 U 时隙维护外生到达；DDDSU 不能漏掉 20% CBR。
+legacy = sy.simulate(
+    tables[:1],
+    sys_cfg=sy.SystemConfig(evaluation_mode="capacity", duration_s=0.05,
+                            tdd_pattern="DDDSU"),
+    traffic=sy.TrafficConfig(model="cbr", cbr_mbps=1.0),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+    kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(92, 0))
+check(abs(legacy.cell["offered_mbps"] - 1.0) < 1e-9,
+      "D/S/U 每个 TTI 都维护业务到达，DDDSU 不再漏掉 U 时隙的 20% CBR")
 
 
 print("\n" + "=" * 70)

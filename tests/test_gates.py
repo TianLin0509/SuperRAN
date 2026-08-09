@@ -203,6 +203,18 @@ d[0] += 500.0
 prx = g.paired_compare(d, b)
 check(prx.max_single_contribution > 0.5, "识别出单样本主导")
 
+# 同一位置的多次衰落是重复测量，不能把 2 个位置 × 2 次衰落冒充 n=4。
+ca, cb, cluster_order = g.paired_cluster_means(
+    np.array([3.0, 5.0, 12.0, 16.0]),
+    np.array([1.0, 3.0, 8.0, 12.0]),
+    np.array(["position-0", "position-0", "position-1", "position-1"]),
+)
+pcluster = g.paired_compare(ca, cb)
+check(pcluster.n == 2 and cluster_order == ["position-0", "position-1"],
+      "重复衰落先按独立位置聚类，统计 n=2 而不是伪 n=4")
+check(np.allclose(ca, [4.0, 14.0]) and np.allclose(cb, [2.0, 10.0]),
+      "每个位置内 A/B 各自取均值后再做配对")
+
 # ---------------------------------------------------------------------------
 sect("6.5  统计判决：t 与 Wilcoxon 冲突、零方差退化")
 

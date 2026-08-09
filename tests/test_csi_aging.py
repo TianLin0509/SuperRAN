@@ -135,6 +135,16 @@ check(lags.tolist() == [(0 - k) % 17 * 2 for k in range(17)],
       "10 ms 年龄 / 5 ms 快照 = 2 个快照，逐 RBG 对得上")
 check((lags >= 0).all(), "滞后非负")
 
+# 离散快照必须选“不新于真实测量”的那一个：2 ms/5 ms 不能四舍五入成当前信道。
+lag_2ms = ca.rbg_lag_snapshots(
+    ca.CsiConfig(srs_period_ms=5.0, hopping=False, processing_delay_ms=2.0),
+    1, snapshot_ms=5.0, snapshot_index=0)
+lag_7ms = ca.rbg_lag_snapshots(
+    ca.CsiConfig(srs_period_ms=5.0, hopping=False, processing_delay_ms=7.0),
+    1, snapshot_ms=5.0, snapshot_index=0)
+check(lag_2ms.tolist() == [1] and lag_7ms.tolist() == [2],
+      "CSI 年龄向上量化守因果：2 ms→1 快照，7 ms→2 快照")
+
 off = ca.CsiConfig(enabled=False)
 check(ca.rbg_lag_snapshots(off, 17, snapshot_ms=5.0, snapshot_index=3).max() == 0,
       "enabled=False 时滞后恒为 0")

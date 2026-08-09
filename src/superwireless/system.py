@@ -452,7 +452,8 @@ class UeLinkTable:
     # --- 发送侧 SINR 的拆解，供审计与说明书引用 ---
     bf_gain_db: np.ndarray | None = None   # [snapshot, rank] SVD − PMI（基站自算）
     pmi_sinr_db: np.ndarray | None = None  # [snapshot, rank] Type I 权下的用户级 SINR
-    cqi_index: np.ndarray | None = None    # [rank] 长期滤波后上报的 CQI
+    cqi_index: np.ndarray | None = None    # [rank] 最后一个快照的因果滤波 CQI
+    cqi_index_per_snapshot: np.ndarray | None = None  # [snapshot,rank] 因果滤波 CQI
     csi_lag_snapshots: np.ndarray | None = None  # [snapshot] 平均 CSI 滞后（快照数）
     # **基站以为的谱效**：rank 自适应与 PF 调度都只能看它，不能看真实值。
     # 拿真实谱效去调度等于让基站预知信道，老化损失会被凭空抹掉一大半。
@@ -755,18 +756,10 @@ def build_link_tables(
         n_rows = snaps_u[0].shape[0]
         n_rbg_eff = max(1, int(np.ceil(n_rows / rows_per_rbg)))
 
-        # --- Type-I-style 宽带 PMI 近似：逐 UE 只搜一次列码本 ---
-        # 宽带 PMI 是**慢时间尺度**的量（38.214 里它的上报周期远长于一个 TTI），
-        # 逐快照重搜既慢又不符合物理。在跨快照/频率的功率协方差上搜一次。
-        # 宽带/慢时标 PMI 看的是 E[H H^H] 上的平均接收功率，不能先对复信道
-        # 跨时间求均值（相位翻转会抵消成零）。compute_precoder/type1 会在完整
-        # [T,F,BS,UE] 序列上构造协方差。
-        h_wideband = np.stack(snaps_u)
-        # **只搜一次。** Type I 的选波束是**增量贪心**（选一层、投影掉、再选下一层），
-        # 所以 rank R 结果的前 r 列与直接搜 rank r **逐位相同**（实测偏差 0.0）。
-        # 逐 rank 各搜一遍白花 4 倍时间——实测码本搜索本来就占建表的 47%。
-        _w_all = _type1_precoder(h_wideband, max_rank)
-        w_pmi = {r: _w_all[:, :, :r] for r in range(1, max_rank + 1)}
+        # Type-I-style 是宽带权（同一快照内所有 RBG 共用一组列），但绝不能在
+        # **整个仿真时域**上只搜一次。那会把未来快照放进当前 PMI，形成 oracle。
+        # 下面在每个快照的可用 h_prec 上搜索；若要模拟更慢的 PMI 周期，应显式
+        # 持有上一次报告，而不是偷看未来后做全时域平均。
 
         sinr = np.zeros((n_s, max_rank))
         mcs = np.zeros((n_s, max_rank), dtype=int)
@@ -795,11 +788,15 @@ def build_link_tables(
             else:
                 h_prec = snaps_u[s]
 
+            # 两个权都只看当前时刻可获得的同一份（可能陈旧）CSI。这样比较的是
+            # 权值自由度/码本量化，不混入“一个看未来、另一个不看”的信息优势。
+            w_pmi_s = _type1_precoder(h_prec, max_rank)
+
             # 预编码用 h_prec、评估用当前快照。零时延时两者相同，
             # 结果与 mumimo.su_rank_adaptation **逐位相同**（test_csi_aging 第 1 节）。
             # Type I 参照权是**在陈旧信道的协方差上**搜的（宽带 PMI 本就是慢量），
             # 所以它同样吃老化——只是自由度少，能算错的地方也少。
-            _wov = _w_all if precoder == "type1" else None
+            _wov = w_pmi_s if precoder == "type1" else None
             rc = ca.rank_adaptation_aged(h_prec, snaps_u[s], noise_power=npow,
                                          max_rank=max_rank, table=table,
                                          target_bler=target_bler, rb_per_rbg=grp,
@@ -818,19 +815,20 @@ def build_link_tables(
             # BF Gain 是**实际发射权**相对 PMI 参照权的增益。
             # precoder="type1" 时两者是同一个权，所以它恒为 0——这不是特例处理，
             # 是定义的直接后果：码本发送没有额外的 BF 增益可加。
-            w_tx_prec = _w_all if precoder == "type1" else ca.svd_precoder(h_prec)
-            for r in range(1, max_rank + 1):
+            w_tx_prec = w_pmi_s if precoder == "type1" else ca.svd_precoder(h_prec)
+            rank_cap = min(max_rank, w_tx_prec.shape[2], w_pmi_s.shape[2])
+            for r in range(1, rank_cap + 1):
                 p_per = 1.0 / r
                 s_tx = ca.mmse_stream_sinr(h_prec, w_tx_prec[:, :, :r],
                                            power_per_stream=p_per, noise_power=npow)
-                s_pmi = ca.mmse_stream_sinr(h_prec, w_pmi[r],
+                s_pmi = ca.mmse_stream_sinr(h_prec, w_pmi_s[:, :, :r],
                                             power_per_stream=p_per, noise_power=npow)
                 g_tx = mu.user_sinr_db(s_tx, rb_per_rbg=grp)
                 g_pmi = mu.user_sinr_db(s_pmi, rb_per_rbg=grp)
                 bf_gain[s, r - 1] = g_tx - g_pmi
                 # CQI 是终端在**真实信道**上用 PMI 权测的，所以这里用当前快照
                 pmi_sinr[s, r - 1] = mu.user_sinr_db(
-                    ca.mmse_stream_sinr(snaps_u[s], w_pmi[r],
+                    ca.mmse_stream_sinr(snaps_u[s], w_pmi_s[:, :, :r],
                                         power_per_stream=p_per, noise_power=npow),
                     rb_per_rbg=grp)
 
@@ -840,24 +838,27 @@ def build_link_tables(
         #   → + BF Gain → 按 SINR 重映射 MCS → + OLLA → floor
         # 这里只走到"+BF Gain"为止，OLLA 留在 TTI 主循环里逐 TTI 更新。
         #
-        # **CQI 是长期滤波的宽带量**（终端上报周期远长于一个 TTI），
-        # 所以取该用户 PMI SINR 在全部快照上的均值再量化；
+        # **CQI 是长期滤波的宽带量**。滤波只能使用 0..s 的观测；过去把整个
+        # 仿真的 PMI SINR 先求均值再回填每个快照，当前 TTI 会偷看到未来。
+        # 这里用 expanding mean 作为没有额外时间常数配置时的透明因果基线；
+        # 若现场给出 IIR 系数/反馈周期，应替换这一行但仍必须保持因果。
         # **BF Gain 是瞬时的**，基站每次调度都能从自己的 CSI 算出来。
         # 早先版本把发送侧写成"接收 SINR 的长期均值"，那是个事后诸葛亮的量——
         # 它已经包含了 SVD 的增益，等于假设基站预先知道自己波束打得准不准。
-        cqi_idx = np.zeros(max_rank, dtype=int)
+        cqi_by_snapshot = np.zeros((n_s, max_rank), dtype=int)
         for _r in range(max_rank):
-            mean_pmi = _nan_safe(np.mean, pmi_sinr[:, _r])
-            cqi_idx[_r] = _cqi_of(mean_pmi, target_bler)
-            thr = _cqi_threshold_sinr(int(cqi_idx[_r]), target_bler)
-            # **CQI=0 不能退化成 −inf。** 它的意思是"低于 CQI 表下界"，
-            # 而不是"这个用户不存在"——真实接收 SINR 可能还有几个 dB。
-            # 退回实测 PMI SINR：粗糙但有限，OLLA 还能在它上面工作。
-            if not np.isfinite(thr):
-                thr = mean_pmi if np.isfinite(mean_pmi) else -20.0
-            sinr_tx[:, _r] = thr + bf_gain[:, _r]
             for _s in range(n_s):
+                filtered_pmi = _nan_safe(np.mean, pmi_sinr[:_s + 1, _r])
+                cqi_by_snapshot[_s, _r] = _cqi_of(filtered_pmi, target_bler)
+                thr = _cqi_threshold_sinr(
+                    int(cqi_by_snapshot[_s, _r]), target_bler)
+                # **CQI=0 不能退化成 −inf。** 它表示低于表下界，不是用户消失。
+                if not np.isfinite(thr):
+                    thr = filtered_pmi if np.isfinite(filtered_pmi) else -20.0
+                gain = bf_gain[_s, _r] if np.isfinite(bf_gain[_s, _r]) else 0.0
+                sinr_tx[_s, _r] = thr + gain
                 mcs_tx[_s, _r] = la_sel(sinr_tx[_s, _r], table, target_bler)
+        cqi_idx = cqi_by_snapshot[-1].copy()
         # **rank 由基站按自己的 CSI 挑**（零时延时 se_gnb 与 se 逐位相同）
         best = rank_gnb - 1
         # **覆盖判定。** 用户级 SINR 连 MCS 0 的 10% BLER 门限都够不到时，
@@ -886,6 +887,7 @@ def build_link_tables(
             if _iots else 0.0,
             sir_db=float(sir_in[i]), sinr_tx_db=sinr_tx, mcs_tx=mcs_tx,
             bf_gain_db=bf_gain, pmi_sinr_db=pmi_sinr, cqi_index=cqi_idx,
+            cqi_index_per_snapshot=cqi_by_snapshot,
             csi_lag_snapshots=lag_used, se_gnb=se_gnb,
             best_se_gnb=se_gnb[np.arange(n_s), best], mcs_table=int(table),
         ))
@@ -1035,7 +1037,9 @@ class _Traffic:
         self._per_rbg_bytes = max(50, int(small_bytes or 1500))
         self.num_rbg = int(num_rbg)
         self.rbg_hist: list[int] = []
-        self._cbr_per_tti = int(cfg.cbr_mbps * 1e6 * tti_ms / 1000.0 / 8)
+        self._cbr_exact_per_tti = float(
+            cfg.cbr_mbps * 1e6 * tti_ms / 1000.0 / 8)
+        self._cbr_carry = np.zeros(n_ue, dtype=float)
 
     def step(self, tti: int) -> None:
         if self.cfg.model == "full_buffer":
@@ -1045,13 +1049,20 @@ class _Traffic:
             return
         if self.cfg.model == "cbr":
             for u in range(self.n_ue):
+                # 每 TTI 直接 int 会永久丢掉小数部分：1 Mbps@0.5 ms 是 62.5 B，
+                # 旧实现每格只投 62 B，长跑固定少 0.8%；更低速率甚至永远为 0。
+                self._cbr_carry[u] += max(0.0, self._cbr_exact_per_tti)
+                n_bytes = int(np.floor(self._cbr_carry[u]))
+                self._cbr_carry[u] -= n_bytes
+                if n_bytes <= 0:
+                    continue
                 b = self.active[u]
                 if b is None:
-                    self.active[u] = _Burst(tti, self._cbr_per_tti, self._cbr_per_tti)
+                    self.active[u] = _Burst(tti, n_bytes, n_bytes)
                 else:
-                    b.bytes_left += self._cbr_per_tti
-                    b.bytes_total += self._cbr_per_tti
-                self.offered_bytes += self._cbr_per_tti
+                    b.bytes_left += n_bytes
+                    b.bytes_total += n_bytes
+                self.offered_bytes += n_bytes
             return
         # ftp3 / bimodal：泊松到达（每 TTI 用伯努利近似，p 很小时等价）
         for u in range(self.n_ue):
@@ -1338,12 +1349,15 @@ def simulate(
                  for t in tables]
 
     for tti in range(sys_cfg.num_tti):
+        # 业务到达属于连续时间轴，不能因为这一格是 U 时隙就消失。旧实现先
+        # continue 再 step，DDDSU 下会系统性漏掉 20% 到达量，负载、排队和体验
+        # 全被低估。先维护队列，再决定本 TTI 能否做下行调度。
+        tr.step(tti)
         _slot = pattern[tti % len(pattern)]
         if _slot not in ("D", "S"):
             continue                                   # 上行时隙不调度下行
         re_per_tti = _re_of[_slot]                     # S 时隙的 RE 少三成
         dl_tti += 1
-        tr.step(tti)
         snap = (tti // snap_every) % n_snap
 
         cand = [u for u in range(n_ue) if tr.has_data(u)
