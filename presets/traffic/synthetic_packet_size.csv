@@ -1,0 +1,9 @@
+# Synthetic example only; not company data and not a 3GPP standard CDF.
+bytes,cdf
+300,0.10
+800,0.25
+1500,0.55
+12000,0.68
+100000,0.78
+500000,0.90
+2000000,1.00

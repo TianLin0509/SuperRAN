@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>superwireless — 面向蒙特卡洛验证的无线信道供应站</title>
+<title>superran — 面向蒙特卡洛验证的无线信道供应站</title>
 <style>
   :root{
     --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
@@ -120,7 +120,7 @@
 <body>
 <div class="wrap">
 
-<h1>superwireless</h1>
+<h1>superran</h1>
 <p class="tagline">给 Agent 用的无线仿真信道供应站 —— 面向蒙特卡洛验证</p>
 <p class="meta">本页所有数字均来自真实运行，非示意 · 2026-07-29</p>
 
@@ -136,7 +136,7 @@
 
 <div class="card">
 <p class="lead" style="margin-bottom:14px;">典型用法：<strong>你提一个无线算法优化思路，需要在可信的信道实例上跑蒙特卡洛仿真。</strong></p>
-<p style="margin:0;">superwireless 给你三样东西——<strong>可信的信道</strong>（内置对标 3GPP 的体检）、
+<p style="margin:0;">superran 给你三样东西——<strong>可信的信道</strong>（内置对标 3GPP 的体检）、
 <strong>多样的配置</strong>（场景/剖面/拓扑任意组合）、<strong>现成的评价链路</strong>
 （预编码 → SINR → 谱效，含四种标准方案的横向对比）。</p>
 </div>
@@ -351,7 +351,7 @@ TDD 配比 7 种 · SRS 完整跳频配置</p>
 <h3>3GPP 官方的校准口径</h3>
 <p>业界判断信道生成得对不对，不看曲线好不好看，而是<strong>按 TR 38.901 §7.8
 规定的口径把指定的统计量算出来，跟各公司提交给 3GPP 的参考曲线对</strong>。
-<code>sw_calibrate</code> 按条款出数：</p>
+<code>sr_calibrate</code> 按条款出数：</p>
 
 <div class="tbl-wrap">
 <table>
@@ -381,7 +381,7 @@ TDD 配比 7 种 · SRS 完整跳频配置</p>
 CDL-C 有 <strong>23/24 簇</strong>有出入，这些簇占总功率 <strong>93.8%</strong>；
 按 Annex A.1 算出来 <strong>ASA 偏 14.5°、ASD 偏 7.1°</strong>。</p>
 <p style="margin-top:8px;">角度错了不会报错，只会让空间相关性、波束赋形增益、到达角估计
-这类结论安静地偏掉——而这正是谱效仿真最依赖的部分。现在 superwireless 启动时会把
+这类结论安静地偏掉——而这正是谱效仿真最依赖的部分。现在 superran 启动时会把
 逐字核对过的标准表灌回仿真器（<strong>不改 ChannelHub 一行源码</strong>，替换的是
 <code>get_cdl_profile</code> 读的那个字典），门 1 里逐簇复核。</p>
 <p style="margin-top:8px;">为了不冤枉别人，标准表是<strong>手抄一遍 + 从 PDF 机械解析一遍</strong>
@@ -512,7 +512,7 @@ CDL-C 有 <strong>23/24 簇</strong>有出入，这些簇占总功率 <strong>93
 <h2>六、物理层工具箱</h2>
 <p class="lead">ChannelHub 里已按 38.211/38.213/38.214 实现的模块，主要用来<strong>当基线</strong>。</p>
 
-<pre><code>from superwireless import physical as ph
+<pre><code>from superran import physical as ph
 
 ph.nr_rb_count(100e6, 30000)      <span class="cm"># 273（标准表，不是简单除法）</span>
 ph.tdd_pattern_info("DDDSU")      <span class="cm"># 周期 5 时隙 / 5 ms，特殊时隙 10 DL + 2 UL 符号</span>
@@ -540,15 +540,15 @@ ph.project_interference(...)      <span class="cm"># 干扰投影——不投影
 
 <pre><code><span class="cm"># 1. 物理内核 + 本项目</span>
 git clone https://github.com/wangxz0803-lab/ChannelHub_main
-git clone https://github.com/TianLin0509/superwireless
-cd superwireless && pip install -e .
+git clone https://github.com/TianLin0509/superran
+cd superran && pip install -e .
 
 <span class="cm"># 2. 可选：射线追踪（约 300 MB，实测不降级 numpy/scipy/torch）</span>
 pip install sionna-rt
 
 <span class="cm"># 3. 注册到 Agent</span>
-claude mcp add superwireless -- python /path/to/superwireless/scripts/mcp_server.py
-codex  mcp add superwireless -- python /path/to/superwireless/scripts/mcp_server.py
+claude mcp add superran -- python /path/to/superran/scripts/mcp_server.py
+codex  mcp add superran -- python /path/to/superran/scripts/mcp_server.py
 
 <span class="cm"># 4. 可选：装 skill（工作流编排），两个 Agent 用同一份 SKILL.md</span>
 cp -r skills/channel-sim ~/.claude/skills/
@@ -558,11 +558,11 @@ cp -r skills/channel-sim ~/.codex/skills/</code></pre>
 <div class="tbl-wrap">
 <table>
 <tbody>
-<tr><td><code>sw_capabilities</code></td><td>引擎可用性</td><td><code>sw_plan</code> / <code>sw_revise</code></td><td>分轮协商</td></tr>
-<tr><td><code>sw_list_presets</code></td><td>场景预设</td><td><code>sw_generate</code></td><td>生成数据集</td></tr>
-<tr><td><code>sw_list_scenes</code></td><td>射线追踪场景</td><td><code>sw_deliver</code></td><td>取货代码</td></tr>
-<tr><td><code>sw_validate</code></td><td><strong>可信度体检</strong></td><td><code>sw_link_performance</code></td><td><strong>算谱效</strong></td></tr>
-<tr><td><code>sw_describe_dataset</code></td><td>数据集信息</td><td><code>sw_list_datasets</code></td><td>已有数据集</td></tr>
+<tr><td><code>sr_capabilities</code></td><td>引擎可用性</td><td><code>sr_plan</code> / <code>sr_revise</code></td><td>分轮协商</td></tr>
+<tr><td><code>sr_list_presets</code></td><td>场景预设</td><td><code>sr_generate</code></td><td>生成数据集</td></tr>
+<tr><td><code>sr_list_scenes</code></td><td>射线追踪场景</td><td><code>sr_deliver</code></td><td>取货代码</td></tr>
+<tr><td><code>sr_validate</code></td><td><strong>可信度体检</strong></td><td><code>sr_link_performance</code></td><td><strong>算谱效</strong></td></tr>
+<tr><td><code>sr_describe_dataset</code></td><td>数据集信息</td><td><code>sr_list_datasets</code></td><td>已有数据集</td></tr>
 </tbody>
 </table>
 </div>

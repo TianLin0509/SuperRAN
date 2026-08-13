@@ -14,8 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from superwireless import katex as kx  # noqa: E402
-from superwireless import mathml as mm  # noqa: E402
+from superran import katex as kx  # noqa: E402
+from superran import mathml as mm  # noqa: E402
 
 
 def M(tex: str, *, block: bool = False) -> str:
@@ -25,7 +25,7 @@ def M(tex: str, *, block: bool = False) -> str:
 def head() -> str:
     src = (ROOT / "TONIGHT.html").read_text(encoding="utf-8")
     h = src.split("</head>")[0]
-    h = h.replace("superwireless 通宵成果与待审", "superwireless 决策落地")
+    h = h.replace("superran 通宵成果与待审", "superran 决策落地")
     return h + "\n" + kx.head_assets() + "\n</head>"
 
 
@@ -38,7 +38,7 @@ F_BFGAIN = M(r"\overline{\mathrm{SINR}_{SVD} - \mathrm{SINR}_{PMI}}")
 F_JITTER = M(r"\eta_s \sim \mathcal{U}(0.95\eta,\,1.05\eta)")
 F_RHO0 = M(r"\rho \to 0")
 F_STEADY2 = M(r"s_{up}/(s_{up}+s_{down})")
-F_TABLE57 = M(r"m_{SRS} = (272,\ 16,\ 4,\ 4), \qquad N = (1,\ 17,\ 4,\ 1)", block=True)
+F_TABLE63 = M(r"m_{SRS} = (272,\ 16,\ 8,\ 4), \qquad N = (1,\ 17,\ 2,\ 2)", block=True)
 F_BSRS = M(r"B_{SRS}=1")
 F_BHOP = M(r"b_{hop}=0")
 F_CORE = M(r"W = \mathrm{SVD}(H_{t-\tau}), \qquad \mathrm{SINR}_k = \frac{1}{"
@@ -352,13 +352,14 @@ Type I 的 IBLER 普遍低于目标 10%（0.043~0.081），是 MCS 整数档卡�
 
 <div class="callout c-blue">
 <p><b>你说的「17 倍跳频」，是 38.211 里逐字有的。</b>
-TS 38.211 Table 6.4.1.4.3-1 的 <b>C_SRS = 57 行</b>：</p>
-<p style="text-align:center">{F_TABLE57}</p>
+TS 38.211 Table 6.4.1.4.3-1 的 <b>C_SRS = 63 行</b>：</p>
+<p style="text-align:center">{F_TABLE63}</p>
 <p>取 {F_BSRS}、{F_BHOP} 时，每次 SRS 占 <b>16 RB —— 正好一个 RBG</b>，
 要 <b>17 跳</b>才扫完 272 RB。这和本项目 17 RBG × 16 RB 的载波配置 <b>1:1 对上</b>。</p>
 <p class="src">跳频序列直接调 ChannelHub 的 <code>srs_rb_indices</code>（它实现了 §6.4.1.4.3
 的完整跳频树），没有自己重写。实测 <code>srs_hopping_cycle_length</code> 返回 17、
-扫描顺序就是 RBG 0→1→…→16 循环。</p>
+扫描顺序为 RBG 0→8→16→7→15→6→14→5→13→4→12→3→11→2→10→1→9，
+17 跳的并集恰好覆盖全带且每个 RBG 一次。</p>
 </div>
 
 <h3>核心：不是给 SINR 打折扣，是让预编码真的算错</h3>
@@ -431,11 +432,11 @@ SU 只是波束没对准，损失温和得多。</p>
 <div class="tbl-wrap"><table>
 <thead><tr><th style="min-width:170px">坑</th><th>症状</th><th>为什么难发现</th></tr></thead>
 <tbody>
-<tr><td><b>跳频兜底路径的输出和标准实现一模一样</b></td>
+<tr><td><b>跳频兜底路径曾被误当成标准实现</b></td>
 <td><code>hop_order()</code> 没先 <code>_ensure_path()</code>，静默走了恒等扫描兜底</td>
-<td>C_SRS=57 的标准序列<b>就是</b>顺序扫描，所以兜底给出完全相同的结果——
-除了看返回的 <code>source</code>，<b>没有任何办法发现自己没在用标准实现</b>。
-测试因此直接断言 <code>source</code> 以 <code>channelhub:</code> 开头。</td></tr>
+<td>正确口径是 C_SRS=63，标准序列为
+<code>0,8,16,7,15,6,14,5,13,4,12,3,11,2,10,1,9</code>，与恒等扫描不同。
+测试同时断言完整顺序和 <code>source</code> 以 <code>channelhub:</code> 开头。</td></tr>
 
 <tr><td><b>测试信道里 MU/SU 比值是个死数</b></td>
 <td>扫遍 0~20 dB，比值<b>恒等于 2.000</b></td>
@@ -468,7 +469,7 @@ SU 只是波束没对准，损失温和得多。</p>
 <code>main</code> 分支仍落后 <code>agent/company-bler-curves</code>，合不合由你定。</p>
 </div>
 
-<footer>superwireless 决策落地 · 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>
+<footer>superran 决策落地 · 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>
 </div>
 {kx.upgrade_script()}
 </body></html>

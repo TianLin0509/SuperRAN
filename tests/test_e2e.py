@@ -16,11 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # 把测试输出吓成"失败"。统一 reconfigure，本文件的 print 全部 replace 兜底。
 sys.stdout.reconfigure(errors="replace")
 
-from superwireless import decisions as dec  # noqa: E402
-from superwireless import deliver as dlv  # noqa: E402
-from superwireless import generate as gen  # noqa: E402
-from superwireless import plan as pl  # noqa: E402
-from superwireless import channelhub as ch  # noqa: E402
+from superran import channelhub as ch  # noqa: E402
+from superran import decisions as dec  # noqa: E402
+from superran import deliver as dlv  # noqa: E402
+from superran import generate as gen  # noqa: E402
+from superran import plan as pl  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -117,7 +117,11 @@ print(f"  dataset_id   {summary['dataset_id']}")
 print(f"  形状         {summary['shape']}")
 print(f"  耗时         {summary['elapsed_s']}s  ({summary['seconds_per_sample']}s/样本)")
 print(f"  体积         {summary['size_mb']} MB")
-print(f"  信道模型     {summary['channel_model']}  含角度={summary['is_cdl']}")
+print(
+    f"  信道模型     configured={summary['configured_channel_model']}  "
+    f"effective={summary['effective_channel_model_counts']}  含角度={summary['is_cdl']}"
+)
+check(bool(summary["effective_channel_model_counts"]), "摘要显式区分配置剖面与逐链路实际剖面")
 print(f"  SINR 分布    {summary['sinr_dB']}")
 print(f"  路损分布     {summary.get('pathloss_dB')}")
 print(f"  视距比例     {summary.get('los_ratio')}")
@@ -169,7 +173,7 @@ with tempfile.TemporaryDirectory() as td:
 
 # ---------------------------------------------------------------------------
 sect("9  测量量物理正确性抽查")
-from superwireless import load  # noqa: E402
+from superran import load  # noqa: E402
 
 ds = load(ds_id)
 p = ds.pdp(0)

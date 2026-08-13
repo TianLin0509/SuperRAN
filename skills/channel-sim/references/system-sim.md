@@ -1,4 +1,4 @@
-# 系统级仿真参数详解 —— `sw_system_sim`
+# 系统级仿真参数详解 —— `sr_system_sim`
 
 **什么时候读这一份**：主文件「第 5 段」里的旋钮不够用、要解释某个 KPI
 是怎么算的、要调话务或邻区负载、或者 `notes` 报了一条你不确定怎么处理的。
@@ -9,20 +9,28 @@
 ## 完整签名
 
 ```python
-sw_system_sim(
+sr_system_sim(
     dataset_id,
     evaluation_mode="capacity", duration_s=5.0,
     traffic_model="ftp3", file_bytes=500_000, arrival_rate_hz=2.0,
     small_ue_share=0.5, small_file_bytes=1_500, small_arrival_rate_hz=20.0,
     small_pdb_ms=20.0, large_pdb_ms=300.0,
+    packet_size_cdf=None, interarrival_cdf=None,
+    packet_size_scale=1.0, interarrival_scale=1.0,
+    interarrival_cdf_unit="ms", traffic_profiles=None,
+    target_prb_utilization=None, load_calibration_axis="interarrival",
+    load_calibration_tolerance=0.02, load_calibration_max_iterations=6,
+    load_calibration_replications=2, load_calibration_formal_refinements=2,
     scheduler="pf", pf_window_tti=100, pf_accounting="auto",
     qos_avg_rate_exponent=1.0, qos_instant_rate_exponent=1.0,
     qos_delay_exponent=0.0, qos_priority_weighting="none", mu_enabled=False,
     trim="tail", small_burst_policy="fractional_slot", tdd_pattern="DDDSU",
     neighbor_prb_util=0.3, neighbor_load_jitter=0.05,
     csi_aging=True, srs_period_ms=10.0, srs_hopping=True,
-    csi_processing_delay_ms=2.0,
-    olla_speedup=1.0, precoder="svd", seed=0, num_replications=8,
+    csi_processing_delay_ms=2.0, csi_report_period_ms=20.0,
+    warmup_s=1.0, olla_speedup=1.0, olla_warmup_speedup=1.0,
+    precoder="svd", power_constraint="ebf", seed=0, num_replications=8,
+    kpi_focus=None, kpi_intent="",
 )
 ```
 
@@ -33,9 +41,9 @@ sw_system_sim(
 | `capacity` | `legacy_v1` | 历史全带口径，单次选择一个 SU（或标量 MU 近似） | NewTx 后复用 ReTx BLER 曲线，最多 4 次 | `trim=none/tail/head_tail` | 复现旧结果、满缓冲容量、公平性 |
 | `experience` | `experience_v2` | TBS 反查最小 RBG，同 TTI 可排多个 UE，尾料可留空 | NACK 字节留在 FIFO，下次仍按 NewTx 判错；无软合并/进程时序 | DRB busy-period + FIFO 到达对象；小 burst 可按 fractional slot | 大小包混跑、等待/PDB、按需分配 |
 
-两者是**两个评估 profile**，不是一个算法的快慢档。`experience_v2` 首版只支持 SU；
-`mu_enabled=True` 会硬报错。主循环都不做矩阵运算，矩阵运算集中在
-`build_link_tables` 建表相；体验模式多了逐 TTI 的 FIFO 与 RBG 分配，因此旧版的
+两者是**两个评估 profile**，不是一个算法的快慢档。当前 `experience_v2` 支持
+两用户、每用户 rank2 的数据受限 SU/MU 自适应；矩阵运算集中在
+`build_link_tables` 建表相，TTI 主循环只查 pair 表。体验模式多了逐 TTI 的 FIFO 与 RBG 分配，因此旧版的
 “40000 TTI 只要 0.2 秒”不能当成它的性能承诺。
 
 ## 重复实验与置信区间 `num_replications` / `seed`
@@ -79,6 +87,12 @@ legacy bimodal 的 RBG 尺寸抽样）/ `scheduler`（度量打平时的随机�
 后面 HARQ 的伯努利序列**整个错位**，于是"话务模型的影响"里混着"HARQ 换了一批随机数"。
 **这类污染在结果里看不出来。**
 
+`experience_v2` 在 `traffic` 顶层流内还按稳定名字拆成
+`profile_assignment / arrival_count / packet_size / interarrival / initial_phase` 五条子流。
+子流键同样取名字的 CRC32，而不是列表下标。于是把 `interarrival_scale` 从 1 改成 0.5
+不会因为到达事件增多而把后续包长抽样整体错位；双标量校准比较的仍是同一批基础 CDF
+抽样。结果的 `traffic_samples.substream_scheme` 会记录这一点。
+
 ### A/B 必须用公共随机数（CRN）—— `rng.compare_replications`
 
 CRN 是经典的方差缩减技术：比较两个方案时对应的两次运行用**同一批伪随机数**，
@@ -108,8 +122,8 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
 **"效应比置信区间还小"**——对称 t 区间下 `|mean| < h` 与"区间含 0"是充要的。
 
 **`rng.compare_replications` 目前只是库函数，没有对应的 MCP 工具。**
-要判决就写脚本导入它跑；**不要臆造 `sw_compare_system_arms` 这类不存在的工具**。
-另外 `sw_system_sim` 的返回里只有聚合后的 `KpiStat`，**没有逐次重复的原始值**，
+要判决就写脚本导入它跑；**不要臆造 `sr_compare_system_arms` 这类不存在的工具**。
+另外 `sr_system_sim` 的返回里只有聚合后的 `KpiStat`，**没有逐次重复的原始值**，
 所以这条路必须在脚本里从 `simulate_replications` 拿 `runs` 才走得通。
 
 ### 区间覆盖什么、不覆盖什么
@@ -119,7 +133,7 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
 把这件事显式写出来——**别把它当成"全部不确定度"**。
 
 **信道实现本身的不确定度是另一个、更大的方差分量**，这个函数不做也做不到——
-要覆盖它得用不同 `seed` 重新 `sw_generate` 再比。
+要覆盖它得用不同 `seed` 重新 `sr_generate` 再比。
 
 这个取舍是量过的（`measurements/rng_replication.json`）：64 次 replication（表固定）
 与 32 次 master seed 扫描（每次重建表、负载抖动重抽）的变异系数对照里，
@@ -145,6 +159,7 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
 |---|---|---|
 | `ftp3` | 3GPP FTP Model 3，泊松到达的固定大小文件 | **默认**，评价体验速率的标准话务 |
 | `mixed` | 一部分 UE 发 1500 B 小文件，另一部分 UE 发大文件；包长和到达率都是外生量 | **experience_v2 推荐**，验证“小包不再偷走整个 TTI” |
+| `cdf` | 两份 `value,cdf` 文件分别驱动包大小与逐 UE renewal 包间隔 | 接公司/现场话务 CDF；公司曲线未到前只能用明确标注的 synthetic 输入 |
 | `bimodal` | legacy_v1 按目标 RBG 数反推包长的历史模型 | 只复现旧结果；experience_v2 因因果倒置会拒绝 |
 | `full_buffer` | 缓冲区永不空 | 只看容量上限。**体验速率在这个模型下没有意义** |
 | `cbr` | 恒定比特率 | 固定码率业务 |
@@ -157,6 +172,45 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
 `file_bytes`、`arrival_rate_hz` 定义。大小 UE 的类别在仿真开始前固定，不由信道好坏或
 目标 RBG 数反推。只有大小混跑才有可识别的资源共享效应：全大包时每人仍要全带；
 全小包时没有大包体验可比较。
+
+### 经验 CDF 与多 profile
+
+CDF 文件是 UTF-8 两列，默认表头为 `value,cdf`；分隔符支持逗号、分号、tab 或空格，
+概率可写 0..1 或 0..100，value 必须为有限正数且严格递增，CDF 必须单调并收敛到 1。
+包大小单位固定 byte；包间隔默认 ms，也可把 `interarrival_cdf_unit="s"`。相对路径固定
+从 superran 项目根解析，结果保存绝对来源路径和 SHA-256，避免 MCP cwd 改变后读错文件。
+
+存在包间隔 CDF 时，到达过程是逐 UE renewal process，`arrival_rate_hz` 不再决定该 profile
+的到达时刻；存在包大小 CDF 时，`file_bytes` 只作无 CDF 时的 fallback。全局与 profile
+局部标量相乘：
+
+```
+effective_size_scale = global_size_scale * profile_size_scale
+effective_interval_scale = global_interval_scale * profile_interval_scale
+offered_load ∝ effective_size_scale / effective_interval_scale
+```
+
+`traffic_profiles` 每项使用 `TrafficClassConfig` 字段。`ue_ids=[...]` 可把 video/XR 明确
+绑定到用户；显式 ID 先分配，剩余 UE 再按 `ue_share` 分配。跨 replication 随机分配的
+profile 会在用户级显示 `varies_across_replications` 与逐类计数，绝不拿第 1 轮标签冒充固定。
+
+项目提供的 `presets/traffic/synthetic_*.csv` 只用于跑通接口与校准流程，**不是公司话务、
+不是 3GPP 标准 CDF，也不能拿它下现场结论**。
+
+### 目标 PRB 利用率校准
+
+`target_prb_utilization=0.30` 表示设计目标，不是结果覆盖值。控制器默认只调包间隔：
+负载不足就减小 `interarrival_scale`，负载过高就增大；`packet_size` 轴只调包长，
+`balanced` 在 log 域把倍率均分给两轴。每轮 probe 固定同一个 master seed 与 replication ID，
+保存倍率、双标量、实测利用率和 CI；选出最接近点后，正式 `num_replications` 使用同一
+master seed 下与 probe 不重叠的 RngRun 区间独立汇总。正式反馈轮内部继续复用同一组
+RngRun，保证每次只比较负载倍率。
+
+只有正式均值落在 `target ± load_calibration_tolerance` 才返回 `status="target_met"`；否则
+返回 `formal_result_outside_tolerance` 并把实测值保留在结果与 notes。校准是场景设计，不是
+算法 A/B 判决；probe 默认 2 次只为控制器降噪，不能拿 probe 区间声称算法显著。若首轮正式
+均值仍偏离，默认最多做两轮正式样本反馈校正，最后选择正式轮中离目标最近的一轮；完整轨迹
+保存在 `formal_history`，不会只留下“成功”的最后一点。
 
 ## KPI 口径：legacy `trim` 与 experience busy-period
 
@@ -172,9 +226,43 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
    用 `(TBVol-PaddingVol)/TBVol × slot` 折算有效时长；`exclude` 可显式保留旧式盲区。
 4. 每个 FTP/mixed 文件还是一个独立 FIFO arrival object，分别记录 first-schedule wait、
    completion delay 与 PDB miss；一个 DRB busy period 可以包含多个 arrival object。
+5. `first_packet_delay_ms_*` 是每个 arrival object 从生成到第一次调度的时延；从未调度的
+   对象作为右删失单列，不伪造成有限时延。
+6. `*_head_inclusive_*` 与对应掐头去尾速率使用相同 payload numerator 和去尾规则，
+   唯一差异是把 busy period 的 arrival→first schedule 等待加回 denominator。
 
 因此 `small_queue_wait_ms_p95` / `small_completion_delay_ms_p95` /
 `small_pdb_miss_ratio` 与 busy-period throughput 是不同层级的指标，不能互换。
+
+### 本小区 PRB 利用率与逐 TTI RBG 分布
+
+`serving_cell_prb_utilization` 是**结果 KPI**：KPI 窗口内所有可用 DL 调度机会的
+`allocated PRB-equivalent / available PRB-equivalent`；D slot 权重 1，S slot 按当前
+工程口径权重 0.7。分母不纳入纯 UL/保护 TTI，所以 full-buffer 下应为 100%。旧字段
+`resource_utilization` 是它的兼容别名。
+
+`tti_occupied_rbg_distribution` 每个可用 DL TTI 只记一次，横轴固定为 0..17 个已占用
+RBG，**包含 idle TTI 的 0 桶**。不要拿 `rbg_size_hist` 代替：后者是每个非零 grant
+分了几个 RBG，一个 TTI 多用户时会记录多次，回答的是另一个问题。
+
+`mu_paired_prb_share_of_used` 是 MU 生效 PRB-equivalent / 已占用 PRB-equivalent；
+`mu_paired_prb_utilization` 是 MU 生效 PRB-equivalent / 全部可用 PRB-equivalent；
+`mu_paired_prb_equivalent` 给原始数量。50% 小区负载且全部已用资源都成功配对时，前两者
+分别是 100% 与 50%，不能只报一个含糊的“MU 配对比例”。
+
+用户级同时给两套资源口径：`grant_prb_equivalent` 在共享 MU PRB 上对每个配对 UE 都计一次，
+适合回答“该 UE 有多少资源处于 MU”，但不能跨 UE 相加；
+`allocated_prb_equivalent_attributed` 将共享 MU PRB 等分给配对 UE，硬不变量是
+`sum(user attributed PRB) == cell allocated PRB`。用户级 MU 主比例是
+`mu_paired_prb_share_of_user_used`。
+
+### Agent 自适应 KPI 页面
+
+`kpi_view` 顶层固定为“小区级 / 用户级”两个 tab。用户级每个支持指标同时给按 UE 图、
+跨 UE 经验 CDF 和全量明细表；这里的 CDF 样本是“各 UE 的 replication 均值”，不是包级 CDF。
+调用本工具的 LLM/Agent 应根据用户问题显式传 `kpi_focus`（KPI key 或关注词）；页面优先展示
+这些指标、其余折叠，并在 `kpi_view.kpi_selection` 保存来源、标签、理由和完整排序。
+未传时才按 `kpi_intent` 关键词与场景配置做确定性兜底。库内不暗调另一个模型，保证复现与审计。
 
 **换口径数字会明显变，所以报数时必须带上用的是哪个 trim。**
 
@@ -184,14 +272,59 @@ ChannelHub 的几何 SINR 是按**所有邻区都在发**算出来的，等于 1
 真实 5G 网络典型是 10% / 30% / 50%。按 full buffer 算会把干扰放大到不真实的程度，
 所以默认取 **0.3**；设 1.0 退化成原行为。
 
-**当前只支持全网统一值**——几何 SIR 是聚合量，拿不到逐邻区贡献。
+**当前入口只支持全网统一值**。这是产品接口边界，不再是数据边界：新数据集保存
+`dl_interference_power_per_slot_per_cell_mw[sample,slot,cell]`，RB 功控已经能逐邻区
+重算干扰；逐小区负载表尚未开放。
 
 `neighbor_load_jitter=0.05` 让实际生效负载在配置值 ±5% 内逐快照波动。
 恒定负载会让所有快照的干扰完全一样，结果比现网干净。
 
+这和结果里的 `serving_cell_prb_utilization` 也不是一回事：前者是邻区干扰输入，后者由
+本小区话务、用户撒点、链路和调度共同决定。10%/30%/50% 是目标负载场景时，应调话务并
+以实测 KPI 验收，不能把目标数硬写回结果；一般业务主场景可聚焦 30%，MU 压力场景可聚焦 50%。
+
 注意这和信道生成阶段的 `pdsch_load` 不是一回事：后者在下行**完全不起作用**
 （见 `scenarios-and-interference.md`），`neighbor_prb_util` 是系统级仿真自己
 在链路表上做的折算。
+
+## 逐 RB 功控 `rb_power_control_enabled` / `rb_power_overrides`
+
+默认关闭，等价于每小区每个 RB 都是 `1x`。开启后，每个小区得到一行连续倍率
+`q[cell,rb]`，硬约束是：
+
+```text
+0.1 <= q[cell,rb] <= 4.0
+sum_rb q[cell,rb] == N_RB
+```
+
+用户只需写要改的 RB，未指定 RB 统一补偿到总和守恒；补偿值越界、区间重叠、
+RB/小区越界、全覆盖但总和不等于 `N_RB` 都硬失败，不会偷偷归一用户指定值。
+
+```json
+[
+  {"cell_index": 0, "rb_start": 0, "rb_end": 15, "multiplier": 2.0},
+  {"cell_index": 3, "rb": 80, "multiplier": 0.5}
+]
+```
+
+对服务小区为 `s(u)` 的 UE，逐 RB 使用绝对功率项重算：
+
+```text
+SINR[u,r] = q[s(u),r] * S[u]
+            / (N[u] + eta[u] * sum(k != s(u), q[k,r] * I[u,k]))
+```
+
+所以服务小区倍率改变期望信号；任一邻区倍率只改变该邻区对这个 UE 的干扰。
+聚合 `SINR/SIR` 无法恢复这条式子，旧数据集缺逐小区分解时必须重新生成。
+
+它与 `power_constraint=ebf/pebf/nebf` 正交：后者归一空间预编码矩阵，前者在其后
+乘频域功率倍率。正式 A/B 应比较“功控开启但全 1x”与“功控开启且有 override”，
+这样两臂都走逐 RB 物理路径，不把旧的 RBG 中心采样近似混入算法效应。
+
+当前边界要随结果转述：逐 RB 的信号/邻区干扰耦合是精确功率运算；一个 TB 跨多个
+RBG 时，有效 SINR 仍沿用项目既有的 dB 算术平均，尚未用链路级 BLER 曲线标定
+EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率折算，而非多小区
+联合 TTI 调度。
 
 ## CSI 老化 `csi_aging` / `srs_period_ms` / `srs_hopping`
 
@@ -199,8 +332,9 @@ ChannelHub 的几何 SINR 是按**所有邻区都在发**算出来的，等于 1
 保留这个开关是为了能做 A/B，把老化的代价量出来，而不是让它悄悄混进所有结果。
 
 - `srs_period_ms` **只接受 5 / 10 / 20 / 40**，别的值直接报错
-- `srs_hopping` 默认开，对应 38.211 Table 6.4.1.4.3-1 的 `C_SRS=57` / `B_SRS=1`：
-  `m_SRS=(272,16,4,4)`、`N=(1,17,4,1)`，每跳 16 RB 正好一个 RBG，**17 跳**扫完 272 RB
+- `srs_hopping` 默认开，对应 38.211 Table 6.4.1.4.3-1 的 `C_SRS=63` / `B_SRS=1`：
+  `m_SRS=(272,16,8,4)`、`N=(1,17,2,2)`，每跳 16 RB 正好一个 RBG，
+  按 `0,8,16,7,15,6,14,5,13,4,12,3,11,2,10,1,9` **17 跳**扫完 272 RB
 - **跳频是老化的主导项**：10 ms 周期下全带扫一遍要 170 ms，某个 RBG 的年龄在
   0~160 ms 之间轮转（平均 80 ms），而 2.6 GHz、30 km/h 的相干时间只有约 3 ms。
   实测 MU/SU 比值 0.816 → 0.449（−45%），SU 谱效 −27%
@@ -241,19 +375,18 @@ OLLA 步长默认 ACK **+0.01**、NACK **−0.09**，稳态 BLER = `up/(up+down)
 
 ## MU `mu_enabled`
 
-默认 **False**，先看清 SU 基线。开了之后 `measure_mu_gain` 会在建表阶段用真实的
-`su_mu_adaptation` 测出**聚合比值**，主循环按 `ratio/K` 折算。
+默认 **False**，先看清 SU 基线。`legacy_v1` 仍保留历史聚合 `mu_gain` 近似；
+`experience_v2` 不再用标量比值回乘，而是在建表阶段预计算所有两用户、每用户 rank2
+的 pair 链路，TTI 主循环按 PF 顺序查表并构造 SU/MU 两套数据受限计划。
 
-**这是标量近似**：逐 TTI 真配对要在每个 TTI 做 SVD + 矩阵求逆，十万 TTI 跑不完。
-返回的 `mu_gain` 带逐快照比值与离散度，**离散度就是这个近似的可信度**——
-实测 3.7%~13.1%，**超过 30% 就不该用标量**，那时的 MU 结论不要报。
+MU MCS 口径是 `CQI + BF + SU-OLLA + CorrLoss + powerLoss + MU-OLLA`：两个 rank2 UE
+相对 SU rank2 的等流功率损失固定为 `−10log10(2)=−3.0103 dB`；CorrLoss 来自 pair
+的基站侧预测 SINR 差分；SU/MU OLLA 是两组独立的用户级状态，不按配对关系拆分。
 
-实测在 10 用户 / 64 端口下 MU/SU 比值常 < 1（密集城区 0.755、城区宏站 0.917），
-自适应因此全程选 SU。**这不是 bug**：SU 无干扰且能到 rank4，MU 硬顶 rank2
-且每人只分 1/K 功率，自由度富余时 SU 本来就该赢。
-
-若所有快照都配对失败，接口会返回硬错误和逐快照 `errors`，**不会再把 ratio=1.0
-当成成功结果继续跑**。此外 `experience_v2` 当前禁止 MU；上面这段只适用于 legacy_v1。
+每个 DL TTI 只做一次 PF 排序。若 SU 能发完所有队列就强制 SU；否则比较队列封顶后的
+useful payload bytes，只有 MU 不小于 SU 才选 MU。接收端用 per-user LMMSE，预编码只看
+`h_est`，BLER 用 `h_true`。当前工程边界仍是两用户 rank2、ZF/RZF；更一般的 MU 配对与
+现场算法待后续接入。
 
 ## 发射权 `precoder`
 
@@ -285,7 +418,7 @@ CQI 的参照权始终是 `type1_wideband`，返回的 `precoder` 块会写明�
 | `bimodal` PRB 利用率偏离 30% | 折合负载和现网口径对不上 |
 | legacy `bimodal` 小包体验速率为 None | legacy 掐尾口径下单 slice burst 没有可测量时间；experience 可改用 fractional slot |
 | `outage_ue > 0` | 有用户全程够不到 MCS 0 的门限，已从调度剔除——**这本身就是结论** |
-| 占用率 > 98% | 已过载，此时体验速率反映的是容量上限而不是用户体验 |
+| `serving_cell_prb_utilization > 98%` | 已过载，此时体验速率反映的是容量上限而不是用户体验；不能用“有调度的 TTI 占比”代替 |
 | `olla_speedup != 1.0` | 步长被放大，稳态抖动更大，出正式结论要设回 1.0 |
 | `num_replications < 6` | 判决检验结构上不可能显著，区间也不可信 |
 | 头条 KPI 相对半宽 > 5% | 点名最宽的那个——比它更小的差异这次实验分辨不出来 |

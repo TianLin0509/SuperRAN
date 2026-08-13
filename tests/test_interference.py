@@ -15,16 +15,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 # 说明书默认会弹浏览器——跑测试时不要。**必须在 import spec 之前设**，
 # 不然 write_spec 一调就是十几个窗口糊满屏幕。
-os.environ["SUPERWIRELESS_NO_BROWSER"] = "1"
+os.environ["SUPERRAN_NO_BROWSER"] = "1"
 
 # Windows 中文控制台是 GBK，统一兜底（见 test_gates.py 同样的处理）。
 sys.stdout.reconfigure(errors="replace")
 
-from superwireless import channelhub as ch  # noqa: E402
-from superwireless import generate as gen  # noqa: E402
-from superwireless import interference as itf  # noqa: E402
-from superwireless import load  # noqa: E402
-from superwireless import plan as pl  # noqa: E402
+from superran import channelhub as ch  # noqa: E402
+from superran import generate as gen  # noqa: E402
+from superran import interference as itf  # noqa: E402
+from superran import load  # noqa: E402
+from superran import plan as pl  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -57,18 +57,21 @@ for S, I_pow, N in cases:
 print(f"  {len(cases)} 组 (S,I,N) 的最大偏差 {worst:.2e} dB")
 check(worst < 1e-9, "IoT = SIR/(SIR-SINR) 与 (I+N)/N 解析一致")
 
-# 这条是本模块存在的理由：**不能**用 snr - sinr。
-# 构造一个 ChannelHub 口径的例子：snr 不含阵列增益且多减了 10log10(RB)。
-RB, N_ant = 273, 64
+# 当前 first-party 源三者共用同一个单 RB 信号定标，因此 snr-sinr 也应
+# 与解析 IoT 相同；主实现仍用 SIR+SINR，以兼容 SNR 口径不受控的外部/旧数据。
 S, I_pow, N = 1.0, 10.0, 1.0
-sinr_ch = 10 * math.log10(S * N_ant / (I_pow * N_ant + N))   # 几何 SINR：含阵列增益
-snr_ch = 10 * math.log10(S / N) - 10 * math.log10(RB)     # ChannelHub 的 snr_dB
-naive = snr_ch - sinr_ch
-true_iot = 10 * math.log10((I_pow * N_ant + N) / N)
-print(f"  naive(snr-sinr) = {naive:.2f} dB，真值 = {true_iot:.2f} dB，"
-      f"差 {abs(naive - true_iot):.1f} dB")
-check(abs(naive - true_iot) > 20.0,
-      "snr_dB - sinr_dB 与真 IoT 相差 20 dB 以上（所以模块里禁用这个式子）")
+snr_ch = 10 * math.log10(S / N)
+sinr_ch = 10 * math.log10(S / (I_pow + N))
+from_snr = snr_ch - sinr_ch
+true_iot = 10 * math.log10((I_pow + N) / N)
+check(abs(from_snr - true_iot) < 1e-12,
+      "当前 first-party 的 snr-sinr 与 IoT 解析值一致")
+
+# 历史/第三方数据若把 SNR 改成全带或接收机后定标，差值会静默漂移；
+# iot_db 不读取 SNR，因此不受这个非契约字段影响。
+mismatched_snr = snr_ch - 10 * math.log10(273)
+check(abs((mismatched_snr - sinr_ch) - true_iot) > 20.0,
+      "外部 SNR 口径漂移时 SIR+SINR 主公式仍不受影响")
 
 # 向量化与广播
 v = itf.iot_db(np.array([-5.0, 0.0, 5.0]), np.array([0.0, 5.0, 10.0]))
@@ -139,7 +142,7 @@ check(itf.classify_measurement_sir(-2.0)["band"] == "测量已失效",
       "负 SIR 判为测量已失效")
 
 # ---------------------------------------------------------------------------
-sect("5  几何采集钩子")
+sect("5  UL 几何 SIR 稳定交接与旧版钩子兼容")
 
 ok = itf.install_geometry_capture()
 check(ok, "钩子挂载成功")
@@ -147,9 +150,15 @@ check(itf.install_geometry_capture(), "重复挂载幂等")
 
 
 class _FakeSample:
-    def __init__(self, sinr, sir):
+    def __init__(self, sinr, sir, meta=None):
         self.sinr_dB = sinr
         self.sir_dB = sir
+        self.meta = meta
+
+
+direct = _FakeSample(12.0, 18.0, {"ul_geometry_sir_dB": 7.5})
+check(abs(itf.take_ul_geometry_sir(direct) - 7.5) < 1e-9,
+      "新版直接从 sample.meta 读取 UL 几何 SIR，不依赖内部函数名")
 
 
 # 暂存为空时必须回 nan，不能回上一次的值
@@ -195,6 +204,14 @@ for name, body in presets.items():
 for name in groups.get("测量干扰", []):
     link = presets[name]["config"].get("link")
     check(link == "BOTH", f"{name} 的 link 是 BOTH（否则拿不到测量域 SIR）")
+
+# BOTH 数据里的 UL SRS 估计要直接作为同一 UE 的下行预编码 CSI；端口不等时
+# 不能靠广播/截断蒙混过去。旧的 2Tx/4Rx 预设正是被全仓回归抓到的合同漏洞。
+for name, body in presets.items():
+    pcfg = body.get("config", {})
+    if pcfg.get("link") == "BOTH":
+        check(pcfg.get("num_ue_tx_ant") == pcfg.get("num_ue_rx_ant"),
+              f"{name} 的 BOTH 场景 SRS Tx 端口与下行 Rx 端口对齐")
 
 # 大站间距场景必须带 caveat：ChannelHub 没有 RMa 路损公式
 for name in groups.get("大站间距", []):
@@ -242,6 +259,12 @@ ch.warmup()
 cfg = dict(pl.load_presets()["multicell_7site"]["config"])
 cfg["num_rb"] = 24          # 只减计算量；几何 IoT 与 num_rb 无关
 cfg["num_ues"] = 7
+# 这一节验证 S/I/N、IoT 落盘与报告对账，不验证大规模阵列。固定到 4T
+# independent-port panel，避免把 21 小区×64T×20-ray 的重信道重复跑进
+# 日常合同测试；64T/256T 真实子阵由 9.5 节与 test_company_256t 单独锁定。
+cfg["num_bs_tx_ant"] = cfg["num_bs_rx_ant"] = 4
+cfg["bs_panel"] = [2, 1, 2]
+cfg["antenna_model_mode"] = "legacy_64"
 cfg["measurements"] = {"ssb_rsrp": False}
 summ = gen.generate(cfg, num_samples=7, workers=1)
 ds = load(summ["dataset_id"])
@@ -280,18 +303,20 @@ for name in ("ul_sir_dB", "dl_sir_dB", "num_interfering_ues", "ul_sir_geo_dB"):
 # ---------------------------------------------------------------------------
 sect("8.5  探测模式：几何量必须与全量逐位相同")
 
-from superwireless import scenario as sc  # noqa: E402
+from superran import scenario as sc  # noqa: E402
 
 # 探测模式压 num_rb 和 num_ofdm_symbols 换速度，前提是几何量一个不差。
-# **这一节比对的是实际发货的那组参数**，不是外推——num_ofdm_symbols 在 1 处
-# 有一道悬崖（实测 sir_dB 偏 16.1 dB），所以只能逐个验证、不能"2 行那 4 也行"。
+# **这一节既比对实际发货参数，也固定验证最小 1-symbol 网格**，防止今后内部
+# 重构又把大尺度几何量错误耦合到小尺度 symbol 网格。
 probe_cfg = dict(pl.load_presets()["multicell_7site"]["config"])
 probe_cfg["num_ues"] = 7
 probe_cfg["seed"] = 4242
-# **参照组也必须带 bs_panel。** 缺 panel 时 ChannelHub 建不出 DFT 码本，
-# 几何 SINR 整条路径被跳过、sinr_dB 退化成含 -10log10(RB) 的 snr_dB，
-# 于是压 num_rb 会看到 10.56 dB 的"偏差"——那是配置缺陷，不是探测模式的问题。
-# probe_config 现在自己补 panel，这里对照组也补，两边才可比。
+probe_cfg["num_bs_tx_ant"] = probe_cfg["num_bs_rx_ant"] = 4
+probe_cfg["bs_panel"] = [2, 1, 2]
+probe_cfg["antenna_model_mode"] = "legacy_64"
+# 参照组与 probe 都补齐 bs_panel，以锁定相同的二维端口/极化/子阵几何。
+# 当前业务几何干扰不再由旧 DFT 码本开关控制；raw SINR 的 RB 依赖来自每 RB
+# PSD，下面会用全带 SNR + 不变 SIR 重构。
 gen._ensure_bs_panel(probe_cfg)
 
 
@@ -304,7 +329,7 @@ def _geom(**over):
     for smp in ch.iter_samples("internal_sim", cfg):
         mm = smp.meta if isinstance(smp.meta, dict) else {}
         out.append((
-            float(smp.sinr_dB), float(smp.sir_dB or np.nan),
+            float(smp.snr_dB), float(smp.sinr_dB), float(smp.sir_dB or np.nan),
             float(mm.get("pathloss_dB", np.nan)),
             float(mm.get("distance_3d_m", np.nan)),
             float(mm.get("doppler_hz", np.nan)),
@@ -320,42 +345,67 @@ ref_geom = _geom()
 shipped, _rb, _rbf = sc.probe_config(dict(probe_cfg))
 cut_geom = _geom(num_rb=shipped["num_rb"],
                  num_ofdm_symbols=shipped["num_ofdm_symbols"])
-both = np.isfinite(ref_geom) & np.isfinite(cut_geom)
-worst_geom = float(np.max(np.abs(ref_geom[both] - cut_geom[both])))
+both = np.isfinite(ref_geom[:, 2:]) & np.isfinite(cut_geom[:, 2:])
+worst_geom = float(np.max(np.abs(ref_geom[:, 2:][both] - cut_geom[:, 2:][both])))
 print(f"  发货参数 num_rb={shipped['num_rb']} "
       f"num_ofdm_symbols={shipped['num_ofdm_symbols']}，"
       f"几何量最大偏差 {worst_geom:.3e}")
 check(worst_geom == 0.0, "探测模式的几何量与全量逐位相同（不是近似）")
+snr_corrected = cut_geom[:, 0] + sc.snr_correction_db(_rb, _rbf)
+check(np.max(np.abs(snr_corrected - ref_geom[:, 0])) < 1e-12,
+      "probe SNR 加 -10log10(RB_full/RB_probe) 后与全量逐位相同")
+sinr_rebuilt = sc._sinr_from_snr_sir(snr_corrected, cut_geom[:, 2])
+check(np.max(np.abs(sinr_rebuilt - ref_geom[:, 1])) < 1e-12,
+      "probe SINR 用全带 SNR 与不变 SIR 重算后逐位相同")
 
-# 缺 bs_panel 时探测会失真——probe_config 必须自己把它补上
+# probe_config 必须自己补 bs_panel，保证空间阵列配置不随探测路径漂移
 _no_panel = dict(pl.load_presets()["multicell_7site"]["config"])
 _no_panel.pop("bs_panel", None)
 check("bs_panel" not in _no_panel, "预设本身不带 bs_panel（所以补齐这步不能省）")
 check("bs_panel" in sc.probe_config(_no_panel)[0],
-      "probe_config 自动补 bs_panel（否则 sinr_dB 会退化成 RB 相关的 snr_dB）")
+      "probe_config 自动补 bs_panel，保持 full/probe 空间阵列一致")
 
-# 悬崖回归：符号数降到 1 会让几何量失真，PROBE_NUM_SYM 绝不能滑到这里
+# 显式全带 SRS 资源也必须随 probe 网格重选，不能把 272-RB 资源塞进 24 RB。
+_company_full = dict(pl.load_presets()["company_64t4r"]["config"])
+_company_probe, _, _ = sc.probe_config(_company_full)
+check(_company_probe["srs_c_srs"] != _company_full["srs_c_srs"],
+      "probe_config 为缩小后的 RB 网格重选合法 C_SRS")
+
+# 回归：哪怕符号网格缩到 1，大尺度几何量也必须与 14-symbol 全量逐位相同。
+# 小尺度信道/估计仍是 speed-only approximation，不在这里验收。
 cliff_geom = _geom(num_rb=shipped["num_rb"], num_ofdm_symbols=1)
-both_c = np.isfinite(ref_geom) & np.isfinite(cliff_geom)
-worst_cliff = float(np.max(np.abs(ref_geom[both_c] - cliff_geom[both_c])))
+both_c = np.isfinite(ref_geom[:, 2:]) & np.isfinite(cliff_geom[:, 2:])
+worst_cliff = float(
+    np.max(np.abs(ref_geom[:, 2:][both_c] - cliff_geom[:, 2:][both_c]))
+)
 print(f"  num_ofdm_symbols=1 时几何量最大偏差 {worst_cliff:.2f} dB")
-check(worst_cliff > 1.0,
-      "num_ofdm_symbols=1 确实会破坏几何量（所以 PROBE_NUM_SYM 不能取 1）")
-check(sc.PROBE_NUM_SYM > sc.PROBE_NUM_SYM_CLIFF,
-      "PROBE_NUM_SYM 在悬崖之上")
+check(worst_cliff == 0.0,
+      "num_ofdm_symbols=1 时大尺度几何量仍与 14-symbol 全量逐位相同")
+check(sc.PROBE_NUM_SYM == 4,
+      "默认探测保留 4-symbol 时域结构，并非依赖已经消失的几何悬崖")
 
-# 移动场景每个 UE 至少要 2 个样本，否则多普勒恒为 0
+# doppler_hz 现在明确定义为 |v|/lambda；即使每 UE 只有一个快照也不应为 0。
 _hst = sc.probe(dict(pl.load_presets()["hst_350kmh"]["config"]), num_samples=21)
 print(f"  hst 探测 21 样本 -> 实跑 {_hst['num_samples']} 个"
       f"（每 UE {_hst['samples_per_ue']} 个），"
       f"多普勒中位 {_hst['geometry']['doppler_hz']['median']} Hz")
-check(_hst["samples_per_ue"] >= 2, "移动场景自动把样本数补到每 UE >= 2")
 check((_hst["geometry"]["doppler_hz"]["median"] or 0) > 100,
-      "补够之后多普勒不再是 0（350 km/h @ 2.6 GHz 应有几百 Hz）")
-check("num_samples_note" in _hst, "补样本这件事写进了报告，不是静默发生")
+      "350 km/h @ 2.6 GHz 的最大 Doppler 为几百 Hz，不再被重复投影压低")
+check(_hst["num_samples"] == 21, "最大 Doppler 不依赖补造第二个快照")
 
-_static = sc.probe(dict(probe_cfg), num_samples=21)
-check("num_samples_note" not in _static, "静止场景不做补样本（不白花时间）")
+# Do not infer the expected speed from an omitted preset key: InternalSim's
+# documented source default is 3 km/h, not zero.  Make the counterexample
+# explicit so a future preset edit cannot silently change what this test proves.
+_static_cfg = dict(probe_cfg)
+_static_cfg["mobility_mode"] = "static"
+_static_cfg["ue_speed_kmh"] = 36.0
+_static = sc.probe(_static_cfg, num_samples=7)
+_speed_ms = float(_static_cfg["ue_speed_kmh"]) / 3.6
+_wavelength = 3e8 / float(_static_cfg.get("carrier_freq_hz", 3.5e9))
+_expected_static_fmax = _speed_ms / _wavelength
+check(abs((_static["geometry"]["doppler_hz"]["median"] or 0)
+          - _expected_static_fmax) < 0.02,
+      "static 只冻结跨快照几何；配置速度仍决定快照内小尺度最大 Doppler")
 
 # 探测模式不支持射线追踪，必须直说而不是给一份假的探测报告
 try:
@@ -369,8 +419,12 @@ sect("9  端到端：paired 模式下的测量域 SIR")
 
 cfg2 = dict(pl.load_presets()["srs_congested"]["config"])
 cfg2["num_rb"] = 24
+cfg2.pop("srs_c_srs", None)  # synthetic small carrier: let ChannelHub reselect
 cfg2["num_ues"] = 7
 cfg2["num_interfering_ues"] = 12
+cfg2["num_bs_tx_ant"] = cfg2["num_bs_rx_ant"] = 4
+cfg2["bs_panel"] = [2, 1, 2]
+cfg2["antenna_model_mode"] = "legacy_64"
 cfg2["measurements"] = {"ssb_rsrp": False}
 summ2 = gen.generate(cfg2, num_samples=7, workers=1)
 ds2 = load(summ2["dataset_id"])
@@ -394,9 +448,9 @@ if "ul_srs" in md and rep2["traffic_domain"].get("dl"):
           f"测量域 SIR({a}) 与业务域 SIR({b}) 是不同的量")
 
 # ---------------------------------------------------------------------------
-sect("9.5  本地默认硬件：64T 1驱3 / 192 阵子 / 0.67λ")
+sect("9.5  本地硬件：64T 1驱3 + 图示 256T 1驱6 / 0.67λ")
 
-from superwireless import hardware as hw  # noqa: E402
+from superran import hardware as hw  # noqa: E402
 
 check(hw.COMPANY_RF_PANEL == [8, 4, 2], "RF 面板是 8H x 4V x 2pol")
 check(hw.COMPANY_NUM_PORTS == 64, "RF 端口 64")
@@ -413,9 +467,16 @@ check(hw.COMPANY_NUM_RB == 272 == hw.COMPANY_NUM_RBG * hw.COMPANY_RB_PER_RBG,
       "272 RB = 17 RBG x 16 RB")
 check(hw.NR_TABLE_NUM_RB_100M_30K == 273,
       "同时记住 38.104 标准表是 273（口径不同，不是笔误）")
-check(hw.COMPANY_UE_RX_ANT == 4 and hw.COMPANY_LINK == "DL", "默认 4R 下行")
+check(hw.COMPANY_UE_TX_ANT == hw.COMPANY_UE_RX_ANT == 4
+      and hw.COMPANY_LINK == "BOTH",
+      "默认 4Tx/4Rx，成对生成 DL 真值与 UL SRS 预编码 CSI")
+_company_ant = hw.company_antenna_block()
+check(_company_ant["element_pattern"]["polarization_slant_angles_deg"] == [45.0, -45.0],
+      "公司默认显式使用 +45/-45 度双极化且端口顺序固定")
+check(_company_ant["element_pattern"]["horizontal_hpbw_deg"] == 110.0,
+      "公司临时参数化阵元方向图采用用户给出的水平 110 度 HPBW")
 
-# 自动挂载规则：只对 64T 面板生效，显式指定一律尊重
+# 自动挂载规则：只对已确认物理结构的 64T/256T 生效，显式指定一律尊重
 c1 = {"bs_panel": [8, 4, 2]}
 hw.apply_array_defaults(c1)
 check(hw.strip_markers(c1) == "company_1to3_192ae", "64T 面板自动切真实阵列")
@@ -425,8 +486,22 @@ check(c1["bs_antenna"]["fixed_vertical_subarray"]["ae_vertical_spacing_lambda"] 
 
 c2 = {"bs_panel": [16, 8, 2]}
 hw.apply_array_defaults(c2)
-check(hw.strip_markers(c2) == "skipped_non_64t", "非 64T 面板不套 1 驱 3（它是这款硬件的事实，不是通用规律）")
-check("antenna_model_mode" not in c2, "非 64T 面板保持 ChannelHub 默认")
+check(hw.strip_markers(c2) == "company_256t_1to6_1536ae",
+      "256T 面板自动切图示 1驱6 真实阵列")
+check(c2["antenna_model_mode"] == "effective_subarray", "256T 使用 effective_subarray")
+check(c2["bs_antenna"]["port_order"] == "pol_h_v", "256T 使用图示 pol_h_v 顺序")
+check(c2["bs_antenna"]["vertical_index_order"] == "top_to_bottom",
+      "256T 端口编号从顶部向底部递增（图中 1 在上、8 在下）")
+check(c2["bs_antenna"]["fixed_vertical_subarray"]["elements_per_rf_port"] == 6,
+      "256T 每个垂直 T 固定 1驱6")
+check(c2["bs_antenna"]["fixed_vertical_subarray"]["ae_vertical_spacing_lambda"] == 0.67,
+      "256T 的 6 个垂直物理阵子间距为 0.67λ")
+
+c2_unknown = {"bs_panel": [4, 2, 2]}
+hw.apply_array_defaults(c2_unknown)
+check(hw.strip_markers(c2_unknown) == "skipped_unconfirmed_array",
+      "未确认馈电结构的面板不猜 1驱N")
+check("antenna_model_mode" not in c2_unknown, "未确认面板保持 ChannelHub 默认")
 
 c3 = {"bs_panel": [8, 4, 2], "antenna_model_mode": "legacy_64"}
 hw.apply_array_defaults(c3)
@@ -446,13 +521,14 @@ for name in _pg.get("本地默认", []):
     # _ensure_bs_panel 从 num_bs_tx_ant 推导，64 -> [8,4,2] 正是要的。
     check("bs_panel" not in c, f"{name} 不写死 bs_panel（由端口数推导）")
 
-# sw_plan 的兜底预设应当是本地默认配置
+# sr_plan 的兜底预设应当是本地默认配置
 _d, _prof = pl.create_draft("验证一个 CSI 压缩的想法")
 check(_d.preset == "company_64t4r", f"通用意图默认挑 company_64t4r（实得 {_d.preset}）")
 
 # 端到端：summary 必须带阵列口径
 _cfg = dict(pl.load_presets()["company_64t4r"]["config"])
 _cfg["num_rb"] = 24
+_cfg.pop("srs_c_srs", None)  # synthetic small carrier: let ChannelHub reselect
 _cfg["num_ues"] = 4
 _s = gen.generate(_cfg, num_samples=8, workers=1)
 _am = _s.get("antenna_model") or {}
@@ -462,8 +538,8 @@ check(_am.get("antenna_model_mode") == "effective_subarray", "summary 记录了�
 check(_am.get("physical_elements") == 192, "summary 记录了 192 物理阵子")
 check(_am.get("element_pattern_is_measured") is False,
       "明示阵元方向图不是实测的（是 3GPP 式参数化模型）")
-check("几何 SINR / IoT 不受它影响" in (_am.get("note") or ""),
-      "明示阵列模型不影响几何 SINR/IoT")
+check("数字预编码增益仍留在 H" in (_am.get("note") or ""),
+      "明示固定阵列增益进预算、数字 BF 增益留在 H")
 
 # ---------------------------------------------------------------------------
 sect("9.8  仿真说明书")
@@ -471,8 +547,8 @@ sect("9.8  仿真说明书")
 import re as _re  # noqa: E402
 import xml.etree.ElementTree as _ET  # noqa: E402
 
-from superwireless import algo_defs as _alg_defs  # noqa: E402
-from superwireless import spec as sp  # noqa: E402
+from superran import algo_defs as _alg_defs  # noqa: E402
+from superran import spec as sp  # noqa: E402
 
 
 def _svgs(path):
@@ -548,10 +624,11 @@ check(_r4["num_params"] > _r4["num_user_set"], "其余标为默认值")
 # 生成时自动带一份
 _cfgs = dict(pl.load_presets()["company_64t4r"]["config"])
 _cfgs["num_rb"] = 24
+_cfgs.pop("srs_c_srs", None)  # synthetic small carrier: let ChannelHub reselect
 _cfgs["num_ues"] = 4
 _ss = gen.generate(_cfgs, num_samples=8, workers=1)
 _sheet = _ss.get("spec_sheet") or {}
-check("html_path" in _sheet, "sw_generate 自动产出说明书")
+check("html_path" in _sheet, "sr_generate 自动产出说明书")
 check(Path(_sheet.get("html_path", "")).is_file(), "说明书文件真的落盘了")
 check("UE" in Path(_sheet["html_path"]).read_text(encoding="utf-8"),
       "生成后的说明书带真实撒点")
@@ -663,7 +740,7 @@ import time  # noqa: E402
 import urllib.error as _ue  # noqa: E402
 import urllib.request as _urq  # noqa: E402
 
-from superwireless import bridge as _br  # noqa: E402
+from superran import bridge as _br  # noqa: E402
 
 _rb = sp.write_spec(dict(pl.load_presets()["company_64t4r_multicell"]["config"]),
                     num_samples=60, title="test-bridge", open_browser=False)
@@ -731,12 +808,12 @@ _post({"id": _rb["spec_id"], "overrides": {"num_sites": 1}, "nonce": "n3"})
 check(_br.pending_count() == 1, "未取走的改动能被计数")
 
 # 每个 MCP 工具的返回值都要挂上它 —— 这是唯一能让用户点击"被看见"的通道
-from superwireless import server as _srv2  # noqa: E402
+from superran import server as _srv2  # noqa: E402
 
 _wrapped = _srv2._with_pending({"foo": 1})
 check("pending_config_changes" in _wrapped, "工具返回值挂上了未处理回传的通知")
 check(_wrapped["pending_config_changes"]["count"] == 1, "通知里带条数")
-check("sw_await_config" in _wrapped["pending_config_changes"]["action"],
+check("sr_await_config" in _wrapped["pending_config_changes"]["action"],
       "通知里直接给出该调什么，不让 agent 自己猜")
 check(_wrapped["foo"] == 1, "原返回值原样保留")
 check(_srv2._with_pending("不是字典") == "不是字典", "非 dict 返回原样放行")
@@ -773,7 +850,7 @@ check("j.waiting" in _js[0] and "m.className" in _js[0], "页面按 waiting 区�
 check("m.innerHTML" not in _js[0], "回执用 textContent 拼，不往 innerHTML 塞服务端字符串")
 
 # 关掉服务时必须**看得见地**降级，不能假装还能回传
-os.environ["SUPERWIRELESS_NO_SERVE"] = "1"
+os.environ["SUPERRAN_NO_SERVE"] = "1"
 try:
     _rn = sp.write_spec(dict(pl.load_presets()["company_64t4r"]["config"]),
                         title="test-noserve", open_browser=False)
@@ -783,11 +860,11 @@ try:
     check("应用到仿真" in Path(_rn["html_path"]).read_text(encoding="utf-8"),
           "按钮仍在 HTML 里（换台机器起了服务照样能用），只是页面自己不显示")
 finally:
-    os.environ.pop("SUPERWIRELESS_NO_SERVE", None)
+    os.environ.pop("SUPERRAN_NO_SERVE", None)
 # ---------------------------------------------------------------------------
 sect("9.10  算法页签：这次用了哪些算法，全部可见")
 
-from superwireless import algorithms as _alg  # noqa: E402
+from superran import algorithms as _alg  # noqa: E402
 
 _ai = _alg.algorithm_list(dict(pl.load_presets()["company_64t4r_multicell"]["config"]))
 check(len(_ai) >= 13, f"算法清单至少 13 条（实得 {len(_ai)}）")
@@ -813,6 +890,17 @@ _r64 = next(a for a in _ai if a["key"] == "receiver")
 _r4 = next(a for a in _leg if a["key"] == "receiver")
 check(_r64["caveat"] != _r4["caveat"], "接收机那条在单/多小区下说法不同")
 
+# 三条曾经随实现演进而失真的文档契约：发送侧口径、RB 功控粒度、MU 两相表。
+_tx = next(a for a in _ai if a["key"] == "tx_rx_sinr")
+check("Γ(MCS(CQI)) + BF Gain" in _tx["choice"] and "oracle" in _tx["caveat"],
+      "发送侧 SINR 明确用 CQI 门限 + BF Gain，禁止偷看接收侧长期均值")
+_gran = next(a for a in _ai if a["key"] == "rbg_granularity")
+check("272 RB" in _gran["choice"] and "功控" in _gran["formula"],
+      "粒度说明保留 RB 功控的 272-RB 精确路径")
+_phase = next(a for a in _ai if a["key"] == "two_phase")
+check("pair" in _phase["choice"] and "experience_v2 不使用" in _phase["caveat"],
+      "体验 MU 使用真实 pair 表，不再冒充标量近似")
+
 # 现网锚点必须带出处
 check(_alg.FIELD_ANCHORS["avg_rank"] == 2.7 and _alg.FIELD_ANCHORS["avg_mcs"] == 15.0,
       "现网锚点是用户给的那两个数")
@@ -836,14 +924,14 @@ check(not any(ord(c) < 9 or 11 <= ord(c) < 32 for c in _ha),
       "页面里没有被转义咬坏的控制字符")
 
 # 关键结论必须出现在页面上，而不只是藏在代码注释里
-for _phrase in ("12 dB", "信道求逆功控", "单码字", "缓冲区非空", "秩 1", "平均 rank 2.7"):
+for _phrase in ("24.36 dB", "预数字波束", "信道求逆功控", "单码字", "缓冲区非空", "秩 1", "平均 rank 2.7"):
     check(_phrase in _ha, f"页面上写清了「{_phrase}」")
 
 # --- 公式渲染：KaTeX 排版 + MathML 兜底 ---
 # 用户 2026-08-03 批准内联 KaTeX（"内联如果只有 1MB，感觉完全可接受"）。
 # **两层而不是二选一**：KaTeX 靠 JS 渲染，脚本没跑起来时只剩裸 LaTeX，
 # 而那恰恰是最需要看懂公式的场合。所以容器里先放 MathML 兜底。
-from superwireless import katex as _kx  # noqa: E402
+from superran import katex as _kx  # noqa: E402
 
 check(_kx.available(), "内联 KaTeX 资产在位（缺了公式会静默退回 MathML）")
 _kxm = _kx.meta()
@@ -867,19 +955,23 @@ for _host in ("cdn.jsdelivr.net", "unpkg.com", "cdnjs.cloudflare.com", "//fonts.
 # 漂了的话页面显示的就不是实际会跑的值，而这种不一致没有任何提示。
 import inspect as _insp  # noqa: E402
 
-from superwireless import server as _srv0  # noqa: E402
+from superran import server as _srv0  # noqa: E402
 
-_sig = _insp.signature(getattr(_srv0.sw_system_sim, "__wrapped__", _srv0.sw_system_sim))
+_sig = _insp.signature(getattr(_srv0.sr_system_sim, "__wrapped__", _srv0.sr_system_sim))
 for _k, _v in sp._SIM_DEFAULTS.items():
     _p = _sig.parameters.get(_k)
     _d = _p.default if _p else None
     if isinstance(_d, bool):
         _d = "on" if _d else "off"
     check(_p is not None and _d == _v,
-          f"面板默认值 {_k}={_v!r} 与 sw_system_sim 签名一致（签名 {_d!r}）")
+          f"面板默认值 {_k}={_v!r} 与 sr_system_sim 签名一致（签名 {_d!r}）")
     check(_k in sp.editable_keys(), f"{_k} 在回传白名单里")
 for _k in ("neighbor_prb_util", "csi_aging", "srs_period_ms", "srs_hopping",
-           "olla_speedup"):
+           "csi_report_period_ms", "warmup_s", "olla_speedup",
+           "olla_warmup_speedup", "mu_enabled", "mu_precoder",
+           "mu_csi_error_variance", "precoder",
+           "power_constraint", "rb_power_control_enabled",
+           "rb_power_overrides"):
     check(f'data-k="{_k}"' in _ha, f"改配置页上有 {_k} 控件")
 
 # --- 对标量的逐步推导，供人工核对 ---
@@ -892,7 +984,7 @@ for _d in _dv:
 
 # **数字必须现算，不能是抄进来的常量。** 抄的话改了 MCS 表这里不会跟着变。
 _peak = next(d for d in _dv if d["key"] == "peak_se")
-from superwireless import linkadapt as _la  # noqa: E402
+from superran import linkadapt as _la  # noqa: E402
 
 _m27 = _la.MCS_TABLES[3][27]
 check(f"{4 * _m27.se:.3f}" in _peak["result"],
@@ -919,8 +1011,8 @@ sect("10  文档里的数字必须和代码对得上")
 # 这一节让文档里的计数与代码绑死，省得下次再漂。
 import re  # noqa: E402
 
-from superwireless import server as _srv  # noqa: E402
-from superwireless import validate as _val  # noqa: E402
+from superran import server as _srv  # noqa: E402
+from superran import validate as _val  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 n_checks = len(_val.full_report(ds).checks)
@@ -936,10 +1028,17 @@ for name in ("README.md", "skills/channel-sim/SKILL.md",
     check(all(c == n_checks for c in claims),
           f"{name} 声称的体检项数都等于 {n_checks}（文中出现 {sorted(claims)}）")
 
-n_tools = len([n for n in vars(_srv) if n.startswith("sw_")])
+n_tools = len([n for n in vars(_srv) if n.startswith("sr_")])
 _m = re.search(r"MCP 工具（(\d+) 个）", (ROOT / "README.md").read_text(encoding="utf-8"))
-print(f"  server 实有 {n_tools} 个 sw_ 工具，README 写 {_m.group(1) if _m else '未写'}")
+print(f"  server 实有 {n_tools} 个 sr_ 工具，README 写 {_m.group(1) if _m else '未写'}")
 check(bool(_m) and int(_m.group(1)) == n_tools, f"README 声称的 MCP 工具数等于 {n_tools}")
+_skill_text = (ROOT / "skills/channel-sim/SKILL.md").read_text(encoding="utf-8")
+_skill_claims = {
+    int(x) for x in re.findall(r"(\d+)\s*个\s*`sr_\*`\s*工具", _skill_text)
+}
+print(f"  channel-sim Skill 写的 sr_ 工具数 {sorted(_skill_claims)}")
+check(bool(_skill_claims) and _skill_claims == {n_tools},
+      f"channel-sim Skill 声称的 MCP 工具数等于 {n_tools}")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)

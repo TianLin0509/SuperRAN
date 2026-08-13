@@ -1,4 +1,4 @@
-# superwireless 安装说明（写给 AI Agent 看的）
+# SuperRAN 安装说明（写给 AI Agent 看的）
 
 > 这份文档的读者是 **AI coding agent**，不是人。用户把它交给你，意思是
 > **"你来装，装完告诉我能不能用"**。
@@ -7,7 +7,7 @@
 
 ## 你的任务
 
-把 superwireless 装到用户机器上并验证可用。产出是一句话：能用 / 不能用及原因。
+把 superran 装到用户机器上并验证可用。产出是一句话：能用 / 不能用及原因。
 
 **不要问用户能自己查出来的事**（Python 在哪、是什么系统、装没装 numpy）——
 跑命令去查。只在下面明确标了 **【问用户】** 的地方停下来问。
@@ -57,24 +57,24 @@ Windows 上如果 `python` 打不开（跳到应用商店），试 `py -3`、
 
 ## 第 2 步：放好两个仓库
 
-superwireless 依赖 **ChannelHub** 作为物理内核。两者建议放成兄弟目录：
+superran 依赖 **ChannelHub** 作为物理内核。两者建议放成兄弟目录：
 
 ```
 <某个目录>/
 ├── ChannelHub_main/      ← 物理内核
-└── superwireless/        ← 本项目
+└── superran/        ← 本项目
 ```
 
 ### 联网模式
 
 ```bash
 git clone https://github.com/wangxz0803-lab/ChannelHub_main
-git clone https://github.com/TianLin0509/superwireless
+git clone https://github.com/TianLin0509/superran
 ```
 
 ### 离线模式
 
-superwireless 就是你手上这份。ChannelHub **不在离线包里**——它没有开源许可证，
+superran 就是你手上这份。ChannelHub **不在离线包里**——它没有开源许可证，
 不能随包转发。
 
 先找一遍，很多公司内网已经有：
@@ -90,19 +90,19 @@ Get-ChildItem -Path C:\,D:\ -Recurse -Filter contract.py -ErrorAction SilentlyCo
 找不到就停下来 **【问用户】**：ChannelHub 源码在哪？需要一个目录，
 里面有 `src/msg_embedding/data/contract.py`。没有它整个项目跑不起来。
 
-### 让 superwireless 找到 ChannelHub
+### 让 superran 找到 ChannelHub
 
 放成兄弟目录时会自动发现。放在别处就设环境变量：
 
 ```bash
-export SUPERWIRELESS_CHANNELHUB=/abs/path/to/ChannelHub_main          # macOS/Linux
-[Environment]::SetEnvironmentVariable("SUPERWIRELESS_CHANNELHUB","D:\path\to\ChannelHub_main","User")  # Windows
+export SUPERRAN_CHANNELHUB=/abs/path/to/ChannelHub_main          # macOS/Linux
+[Environment]::SetEnvironmentVariable("SUPERRAN_CHANNELHUB","D:\path\to\ChannelHub_main","User")  # Windows
 ```
 
 **验证：**
 
 ```bash
-<PYTHON> -c "import sys; sys.path.insert(0,'src'); from superwireless import channelhub; print(channelhub.channelhub_root())"
+<PYTHON> -c "import sys; sys.path.insert(0,'src'); from superran import channelhub; print(channelhub.channelhub_root())"
 ```
 
 打印出的路径下必须存在 `src/msg_embedding/data/contract.py`。不存在就是没找到。
@@ -116,19 +116,19 @@ export SUPERWIRELESS_CHANNELHUB=/abs/path/to/ChannelHub_main          # macOS/Li
 ### 联网模式
 
 ```bash
-cd superwireless
+cd superran
 <PYTHON> -m pip install -e .
 ```
 
 ### 离线模式 · full 包
 
 ```bash
-cd superwireless
+cd superran
 <PYTHON> -m pip install --no-index --find-links wheels -e .
 ```
 
 已实测：全新 venv（只有 pip）里全程 `--no-index` 装成功，35 个包含
-superwireless 自身。
+superran 自身。
 
 ### 离线模式 · thin 包
 
@@ -138,7 +138,7 @@ thin 包里没有它，`--no-index` 下也无处可拉——而且报错只说
 完全看不出缺的是什么。改成直接装依赖：
 
 ```bash
-cd superwireless
+cd superran
 <PYTHON> -m pip install --no-index --find-links wheels mcp pydantic pyyaml structlog
 ```
 
@@ -153,9 +153,9 @@ thin 包**不含 numpy/scipy**，靠目标机器自带。装完先验：
 
 ### 关于 `pip install -e .` 到底要不要做
 
-**可以不做。** `scripts/mcp_server.py` 和 `sw_deliver` 生成的取货代码都会自己把
+**可以不做。** `scripts/mcp_server.py` 和 `sr_deliver` 生成的取货代码都会自己把
 `src/` 加进 `sys.path`。它的真正作用只有两个：把依赖装齐、让任意目录下能
-`import superwireless`。
+`import superran`。
 
 依赖已经齐了又不想动 site-packages 时跳过是可以的——
 **但要在最终报告里说清楚你跳过了，以及后果**。
@@ -188,18 +188,18 @@ thin 包**不含 numpy/scipy**，靠目标机器自带。装完先验：
 
 ```bash
 # Claude Code
-claude mcp add superwireless -- <PYTHON绝对路径> <仓库绝对路径>/scripts/mcp_server.py
+claude mcp add superran -- <PYTHON绝对路径> <仓库绝对路径>/scripts/mcp_server.py
 
 # Codex
-codex mcp add superwireless -- <PYTHON绝对路径> <仓库绝对路径>/scripts/mcp_server.py
+codex mcp add superran -- <PYTHON绝对路径> <仓库绝对路径>/scripts/mcp_server.py
 ```
 
 Codex 也可以直接写 `~/.codex/config.toml`：
 
 ```toml
-[mcp_servers.superwireless]
+[mcp_servers.superran]
 command = 'C:\path\to\python.exe'
-args = ['C:\path\to\superwireless\scripts\mcp_server.py']
+args = ['C:\path\to\superran\scripts\mcp_server.py']
 ```
 
 其它支持 MCP 的 agent：stdio 传输，命令就是上面那两个绝对路径。
@@ -211,14 +211,14 @@ args = ['C:\path\to\superwireless\scripts\mcp_server.py']
 **验证：**
 
 ```bash
-claude mcp list        # 应看到 superwireless ... ✔ Connected
+claude mcp list        # 应看到 superran ... ✔ Connected
 ```
 
 连不上时先手动跑一次，stderr 会打印预热结果：
 
 ```bash
 <PYTHON> <仓库>/scripts/mcp_server.py
-# 期望第一行类似：[superwireless] warmup ok 3.2s
+# 期望第一行类似：[superran] warmup ok 3.2s
 # 然后它会等 stdin，Ctrl-C 退出即可
 ```
 
@@ -275,7 +275,7 @@ cd <仓库>
 
 ```bash
 <PYTHON> -c "
-from superwireless import channelhub as ch
+from superran import channelhub as ch
 for c in ch.probe_capabilities():
     print(c.name, c.available, c.missing)
 "
@@ -286,7 +286,7 @@ MCP 冒烟（无 ChannelHub 也应当能起）：
 
 ```bash
 <PYTHON> -c "
-import asyncio; from superwireless import server
+import asyncio; from superran import server
 print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.MCP_MAJOR)
 "
 # 期望：tools: 16
@@ -299,10 +299,10 @@ print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.
 跟用户说清楚这几件事，**不要只说"装好了"**：
 
 1. **能不能用** —— MCP 是否 Connected、测试过了几项
-2. **装在哪** —— superwireless 和 ChannelHub 的绝对路径、用的哪个 Python
+2. **装在哪** —— superran 和 ChannelHub 的绝对路径、用的哪个 Python
 3. **哪些没装** —— 射线追踪装没装、skill 装没装、`pip install -e .` 做没做
 4. **下一步** —— 给一句可以直接说的话：
-   > "用 superwireless 生成一批单小区 64T4R 的信道，我要验证一个 CSI 压缩的想法。"
+   > "用 superran 生成一批单小区 64T4R 的信道，我要验证一个 CSI 压缩的想法。"
 
 ---
 
@@ -312,9 +312,9 @@ print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.
 |---|---|---|
 | MCP 显示 Failed / 连不上 | Python 路径不对，或依赖没装齐 | 手动跑 `<PYTHON> scripts/mcp_server.py` 看 stderr |
 | MCP 连上但一调用就报缺依赖 | agent 子进程用的不是你 pip install 的那个 Python | 用 python.exe 绝对路径重新注册 |
-| 报找不到 ChannelHub | 目录不在自动查找范围内 | 设 `SUPERWIRELESS_CHANNELHUB`，指到含 `src/msg_embedding/data/contract.py` 的目录 |
-| `sw_generate` 卡住不返回 | 历史上是 scipy 在工作线程里的 import 死锁 | 已修（启动预热）。仍遇到就设 `SUPERWIRELESS_DEBUG=1`，会开 faulthandler 打栈到 stderr |
-| 测试报 `ModuleNotFoundError: superwireless` | 没在仓库根目录跑 | `cd` 到仓库根再跑；测试脚本自己会加 `src/` 到 path |
+| 报找不到 ChannelHub | 目录不在自动查找范围内 | 设 `SUPERRAN_CHANNELHUB`，指到含 `src/msg_embedding/data/contract.py` 的目录 |
+| `sr_generate` 卡住不返回 | 历史上是 scipy 在工作线程里的 import 死锁 | 已修（启动预热）。仍遇到就设 `SUPERRAN_DEBUG=1`，会开 faulthandler 打栈到 stderr |
+| 测试报 `ModuleNotFoundError: superran` | 没在仓库根目录跑 | `cd` 到仓库根再跑；测试脚本自己会加 `src/` 到 path |
 | 射线追踪报 `invalid PLY header` | 中国城市场景的 PLY 是 VTK 导出的，Mitsuba 3.8 解析不了 | 已自动处理（复制到缓存后清理头部）。加新场景时若再遇到就是这个原因 |
 | pip 要降级 numpy/scipy/torch | 装 sionna-rt 时的版本冲突 | 停下来问用户。正常情况不会降级 |
 | Windows 上 `python` 跳到应用商店 | 系统别名占用 | 用 `py -3` 或 `%LOCALAPPDATA%\Programs\Python\` 下的绝对路径 |
@@ -324,10 +324,10 @@ print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.
 ## 卸载
 
 ```bash
-claude mcp remove superwireless
-codex  mcp remove superwireless
+claude mcp remove superran
+codex  mcp remove superran
 rm -rf ~/.claude/skills/channel-sim ~/.codex/skills/channel-sim
-<PYTHON> -m pip uninstall superwireless
+<PYTHON> -m pip uninstall superran
 # 生成的数据在仓库的 artifacts/ 下，删仓库即可全清
 ```
 

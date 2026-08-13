@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>superwireless 场景拓展与干扰量化</title>
+<title>superran 场景拓展与干扰量化</title>
 <style>
   :root{
     --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
@@ -225,7 +225,7 @@
 
 <p>测量域的量<b>只在 <code>link="BOTH"</code>（paired）时才产生</b>——
 单向链路的数据里根本没有 <code>ul_sir_dB</code> / <code>dl_sir_dB</code> 这两列。
-之前 superwireless 也没收集它们，所以"SRS 被邻区打穿"这类场景在数据里完全看不见。</p>
+之前 superran 也没收集它们，所以"SRS 被邻区打穿"这类场景在数据里完全看不见。</p>
 
 <h2 id="s3">三、哪些旋钮真的能动 IoT</h2>
 
@@ -249,14 +249,14 @@
 <code>pdsch_load</code> 只决定对几个波束取平均——均值不变，只是方差变小。</p>
 <p>后果很具体：拿它做"轻载 vs 满载"对比会生成<b>两批一模一样的数据</b>，
 然后得出"负载不影响性能"。每一步都合理，结论完全是工具造成的。
-现在 <code>sw_plan</code> 的 guards 会直接拦下来，
+现在 <code>sr_plan</code> 的 guards 会直接拦下来，
 建议的扫描维度也已经从 <code>prb_utilization</code> 改成 <code>isd_m</code>。</p>
 </div>
 
 <h2 id="s4">四、23 个场景的实测画像</h2>
 
 <p class="lead">从 8 个预设扩到 <b>23 个</b>，分 10 组。每一行的数字都是
-<code>sw_probe_scenario</code> 实跑 63 个样本得到的，不是设计意图。</p>
+<code>sr_probe_scenario</code> 实跑 63 个样本得到的，不是设计意图。</p>
 
 <h3>基线</h3>
 <div class='tbl-wrap'><table><tr><th>预设</th><th>小区</th><th>ISD</th><th>下行 IoT</th><th>SINR 中位</th><th>路损中位</th><th>视距比</th><th>SRS 测量 SIR</th><th>耗时/样本</th></tr><tr><td><code>single_cell_64t4r</code><br><span class='src'>单小区 · 64T4R 宏站</span></td><td class='nowrap'>1</td><td class='nowrap'><span class="src">-</span></td><td class='nowrap'><span class="src">-</span> </td><td class='nowrap'>27.1 dB</td><td class='nowrap'>113.5 dB</td><td class='nowrap'>0.14</td><td class='nowrap'><span class=src>-</span> </td><td class='nowrap'>22 ms</td></tr>
@@ -431,13 +431,13 @@ DFT 码本，几何 SINR 整条路径被跳过、<code>sinr_dB</code> 退化成 
 
 <div class="tbl-wrap"><table>
 <tr><th>工具</th><th>做什么</th></tr>
-<tr><td><code>sw_probe_scenario</code></td><td>几十秒探清一个场景的干扰、覆盖、几何特征</td></tr>
-<tr><td><code>sw_compare_scenarios</code></td><td>几个候选场景并排比一张表</td></tr>
-<tr><td><code>sw_interference_report</code></td><td>业务域 IoT + 测量域导频 SIR，含等效负载与 NMSE 下限</td></tr>
-<tr><td><code>sw_design_interference</code></td><td>要造某个 IoT 该动哪些旋钮（带实测值）</td></tr>
-<tr><td><code>sw_iot_convert</code></td><td>IoT / 等效负载 / 分级之间换算</td></tr>
-<tr><td><code>sw_list_presets(group=…)</code></td><td>按组浏览 21 个场景</td></tr>
-<tr><td><code>sw_generate(collect_ssb=…)</code></td><td>显式控制 SSB 测量，省约 30%</td></tr>
+<tr><td><code>sr_probe_scenario</code></td><td>几十秒探清一个场景的干扰、覆盖、几何特征</td></tr>
+<tr><td><code>sr_compare_scenarios</code></td><td>几个候选场景并排比一张表</td></tr>
+<tr><td><code>sr_interference_report</code></td><td>业务域 IoT + 测量域导频 SIR，含等效负载与 NMSE 下限</td></tr>
+<tr><td><code>sr_design_interference</code></td><td>要造某个 IoT 该动哪些旋钮（带实测值）</td></tr>
+<tr><td><code>sr_iot_convert</code></td><td>IoT / 等效负载 / 分级之间换算</td></tr>
+<tr><td><code>sr_list_presets(group=…)</code></td><td>按组浏览 21 个场景</td></tr>
+<tr><td><code>sr_generate(collect_ssb=…)</code></td><td>显式控制 SSB 测量，省约 30%</td></tr>
 </table></div>
 
 <p>门 1 新增 <b>IoT 自洽性</b>检查：逐样本 SIR &gt; SINR、IoT ≥ 0 dB、
@@ -464,7 +464,7 @@ DFT 码本，几何 SINR 整条路径被跳过、<code>sinr_dB</code> 退化成 
 </ul>
 
 <footer>
-superwireless · 场景拓展与干扰量化 · 2026-07-31<br>
+superran · 场景拓展与干扰量化 · 2026-07-31<br>
 本页所有数字来自实跑，脚本与原始 JSON 保留在会话 scratchpad。
 </footer>
 

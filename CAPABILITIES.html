@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>superwireless 能力手册 — 能产生什么信道、能拿到什么观察量</title>
+<title>superran 能力手册 — 能产生什么信道、能拿到什么观察量</title>
 <style>
   :root{
     --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
@@ -102,7 +102,7 @@
 <body>
 <div class="wrap">
 
-<h1>superwireless 能力手册</h1>
+<h1>superran 能力手册</h1>
 <p class="tagline">能产生哪些信道 · 能拿到哪些观察量 · 能力边界在哪</p>
 <p class="meta">全部内容由代码与实跑导出，非手写 · 2026-07-29 · 测试 132 项全通过</p>
 
@@ -268,7 +268,7 @@
 </div>
 
 <div class="plain">
-<p>中国城市场景首次使用会自动准备资产——仓库里那些建筑网格文件是 VTK 导出的，头部有个字段 Mitsuba 不认，会直接报错。superwireless 复制到缓存后清理掉再用，<strong>不动原文件</strong>，之后走缓存。</p>
+<p>中国城市场景首次使用会自动准备资产——仓库里那些建筑网格文件是 VTK 导出的，头部有个字段 Mitsuba 不认，会直接报错。superran 复制到缓存后清理掉再用，<strong>不动原文件</strong>，之后走缓存。</p>
 </div>
 
 <h2 id="s3">三、数据长什么样</h2>
@@ -326,7 +326,7 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 </div>
 
 <h3>几何与大尺度量</h3>
-<p>这些是仿真过程中算出来的物理量。<strong>ChannelHub 原本在存盘时会丢掉它们</strong>，superwireless 接了出来。</p>
+<p>这些是仿真过程中算出来的物理量。<strong>ChannelHub 原本在存盘时会丢掉它们</strong>，superran 接了出来。</p>
 <div class="tbl-wrap">
 <table>
 <thead><tr><th>访问方式（<code>ds.geometry[...]</code>）</th><th>形状</th><th>单位</th><th>说明</th></tr></thead>
@@ -449,7 +449,7 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 <p class="q">谱效口径：<code>SE = mean_rb Σ_layer log2(1 + 后处理SINR)</code>。
 实测四方案比例 SVD 100% ＞ 宽带 71% ＞ TypeI 63% ＞ DFT 34%。</p>
 
-<h3>物理层工具箱 <code>superwireless.physical</code></h3>
+<h3>物理层工具箱 <code>superran.physical</code></h3>
 <div class="tbl-wrap">
 <table>
 <thead><tr><th>函数</th><th>作用</th><th>实测</th></tr></thead>
@@ -516,7 +516,7 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 </div>
 
 <h3>你还可以自己传 28 个</h3>
-<p><code>internal_sim</code> 一共接受 <strong>44 个参数</strong>，<code>sionna_rt</code> 接受 <strong>49 个</strong>。上表之外的都可以直接写进 <code>overrides</code>——<strong>superwireless 对不认识的键原样透传，不做解释也不拦截</strong>。</p>
+<p><code>internal_sim</code> 一共接受 <strong>44 个参数</strong>，<code>sionna_rt</code> 接受 <strong>49 个</strong>。上表之外的都可以直接写进 <code>overrides</code>——<strong>superran 对不认识的键原样透传，不做解释也不拦截</strong>。</p>
 
 <div class="tbl-wrap">
 <table>
@@ -533,7 +533,7 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 </div>
 
 <div class="callout c-green">
-<p><strong>这就是扩展性的来源。</strong>比如 1驱3 的 AAU（64 个 RF 口，每口驱动 3 个垂直阵子，共 192 个物理阵子），只要把 <code>bs_panel</code>、<code>antenna_model_mode</code>、<code>bs_antenna.fixed_vertical_subarray</code> 传进去就行，<strong>superwireless 侧零代码改动</strong>。</p>
+<p><strong>这就是扩展性的来源。</strong>比如 1驱3 的 AAU（64 个 RF 口，每口驱动 3 个垂直阵子，共 192 个物理阵子），只要把 <code>bs_panel</code>、<code>antenna_model_mode</code>、<code>bs_antenna.fixed_vertical_subarray</code> 传进去就行，<strong>superran 侧零代码改动</strong>。</p>
 <p>实测生效：阵列模型从 <code>legacy_3gpp_64_independent</code> 变成 <code>fixed_1to3_vertical_subarray_64T</code>，能量集中度 0.811 → 0.662（垂直合并把能量从主特征模分散出去，物理上合理）。</p>
 </div>
 
@@ -570,15 +570,15 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 <table>
 <thead><tr><th>访问方式</th><th>返回</th><th>说明</th></tr></thead>
 <tbody>
-<tr><td><code>ds.gate()</code> / <code>sw_gate</code></td><td>GateResult</td>
+<tr><td><code>ds.gate()</code> / <code>sr_gate</code></td><td>GateResult</td>
 <td><strong>门 1</strong>：18 项体检翻译成门禁语言，硬性项不通过即拦截</td></tr>
-<tr><td><code>ds.calibrate()</code> / <code>sw_calibrate</code></td><td>CalibrationReport</td>
+<tr><td><code>ds.calibrate()</code> / <code>sr_calibrate</code></td><td>CalibrationReport</td>
 <td><strong>3GPP §7.8 校准量</strong>：耦合损耗、几何量（含噪/不含噪）、时延与角度扩展、PRB 奇异值三条 CDF</td></tr>
-<tr><td><code>ds.compare_arms(a, b)</code> / <code>sw_compare_arms</code></td><td>ComparisonResult</td>
+<tr><td><code>ds.compare_arms(a, b)</code> / <code>sr_compare_arms</code></td><td>ComparisonResult</td>
 <td><strong>配对比较 + 门 2 + 门 3</strong>，返回可直接写进报告的结论句</td></tr>
-<tr><td><code>sw_sample_size</code></td><td>dict</td>
+<tr><td><code>sr_sample_size</code></td><td>dict</td>
 <td><strong>功效分析</strong>：样本数 ↔ 最小可检出效应，互为反解</td></tr>
-<tr><td><code>sw_missing_slots</code></td><td>dict</td>
+<tr><td><code>sr_missing_slots</code></td><td>dict</td>
 <td><strong>结论模板还缺哪些槽</strong>，按"空着的代价"排序，每槽带 3~4 个选项</td></tr>
 </tbody>
 </table>
@@ -604,8 +604,8 @@ ds.h_interferers   <span class="cm"># [N, K-1, T, RB, BS_ant, UE_ant]        干
 <div class="callout c-amber">
 <p><strong>CDL 剖面表已被替换为标准值。</strong>ChannelHub 自带的 CDL-A/B/C 三张表
 角度列与 38.901 不符（CDL-C 有 23/24 簇有出入，占总功率 93.8%），
-superwireless 启动时会用逐字核对过的标准表覆盖。
-设 <code>SUPERWIRELESS_CDL_SPEC=0</code> 可复现未修正前的结果。
+superran 启动时会用逐字核对过的标准表覆盖。
+设 <code>SUPERRAN_CDL_SPEC=0</code> 可复现未修正前的结果。
 <strong>CDL-D/E 不在覆盖范围内</strong>——它们的表结构含 <code>Cluster PAS</code> 列、
 首簇拆成镜面与 Laplacian 两行，没有逐字核对过的表宁可不放。</p>
 </div>
@@ -643,7 +643,7 @@ superwireless 启动时会用逐字核对过的标准表覆盖。
 <tr><td>下行预编码矩阵</td><td>视配置而定</td><td>实测单小区为 <code>None</code>，多小区/多时隙有值。<strong>用前判空</strong></td></tr>
 <tr><td>时序相关性</td><td><code>num_slots_per_sample</code> &gt; 1</td><td>T=1 时样本间独立，无时序可预测</td></tr>
 <tr><td>指定信噪比区间</td><td>走拒绝采样</td><td>区间偏离实际分布太远时可能一个样本都取不到，会报错并给出实际分布</td></tr>
-<tr><td>射线追踪</td><td><code>pip install sionna-rt</code></td><td><code>sw_capabilities</code> 如实报告不可用及缺什么</td></tr>
+<tr><td>射线追踪</td><td><code>pip install sionna-rt</code></td><td><code>sr_capabilities</code> 如实报告不可用及缺什么</td></tr>
 <tr><td>精确小区数</td><td>六边形栅格站数只能是 1/7/19</td><td>配 2 站实际生成 7 站；用 <code>topology_layout="linear"</code> 或 <code>custom_site_positions</code> 可精确指定。<strong>生成后会自动对比并报出不一致</strong></td></tr>
 <tr><td>视距场景</td><td>信道剖面类别要匹配</td><td>视距场景配非视距剖面时时延扩展偏离 4.4 倍，体检会拦</td></tr>
 <tr><td>多小区干扰</td><td>需要 <code>bs_panel</code> 才建 DFT 码本</td><td>拿不到码本时 ChannelHub 走兜底（<code>sir_dB=49.9</code>、<code>sinr_dB=snr_dB</code>）且不报错。现由 <code>num_bs_tx_ant</code> 自动推导，门 1 复查</td></tr>
@@ -668,12 +668,12 @@ superwireless 启动时会用逐字核对过的标准表覆盖。
 </div>
 
 <div class="callout c-purple">
-<p><strong>体积估算：</strong>样本数 × T × RB × BS_ant × UE_ant × 8 字节 × 2（理想 + 估计）。<code>sw_plan</code> 会在提案里给出预估，超过 1 GB 时值得先跑 20 个样本确认配置。</p>
+<p><strong>体积估算：</strong>样本数 × T × RB × BS_ant × UE_ant × 8 字节 × 2（理想 + 估计）。<code>sr_plan</code> 会在提案里给出预估，超过 1 GB 时值得先跑 20 个样本确认配置。</p>
 </div>
 
 <footer>
 <p>本手册所有数字由代码与实跑导出：剖面参数读自 3GPP 38.901 标准表格，场景统计读自场景文件，观察量的形状与类型来自实际生成的数据集，性能数据来自真实计时。</p>
-<p>项目地址 <code>github.com/TianLin0509/superwireless</code> · 物理内核来自 ChannelHub · 射线追踪基于 Sionna RT · MIT License</p>
+<p>项目地址 <code>github.com/TianLin0509/superran</code> · 物理内核来自 ChannelHub · 射线追踪基于 Sionna RT · MIT License</p>
 </footer>
 
 </div>

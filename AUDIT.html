@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>superwireless 全库自审</title>
+<title>superran 全库自审</title>
 <style>
   :root{
     --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
@@ -231,10 +231,10 @@ bimodal 抽出的 RBG 数只用来定 burst 的字节数，<b>不影响实际占
 <h2 id="a2">二、Skill 与机制：对照 superpowers</h2>
 
 <div class="callout c-red">
-<p><b>最大的路由缺口：<code>sw_system_sim</code> 在 SKILL.md 里出现 0 次。</b>
+<p><b>最大的路由缺口：<code>sr_system_sim</code> 在 SKILL.md 里出现 0 次。</b>
 体验速率是你说的「真正最关心的 KPI」，系统级仿真是最近两轮最大的功能，
 但照着 skill 走的 agent <b>根本不会发现它</b>。
-<code>sw_describe_dataset</code> 同样是 0 次。</p>
+<code>sr_describe_dataset</code> 同样是 0 次。</p>
 </div>
 
 <div class="tbl-wrap"><table>
@@ -300,10 +300,10 @@ MU 是标量近似而非逐 TTI 真配对、<code>interference_model="precoded"<
 <div class="rank">
 <div class="rk rk1">2</div>
 <div class="rb">
-<h4>把 sw_system_sim 写进 SKILL.md</h4>
+<h4>把 sr_system_sim 写进 SKILL.md</h4>
 <div><span class="eff">工作量 很小 · 约 80 行</span><span class="eff">这个功能现在事实上不可达</span></div>
 <p><b>做什么：</b>在 skill 里加「第 5 段 · 系统级体验速率」，交代什么时候该从链路级切到系统级、数据集要满足什么条件（每 UE 多快照）、KPI 怎么读。</p>
-<div class="why"><b class="wt">为什么我认为该做</b><p>skill 是给 agent 看的操作手册。<b>整本手册里没提过系统级仿真这个工具</b>（<code>sw_system_sim</code> 在 SKILL.md 里出现 <b>0 次</b>），所以任何按手册干活的 agent 都不会用它。<br><br>后果不是「效率低一点」，是<b>功能事实上不存在</b>。用户问「这个小区的体验速率是多少」，agent 会去翻链路级的谱效工具，然后给出一个香农谱效——那根本不是体验速率，而且它<b>看起来像个答案</b>，所以错得很隐蔽。</p></div>
+<div class="why"><b class="wt">为什么我认为该做</b><p>skill 是给 agent 看的操作手册。<b>整本手册里没提过系统级仿真这个工具</b>（<code>sr_system_sim</code> 在 SKILL.md 里出现 <b>0 次</b>），所以任何按手册干活的 agent 都不会用它。<br><br>后果不是「效率低一点」，是<b>功能事实上不存在</b>。用户问「这个小区的体验速率是多少」，agent 会去翻链路级的谱效工具，然后给出一个香农谱效——那根本不是体验速率，而且它<b>看起来像个答案</b>，所以错得很隐蔽。</p></div>
 <div class="anal"><b class="at">打个比方</b>餐厅新出了招牌菜，厨房会做，但菜单上没印。客人永远点不到。</div>
 <p class="src"><b>代价：</b>纯文档，不改代码。</p>
 </div></div>
@@ -377,7 +377,7 @@ MU 是标量近似而非逐 TTI 真配对、<code>interference_model="precoded"<
 它是唯一需要重构的一条。</p>
 </div>
 
-<footer>superwireless 全库自审 · 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>
+<footer>superran 全库自审 · 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>
 </div>
 <script>(function(){if(typeof katex==='undefined')return;var n=document.querySelectorAll('.kx');for(var i=0;i<n.length;i++){var e=n[i],t=e.getAttribute('data-tex');if(!t)continue;try{var d=e.getAttribute('data-display')==='1';var h=katex.renderToString(t,{displayMode:d,throwOnError:false,output:'html',strict:false});e.innerHTML=h;e.classList.add('kx-ok');}catch(err){/* 保留 MathML 兜底，不动它 */}}})();</script>
 </body></html>

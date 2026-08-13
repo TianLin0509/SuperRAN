@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "superwireless"
+name = "superran"
 version = "0.1.0"
 description = "给 Agent 用的无线仿真信道供应站：标准化信道实例与物理测量量的 MCP 服务"
 readme = "README.md"
@@ -24,7 +24,7 @@ rt = ["sionna-rt"]          # Phase 2 射线追踪，会连带装 mitsuba + drji
 dev = ["pytest>=7.0", "ruff>=0.1"]
 
 [project.scripts]
-superwireless-mcp = "superwireless.server:main"
+superran-mcp = "superran.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -33,7 +33,7 @@ where = ["src"]
 # **不带上它说明书里的公式会退回 MathML**——不报错、只是没那么好看，
 # 所以打包漏了很难发现。scripts/vendor_katex.py 负责生成，不手改。
 [tool.setuptools.package-data]
-superwireless = ["assets/*.css", "assets/*.js", "assets/*.json"]
+superran = ["assets/*.css", "assets/*.js", "assets/*.json"]
 
 [tool.ruff]
 line-length = 100

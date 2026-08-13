@@ -18,7 +18,7 @@ from run_deep_simulation_audit import (
     table_trace,
 )
 
-from superwireless import load
+from superran import load
 
 
 def main() -> None:

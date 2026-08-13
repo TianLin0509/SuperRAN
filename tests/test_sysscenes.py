@@ -12,11 +12,11 @@ import os
 import sys
 from pathlib import Path
 
-os.environ.setdefault("SUPERWIRELESS_NO_BROWSER", "1")
+os.environ.setdefault("SUPERRAN_NO_BROWSER", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from superwireless import plan as pl  # noqa: E402
-from superwireless import sysscenes as ss  # noqa: E402
+from superran import plan as pl  # noqa: E402
+from superran import sysscenes as ss  # noqa: E402
 
 _n_pass = 0
 _n_fail = 0

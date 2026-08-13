@@ -1,4 +1,4 @@
-# superwireless
+# SuperRAN
 
 给 Agent 用的无线仿真信道供应站 —— **面向蒙特卡洛验证**。
 
@@ -32,15 +32,15 @@ print(ds.calibrate().text()) # 3GPP §7.8 口径的校准量，对 R1-165975 参
 
 ```python
 # 干扰场景 · 测量干扰 · 大站间距 · 移动性 · 高铁 · 传播条件 · 多小区干扰 · 基线 · 射线追踪 · 室内与专网
-r = sw_probe_scenario(preset="high_iot_dense", num_samples=63)   # 几十秒，不是几十分钟
+r = sr_probe_scenario(preset="high_iot_dense", num_samples=63)   # 几十秒，不是几十分钟
 # 干扰画像、链路预算、路损/距离/视距/多普勒分布
 ```
 
 **探测模式把 `num_rb` 压到 24、`num_ofdm_symbols` 压到 4，几何量与全量逐位相同**
-（实测 num_rb 273/24/12 与 nsym 14/7/4/2 各档，SINR/SIR/路损/距离/视距/多普勒/
-UE 位置全部零差异），**11.5 倍速**（2602 → 226 毫秒/样本）。
-唯一变的 `snr_dB` 有解析修正。nsym 在 1 处有悬崖（偏 16.1 dB），所以取 4 不取 2。
-给不了谱效与吞吐，返回里会列清楚。
+（实测 num_rb 273/24/12 与 nsym 14/7/4/2/1 各档，SINR/SIR/路损/距离/视距/
+多普勒/UE 位置全部零差异）。唯一变的 `snr_dB` 有解析修正。性能随内核而变：
+当前 20-ray 版本在 21 小区 16T/20MHz 的交错对照约 **1.80×**，不是旧单簇内核的
+11.5×；实际看返回的 `elapsed_s`。探测给不了谱效与吞吐，返回里会列清楚。
 
 **三、谱效开箱即用。** 预编码 → 逐层 SINR → 频谱效率的完整链路，
 含逐 RB 协方差特征波束（单快照时等价瞬时 SVD）、宽带协方差特征波束、
@@ -80,18 +80,18 @@ CSI 压缩、信道估计、波束管理、调度算法走结果契约：
 
 ```python
 # 1. 生成前锁口径（预注册），生成时绑上
-pr = sw_lock_analysis(primary_metric="spectral_efficiency", baseline="type1")
-ds = sw_generate(..., prereg_id=pr.prereg_id)
+pr = sr_lock_analysis(primary_metric="spectral_efficiency", baseline="type1")
+ds = sr_generate(..., prereg_id=pr.prereg_id)
 
 # 2. 导一份评测脚本，把 my_algorithm 换成你的算法（不改也能跑）
-code = sw_export_eval_template(dataset_id)["code"]
+code = sr_export_eval_template(dataset_id)["code"]
 
 # 3. 你的脚本里注册结果 —— MCP 不执行你的代码，只收标准化的逐样本值
 art = ds.register_results("我的方法", values, metric="spectral_efficiency",
                           method_metadata={"csi": "estimated"})
 
 # 4. 交给 MCP 判决，与内置方案用同一套统计与门控
-sw_compare_results(art_a.result_id, art_b.result_id)
+sr_compare_results(art_a.result_id, art_b.result_id)
 ```
 
 注册时锁死数据集内容摘要、样本 ID **逐个按序**比对、指标与单位——
@@ -120,13 +120,13 @@ QAM 约束容量用 Gauss-Hermite 求积**精确算**，表 1/2 的 MCS/CQI 与 
 
 ```python
 st = ds.throughput(mcs_table=3)
-sw_bler_curve(mcs=15, tx_mode="newtx", sinr_db_list=[14.0, 14.05])
+sr_bler_curve(mcs=15, tx_mode="newtx", sinr_db_list=[14.0, 14.05])
 # BLER = [0.132, 0.0949]，10% 门限 14.042 dB
 ```
 
 表 3 **不是 3GPP 标准表**；源脚本标签 `Es/No` 已确认表示经典 MMSE 接收机
 的 SINR。TB/CB、块长、信道模型、MIMO 层数和译码器细节暂不参数化。
-`sw_mcs_info(table=3, show_bler_anchors=true)` 可查看全部门限、码率和哈希自检。
+`sr_mcs_info(table=3, show_bler_anchors=true)` 可查看全部门限、码率和哈希自检。
 
 TDD AMC 已支持完整的 `CQI → 初始 MCS → NewTx SINR 门限 → BF Gain →
 重映射 MCS → OLLA → floor` 链路。BF Gain 是同一信道、CSI、rank、功率、
@@ -134,24 +134,25 @@ TDD AMC 已支持完整的 `CQI → 初始 MCS → NewTx SINR 门限 → BF Gain
 差值；用户 SINR 对全部 RB×流在 dB 域做算术平均：
 
 ```python
-sw_tdd_mcs(dataset_id="ds_xxxxxxxx", cqi=9, olla_mcs_offset=-0.2,
+sr_tdd_mcs(dataset_id="ds_xxxxxxxx", cqi=9, olla_mcs_offset=-0.2,
            feedback_ack=False)
 ```
 
 在 Claude Code / Codex CLI 里不需要自己写 Python，直接告诉 Agent：
-“请调用 superwireless 的 `sw_tdd_mcs`，对数据集 `ds_xxxxxxxx`、CQI 9、
+“请调用 superran 的 `sr_tdd_mcs`，对数据集 `ds_xxxxxxxx`、CQI 9、
 OLLA -0.2 MCS 计算最终 MCS，并解释逐流 BF Gain。”Agent 会调用 MCP 并返回
 完整中间量。`CQI=0` 明确不调度；反馈只更新下一时刻 OLLA，当前决策不回写。
 
-`sw_sweep_snr` 出谱效/吞吐 vs SNR 曲线——实测低信噪比达成 77%、
+`sr_sweep_snr` 出谱效/吞吐 vs SNR 曲线——实测低信噪比达成 77%、
 高信噪比因 MCS 封顶掉到 38%。
 
 **六点五、干扰强度用 IoT 说话。** "高干扰"是个数不是形容词。
 IoT（噪声抬升 `(I+N)/N`）由几何 SIR 与 SINR **精确推出**——
-不是 `snr_dB - sinr_dB`，那两个字段口径不同，相减差几十 dB。
+当前 first-party 后端的 `snr_dB` 与 `sinr_dB` 共享预数字波束、每 RB 参考，
+所以两者之差是等价旁证；正式实现仍用 SIR+SINR，以兼容口径未声明的外部/旧数据。
 
 ```python
-sw_interference_report(dataset_id)
+sr_interference_report(dataset_id)
 # traffic_domain.dl.iot   → 28.3 dB，高干扰，等效负载 0.9985
 # measurement_domain.ul_srs → SIR -10.5 dB，测量已失效，NMSE 底 10.5 dB
 ```
@@ -161,23 +162,27 @@ sw_interference_report(dataset_id)
 SRS 测量域 SIR 差 **17.9 dB**（−10.50 vs +7.37）。
 只看业务域 SINR 会认为这两个场景是同一件事。
 
-哪些旋钮真的能动 IoT 是**实测过的**，`sw_design_interference` 会给出实测值——
+哪些旋钮真的能动 IoT 是**实测过的**，`sr_design_interference` 会给出实测值——
 其中两条与直觉相反：`pdsch_load` 对下行 IoT **完全无效**（0.2 与 1.0 逐位相同），
 `num_interfering_ues` 影响的是测量域而非业务域上行 IoT。
 
-**七、跑得快。** `workers="auto"` 按配置预估耗时自动决定要不要多进程。
-实测单样本耗时差 85 倍（单小区 32T/20MHz 24 ms，21 小区 64T/100MHz 2054 ms），
-重配置 200 样本 **842s → 246s**；轻配置自动走串行，因为起进程的开销更大。
+**七、跑得快但不换样本。** `workers="auto"` 按配置预估耗时自动决定要不要多进程；
+static internal_sim 用同 seed + 全局 sample index 分块，worker 数变化时逐样本逐位一致。
+移动轨迹、拒绝采样或未支持索引的外部源会带原因回退串行。
+20-ray 内核的热态历史锚点是：单小区 32T/20MHz 约 0.158 s/样本、单小区
+64T/100MHz 约 1.074 s/样本、21 小区 16T/20MHz 约 7.48 s/样本；24 样本同一
+多小区配置实测串行 179.5s、4 进程 49.3s。大批轻配置现在也可能值得并行。
 
-`collect_ssb=False` 再省约 30%（交错重测中位数 3456 → 2475 ms/样本）。
-**比较耗时必须交错重测**：本机基准的轮间波动就有 11.9%，
-顺序跑变体会把预热效应读成"加速"——第一版基准正是这么测出一个假的 2.55×。
+`collect_ssb=False` 会减少工作量，但旧 30% 标定属于 20-ray 之前的版本，不再当作
+当前承诺。**比较耗时必须交错重测**；顺序跑变体会把预热效应读成“加速”，而冷态
+单样本与热态批量的差异本轮已达一个数量级。`estimate_seconds()` 只负责进程调度，
+不是 SLA；实际耗时认返回的 `elapsed_s`。
 
 样本数是**算出来的**，不是问用户的：
 
 ```python
-sw_sample_size(std_diff=2.14, expected_effect=1.5)   # → 需要 64 个样本
-sw_sample_size(std_diff=2.14, n_current=20)          # → 最小可检出 2.70 —— 比预期还大，白跑
+sr_sample_size(std_diff=2.14, expected_effect=1.5)   # → 需要 64 个样本
+sr_sample_size(std_diff=2.14, n_current=20)          # → 最小可检出 2.70 —— 比预期还大，白跑
 ```
 
 ## 交互方式
@@ -185,7 +190,7 @@ sw_sample_size(std_diff=2.14, n_current=20)          # → 最小可检出 2.70 
 ```
 你：帮我验证一个 CSI 压缩的想法，先弄一批单小区 64T4R 的信道数据。
 
-Agent：配好了 64T4R、273 RB、CDL-C、100 MHz。
+Agent：配好了 64T4R、272 RB（17 RBG × 16 RB）、CDL-C、100 MHz。
        第 1 轮 · 实验设计 —— 参数配错重跑就行，实验设计错了结论作废。
 
        ① 你的方法要跟什么比？
@@ -208,14 +213,17 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 
 ## 文档
 
+- **[SuperRAN 开发者文档 `docs/index.html`](docs/index.html)** —— 当前实现的主入口：无线物理、64T4R/192×64 阵列、SRS/LMMSE、EBF/PEBF/NEBF、SU/MU、capacity/experience、话务/PF/KPI、34 个 MCP 工具、Skill、全部公开 API 与本次审计修复；单文件离线可打开
 - **[安装说明 `SETUP.html`](SETUP.html)** —— 由哪几块拼成、要装什么、怎么装、装完先跑什么、排错
 - **[`INSTALL_AGENT.md`](INSTALL_AGENT.md)** —— 写给 AI agent 看的安装步骤，丢给它自己装
 - **[能力手册 `CAPABILITIES.html`](CAPABILITIES.html)** —— 能产生哪些信道、能拿到哪些观察量（含形状与单位）、参数全表、能力边界
 - **[实测场景演示 `SHOWCASE.html`](SHOWCASE.html)** —— 真实跑过的场景对话、三道门、踩过的坑
 - **[接入自研算法 `EXTERNAL_ALGO.html`](EXTERNAL_ALGO.html)** —— 让你自己的算法进门 2/门 3、预注册分析口径、边界与局限
 - **[从 SINR 到真实吞吐 `LINK_ADAPTATION.html`](LINK_ADAPTATION.html)** —— L1 链路自适应、38.214 MCS/CQI、SNR 扫描曲线、并行生成
-- **[测试体系说明 `TESTS.html`](TESTS.html)** —— 「635 项测试」是什么、拦住过哪 8 个真实事故、以及它**证明不了**什么
-- **仿真说明书** —— `sw_spec_sheet` 出的 HTML，**默认直接在浏览器里弹出来**：拓扑图打头、其余折进页签、还能在上面改参数点「应用到仿真」把改动送回 agent（`sw_await_config` 接）。落在 `artifacts/specs/`，拷走用 `file://` 打开时自动退回复制粘贴
+- **[测试体系历史说明 `TESTS.html`](TESTS.html)** —— 2026-07-31 的历史快照，用于理解测试理念与事故案例；当前文件/接口清单以开发者文档为准
+- **仿真说明书** —— `sr_spec_sheet` 出的 HTML，默认只返回 URL、不打断用户；明确传 `open_browser=True` 才弹浏览器。页面以拓扑图打头，其余折进页签，还能改参数点「应用到仿真」把改动送回 agent（`sr_await_config` 接）。落在 `artifacts/specs/`，拷走用 `file://` 打开时自动退回复制粘贴
+- **CDF 话务与目标负载校准** —— 包大小/包间隔各读一份 `value,cdf`，支持全局×profile 双标量、多 profile 与 `ue_ids` 显式用户映射；`target_prb_utilization=0.30` 用公共随机数调话务，最后另跑正式重复实验，未达容差绝不回填目标值。内置 synthetic CDF 只用于接口演示，后续可直接替换公司曲线
+- **Agent 自适应 KPI 结果页** —— `sr_system_sim(evaluation_mode="experience")` 自动返回 `kpi_view.html_path/url`，顶层为“小区级 / 用户级”；用户级指标同时支持按 UE 图、跨 UE 经验 CDF 和明细表。调用 Agent 可传 `kpi_focus` 优先展示相关 KPI，其余折叠且不丢失，选择理由完整回传。页面含首包时延、含头速率、本小区 PRB 利用率、0..17 RBG 分布、MU 配对比例与用户级 PRB 归因，离线打开不依赖外部资源
 - **[MU-MIMO 算法流程 `MU_MIMO.html`](MU_MIMO.html)** —— 配对/预编码/功率分配逐步展开，含六个待确认的设计选择与实测数字
 - **[通宵成果与待审 `TONIGHT.html`](TONIGHT.html)** —— 6 个 bug、5 个新需求提案、8 个待拍板的决策点
 - **[通宵进展与待审问题 `MORNING_REVIEW.html`](MORNING_REVIEW.html)** —— 3GPP/ITU 对标结果 + 12 个待拍板的问题
@@ -259,7 +267,7 @@ PMI 给码本索引而非嵌入向量。
 
 把这句话发给你的 Claude Code / Codex：
 
-> 帮我装 superwireless：读 https://github.com/TianLin0509/superwireless/blob/main/INSTALL_AGENT.md
+> 帮我装 superran：读 https://github.com/TianLin0509/superran/blob/main/INSTALL_AGENT.md
 > 按里面的步骤装好并验证，装完告诉我能不能用。
 
 [`INSTALL_AGENT.md`](INSTALL_AGENT.md) 是**写给 agent 看的**：每步带验证命令与预期输出，
@@ -274,7 +282,7 @@ python scripts/make_offline_bundle.py          # 完整包 65 MB，全新 venv �
 python scripts/make_offline_bundle.py --thin   # 轻量包 17 MB，要求目标机已有 numpy/scipy
 ```
 
-产出 `dist/superwireless-offline-<包型>-<平台>-py<版本>.zip`，里面有源码、skill、
+产出 `dist/superran-offline-<包型>-<平台>-py<版本>.zip`，里面有源码、skill、
 依赖 wheel、`bundle-manifest.json`（各文件 SHA-256）、`INSTALL_AGENT.md`
 和给人看的 `开始安装.txt`。接收方解压后把那句话发给自己的 agent 即可。
 
@@ -295,18 +303,18 @@ python scripts/make_offline_bundle.py --thin   # 轻量包 17 MB，要求目标�
 
 ```bash
 git clone https://github.com/wangxz0803-lab/ChannelHub_main   # 物理内核
-git clone https://github.com/TianLin0509/superwireless
-cd superwireless && pip install -e .
+git clone https://github.com/TianLin0509/superran
+cd superran && pip install -e .
 
 pip install sionna-rt      # 可选，射线追踪（约 300 MB）
 ```
 
-ChannelHub 会自动在同级/上级目录查找；放在别处就设 `SUPERWIRELESS_CHANNELHUB`。
-不装射线追踪也能用，`sw_capabilities` 会如实报告缺什么。
+ChannelHub 会自动在同级/上级目录查找；放在别处就设 `SUPERRAN_CHANNELHUB`。
+不装射线追踪也能用，`sr_capabilities` 会如实报告缺什么。
 
 ```bash
-claude mcp add superwireless -- python /path/to/superwireless/scripts/mcp_server.py
-codex  mcp add superwireless -- python /path/to/superwireless/scripts/mcp_server.py
+claude mcp add superran -- python /path/to/superran/scripts/mcp_server.py
+codex  mcp add superran -- python /path/to/superran/scripts/mcp_server.py
 
 cp -r skills/channel-sim ~/.claude/skills/     # 可选：工作流编排
 cp -r skills/channel-sim ~/.codex/skills/
@@ -337,29 +345,29 @@ cp -r skills/channel-sim ~/.codex/skills/
 
 | 工具 | 作用 |
 |---|---|
-| `sw_capabilities` / `sw_list_presets` / `sw_list_scenes` | 能力与场景发现 |
-| `sw_missing_slots` | **结论模板还缺哪些槽** —— 决定该主动问什么 |
-| `sw_plan` / `sw_revise` | 分轮协商：实验设计 + 参数 + 对比组 + 陷阱 |
-| `sw_generate` | 生成数据集，返回句柄与统计摘要 |
-| `sw_deliver` | 按自然语言点单生成取货代码 |
-| `sw_validate` / `sw_gate` | **可信度体检 / 门 1**：17 项 |
-| `sw_calibrate` | **3GPP §7.8 校准量**：耦合损耗、几何、时延角度扩展、PRB 奇异值 |
-| `sw_link_performance` | **算谱效**：预编码 → SINR → 谱效，多方案横向对比 |
-| `sw_compare_arms` | **配对比较 + 门 2 + 门 3**，返回可直接引用的结论句 |
-| `sw_sample_size` | **功效分析**：样本数 ↔ 最小可检出效应 |
-| `sw_lock_analysis` | **预注册**：生成前把主指标与基线定下来 |
-| `sw_export_eval_template` | **自研算法评测脚本骨架**，替换一个函数即可 |
-| `sw_compare_results` | **判决外部算法结果** + 门 2 + 门 3 + 预注册身份 |
-| `sw_list_results` | 已注册的结果与预注册记录 |
-| `sw_throughput` | **真实吞吐 Mbps** + 5% 边缘用户（链路到系统映射） |
-| `sw_sweep_snr` | **谱效/吞吐 vs SNR 曲线**，各点配对无抽样噪声 |
-| `sw_mcs_info` | 表 1/2：38.214 + 分析模型；表 3：用户 MCS + NewTx/ReTx 门限 |
-| `sw_bler_curve` | 查单档原始 BLER 曲线、10% 门限，并在任意 SINR 点做对数域插值 |
-| `sw_tdd_mcs` | **TDD AMC**：CQI → PMI/SVD BF Gain → MCS → OLLA，返回逐 RB/流审计链 |
-| `sw_system_sim` | **系统级仿真**：连续几秒 TTI + PF 调度 + 话务，出体验速率等现网 KPI |
-| `sw_spec_sheet` | **仿真说明书**：拓扑图 + 分级页签 + 调参面板，**默认自己弹浏览器** |
-| `sw_await_config` | 等用户在说明书上点「应用到仿真」，**改动直接回来**，免复制粘贴 |
-| `sw_describe_dataset` / `sw_list_datasets` | 数据集信息 |
+| `sr_capabilities` / `sr_list_presets` / `sr_list_scenes` | 能力与场景发现 |
+| `sr_missing_slots` | **结论模板还缺哪些槽** —— 决定该主动问什么 |
+| `sr_plan` / `sr_revise` | 分轮协商：实验设计 + 参数 + 对比组 + 陷阱 |
+| `sr_generate` | 生成数据集，返回句柄与统计摘要 |
+| `sr_deliver` | 按自然语言点单生成取货代码 |
+| `sr_validate` / `sr_gate` | **可信度体检 / 门 1**：18 项 |
+| `sr_calibrate` | **3GPP §7.8 校准量**：耦合损耗、几何、时延角度扩展、PRB 奇异值 |
+| `sr_link_performance` | **算谱效**：预编码 → SINR → 谱效，多方案横向对比 |
+| `sr_compare_arms` | **配对比较 + 门 2 + 门 3**，返回可直接引用的结论句 |
+| `sr_sample_size` | **功效分析**：样本数 ↔ 最小可检出效应 |
+| `sr_lock_analysis` | **预注册**：生成前把主指标与基线定下来 |
+| `sr_export_eval_template` | **自研算法评测脚本骨架**，替换一个函数即可 |
+| `sr_compare_results` | **判决外部算法结果** + 门 2 + 门 3 + 预注册身份 |
+| `sr_list_results` | 已注册的结果与预注册记录 |
+| `sr_throughput` | **真实吞吐 Mbps** + 5% 边缘用户（链路到系统映射） |
+| `sr_sweep_snr` | **谱效/吞吐 vs SNR 曲线**，各点配对无抽样噪声 |
+| `sr_mcs_info` | 表 1/2：38.214 + 分析模型；表 3：用户 MCS + NewTx/ReTx 门限 |
+| `sr_bler_curve` | 查单档原始 BLER 曲线、10% 门限，并在任意 SINR 点做对数域插值 |
+| `sr_tdd_mcs` | **TDD AMC**：CQI → PMI/SVD BF Gain → MCS → OLLA，返回逐 RB/流审计链 |
+| `sr_system_sim` | **系统级仿真**：连续几秒 TTI + PF 调度 + 话务，出体验速率等现网 KPI |
+| `sr_spec_sheet` | **仿真说明书**：拓扑图 + 分级页签 + 调参面板；默认只返回 URL，`open_browser=True` 才弹浏览器 |
+| `sr_await_config` | 等用户在说明书上点「应用到仿真」，**改动直接回来**，免复制粘贴 |
+| `sr_describe_dataset` / `sr_list_datasets` | 数据集信息 |
 
 ## 观察量（12 类）
 
@@ -378,15 +386,15 @@ cp -r skills/channel-sim ~/.codex/skills/
 
 ## 物理层工具箱
 
-`superwireless.physical` 转发 ChannelHub 里已按 38.211/38.213/38.214 实现的模块，
+`superran.physical` 转发 ChannelHub 里已按 38.211/38.213/38.214 实现的模块，
 主要用来**当基线**和**做导频层课题**：
 
 ```python
-from superwireless import physical as ph
+from superran import physical as ph
 
 ph.nr_rb_count(100e6, 30000)       # 273（标准表，不是简单除法）
 ph.tdd_pattern_info("DDDSU")       # 帧结构 + 特殊时隙符号级切分
-ph.srs_config(273, b_srs=1)        # SRS 跳频：周期 17、每跳 16 RB、覆盖 6%
+ph.srs_config(272, b_srs=1)        # SRS 跳频：周期 17、每跳 16 RB、覆盖整带
 ph.zadoff_chu(25, 139)             # ZC 序列，实测峰旁比 151 dB
 ph.ssb_sequences(42)               # PSS / SSS / PBCH-DMRS
 ph.dft_codebook(8, 4, 2)           # CSI-RS 波束码本 [512, 64]
@@ -418,36 +426,44 @@ ph.project_interference(...)       # 干扰投影：不投影会高估干扰
 - **时延扩展的频域估计有固有误差**。可观测最大时延是 `1/(12·SCS)`，
   实测比值 0.8~1.0，仅作数量级检查。
 - **QuaDRiGa 未纳入**，需要 MATLAB/Octave 运行时。
-- **ChannelHub 的 CDL-A/B/C 角度表与 38.901 不符**，superwireless 启动时会用
-  逐字核对过的标准表覆盖（`spec38901.apply_spec_tables`）。CDL-C 原表有
-  23/24 簇的角度与 Table 7.7.1-3 有出入，占总功率 93.8%，ASA 偏 14.5°。
-  时延与功率两列是对的。设 `SUPERWIRELESS_CDL_SPEC=0` 可复现未修正前的结果；
-  **CDL-D/E 未覆盖**（表结构含 `Cluster PAS` 列，未逐字核对）。
-- **多小区必须有 `bs_panel` 干扰才会进 SINR**。ChannelHub 只在拿到面板排布时
-  才建 DFT 码本，拿不到就走兜底：`sir_dB = 49.9`、`sinr_dB = snr_dB`，
-  不报错不告警。superwireless 现在会由 `num_bs_tx_ant` 自动推导面板并在
-  门 1 里检查——但 2026-07-29 之前生成的数据集没有这一步，那些数据集里的
-  "SINR"实为纯热噪声 SNR。
+- **物理代码与射线追踪资产可来自不同 checkout**。默认优先使用相邻
+  `MSG-Platform` 的当前 Python 内核，并在其他 ChannelHub 候选根寻找真正含 JSON 的
+  `configs/scenes`；也可分别用 `SUPERRAN_CHANNELHUB` 与
+  `SUPERRAN_SCENES` 指定。拿旧仓库的场景资产不会把物理代码一起降级。
+- **CDL-A~E 都有标准表硬门**。相邻 MSG-Platform 的五张表已修正为
+  38.901 Table 7.7.1-1~5（23/23/24/14/15 个表分量）；superran 启动时仍用独立
+  `spec38901` 副本交叉核对并兼容覆盖旧 checkout，失败即阻断生成。diffuse component
+  按 20 rays 展开；CDL-D/E 的 K 已在表的镜面/散射功率差中，只计一次。
+  `SUPERRAN_CDL_SPEC=0` 仅用于复现历史非标准结果。
+- **`bs_panel` 决定空间阵列，不再决定邻区干扰是否进入几何预算**。当前
+  first-party 后端直接从服务/邻区接收功率形成 SNR/SIR/SINR；面板仍是二维端口
+  几何、双极化和 64T 1 驱 3 effective-subarray 的必要输入。门 1 会另行拦截
+  多小区却 `SIR=49.9` 或 `SINR=SNR` 的退化数据。
 
 ## 测试
 
 ```bash
-python tests/test_e2e.py         # 端到端 39 项
-python tests/test_mcp_server.py  # MCP 全链路 37 项
-python tests/test_raytracing.py  # 射线追踪与决策层 40 项
-python tests/test_linklevel.py   # 谱效、可信度、物理层、IRC 45 项
-python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
-python tests/test_results.py     # 外部算法结果契约、预注册 80 项
-python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
-python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应 63 项
-python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径 80 项
-python tests/test_interference.py # IoT、测量域、预设、说明书、算法页、文档计数 362 项
-python tests/test_csi_aging.py   # CSI 时延与老化、SRS 跳频、基站/真实视角分离 84 项
-python tests/test_rng.py         # 随机数分流、多重复置信区间、公共随机数 107 项
-python tests/test_sysscenes.py   # 系统级场景预设、成对受控性、expect 诚实性 69 项
+python tests/test_e2e.py
+python tests/test_mcp_server.py
+python tests/test_raytracing.py
+python tests/test_linklevel.py
+python tests/test_gates.py
+python tests/test_results.py
+python tests/test_linkadapt.py
+python tests/test_mumimo.py
+python tests/test_system.py
+python tests/test_interference.py
+python tests/test_csi_aging.py
+python tests/test_rng.py
+python tests/test_sysscenes.py
+python tests/test_power_control.py
+python tests/test_physics_invariants.py
+python tests/test_channel_generation_contract.py
+python tests/test_developer_guide.py
 ```
 
-共 **1227 项**。
+当前共 **17 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
+容易失真的手写“总项数”；以实际运行输出和开发者文档的自动盘点为准。
 
 ## 致谢
 

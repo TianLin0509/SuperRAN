@@ -19,7 +19,7 @@
 
     python scripts/vendor_katex.py [--version 0.16.11]
 
-产出 ``src/superwireless/assets/katex.css`` 与 ``katex.js``。
+产出 ``src/superran/assets/katex.css`` 与 ``katex.js``。
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "src" / "superwireless" / "assets"
+OUT = ROOT / "src" / "superran" / "assets"
 
 
 def fetch(base: str, path: str) -> bytes:

@@ -18,12 +18,12 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from superwireless import katex as kx  # noqa: E402
-from superwireless import load  # noqa: E402
-from superwireless import mathml as mm  # noqa: E402
+from superran import katex as kx  # noqa: E402
+from superran import load  # noqa: E402
+from superran import mathml as mm  # noqa: E402
 
 DATA_PATH = ROOT / "artifacts" / "results" / "deep_simulation_audit.json"
-OUT = ROOT / "artifacts" / "reports" / "SUPERWIRELESS_USER_MANUAL.html"
+OUT = ROOT / "artifacts" / "reports" / "SUPERRAN_USER_MANUAL.html"
 
 
 def M(tex: str, *, block: bool = False) -> str:
@@ -86,7 +86,9 @@ F_MU = M(
     block=True,
 )
 F_AGE = M(
-    r"L_{b}(s)=\left\lceil\frac{A_b(s)+D_{\mathrm{proc}}}{\Delta t_{\mathrm{snap}}}\right\rceil,\quad \hat H_b(s)=H_b(\max(0,s-L_b))",
+    r"\tau_b(t)=t-\max\{t_{b,n}:t_{b,n}\le t-D_{\mathrm{proc}}\},\quad "
+    r"L_b=\left\lceil\tau_b/\Delta t_{\mathrm{snap}}\right\rceil,\quad "
+    r"\hat H_b(s)=H_b(\max(0,s-L_b))",
     block=True,
 )
 F_CQI = M(
@@ -360,7 +362,7 @@ def system_flow_svg() -> str:
 <rect width="100%" height="100%" rx="18" fill="#fbfdff"/>
 <text x="35" y="38" class="phase-title">Phase A · 信道压成 UE × snapshot × rank 链路表（每个数据集一次）</text>
 <g class="flow-box"><rect x="35" y="62" width="220" height="88"/><text x="145" y="91"><tspan>80 行 → 10 UE × 8 快照</tspan><tspan x="145" dy="22">Δsnapshot = 5 ms</tspan></text></g>
-<g class="flow-box"><rect x="300" y="62" width="220" height="88"/><text x="410" y="91"><tspan>SRS 年龄向上量化</tspan><tspan x="410" dy="22">逐 RBG 取 stale H</tspan></text></g>
+<g class="flow-box"><rect x="300" y="62" width="220" height="88"/><text x="410" y="91"><tspan>CSI 陈旧时长向上量化</tspan><tspan x="410" dy="22">逐 RBG 取 stale H</tspan></text></g>
 <g class="flow-box"><rect x="565" y="62" width="220" height="88"/><text x="675" y="91"><tspan>同一 stale H 搜权</tspan><tspan x="675" dy="22">SVD 与 PMI 均因果</tspan></text></g>
 <g class="flow-box"><rect x="830" y="62" width="195" height="88"/><text x="928" y="91"><tspan>逐 rank 评估</tspan><tspan x="928" dy="22">γtrue / SEgnb / BF</tspan></text></g>
 <g class="flow-box accent"><rect x="365" y="205" width="330" height="95"/><text x="530" y="235"><tspan>因果 CQI → BF gain → Tx SINR/MCS</tspan><tspan x="530" dy="23">rank 按 gNB 视角选；OLLA 留给 TTI 循环</tspan></text></g>
@@ -385,20 +387,20 @@ def system_flow_svg() -> str:
 
 def bugs_table() -> tuple[str, int]:
     bugs = [
-        ("S-01", "谱效", "有色容量白化后又除一次 N0", "容量上界被错误压低，可能让普通预编码看起来越界", "白化后统一噪声=1；注水分母改为 normalized_noise", "SISO 有色损伤解析式逐位一致", "src/superwireless/linklevel.py", "normalized_noise"),
-        ("S-02", "谱效", "把逐 RB 线性 SINR 先求平均再报层 SINR", "该 SINR不能反算实际 E[log(1+γ)]，报告自相矛盾", "改成 log-domain 的速率等效 SINR", "报告层 SINR精确复原层 SE", "src/superwireless/linklevel.py", "np.expm1"),
-        ("S-03", "谱效", "rank 只按奇异值比例阈值选", "同一信道在低/高 SNR 选同 rank；弱层分功率后可降速", "在发送端可知的 h_est、同 N/I 下枚举 rank 1..4，取预测 SE 最大", "构造信道低 SNR 选1、高 SNR 选2", "src/superwireless/linklevel.py", "if rank_selection == \"threshold\""),
-        ("S-04", "统计", "小样本 CI 固定用 z=1.96", "n 小时区间系统性偏窄", "n>1 使用 Student-t 临界值", "n=3 与 scipy t(2) 精确一致", "src/superwireless/linklevel.py", "student_t.ppf"),
-        ("S-05", "干扰", "用受害 UE 交叉信道主奇异向量当邻区波束，却称‘服务自己 UE’", "实际等于邻区故意对准受害 UE；空间干扰形状有方向性偏差", "默认生成与交叉信道统计独立的单位范数邻区波束；victim_aligned 仅留故障复现", "独立模型与 victim-aligned 输出必须不同", "src/superwireless/linklevel.py", "if model == \"victim_aligned\""),
-        ("S-06", "干扰", "Ruu 快照不足时给同一信道加 5% 抖动补样本", "凭空造观测、抬高协方差秩，让 IRC 获得不存在的信息", "只用 min(requested,T) 个真实快照，奇异性由 diagonal loading 处理", "T=1 时请求1/100样本结果一致且 rank=1", "src/superwireless/linklevel.py", "n_s = min"),
-        ("S-07", "CSI", "SRS 年龄/快照间隔用 round", "2ms/5ms→0，相当于使用测量发生前的当前信道", "离散年龄一律 ceil，保证取到的 CSI 不新于真实测量", "2ms→1、7ms→2", "src/superwireless/csi_aging.py", "np.ceil"),
-        ("S-08", "CSI", "整个仿真时域只搜一次 PMI", "snapshot 0 偷看未来快照，形成 oracle", "每个快照只在当时可用的 stale h_prec 上搜宽带 PMI", "任意改未来信道，snapshot0 PMI/BF gain 不变", "src/superwireless/system.py", "w_pmi_s"),
-        ("S-09", "CSI", "CQI 用全程 PMI SINR 均值回填所有快照", "当前 TTI 获得未来 SINR 信息", "使用 0..s expanding mean 的透明因果基线", "任意改未来信道，snapshot0 CQI/Tx SINR 不变", "src/superwireless/system.py", "filtered_pmi"),
-        ("E-01", "业务", "CBR 每 TTI 直接 int(bytes)", "小数永久丢失；低速率甚至每 TTI 都为0", "每 UE 累积分数字节 carry，再 floor 入队", "0.001 Mbps ×1s 精确到达125B", "src/superwireless/system.py", "_cbr_carry"),
-        ("E-02", "业务", "先跳过 U slot，再生成业务到达", "DDDSU 固定漏掉20%外生到达，负载/排队被低估", "每个 D/S/U TTI 先 step traffic，再判断能否下行调度", "1 Mbps CBR 在 DDDSU 仍报告1 Mbps offered", "src/superwireless/system.py", "tr.step(tti)"),
-        ("E-03", "体验", "PDB 分母只含已完成 arrival object", "最差的未完成对象消失，过载越重 PDB 越好看", "已过 deadline 的未完成对象记确定 miss；未到 deadline 单列右删失", "过载窗同时出现 overdue miss 与 right-censored", "src/superwireless/experience.py", "overdue_incomplete"),
-        ("E-04", "体验", "用户体验分布只含有完成 burst 的 UE", "被饿死 UE 从分布消失，算法越差样本越漂亮", "有到达 UE 全进入 zero-inclusive 分布；无完成记0", "starved UE: eligible=1/measured=0/value=0", "src/superwireless/experience.py", "user_exp_completed_only"),
-        ("X-01", "统计", "80 行衰落观测直接当 n=80 独立样本", "同一位置重复衰落相关，伪增自由度并缩窄 CI", "先按 UE 坐标聚成40个位置均值，再做配对 t/Wilcoxon", "2位置×2衰落的测试明确得到 n=2", "src/superwireless/gates.py", "paired_cluster_means"),
+        ("S-01", "谱效", "有色容量白化后又除一次 N0", "容量上界被错误压低，可能让普通预编码看起来越界", "白化后统一噪声=1；注水分母改为 normalized_noise", "SISO 有色损伤解析式逐位一致", "src/superran/linklevel.py", "normalized_noise"),
+        ("S-02", "谱效", "把逐 RB 线性 SINR 先求平均再报层 SINR", "该 SINR不能反算实际 E[log(1+γ)]，报告自相矛盾", "改成 log-domain 的速率等效 SINR", "报告层 SINR精确复原层 SE", "src/superran/linklevel.py", "np.expm1"),
+        ("S-03", "谱效", "rank 只按奇异值比例阈值选", "同一信道在低/高 SNR 选同 rank；弱层分功率后可降速", "在发送端可知的 h_est、同 N/I 下枚举 rank 1..4，取预测 SE 最大", "构造信道低 SNR 选1、高 SNR 选2", "src/superran/linklevel.py", "if rank_selection == \"threshold\""),
+        ("S-04", "统计", "小样本 CI 固定用 z=1.96", "n 小时区间系统性偏窄", "n>1 使用 Student-t 临界值", "n=3 与 scipy t(2) 精确一致", "src/superran/linklevel.py", "student_t.ppf"),
+        ("S-05", "干扰", "用受害 UE 交叉信道主奇异向量当邻区波束，却称‘服务自己 UE’", "实际等于邻区故意对准受害 UE；空间干扰形状有方向性偏差", "默认生成与交叉信道统计独立的单位范数邻区波束；victim_aligned 仅留故障复现", "独立模型与 victim-aligned 输出必须不同", "src/superran/linklevel.py", "if model == \"victim_aligned\""),
+        ("S-06", "干扰", "Ruu 快照不足时给同一信道加 5% 抖动补样本", "凭空造观测、抬高协方差秩，让 IRC 获得不存在的信息", "只用 min(requested,T) 个真实快照，奇异性由 diagonal loading 处理", "T=1 时请求1/100样本结果一致且 rank=1", "src/superran/linklevel.py", "n_s = min"),
+        ("S-07", "CSI", "CSI 陈旧时长/快照间隔用 round", "2ms/5ms→0，相当于使用测量发生前的当前信道", "离散陈旧时长一律 ceil，保证取到的 CSI 不新于真实测量", "2ms→1、7ms→2", "src/superran/csi_aging.py", "np.ceil"),
+        ("S-08", "CSI", "整个仿真时域只搜一次 PMI", "snapshot 0 偷看未来快照，形成 oracle", "每个快照只在当时可用的 stale h_prec 上搜宽带 PMI", "任意改未来信道，snapshot0 PMI/BF gain 不变", "src/superran/system.py", "w_pmi_s"),
+        ("S-09", "CSI", "CQI 用全程 PMI SINR 均值回填所有快照", "当前 TTI 获得未来 SINR 信息", "使用 0..s expanding mean 的透明因果基线", "任意改未来信道，snapshot0 CQI/Tx SINR 不变", "src/superran/system.py", "filtered_pmi"),
+        ("E-01", "业务", "CBR 每 TTI 直接 int(bytes)", "小数永久丢失；低速率甚至每 TTI 都为0", "每 UE 累积分数字节 carry，再 floor 入队", "0.001 Mbps ×1s 精确到达125B", "src/superran/system.py", "_cbr_carry"),
+        ("E-02", "业务", "先跳过 U slot，再生成业务到达", "DDDSU 固定漏掉20%外生到达，负载/排队被低估", "每个 D/S/U TTI 先 step traffic，再判断能否下行调度", "1 Mbps CBR 在 DDDSU 仍报告1 Mbps offered", "src/superran/system.py", "tr.step(tti)"),
+        ("E-03", "体验", "PDB 分母只含已完成 arrival object", "最差的未完成对象消失，过载越重 PDB 越好看", "已过 deadline 的未完成对象记确定 miss；未到 deadline 单列右删失", "过载窗同时出现 overdue miss 与 right-censored", "src/superran/experience.py", "overdue_incomplete"),
+        ("E-04", "体验", "用户体验分布只含有完成 burst 的 UE", "被饿死 UE 从分布消失，算法越差样本越漂亮", "有到达 UE 全进入 zero-inclusive 分布；无完成记0", "starved UE: eligible=1/measured=0/value=0", "src/superran/experience.py", "user_exp_completed_only"),
+        ("X-01", "统计", "80 行衰落观测直接当 n=80 独立样本", "同一位置重复衰落相关，伪增自由度并缩窄 CI", "先按 UE 坐标聚成40个位置均值，再做配对 t/Wilcoxon", "2位置×2衰落的测试明确得到 n=2", "src/superran/gates.py", "paired_cluster_means"),
     ]
     rows = []
     for bug_id, domain, old, harm, fix, sentinel, path, needle in bugs:
@@ -517,7 +519,7 @@ def build() -> str:
     raw_json = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,">
-<title>superwireless · 谱效与体验速率深度仿真手册</title>
+<title>superran · 谱效与体验速率深度仿真手册</title>
 <style>
 :root{{--ink:#15263c;--muted:#617083;--blue:#1f6fd1;--blue2:#eaf2fc;--green:#16865b;--red:#c8463b;--amber:#ad6b08;--line:#d7e1ed;--bg:#f4f7fb;--card:#fff;--shadow:0 10px 30px rgba(31,55,87,.08)}}
 *{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.72 "Segoe UI","Microsoft YaHei",sans-serif}}
@@ -543,7 +545,7 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 @media(max-width:900px){{.hero-metrics,.metric-row,.grid3{{grid-template-columns:repeat(2,1fr)}}.grid2{{grid-template-columns:1fr}}.decision{{grid-template-columns:1fr}}th{{position:static}}}}
 @media(max-width:560px){{main{{padding:22px 12px 55px}}.hero{{padding:34px 18px}}.hero-metrics,.metric-row,.grid3{{grid-template-columns:1fr}}}}
 </style>{kx.head_assets()}</head><body>
-<header class="hero"><div class="hero-inner"><div class="eyebrow">SUPERWIRELESS · DEEP SIMULATION AUDIT · 2026-08-09</div>
+<header class="hero"><div class="hero-inner"><div class="eyebrow">SUPERRAN · DEEP SIMULATION AUDIT · 2026-08-09</div>
 <h1>谱效评估型与体验评估型：两条完整、分离、可追溯的仿真链</h1>
 <p class="lead">这不是同一模式的两个参数。谱效算例止于 <b>EΣlog₂(1+SINR)</b>；体验算例从链路表继续进入业务、TTI、PF、RBG、TBS、BLER、OLLA 与 burst KPI。页面里的数值全部来自冻结 JSON，14 条新原理错误已修复并配反向哨兵。</p>
 <div class="hero-metrics"><div class="hero-metric"><b>{bug_count}</b><span>本轮新增原理修复</span></div><div class="hero-metric"><b>14 / 14</b><span>测试入口通过</span></div><div class="hero-metric"><b>40</b><span>谱效独立位置簇</span></div><div class="hero-metric"><b>16 × CRN</b><span>体验配对重复</span></div></div></div></header>
@@ -567,10 +569,10 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 <details><summary>门1的18项逐条结果</summary><div class="scroll"><table>{gate_items(spectrum['gate1'])}</table></div></details></section>
 
 <section><div class="section-head"><h2><span class="num">2</span>几何 SINR 拆 S/I/N，再构造空间干扰</h2></div>
-<div class="formula">{F_GEOMETRY}</div><p>代表样本以 rank-1 后波束信号功率 S={rep['operating_point']['signal_reference_power']:.6f} 为锚：I+N={rep['operating_point']['total_impairment_power']:.6f}，其中 N={rep['operating_point']['noise_power']:.6f}、I={rep['operating_point']['interference_power']:.6f}。这复原几何 SINR={rep['geometry_sinr_db']:.3f}dB、SIR={rep['geometry_sir_db']:.3f}dB。</p>
+<div class="formula">{F_GEOMETRY}</div><p>代表样本以预数字波束平均系数功率 S=E[|H|²]P={rep['operating_point']['signal_reference_power']:.6f} 为锚：I+N={rep['operating_point']['total_impairment_power']:.6f}，其中 N={rep['operating_point']['noise_power']:.6f}、I={rep['operating_point']['interference_power']:.6f}。这复原几何 SINR={rep['geometry_sinr_db']:.3f}dB、SIR={rep['geometry_sir_db']:.3f}dB；数字 BF 增益仍由 H 与预编码器贡献一次。</p>
 <div class="formula">{F_RUU}</div><p>几何 SIR 只决定总干扰功率；h_interferers 决定 Ruu 的空间/频率形状，再按几何 I 重标。代表样本 Ruu 有效秩 {rep['interference_covariance']['effective_rank']:.3f}，每接收天线平均 trace={rep['interference_covariance']['mean_trace_per_rx_antenna']:.6f}。</p>
 <div class="callout danger"><b>本轮修掉的关键错误：</b>数据没有邻区“被服务 UE”的信道，所以不能把受害 UE 交叉信道的主奇异向量当邻区发射权。现在默认邻区权与交叉信道统计独立；旧逻辑只以 <code>victim_aligned</code> 故障模式保留。</div>
-{source_excerpt('src/superwireless/linklevel.py','def interference_covariance(',before=0,after=72,title='实际实现：独立邻区波束、真实 Ruu 快照与 PSD 累加')}</section>
+{source_excerpt('src/superran/linklevel.py','def interference_covariance(',before=0,after=72,title='实际实现：独立邻区波束、真实 Ruu 快照与 PSD 累加')}</section>
 
 <section><div class="section-head"><h2><span class="num">3</span>SRS 权与 PMI 权到底怎样设计</h2></div>
 <div class="grid3"><div class="card"><h3>逐 RB SRS 协方差权</h3><div class="formula">{F_SRS_WEIGHT}</div><p>每个 RB 各算一个空间协方差和特征子空间，自由度最高；不是直接平均复信道。</p></div>
@@ -578,7 +580,7 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 <div class="card"><h3>Type-I-style PMI</h3><div class="formula">{F_PMI_WEIGHT}</div><p>64端口列码本、增量贪心、宽带共享。它是工程近似，不冒充完整38.214多层码本。</p></div></div>
 {spectrum_bars_svg(spectrum)}
 <p>代表样本中，逐 RB SRS 权输出 shape 272×64×3，宽带 SRS 与 PMI 都选 rank1；PMI 码本 index=320。所有列在 RB0 的范数均为1，层间总功率在接收计算时按 1/r 分配。</p>
-{source_excerpt('src/superwireless/linklevel.py','def _covariance_eigen_precoder(',before=0,after=58,title='实际实现：功率协方差特征权，不平均复信道')}
+{source_excerpt('src/superran/linklevel.py','def _covariance_eigen_precoder(',before=0,after=58,title='实际实现：功率协方差特征权，不平均复信道')}
 </section>
 
 <section><div class="section-head"><h2><span class="num">4</span>Rank、接收机、逐层 SINR 与谱效</h2></div>
@@ -587,8 +589,8 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 <div class="formula">{F_MMSE}</div><div class="formula">{F_SINR}</div><div class="formula">{F_SE}</div><div class="formula">{F_EQ_SINR}</div>
 <div class="scroll"><table><thead><tr><th>方法</th><th>rank</th><th>发送侧候选 SE</th><th>true SE</th><th>层速率等效 SINR</th><th>容量上界</th><th>达成率</th></tr></thead><tbody>{''.join(method_rows)}</tbody></table></div>
 <p>逐 RB SRS 的 true SE = 7.2024 + 3.0993 + 0.6784 = <b>10.9802 bit/s/Hz</b>；对应层 SINR 21.65 / 8.79 / -2.22dB。速率等效 SINR 能精确反算层 SE，线性平均 SINR 不能。</p>
-{source_excerpt('src/superwireless/linklevel.py','if rank_selection == "threshold"',before=4,after=62,title='实际实现：发送侧枚举 rank，固定权后才上 h_true')}
-{source_excerpt('src/superwireless/linklevel.py','normalized_noise',before=9,after=18,title='实际实现：有色容量白化后不重复除噪声')}
+{source_excerpt('src/superran/linklevel.py','if rank_selection == "threshold"',before=4,after=62,title='实际实现：发送侧枚举 rank，固定权后才上 h_true')}
+{source_excerpt('src/superran/linklevel.py','normalized_noise',before=9,after=18,title='实际实现：有色容量白化后不重复除噪声')}
 </section>
 
 <section><div class="section-head"><h2><span class="num">5</span>MU 配对、MCS、OLLA 和 TTI 为什么不在这里</h2></div>
@@ -600,7 +602,7 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 <div class="formula">{F_CLUSTER}</div><div class="formula">{F_CI}</div>
 <p>80 行里每个独立位置出现2次。主统计先在位置内平均，再以 n=40 做 Student-t CI 与 Wilcoxon；样本级 n=80 只留诊断。修复后均值仍是 +3.3475，但 CI 更宽、更诚实：<b>[2.4353, 4.2597]</b>，Wilcoxon p={p['wilcoxon_p']:.3g}，胜率 {pct(p['win_rate'])}，最大单位置贡献 {pct(p['max_single_contribution'])}。</p>
 <div class="grid2"><div class="card"><h3>门2 · 公平</h3><table>{gate_items(spectrum['primary']['gate2'])}</table></div><div class="card"><h3>门3 · 站得住</h3><table>{gate_items(spectrum['primary']['gate3'])}</table></div></div>
-{source_excerpt('src/superwireless/gates.py','def paired_cluster_means(',before=0,after=52,title='实际实现：重复衰落按独立位置聚类')}</section>
+{source_excerpt('src/superran/gates.py','def paired_cluster_means(',before=0,after=52,title='实际实现：重复衰落按独立位置聚类')}</section>
 </article>
 
 <article id="experience" class="panel">
@@ -618,13 +620,13 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 <p>每个 replication 的无线时间是5s；A/B 两臂各16次，合计模拟80s/臂、160s paired radio time。链路表只建一次，CRN 只改变 traffic/HARQ/tie-break 随机流。</p></section>
 
 <section><div class="section-head"><h2><span class="num">2</span>Phase A：SRS、PMI、CQI、rank 与链路表</h2></div>
-<div class="formula">{F_AGE}</div><p>SRS 年龄量化必须向上取整。2ms处理时延在5ms快照上是1个快照，不允许 round 成0。每个快照的 SVD 与 PMI 都只看同一份 stale h_prec，真实当前信道只用于评估。</p>
+<div class="formula">{F_AGE}</div><p>CSI 陈旧时长量化必须向上取整。2ms处理时延在5ms快照上是1个快照，不允许 round 成0。每个快照的 SVD 与 PMI 都只看同一份 stale h_prec，真实当前信道只用于评估。</p>
 <div class="formula">{F_CQI}</div><p>CQI 采用从0到当前 s 的 expanding mean 作为透明因果基线；它不是现场 IIR 的替代品。随后按 CQI 门限 + BF gain 得到发送侧 SINR/MCS；rank 只能按 gNB 估计 SE 选。</p>
 <div class="scroll"><table><thead><tr><th>UE</th><th>几何 SINR</th><th>IoT</th><th>平均 CSI lag</th><th>选 rank</th><th>gNB SE</th><th>true SINR</th><th>CQI</th><th>Tx SINR</th><th>Tx MCS</th></tr></thead><tbody>{''.join(rank_rows)}</tbody></table></div>
 <div class="callout warn"><b>绝对标定限制：</b>代表快照的平均 lag 是17 snapshots≈85ms，但现有每 UE 只有8×5ms=40ms历史；超出部分钳到最早快照。A/B 的 PF 因果对比共享同一链路表，因此主对比仍可解释；绝对 CSI-aging / 现场体验值不能据此定标。待决策 D6 给出修法。</div>
-{source_excerpt('src/superwireless/csi_aging.py','ratio = np.maximum(age',before=6,after=8,title='实际实现：SRS 年龄因果量化')}
-{source_excerpt('src/superwireless/system.py','w_pmi_s = _type1_precoder',before=12,after=52,title='实际实现：每快照因果 PMI 与 BF gain')}
-{source_excerpt('src/superwireless/system.py','filtered_pmi = _nan_safe',before=14,after=22,title='实际实现：因果 CQI，不回填未来均值')}</section>
+{source_excerpt('src/superran/csi_aging.py','ratio = np.maximum(staleness',before=6,after=8,title='实际实现：CSI 陈旧时长因果量化')}
+{source_excerpt('src/superran/system.py','w_pmi_s = _type1_precoder',before=12,after=52,title='实际实现：每快照因果 PMI 与 BF gain')}
+{source_excerpt('src/superran/system.py','filtered_pmi = _nan_safe',before=14,after=22,title='实际实现：因果 CQI，不回填未来均值')}</section>
 
 <section><div class="section-head"><h2><span class="num">3</span>Phase B：每个 TTI 的业务、PF、RBG 与 TBS</h2></div>
 <p><b>先到达，再看 slot。</b>业务时钟不因 U slot 停止；DDDSU 中 U slot 只是不做下行调度。候选 UE 用全带 potential TBS 计算 PF metric：</p><div class="formula">{F_PF}</div>
@@ -632,8 +634,8 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 <p>当前 α=β=1、γ=0、w=1，严格退化经典 PF；现场 EPF 定义仍需拍板。</p>
 <div class="formula">{F_TBS_INFO}</div><div class="formula">{F_NSTAR}</div>
 <p>TBS 表 shape 2×28×4×17，共 {exp['trace']['tbs_lookup']['entries']} 个 byte 值；D 与 S 两类 slot 分开。表对 RBG 数严格单调，所以 <code>searchsorted(side='left')</code> 精确找第一个够用的 n。不能用 TBS(17)/17 做线性除法，因为38.214量化会让1%误差少给一个RBG。</p>
-{source_excerpt('src/superwireless/experience.py','class TbsLookup:',before=0,after=98,title='实际实现：D/S × MCS × rank × RBG TBS 表与 searchsorted 反查')}
-{source_excerpt('src/superwireless/experience.py','n_need, _fits = lookup.required_rbg',before=16,after=74,title='实际实现：PF 排序后逐 UE 按需分 RBG')}</section>
+{source_excerpt('src/superran/experience.py','class TbsLookup:',before=0,after=98,title='实际实现：D/S × MCS × rank × RBG TBS 表与 searchsorted 反查')}
+{source_excerpt('src/superran/experience.py','n_need, _fits = lookup.required_rbg',before=16,after=74,title='实际实现：PF 排序后逐 UE 按需分 RBG')}</section>
 
 <section><div class="section-head"><h2><span class="num">4</span>BLER、ACK/NACK、OLLA 与 PF 平均值</h2></div>
 <p>实际 true SINR 查 BLER 曲线；固定的 <code>[replication, TTI, UE]</code> 均匀随机数决定 ACK。NACK 不扣 payload，字节留队，下一次按 NewTx 重试；本轮没有 HARQ soft combining。</p>
@@ -647,8 +649,8 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 <div class="formula">{F_REL19}</div><p>3GPP TS 28.552 的 DRB.UEThpDl 明确面向跨多个 slot 的大数据 burst，并排除清空 buffer 的最后一段。单次首传小包会得到 ThpTimeDl=0，不能硬算同一个吞吐 KPI；本项目对 small 单列 queue-wait、completion-delay、PDB miss。</p>
 <div class="formula">{F_PDB}</div><p>仿真结束时，已过 deadline 但未完成的是确定 miss；尚未到 deadline 才是右删失。已到达但没有完成 burst 的 UE 以0留在用户体验分布，另保留 completed-only 诊断。</p>
 <div class="formula">{F_CONSERVE}</div><p>代表正确臂：arrived {exp['trace']['byte_conservation']['arrived']:,}B = ACK {exp['trace']['byte_conservation']['acked']:,}B + queued {exp['trace']['byte_conservation']['queued']:,}B，误差 {exp['trace']['byte_conservation']['error_pct']:.1f}%。</p>
-{source_excerpt('src/superwireless/experience.py','overdue_incomplete = [',before=12,after=44,title='实际实现：PDB 确定 miss 与右删失')}
-{source_excerpt('src/superwireless/experience.py','user_exp = [float',before=8,after=21,title='实际实现：饿死 UE 不从分布消失')}</section>
+{source_excerpt('src/superran/experience.py','overdue_incomplete = [',before=12,after=44,title='实际实现：PDB 确定 miss 与右删失')}
+{source_excerpt('src/superran/experience.py','user_exp = [float',before=8,after=21,title='实际实现：饿死 UE 不从分布消失')}</section>
 
 <section><div class="section-head"><h2><span class="num">6</span>16 次 CRN 配对结果：主结论与支持性结论分开</h2></div>{experience_slope_svg(exp)}
 <div class="scroll"><table><thead><tr><th>身份</th><th>KPI</th><th>A correct</th><th>B fault</th><th>A-B</th><th>95% CI</th><th>Wilcoxon p</th><th>判定</th></tr></thead><tbody>{''.join(kpi_html)}</tbody></table></div>
@@ -674,7 +676,7 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 <div class="scroll"><table><thead><tr><th>阶段</th><th>实现内容</th><th>必须产物</th><th>验收</th></tr></thead><tbody>
 <tr><td>P0 · correctness</td><td>本轮14项修复、PF反向臂、位置聚类</td><td>代码 + tests + deep JSON + 本HTML</td><td>14入口全绿；门1/2/3；字节/RBG守恒</td></tr>
 <tr><td>P1 · 产品口径</td><td>EPF、PF credit、tail fill、HARQ retry、burst/PDB定义</td><td>一页参数合同 + preset</td><td>每个参数有默认值、来源、替代臂</td></tr>
-<tr><td>P2 · 数据可信</td><td>≥40 snapshots/UE；neighbor served-channel/W；负载trace</td><td>新 dataset + manifest + Gate1</td><td>历史覆盖SRS最大年龄；无周期伪回放</td></tr>
+<tr><td>P2 · 数据可信</td><td>≥40 snapshots/UE；neighbor served-channel/W；负载trace</td><td>新 dataset + manifest + Gate1</td><td>历史覆盖 CSI 最大陈旧时长；无周期伪回放</td></tr>
 <tr><td>P3 · 现场标定</td><td>DMRS/PTRS/CORESET RE；公司BLER；HARQ RTT/RV/process</td><td>版本化 link profile</td><td>TBS/BLER/OLLA锚点逐项对账</td></tr>
 <tr><td>P4 · 能力扩展</td><td>逐RBG SINR、频选调度、MU pairing/ZF/RZF</td><td>独立实验计划和基线</td><td>不得与P1/P2同时改；增益可归因</td></tr>
 </tbody></table></div>

@@ -1,8 +1,8 @@
 """打一个离线安装包，给不能联网的机器用。
 
-产出 ``dist/superwireless-offline-<包型>-<平台>-<pyver>.zip``，里面有：
+产出 ``dist/superran-offline-<包型>-<平台>-<pyver>.zip``，里面有：
 
-* superwireless 全部源码、skill、测试、文档
+* superran 全部源码、skill、测试、文档
 * ``wheels/`` —— 依赖的 wheel 文件，装的时候 ``pip install --no-index --find-links wheels``
 * ``INSTALL_AGENT.md`` —— 写给 AI agent 看的安装说明，用户把它丢给自己的 agent 就行
 * ``开始安装.txt`` —— 给人看的一句话说明
@@ -62,7 +62,7 @@ SCIENCE_DEPS = ["numpy>=1.24", "scipy>=1.10"]
 # 完全看不出缺的是 setuptools。
 BUILD_DEPS = ["setuptools>=68", "wheel"]
 
-READ_ME_FIRST = """superwireless 离线安装包
+READ_ME_FIRST = """superran 离线安装包
 ========================
 
 {KIND_NOTE}
@@ -70,7 +70,7 @@ READ_ME_FIRST = """superwireless 离线安装包
 不用自己照着敲命令。把下面这句话发给你的 AI coding agent
 （Claude Code / Codex / 任何能读文件+跑命令的 agent），它会自己装完并验证：
 
-    这个目录里是 superwireless 离线安装包，读 INSTALL_AGENT.md 按里面的步骤
+    这个目录里是 superran 离线安装包，读 INSTALL_AGENT.md 按里面的步骤
     装好并验证，装完告诉我能不能用。
 
 --------------------------------------------------------------------
@@ -84,7 +84,7 @@ READ_ME_FIRST = """superwireless 离线安装包
    你需要自己拿到一份，判据是目录下存在：
        src/msg_embedding/data/contract.py
    放在本目录的兄弟目录下（叫 ChannelHub_main）会被自动发现；
-   放别处就设环境变量 SUPERWIRELESS_CHANNELHUB 指过去。
+   放别处就设环境变量 SUPERRAN_CHANNELHUB 指过去。
 
 --------------------------------------------------------------------
 包里有什么
@@ -104,7 +104,7 @@ READ_ME_FIRST = """superwireless 离线安装包
 --------------------------------------------------------------------
 
   <你的python> -m pip install --no-index --find-links wheels -e .
-  <你的agent CLI> mcp add superwireless -- <python绝对路径> <本目录绝对路径>/scripts/mcp_server.py
+  <你的agent CLI> mcp add superran -- <python绝对路径> <本目录绝对路径>/scripts/mcp_server.py
   cp -r skills/channel-sim ~/.claude/skills/
 
 验证： <你的python> tests/test_e2e.py
@@ -164,7 +164,7 @@ def _build_manifest(stage: Path, kind: str, plat: str, py: str, args: Any) -> di
             [] if kind == "full" else ["numpy", "scipy"] if kind == "thin"
             else ["numpy", "scipy", "mcp", "pydantic", "pyyaml", "structlog", "setuptools"]
         ),
-        "superwireless_commit": _git_commit(REPO),
+        "superran_commit": _git_commit(REPO),
         "build_time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "built_with_python": sys.version.split()[0],
         "target_platform": plat,
@@ -232,7 +232,7 @@ def download_wheels(dest: Path, thin: bool, platform: str | None,
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="打 superwireless 离线安装包")
+    ap = argparse.ArgumentParser(description="打 superran 离线安装包")
     ap.add_argument("--thin", action="store_true",
                     help="轻量包（约 16 MB）：不含 numpy/scipy。**要求目标机器已有科学计算栈**，"
                          "全新 venv 里装不上。默认打完整包")
@@ -252,7 +252,7 @@ def main() -> None:
     # 然后在目标机上撞一个看不懂的构建错误。
     kind = "nodeps" if args.no_wheels else ("thin" if args.thin else "full")
     out = Path(args.out) if args.out else (
-        REPO / "dist" / f"superwireless-offline-{kind}-{tag_plat}-py{tag_py}.zip"
+        REPO / "dist" / f"superran-offline-{kind}-{tag_plat}-py{tag_py}.zip"
     )
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -261,7 +261,7 @@ def main() -> None:
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
 
-    print(f"打包 superwireless → {out.name}")
+    print(f"打包 superran → {out.name}")
 
     # 1. 依赖
     warnings: list[str] = []

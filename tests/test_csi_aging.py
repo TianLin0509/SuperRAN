@@ -3,7 +3,7 @@
 分节：
 1. 零时延恒等式——**这是本模块的地基**
 2. 38.211 跳频序列
-3. 年龄与滞后的量化
+ 3. CSI 陈旧时长与滞后的量化
 4. 老化的物理方向（越老越差、跳频比不跳频差、MU 比 SU 掉得多）
 5. 基站视角与真实视角必须分开
 6. 配置校验与告警
@@ -14,14 +14,14 @@ import os
 import sys
 from pathlib import Path
 
-os.environ.setdefault("SUPERWIRELESS_NO_BROWSER", "1")
+os.environ.setdefault("SUPERRAN_NO_BROWSER", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np  # noqa: E402
 
-from superwireless import csi_aging as ca  # noqa: E402
-from superwireless import mumimo as mu  # noqa: E402
-from superwireless import system as sy  # noqa: E402
+from superran import csi_aging as ca  # noqa: E402
+from superran import mumimo as mu  # noqa: E402
+from superran import system as sy  # noqa: E402
 
 _n_pass = 0
 _n_fail = 0
@@ -106,33 +106,40 @@ section("2  38.211 跳频序列")
 # ---------------------------------------------------------------------------
 order, source = ca.hop_order(17, rb_per_rbg=16, hop_factor=17)
 check(source.startswith("channelhub:"), f"跳频序列来自 ChannelHub 的标准实现（{source}）")
-check(len(order) == 17, f"cycle = 17（C_SRS=57 / B_SRS=1 的 N1）实测 {len(order)}")
+check(len(order) == 17, f"cycle = 17（C_SRS=63 / B_SRS=1 的 N1）实测 {len(order)}")
 check(sorted(order.tolist()) == list(range(17)), "17 跳恰好覆盖 17 个 RBG，不重不漏")
-check(order.tolist() == list(range(17)), f"扫描顺序是 RBG 0→16，实测 {order.tolist()[:5]}…")
+expected_order = [0, 8, 16, 7, 15, 6, 14, 5, 13, 4, 12, 3, 11, 2, 10, 1, 9]
+check(order.tolist() == expected_order,
+      f"奇数 N1=17 按 floor(N1/2)=8 镜像跳频，实测 {order.tolist()}")
 
 # ---------------------------------------------------------------------------
-section("3  年龄与滞后的量化")
+section("3  CSI 陈旧时长与滞后的量化")
 # ---------------------------------------------------------------------------
 cfg = ca.CsiConfig(srs_period_ms=10.0, hopping=True, processing_delay_ms=0.0)
 check(abs(cfg.full_sweep_ms - 170.0) < 1e-9, f"10 ms × 17 跳 = 170 ms 扫完全带（{cfg.full_sweep_ms}）")
-ages = ca.rbg_age_ms(cfg, 17, 0.0)
-check(len(set(np.round(ages, 6))) == 17, "各 RBG 年龄互不相同（跳频的直接后果）")
-check(abs(max(ages) - 160.0) < 1e-9, f"最老的 RBG 年龄 160 ms（16 × 10），实测 {max(ages)}")
-check(abs(min(ages)) < 1e-9, f"最新的 RBG 年龄 0 ms，实测 {min(ages)}")
+ages = ca.rbg_csi_staleness_ms(cfg, 17, 0.0)
+check(len(set(np.round(ages, 6))) == 17, "各 RBG 的 CSI 陈旧时长互不相同")
+check(abs(max(ages) - 160.0) < 1e-9,
+      f"最陈旧 RBG 为 160 ms（16 × 10），实测 {max(ages)}")
+check(abs(min(ages)) < 1e-9, f"最新 RBG 为 0 ms，实测 {min(ages)}")
 
 # 年龄随时间轮转——不能有"某几个 RBG 永远最差"
-a0 = ca.rbg_age_ms(cfg, 17, 0.0)
-a1 = ca.rbg_age_ms(cfg, 17, 10.0)
+a0 = ca.rbg_csi_staleness_ms(cfg, 17, 0.0)
+a1 = ca.rbg_csi_staleness_ms(cfg, 17, 10.0)
 check(int(np.argmax(a0)) != int(np.argmax(a1)), "最老的那个 RBG 随时间轮转，不是固定几个")
 
 nohop = ca.CsiConfig(srs_period_ms=10.0, hopping=False, processing_delay_ms=0.0)
-check(len(set(np.round(ca.rbg_age_ms(nohop, 17, 3.0), 6))) == 1,
-      "不跳频时全带年龄相同")
+check(len(set(np.round(ca.rbg_csi_staleness_ms(nohop, 17, 3.0), 6))) == 1,
+      "不跳频时全带 CSI 陈旧时长相同")
 check(abs(nohop.full_sweep_ms - 10.0) < 1e-9, "不跳频时一个周期就扫完全带")
 
 lags = ca.rbg_lag_snapshots(cfg, 17, snapshot_ms=5.0, snapshot_index=0)
-check(lags.tolist() == [(0 - k) % 17 * 2 for k in range(17)],
-      "10 ms 年龄 / 5 ms 快照 = 2 个快照，逐 RBG 对得上")
+_hop_order, _ = ca.hop_order(17)
+_expected_lags = np.empty(17, dtype=int)
+for _j, _rbg in enumerate(_hop_order):
+    _expected_lags[int(_rbg)] = ((-_j) % 17) * 2
+check(lags.tolist() == _expected_lags.tolist(),
+      "10 ms 陈旧时长 / 5 ms 快照 = 2 个快照，逐 RBG 对得上")
 check((lags >= 0).all(), "滞后非负")
 
 # 离散快照必须选“不新于真实测量”的那一个：2 ms/5 ms 不能四舍五入成当前信道。
@@ -143,7 +150,23 @@ lag_7ms = ca.rbg_lag_snapshots(
     ca.CsiConfig(srs_period_ms=5.0, hopping=False, processing_delay_ms=7.0),
     1, snapshot_ms=5.0, snapshot_index=0)
 check(lag_2ms.tolist() == [1] and lag_7ms.tolist() == [2],
-      "CSI 年龄向上量化守因果：2 ms→1 快照，7 ms→2 快照")
+      "CSI 陈旧时长向上量化守因果：2 ms→1 快照，7 ms→2 快照")
+
+# 处理时延必须改变“哪一次 SRS 已经可用”，不能只在选完本次机会后机械加时延。
+# t=10 ms 恰好是新机会；processing=2 ms 时它尚未处理完，只能用 t=0 ms 的
+# 上一次测量。到 t=15 ms 时新测量已可用，陈旧时长才降到 5 ms。
+_boundary_cfg = ca.CsiConfig(
+    srs_period_ms=10.0, hopping=False, processing_delay_ms=2.0)
+_at_boundary = ca.rbg_csi_staleness_ms(_boundary_cfg, 1, 10.0)
+_after_processing = ca.rbg_csi_staleness_ms(_boundary_cfg, 1, 15.0)
+check(_at_boundary.tolist() == [10.0] and _after_processing.tolist() == [5.0],
+      "SRS 周期边界守因果：未处理完用上次测量，处理完成后才切到本次测量")
+
+_hop_boundary = ca.rbg_csi_staleness_ms(
+    ca.CsiConfig(srs_period_ms=10.0, hopping=True, processing_delay_ms=2.0),
+    17, 10.0)
+check(int(np.argmin(_hop_boundary)) == 0 and float(np.min(_hop_boundary)) == 10.0,
+      "跳频边界不提前切换 RBG phase（t=10 ms 时 phase-1 SRS 尚不可用）")
 
 off = ca.CsiConfig(enabled=False)
 check(ca.rbg_lag_snapshots(off, 17, snapshot_ms=5.0, snapshot_index=3).max() == 0,
@@ -176,7 +199,7 @@ se_hop = _se(ca.CsiConfig(srs_period_ms=10.0, hopping=True))
 se_slow = _se(ca.CsiConfig(srs_period_ms=40.0, hopping=True))
 print(f"  完美 {se_perfect:.3f} / 不跳频 {se_nohop:.3f} / 17跳 {se_hop:.3f} / 40ms {se_slow:.3f}")
 check(se_perfect > se_nohop, "有时延必然差于零时延")
-check(se_nohop > se_hop, "跳频（年龄跨度 0~160 ms）比不跳频差")
+check(se_nohop > se_hop, "跳频（CSI 陈旧时长跨度 0~160 ms）比不跳频差")
 check(se_hop >= se_slow - 1e-6, "SRS 周期越长越差")
 check(se_perfect > se_hop * 1.1, f"17 跳的损失是量级可见的（{(1 - se_hop / se_perfect) * 100:.0f}%）")
 
@@ -187,7 +210,29 @@ tb_b = sy.build_link_tables(hs, geo, num_snapshots=8,
 check(all(np.array_equal(a.best_se, b.best_se) for a, b in zip(tb_a, tb_b, strict=True)),
       "enabled=False 与不传 csi 逐位相同")
 
-# MU 受老化的打击必须重于 SU：ZF 零陷是按陈旧信道打的
+# 评估信道和基站可见估计信道必须是两条独立数据流。真实数据同时提供 h_true/h_est；
+# 若 h_est 没进这个入口，所谓 SRS/CSI 失配其实只是在延迟真信道上做预编码。
+_h_true = _seq(np.random.default_rng(111), 2, 0.8, n_rb=8, bs=4, ue=2)
+_h_est = _h_true.copy()
+_h_est[:, :, [0, 1]] = _h_est[:, :, [1, 0]]
+_tb_est = sy.build_link_tables(
+    [_h_true], [10.0], h_for_precoding_users=[_h_est], rb_per_rbg=1)
+check(np.array_equal(_tb_est[0].h_true_rbg, _h_true),
+      "h_true 只进入真实接收评估缓存")
+check(np.array_equal(_tb_est[0].h_prec_rbg, _h_est),
+      "显式 h_est 进入预编码缓存，不被 h_true 偷换")
+check(_tb_est[0].precoding_csi_source == "explicit_estimate",
+      "链路表显式标记预编码 CSI 来自估计信道")
+try:
+    sy.build_link_tables([_h_true], [10.0], h_for_precoding_users=[])
+except ValueError:
+    _bad_prec_len_rejected = True
+else:
+    _bad_prec_len_rejected = False
+check(_bad_prec_len_rejected, "h_true/h_est 样本数不一致时硬报错")
+
+# 老化必须降低 MU 的绝对可用谱效；LMMSE 也会让 SU/MU 对老化的相对敏感度
+# 随 realization 改变，因此不能把“MU/SU 比值一定下降”当成物理定律。
 g_perfect = sy.measure_mu_gain(hs, geo, max_mu_users=4, max_snapshots=4, csi=None)
 g_hop = sy.measure_mu_gain(hs, geo, max_mu_users=4, max_snapshots=4,
                            csi=ca.CsiConfig(srs_period_ms=10.0, hopping=True),
@@ -197,10 +242,11 @@ g_nohop = sy.measure_mu_gain(hs, geo, max_mu_users=4, max_snapshots=4,
                              snapshot_ms=5.0)
 print(f"  MU/SU 比值：完美 {g_perfect['ratio']:.3f} / 不跳频 {g_nohop['ratio']:.3f}"
       f" / 17跳 {g_hop['ratio']:.3f}")
-check(g_hop["ratio"] < g_perfect["ratio"],
-      f"老化后 MU/SU 比值下降（ZF 零陷落空），"
-      f"掉 {(1 - g_hop['ratio'] / g_perfect['ratio']) * 100:.0f}%")
-check(g_hop["ratio"] < g_nohop["ratio"], "跳频比不跳频掉得更多")
+check(g_hop["mu_se_median"] < g_perfect["mu_se_median"],
+      f"老化后 MU 绝对谱效下降（{g_perfect['mu_se_median']:.3f} → "
+      f"{g_hop['mu_se_median']:.3f}）")
+check(g_hop["mu_se_median"] < g_nohop["mu_se_median"],
+      "跳频比不跳频的 MU 绝对谱效更低")
 check(g_aged_flag := (g_hop.get("csi_aging") is True),
       "MU 增益结果里标注了用的是陈旧 CSI")
 
@@ -210,8 +256,8 @@ g_slow = sy.measure_mu_gain(hs_slow, geo, max_mu_users=4, max_snapshots=4,
                             csi=ca.CsiConfig(srs_period_ms=10.0, hopping=True),
                             snapshot_ms=5.0)
 g_slow0 = sy.measure_mu_gain(hs_slow, geo, max_mu_users=4, max_snapshots=4, csi=None)
-loss_fast = 1 - g_hop["ratio"] / g_perfect["ratio"]
-loss_slow = 1 - g_slow["ratio"] / g_slow0["ratio"]
+loss_fast = 1 - g_hop["mu_se_median"] / g_perfect["mu_se_median"]
+loss_slow = 1 - g_slow["mu_se_median"] / g_slow0["mu_se_median"]
 print(f"  老化损失：快变信道 {loss_fast * 100:.0f}%，慢变信道 {loss_slow * 100:.0f}%")
 check(loss_slow < loss_fast / 2,
       "慢变信道的老化损失显著小于快变（证明损失确实来自时变而非别处）")
@@ -248,12 +294,67 @@ for bad in (7.0, 0.0, 100.0):
     except ValueError:
         check(True, f"srs_period_ms={bad} 被拒（只允许 5/10/20/40）")
 
+for _kwargs, _label in (
+    ({"processing_delay_ms": float("nan")}, "NaN processing delay"),
+    ({"processing_delay_ms": float("inf")}, "Inf processing delay"),
+    ({"hop_factor": 1.5}, "非整数 hop factor"),
+    ({"hop_factor": True}, "bool hop factor"),
+):
+    try:
+        ca.CsiConfig(**_kwargs)
+        check(False, f"{_label} 应当被拒")
+    except ValueError:
+        check(True, f"{_label} 被拒，不把非法配置带进 CSI 时延链")
+
+for _call, _label in (
+    (lambda: ca.hop_order(0), "零 RBG"),
+    (lambda: ca.rbg_lag_snapshots(ca.CsiConfig(), 17, snapshot_ms=0.0,
+                                  snapshot_index=0), "零 snapshot interval"),
+    (lambda: ca.rbg_lag_snapshots(ca.CsiConfig(), 17, snapshot_ms=5.0,
+                                  snapshot_index=-1), "负 snapshot index"),
+):
+    try:
+        _call()
+        check(False, f"{_label} 应当被拒")
+    except ValueError:
+        check(True, f"{_label} 被拒，不进入 fallback/量化路径")
+
 summ = ca.aging_summary(ca.CsiConfig(srs_period_ms=10.0, hopping=True),
                         num_rbg=17, snapshot_ms=5.0, speed_kmh=30.0)
 check(summ["hop_order_source"].startswith("channelhub:"), "摘要里标注了跳频序列来源")
 check(summ["coherence_time_ms"] is not None and summ["coherence_time_ms"] < 10,
       f"30 km/h 相干时间 {summ['coherence_time_ms']} ms（应当 < 10）")
-check(len(summ["warnings"]) > 0, "平均年龄远大于相干时间时给出告警")
+check(len(summ["warnings"]) > 0, "平均 CSI 陈旧时长远大于相干时间时给出告警")
+check("mean_csi_staleness_ms" in summ and "mean_age_ms" not in summ,
+      "结果字段使用 CSI 陈旧时长，不再把 SRS 周期误称为 SRS 年龄")
+
+# 5 ms 是 trace 快照间隔，不是 PMI 固定周期。默认 20 ms 时 PMI/CQI 每 4 个
+# 快照更新一次；显式 5 ms 才会逐快照更新。
+check(np.array_equal(tb[0].csi_report_source_snapshot,
+                     np.array([0, 0, 0, 0, 4, 4, 4, 4])),
+      "默认 20 ms CSI report 在 5 ms trace 上持有 4 个快照")
+check(np.all(tb[0].cqi_index_per_snapshot[:4]
+             == tb[0].cqi_index_per_snapshot[0]),
+      "CQI 在两次 report 之间真正保持，不只是改输出标签")
+tb_fast_report = sy.build_link_tables(
+    hs, geo, num_snapshots=8, snapshot_ms=5.0,
+    csi=ca.CsiConfig(srs_period_ms=10.0, hopping=True,
+                     csi_report_period_ms=5.0))
+check(np.array_equal(tb_fast_report[0].csi_report_source_snapshot, np.arange(8)),
+      "显式 5 ms CSI report 才逐快照更新 PMI/CQI")
+check(ca.CsiConfig().as_dict()["csi_report_period_ms"] == 20.0,
+      "PMI/CQI 工程默认 20 ms，并与 SRS 周期、trace 间隔分开")
+_csi_dict = ca.CsiConfig().as_dict()
+check(_csi_dict["csi_report_feedback_latency_ms"] == 0.0
+      and "expanding mean" in _csi_dict["cqi_filter"],
+      "CSI report 的零额外反馈时延与因果 expanding-mean 近似显式上报")
+
+# 周期 trace 历史只有显式开启才可用；它代表预启动前上一轮 trace，冷启动仍钳零。
+_trace = [np.full((1, 1, 1), x, dtype=float) for x in (10, 20, 30)]
+_cold = ca.stale_channel(_trace, 0, np.array([1]), periodic_history=False)
+_steady = ca.stale_channel(_trace, 0, np.array([1]), periodic_history=True)
+check(float(_cold[0, 0, 0]) == 10.0 and float(_steady[0, 0, 0]) == 30.0,
+      "冷启动钳最早快照；预启动周期重放显式使用上一轮因果历史")
 
 # 5 ms 周期 + 不跳频 + 5 ms 快照 → 滞后全部量化成 0，模型失效必须警告
 degenerate = ca.aging_summary(
@@ -282,6 +383,8 @@ for _sd in (0.04, 0.09, 0.19):
     check(abs(sy.olla_step_down_for(_p, 0.01) - _sd) < 1e-9, f"s_down={_sd} 往返自洽")
 check(abs(sy.SchedulerConfig().as_dict()["olla_target_bler"] - 0.1) < 1e-9,
       "默认步长 +0.01/-0.09 给出稳态 IBLER 10.0%（-0.1 只有 9.09%）")
+check(abs(sy.SchedulerConfig().as_dict()["mu_olla_target_bler"] - 0.1) < 1e-9,
+      "MU 独立 OLLA 的默认稳态 IBLER 目标也显式上报为 10.0%")
 # 等比放大不改变稳态——这是 olla_speedup 的全部依据
 _a = sy.SchedulerConfig(olla_speedup=1.0).as_dict()["olla_target_bler"]
 _b = sy.SchedulerConfig(olla_speedup=25.0).as_dict()["olla_target_bler"]

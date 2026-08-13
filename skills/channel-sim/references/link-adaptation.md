@@ -12,9 +12,9 @@
 | "换 mcs_table=2 就一定更快" | 只有确实压在表顶时才有效。实测 29 dB 场景 1373 → 1690 Mbps，低信噪比处无差别 |
 | "BLER 是 3GPP 实测的" | 表 1/2 是有限码长分析模型，表 3 是用户提供的曲线，两者都不是标准曲线 |
 
-## 香农谱效不是吞吐 —— `sw_throughput`
+## 香农谱效不是吞吐 —— `sr_throughput`
 
-`sw_link_performance` / `ds.link()` 给的是所选预编码与接收机下的
+`sr_link_performance` / `ds.link()` 给的是所选预编码与接收机下的
 `SE = Σ log2(1+SINR)`，即**高斯码本谱效，不是 MIMO 容量上界**；返回里的
 `capacity_bound` 才是同一噪声/干扰口径下逐时频最优注水容量。真实 MCS/TBS
 吞吐还会低于高斯码本谱效，原因有三条，都是可量化的：
@@ -23,7 +23,7 @@
 2. **码率离散** —— MCS 只有 29 档，实际码率总落在需要的码率之下
 3. **有限码长 + 实现损失** —— LDPC 距容量 1~2 dB，码块越多 TB 越易错
 
-`sw_throughput` 走业界做系统级仿真的标准路径（链路到系统映射：
+`sr_throughput` 走业界做系统级仿真的标准路径（链路到系统映射：
 有效 SINR → MCS/CQI → TBS → BLER → 吞吐），给出 **Mbps** 和
 **5% 边缘用户吞吐**（3GPP 评估里的公平性指标，比均值更能说明问题）。
 
@@ -31,25 +31,27 @@
 那说明限制来自 MCS 表而不是信道或算法，换 `mcs_table=2`（含 256QAM）
 通常直接提升 20% 以上。实测 29 dB 的场景：表 1 均值 1373 Mbps，表 2 1690 Mbps。
 
-`sw_sweep_snr` 出**谱效/吞吐 vs SNR 曲线**，无线论文里最标准的那张图。
+`sr_sweep_snr` 出**谱效/吞吐 vs SNR 曲线**，无线论文里最标准的那张图。
 各点跑在同一批信道上、彼此配对，曲线不含信道抽样噪声。
 达成率的走势最有信息量：低信噪比处 70~77%（受噪声限），
 高信噪比处掉到 40% 以下（受 MCS 表封顶限）。
 
 **工作点边界**：显式传 `snr_db=20` 表示合成的预波束 SNR，用来画受控曲线；
-不传时才使用数据集逐样本几何 SINR。后者已经包含服务波束阵列增益，必须锚到
-rank-1 后波束 `E[σ₁²]` 反推总损伤，不能用 `mean(|h|²)` 反推后再叠 SVD，
-否则阵列增益会重复计算。若同时有自洽的 SIR 和干扰信道，才把总损伤拆成噪声
+不传时才使用数据集逐样本几何 SINR。first-party 后端把它定义在**预数字波束、
+每 RB**参考面：阵元方向图与固定子阵增益已进大尺度预算，数字多端口 BF 增益
+仍在 H 中。因此用 `E[|H|²]` 反推总损伤，再由预编码器把数字 BF 增益贡献一次；
+不能用 rank-1 后波束 `E[σ₁²]` 当默认锚点，否则会把真实 BF 增益抵消。
+若同时有自洽的 SIR 和干扰信道，才把总损伤拆成噪声
 与经几何功率重标定的空间协方差；条件不齐时把 I+N 全部当白损伤，不重复加干扰。
 
 ## 评价链路：谁出数、谁判决
 
-- **`sw_link_performance` 出数** —— 一次调用在同一批信道上横评多个方案（默认
+- **`sr_link_performance` 出数** —— 一次调用在同一批信道上横评多个方案（默认
   svd / svd_wideband / type1 / dft，自研方案加进 `methods`），返回谱效均值、
   95% 置信区间与收敛判断。**只出数不过门**：均值差再好看，也不许直接写成结论。
   `use_estimated_csi: true` 是 CSI 反馈课题的核心对比——估计信道算预编码、
   理想信道评性能，量的是 CSI 误差的真实代价。
-- **`sw_compare_arms` 判决** —— 横评筛出的决赛组合两两过它。
+- **`sr_compare_arms` 判决** —— 横评筛出的决赛组合两两过它。
 
 ## MCS 表与 BLER 的口径边界
 
@@ -59,10 +61,10 @@ rank-1 后波束 `E[σ₁²]` 反推总损伤，不能用 `mean(|h|²)` 反推�
 源标签 Es/No 就是经典 MMSE 接收机的 SINR；其他链路维度暂不参数化，
 曲线范围外只能保守钳位，不能外推。
 
-- `sw_mcs_info(table=1/2, show_bler_anchors=true)` —— 看分析模型门限
-- `sw_mcs_info(table=3, show_bler_anchors=true)` —— 看用户曲线两套门限与哈希自检
-- `sw_bler_curve(mcs=..., tx_mode="newtx"/"retx")` —— 取单档原始曲线或插值
-- `sw_tdd_mcs(dataset_id=..., cqi=..., olla_mcs_offset=...)` —— TDD 最终 MCS 与逐流审计链
+- `sr_mcs_info(table=1/2, show_bler_anchors=true)` —— 看分析模型门限
+- `sr_mcs_info(table=3, show_bler_anchors=true)` —— 看用户曲线两套门限与哈希自检
+- `sr_bler_curve(mcs=..., tx_mode="newtx"/"retx")` —— 取单档原始曲线或插值
+- `sr_tdd_mcs(dataset_id=..., cqi=..., olla_mcs_offset=...)` —— TDD 最终 MCS 与逐流审计链
 
 表 3 的 HARQ 首传用 NewTx、后续用 ReTx；只有一条 ReTx 曲线，因此多次重传会
 复用它并显式标成假设（`harq_model=newtx_then_retx_curve_reused`）。
@@ -71,7 +73,7 @@ rank-1 后波束 `E[σ₁²]` 反推总损伤，不能用 `mean(|h|²)` 反推�
 
 ## TDD 的 CQI、BF Gain 与 OLLA
 
-用户要求 TDD MCS 或提到 CQI/BF Gain/OLLA 时，调用 `sw_tdd_mcs`，**不要在对话里
+用户要求 TDD MCS 或提到 CQI/BF Gain/OLLA 时，调用 `sr_tdd_mcs`，**不要在对话里
 手算**。固定顺序是：`CQI → 按谱效映射初始 MCS → 该 MCS 的 NewTx 目标 BLER
 SINR 门限 → + BF Gain → 重映射 MCS → + OLLA → floor → 钳位 0..27`。
 

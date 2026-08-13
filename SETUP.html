@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>superwireless 组成与安装 — 由哪几块拼成、别人怎么装</title>
+<title>superran 组成与安装 — 由哪几块拼成、别人怎么装</title>
 <style>
   :root{
     --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
@@ -132,9 +132,9 @@
 <body>
 <div class="wrap">
 
-<h1>superwireless 组成与安装</h1>
+<h1>superran 组成与安装</h1>
 <p class="tagline">由哪几块拼成 · 别人怎么装 · 装完先干什么</p>
-<p class="meta">v0.1.0 · 2026-07-30 · 测试 195 项全通过 · github.com/TianLin0509/superwireless</p>
+<p class="meta">v0.1.0 · 2026-07-30 · 测试 195 项全通过 · github.com/TianLin0509/superran</p>
 
 <div class="toc">
 <strong>目录</strong>
@@ -170,26 +170,26 @@
 </div>
 <div class="down">▲</div>
 <div class="layer">
-<h4>superwireless MCP 服务 <span class="tag t-install">要装</span></h4>
+<h4>superran MCP 服务 <span class="tag t-install">要装</span></h4>
 <p>30 个工具，stdio 传输。管<strong>能力</strong>：生成信道、出观察量、跑校准、过门、算样本数。
 <strong>自包含</strong>——每个工具的文档字符串里写清了口径与陷阱，不依赖 skill 也能被正确调用。</p>
 </div>
 <div class="down">▲</div>
 <div class="layer">
-<h4>superwireless Python 包 <span class="tag t-auto">跟 MCP 一起装</span></h4>
+<h4>superran Python 包 <span class="tag t-auto">跟 MCP 一起装</span></h4>
 <p>17 个模块、约 6700 行。信道生成、测量量、谱效链路、38.901 校准、三道门。
 也可以<strong>绕过 MCP 直接 import 当库用</strong>。</p>
 </div>
 <div class="down">▲</div>
 <div class="layer ext">
 <h4>ChannelHub 物理内核 <span class="tag t-ext">外部依赖，要单独 clone</span></h4>
-<p>3GPP 38.901 的信道生成实现。superwireless <strong>只当它是普通 Python 库</strong>，
+<p>3GPP 38.901 的信道生成实现。superran <strong>只当它是普通 Python 库</strong>，
 不用它的后端、前端、数据库、任务队列。</p>
 </div>
 <div class="down">▲</div>
 <div class="layer ext">
 <h4>Sionna RT <span class="tag t-opt">可选，约 300 MB</span></h4>
-<p>射线追踪。不装的话统计信道照常能跑，<code>sw_capabilities</code> 会如实报告缺什么。</p>
+<p>射线追踪。不装的话统计信道照常能跑，<code>sr_capabilities</code> 会如实报告缺什么。</p>
 </div>
 </div>
 
@@ -207,9 +207,9 @@
 <thead><tr><th>装什么</th><th>怎么装</th><th>体积</th><th>不装会怎样</th></tr></thead>
 <tbody>
 <tr><td><strong>ChannelHub</strong><br><span class="src">物理内核</span></td>
-<td><code>git clone</code> 到 superwireless 的同级或上级目录</td><td>~50 MB</td>
+<td><code>git clone</code> 到 superran 的同级或上级目录</td><td>~50 MB</td>
 <td><span class="pill p-no">不能用</span> 所有信道生成都依赖它</td></tr>
-<tr><td><strong>superwireless</strong><br><span class="src">本体 + MCP</span></td>
+<tr><td><strong>superran</strong><br><span class="src">本体 + MCP</span></td>
 <td><code>git clone</code> + <code>pip install -e .</code></td><td>~2 MB</td>
 <td><span class="pill p-no">不能用</span></td></tr>
 <tr><td><strong>channel-sim skill</strong><br><span class="src">工作流编排</span></td>
@@ -242,8 +242,8 @@
 <div class="mini">
 <h4>① 外网用户：一句话交给 agent</h4>
 <p>让用户把这句话发给自己的 Claude Code / Codex：</p>
-<pre style="margin:8px 0; font-size:11.5px;"><code>帮我装 superwireless：读
-https://github.com/TianLin0509/superwireless/blob/main/INSTALL_AGENT.md
+<pre style="margin:8px 0; font-size:11.5px;"><code>帮我装 superran：读
+https://github.com/TianLin0509/superran/blob/main/INSTALL_AGENT.md
 按里面的步骤装好并验证，装完告诉我能不能用。</code></pre>
 <p><code>INSTALL_AGENT.md</code> 是<strong>写给 agent 看的</strong>，不是给人看的：
 每步带验证命令与预期输出，明确标了哪些事该问用户、哪些该自己跑命令查，
@@ -309,7 +309,7 @@ python scripts/make_offline_bundle.py --thin
 <p><strong>整条链路是实测过的</strong>，而且按环境分开报：</p>
 <p style="margin-top:8px;"><strong>full 包</strong> —— 全新 venv（安装前只有 pip）→
 <code>pip install --no-index --find-links wheels -e .</code> 装上 35 个包（含
-superwireless 自身）→ manifest 里 10 个文件 + 37 个 wheel 的 SHA-256 逐一核对，
+superran 自身）→ manifest 里 10 个文件 + 37 个 wheel 的 SHA-256 逐一核对，
 零不一致 → 无 ChannelHub 时三个引擎都如实报 unavailable、MCP 仍能 list 出 30 个工具 →
 放入 ChannelHub 后 test_e2e 39 / test_mcp_server 25 / test_gates 86 全通过
 （mcp <strong>2.0</strong>、无 sionna-rt）。</p>
@@ -328,25 +328,25 @@ superwireless 自身）→ manifest 里 10 个文件 + 37 个 wheel 的 SHA-256 
 
 <div class="step">
 <h3>拿两个仓库，放成兄弟目录</h3>
-<pre><code><span class="cm"># 目录关系随意，但放成兄弟目录时 superwireless 能自动找到 ChannelHub</span>
+<pre><code><span class="cm"># 目录关系随意，但放成兄弟目录时 superran 能自动找到 ChannelHub</span>
 cd ~/code
 git clone https://github.com/wangxz0803-lab/ChannelHub_main
-git clone https://github.com/TianLin0509/superwireless</code></pre>
-<p>自动发现的查找顺序：环境变量 <code>SUPERWIRELESS_CHANNELHUB</code> →
-superwireless 的父目录、祖父目录、自身目录下名为
+git clone https://github.com/TianLin0509/superran</code></pre>
+<p>自动发现的查找顺序：环境变量 <code>SUPERRAN_CHANNELHUB</code> →
+superran 的父目录、祖父目录、自身目录下名为
 <code>ChannelHub_main</code> / <code>ChannelHub</code> / <code>channelhub</code> 的目录。
 判据是里面有没有 <code>src/msg_embedding/data/contract.py</code>。</p>
 <p>放在别处就设环境变量：</p>
 <pre><code><span class="cm"># Windows PowerShell（写进用户环境变量才能持久）</span>
-[Environment]::SetEnvironmentVariable("SUPERWIRELESS_CHANNELHUB", "D:\path\to\ChannelHub_main", "User")
+[Environment]::SetEnvironmentVariable("SUPERRAN_CHANNELHUB", "D:\path\to\ChannelHub_main", "User")
 
 <span class="cm"># macOS / Linux</span>
-export SUPERWIRELESS_CHANNELHUB=/path/to/ChannelHub_main</code></pre>
+export SUPERRAN_CHANNELHUB=/path/to/ChannelHub_main</code></pre>
 </div>
 
 <div class="step">
-<h3>装 superwireless</h3>
-<pre><code>cd superwireless
+<h3>装 superran</h3>
+<pre><code>cd superran
 pip install -e .
 
 <span class="cm"># 可选：射线追踪（约 300 MB，含 mitsuba + drjit）</span>
@@ -360,13 +360,13 @@ pip install sionna-rt</code></pre>
 <h3>注册 MCP 服务</h3>
 <p>指向仓库里的 <code>scripts/mcp_server.py</code>，<strong>用绝对路径</strong>：</p>
 <div class="tabs"><span class="tab on">Claude Code</span></div>
-<pre><code>claude mcp add superwireless -- python /abs/path/to/superwireless/scripts/mcp_server.py</code></pre>
+<pre><code>claude mcp add superran -- python /abs/path/to/superran/scripts/mcp_server.py</code></pre>
 <div class="tabs"><span class="tab on">Codex</span></div>
-<pre><code>codex mcp add superwireless -- python /abs/path/to/superwireless/scripts/mcp_server.py</code></pre>
+<pre><code>codex mcp add superran -- python /abs/path/to/superran/scripts/mcp_server.py</code></pre>
 <p>Codex 也可以直接改 <code>~/.codex/config.toml</code>：</p>
-<pre><code>[mcp_servers.superwireless]
+<pre><code>[mcp_servers.superran]
 command = 'C:\path\to\python.exe'
-args = ['C:\path\to\superwireless\scripts\mcp_server.py']</code></pre>
+args = ['C:\path\to\superran\scripts\mcp_server.py']</code></pre>
 <div class="callout c-amber">
 <p><strong>Windows 上把 <code>python</code> 换成 python.exe 的绝对路径。</strong>
 装了多个 Python 版本时，agent 起的子进程未必用你 <code>pip install</code> 那个，
@@ -391,9 +391,9 @@ Copy-Item -Recurse skills\channel-sim $HOME\.codex\skills\</code></pre>
 
 <div class="step">
 <h3>验证</h3>
-<pre><code>claude mcp list          <span class="cm"># 应看到 superwireless ... ✔ Connected</span>
+<pre><code>claude mcp list          <span class="cm"># 应看到 superran ... ✔ Connected</span>
 
-cd superwireless
+cd superran
 python tests/test_e2e.py         <span class="cm"># 端到端 39 项</span>
 python tests/test_mcp_server.py  <span class="cm"># MCP 全链路 33 项</span>
 python tests/test_raytracing.py  <span class="cm"># 射线追踪与决策层 39 项</span>
@@ -416,7 +416,7 @@ python tests/test_interference.py <span class="cm"># IoT、测量域、场景预
 <dt>仓库位置</dt><dd>skills/channel-sim/SKILL.md</dd>
 <dt>Claude Code</dt><dd>~/.claude/skills/channel-sim/SKILL.md</dd>
 <dt>Codex</dt><dd>~/.codex/skills/channel-sim/SKILL.md</dd>
-<dt>触发词</dt><dd>信道仿真 · 生成信道 · CSI 数据 · PDP · PMI · SRS · 蒙特卡洛 · 谱效 · SINR · 波束仿真 · 多小区干扰 · superwireless</dd>
+<dt>触发词</dt><dd>信道仿真 · 生成信道 · CSI 数据 · PDP · PMI · SRS · 蒙特卡洛 · 谱效 · SINR · 波束仿真 · 多小区干扰 · superran</dd>
 </div>
 
 <h3>里面写了什么</h3>
@@ -453,42 +453,42 @@ the spec review step was being skipped entirely.</em>
 <table>
 <thead><tr><th>阶段</th><th>工具</th><th>作用</th></tr></thead>
 <tbody>
-<tr><td rowspan="3"><strong>探能力</strong></td><td><code>sw_capabilities</code></td><td>本机可用的仿真引擎，不可用的缺什么</td></tr>
-<tr><td><code>sw_list_presets</code></td><td>列出 8 个场景预设</td></tr>
-<tr><td><code>sw_list_scenes</code></td><td>列出 10 个射线追踪场景（真实建筑几何）</td></tr>
+<tr><td rowspan="3"><strong>探能力</strong></td><td><code>sr_capabilities</code></td><td>本机可用的仿真引擎，不可用的缺什么</td></tr>
+<tr><td><code>sr_list_presets</code></td><td>列出 8 个场景预设</td></tr>
+<tr><td><code>sr_list_scenes</code></td><td>列出 10 个射线追踪场景（真实建筑几何）</td></tr>
 
-<tr><td rowspan="3"><strong>问清楚</strong></td><td><code>sw_missing_slots</code></td><td><strong>结论模板还缺哪些槽</strong>，按空着的代价排序，每槽带 3~4 个选项</td></tr>
-<tr><td><code>sw_plan</code></td><td>把意图变成配置提案 + 该确认哪几件事</td></tr>
-<tr><td><code>sw_revise</code></td><td>差分修正——用户只说改什么，不必重述整个需求</td></tr>
+<tr><td rowspan="3"><strong>问清楚</strong></td><td><code>sr_missing_slots</code></td><td><strong>结论模板还缺哪些槽</strong>，按空着的代价排序，每槽带 3~4 个选项</td></tr>
+<tr><td><code>sr_plan</code></td><td>把意图变成配置提案 + 该确认哪几件事</td></tr>
+<tr><td><code>sr_revise</code></td><td>差分修正——用户只说改什么，不必重述整个需求</td></tr>
 
-<tr><td rowspan="4"><strong>生成取货</strong></td><td><code>sw_generate</code></td><td>生成数据集，返回句柄与统计摘要（<strong>不返回数据本身</strong>）</td></tr>
-<tr><td><code>sw_deliver</code></td><td>按自然语言点单，返回可直接运行的 Python 取货代码</td></tr>
-<tr><td><code>sw_describe_dataset</code></td><td>看维度、分布、可用字段</td></tr>
-<tr><td><code>sw_list_datasets</code></td><td>本机已生成的数据集</td></tr>
+<tr><td rowspan="4"><strong>生成取货</strong></td><td><code>sr_generate</code></td><td>生成数据集，返回句柄与统计摘要（<strong>不返回数据本身</strong>）</td></tr>
+<tr><td><code>sr_deliver</code></td><td>按自然语言点单，返回可直接运行的 Python 取货代码</td></tr>
+<tr><td><code>sr_describe_dataset</code></td><td>看维度、分布、可用字段</td></tr>
+<tr><td><code>sr_list_datasets</code></td><td>本机已生成的数据集</td></tr>
 
-<tr><td><strong>说明书</strong></td><td><code>sw_spec_sheet</code></td><td><strong>把敲定的配置画出来</strong>：阵列/拓扑/频域/时域/信道剖面示意图 + 逐项标注来源的参数全表。离线 HTML，落在 artifacts/specs/</td></tr>
+<tr><td><strong>说明书</strong></td><td><code>sr_spec_sheet</code></td><td><strong>把敲定的配置画出来</strong>：阵列/拓扑/频域/时域/信道剖面示意图 + 逐项标注来源的参数全表。离线 HTML，落在 artifacts/specs/</td></tr>
 
-<tr><td rowspan="3"><strong>场景探测</strong></td><td><code>sw_probe_scenario</code></td><td><strong>下单前先看货</strong>：几十秒探清干扰、覆盖、几何特征。num_rb 压到 24、num_ofdm_symbols 压到 4，几何量与全量<strong>逐位相同</strong>（实测），<strong>11.5 倍速</strong></td></tr>
-<tr><td><code>sw_compare_scenarios</code></td><td>几个候选场景并排比一张表</td></tr>
-<tr><td><code>sw_list_presets(group=…)</code></td><td>按 10 个分组浏览 23 个场景预设，每个都带实测特征</td></tr>
+<tr><td rowspan="3"><strong>场景探测</strong></td><td><code>sr_probe_scenario</code></td><td><strong>下单前先看货</strong>：几十秒探清干扰、覆盖、几何特征。num_rb 压到 24、num_ofdm_symbols 压到 4，几何量与全量<strong>逐位相同</strong>（实测），<strong>11.5 倍速</strong></td></tr>
+<tr><td><code>sr_compare_scenarios</code></td><td>几个候选场景并排比一张表</td></tr>
+<tr><td><code>sr_list_presets(group=…)</code></td><td>按 10 个分组浏览 23 个场景预设，每个都带实测特征</td></tr>
 
-<tr><td rowspan="3"><strong>干扰量化</strong></td><td><code>sw_interference_report</code></td><td><strong>业务域 IoT + 测量域导频 SIR</strong>。IoT 由几何 SIR 与 SINR 精确推出，含等效小区负载与估计 NMSE 下限</td></tr>
-<tr><td><code>sw_design_interference</code></td><td>要造某个 IoT 该动哪些旋钮，每条带实测值（其中两条与直觉相反）</td></tr>
-<tr><td><code>sw_iot_convert</code></td><td>IoT / 等效负载 / 分级之间换算</td></tr>
+<tr><td rowspan="3"><strong>干扰量化</strong></td><td><code>sr_interference_report</code></td><td><strong>业务域 IoT + 测量域导频 SIR</strong>。IoT 由几何 SIR 与 SINR 精确推出，含等效小区负载与估计 NMSE 下限</td></tr>
+<tr><td><code>sr_design_interference</code></td><td>要造某个 IoT 该动哪些旋钮，每条带实测值（其中两条与直觉相反）</td></tr>
+<tr><td><code>sr_iot_convert</code></td><td>IoT / 等效负载 / 分级之间换算</td></tr>
 
-<tr><td rowspan="3"><strong>体检校准</strong></td><td><code>sw_validate</code></td><td>18 项可信度检查</td></tr>
-<tr><td><code>sw_gate</code></td><td><strong>门 1</strong>：同样 18 项，但翻译成门禁语言——硬性项不通过即拦截。含 <strong>IoT 自洽性</strong>：逐样本 SIR &gt; SINR、IoT ≥ 0 dB、不可信样本不过半</td></tr>
-<tr><td><code>sw_calibrate</code></td><td><strong>3GPP 38.901 §7.8 校准量</strong>：耦合损耗、几何量（含噪/不含噪）、时延与角度扩展、PRB 奇异值三条 CDF</td></tr>
+<tr><td rowspan="3"><strong>体检校准</strong></td><td><code>sr_validate</code></td><td>18 项可信度检查</td></tr>
+<tr><td><code>sr_gate</code></td><td><strong>门 1</strong>：同样 18 项，但翻译成门禁语言——硬性项不通过即拦截。含 <strong>IoT 自洽性</strong>：逐样本 SIR &gt; SINR、IoT ≥ 0 dB、不可信样本不过半</td></tr>
+<tr><td><code>sr_calibrate</code></td><td><strong>3GPP 38.901 §7.8 校准量</strong>：耦合损耗、几何量（含噪/不含噪）、时延与角度扩展、PRB 奇异值三条 CDF</td></tr>
 
-<tr><td rowspan="5"><strong>链路自适应</strong></td><td><code>sw_throughput</code></td><td>真实吞吐、5% 边缘用户；<code>mcs_table=3</code> 使用用户 NewTx/ReTx BLER 曲线</td></tr>
-<tr><td><code>sw_sweep_snr</code></td><td>谱效/吞吐 vs SNR 曲线</td></tr>
-<tr><td><code>sw_mcs_info</code></td><td>标准表或用户表、BLER 门限与完整性自检</td></tr>
-<tr><td><code>sw_bler_curve</code></td><td>单档原始 BLER 曲线、门限与插值查询</td></tr>
-<tr><td><code>sw_tdd_mcs</code></td><td>TDD CQI → PMI/SVD BF Gain → MCS → OLLA；返回逐 RB、逐流审计链</td></tr>
+<tr><td rowspan="5"><strong>链路自适应</strong></td><td><code>sr_throughput</code></td><td>真实吞吐、5% 边缘用户；<code>mcs_table=3</code> 使用用户 NewTx/ReTx BLER 曲线</td></tr>
+<tr><td><code>sr_sweep_snr</code></td><td>谱效/吞吐 vs SNR 曲线</td></tr>
+<tr><td><code>sr_mcs_info</code></td><td>标准表或用户表、BLER 门限与完整性自检</td></tr>
+<tr><td><code>sr_bler_curve</code></td><td>单档原始 BLER 曲线、门限与插值查询</td></tr>
+<tr><td><code>sr_tdd_mcs</code></td><td>TDD CQI → PMI/SVD BF Gain → MCS → OLLA；返回逐 RB、逐流审计链</td></tr>
 
-<tr><td rowspan="3"><strong>下结论</strong></td><td><code>sw_link_performance</code></td><td>预编码 → 逐层 SINR → 谱效，四种预编码横向对比</td></tr>
-<tr><td><code>sw_compare_arms</code></td><td><strong>配对比较 + 门 2 + 门 3</strong>，返回可直接写进报告的结论句</td></tr>
-<tr><td><code>sw_sample_size</code></td><td><strong>功效分析</strong>：样本数 ↔ 最小可检出效应，互为反解</td></tr>
+<tr><td rowspan="3"><strong>下结论</strong></td><td><code>sr_link_performance</code></td><td>预编码 → 逐层 SINR → 谱效，四种预编码横向对比</td></tr>
+<tr><td><code>sr_compare_arms</code></td><td><strong>配对比较 + 门 2 + 门 3</strong>，返回可直接写进报告的结论句</td></tr>
+<tr><td><code>sr_sample_size</code></td><td><strong>功效分析</strong>：样本数 ↔ 最小可检出效应，互为反解</td></tr>
 </tbody>
 </table>
 </div>
@@ -500,7 +500,7 @@ the spec review step was being skipped entirely.</em>
 <table>
 <thead><tr><th>路径</th><th>内容</th></tr></thead>
 <tbody>
-<tr><td><code>src/superwireless/</code></td><td>Python 包，17 个模块（见下表）</td></tr>
+<tr><td><code>src/superran/</code></td><td>Python 包，17 个模块（见下表）</td></tr>
 <tr><td><code>scripts/mcp_server.py</code></td><td>MCP 入口。自包含，注册时指它就行</td></tr>
 <tr><td><code>skills/channel-sim/SKILL.md</code></td><td>唯一的 skill</td></tr>
 <tr><td><code>presets/presets.yaml</code></td><td>8 个场景预设。<strong>加新场景改这里，不用改代码</strong></td></tr>
@@ -558,13 +558,13 @@ the spec review step was being skipped entirely.</em>
 <div class="callout c-blue">
 <p><strong>体积估算。</strong>单样本 ≈ <code>T × RB × BS_ant × UE_ant × 8 字节 × 2</code>（理想 + 估计两份）。
 64 天线 × 273 RB × 4 收 的样本约 <strong>1.1 MB</strong>，200 个就是 220 MB。
-<code>sw_plan</code> 会先给体积预估，超过 1 GB 时应当提醒。</p>
+<code>sr_plan</code> 会先给体积预估，超过 1 GB 时应当提醒。</p>
 </div>
 
 <div class="callout c-amber">
 <p><strong>数据永远不进对话。</strong>MCP 只回句柄、统计摘要和取货代码。
 一个样本序列化成 JSON 会膨胀到十几 MB——放进上下文既装不下也没意义。
-拿到 <code>sw_deliver</code> 的代码后写进脚本运行，不要试图打印数组。</p>
+拿到 <code>sr_deliver</code> 的代码后写进脚本运行，不要试图打印数组。</p>
 </div>
 
 <h2 id="s8">八、三种用法：按需取用</h2>
@@ -579,13 +579,13 @@ the spec review step was being skipped entirely.</em>
 <div class="mini">
 <h4>② 只装 MCP</h4>
 <p>30 个工具全都在，只是没人提醒流程。agent 仍然读得到每个工具文档里的口径说明，
-<code>sw_gate</code> 也照样会拦。</p>
+<code>sr_gate</code> 也照样会拦。</p>
 <p><strong>适合</strong>：你自己清楚要什么，或者用的 agent 不支持 skill。</p>
 </div>
 <div class="mini">
 <h4>③ 直接当 Python 库</h4>
 <p>不注册 MCP，直接 import。所有能力都有对应的函数。</p>
-<pre style="margin:8px 0 0; font-size:11.5px;"><code>from superwireless import load
+<pre style="margin:8px 0 0; font-size:11.5px;"><code>from superran import load
 ds = load("ds_xxxx")
 print(ds.gate().text())
 print(ds.calibrate().text())
@@ -601,21 +601,21 @@ print(r.statement())</code></pre>
 
 <h3>验证链路通了</h3>
 <pre><code><span class="cm"># 1. 引擎可用性 —— 缺什么会如实说，不会假装能跑</span>
-sw_capabilities()
+sr_capabilities()
 
 <span class="cm"># 2. 先来 20 个样本探路，别一上来就几百个</span>
-sw_plan(intent="单小区 64T4R，验证 CSI 压缩的想法")
-sw_generate(draft_id=..., num_samples=20)
+sr_plan(intent="单小区 64T4R，验证 CSI 压缩的想法")
+sr_generate(draft_id=..., num_samples=20)
 
 <span class="cm"># 3. 门 1 体检 —— 这一步不能省</span>
-sw_gate(dataset_id="ds_xxxx")
+sr_gate(dataset_id="ds_xxxx")
 
 <span class="cm"># 4. 取货，拿到可运行的 Python</span>
-sw_deliver(dataset_id="ds_xxxx", want="信道 + PDP + PMI")</code></pre>
+sr_deliver(dataset_id="ds_xxxx", want="信道 + PDP + PMI")</code></pre>
 
 <h3>一句话对 agent 说</h3>
 <div class="callout c-green">
-<p>"用 superwireless 给我生成一批单小区 64T4R 的信道，我要验证一个 CSI 压缩的想法。"</p>
+<p>"用 superran 给我生成一批单小区 64T4R 的信道，我要验证一个 CSI 压缩的想法。"</p>
 <p style="margin-top:8px;">装了 skill 的话，agent 会先反问你两三个问题（跟什么比、看什么指标、
 预期增益多大），然后才开始配参数——<strong>这是有意的</strong>，
 参数配错重跑就行，实验设计错了整批数据白做。</p>
@@ -651,10 +651,10 @@ sw_deliver(dataset_id="ds_xxxx", want="信道 + PDP + PMI")</code></pre>
 <tr><td>MCP 连上了但一调用就报缺依赖</td><td>agent 起的子进程用的不是你 pip install 的那个 Python</td>
 <td>同上，换成绝对路径</td></tr>
 <tr><td>报找不到 ChannelHub</td><td>目录不在查找范围内</td>
-<td>设 <code>SUPERWIRELESS_CHANNELHUB</code> 指到 ChannelHub 根目录
+<td>设 <code>SUPERRAN_CHANNELHUB</code> 指到 ChannelHub 根目录
 （里面要有 <code>src/msg_embedding/data/contract.py</code>）</td></tr>
-<tr><td><code>sw_generate</code> 卡住不返回</td><td>历史上是 scipy 在工作线程里的 import 死锁</td>
-<td>已修（启动时预热）。若仍遇到，设 <code>SUPERWIRELESS_DEBUG=1</code>
+<tr><td><code>sr_generate</code> 卡住不返回</td><td>历史上是 scipy 在工作线程里的 import 死锁</td>
+<td>已修（启动时预热）。若仍遇到，设 <code>SUPERRAN_DEBUG=1</code>
 会开 faulthandler 并把栈打到 stderr</td></tr>
 <tr><td>射线追踪报 <code>invalid PLY header</code></td><td>中国城市场景的 PLY 是 VTK 导出的，Mitsuba 3.8 解析不了</td>
 <td>已自动处理（复制到缓存后清理头部，不动原文件）。加新城市场景时若再遇到就是这个原因</td></tr>
@@ -662,7 +662,7 @@ sw_deliver(dataset_id="ds_xxxx", want="信道 + PDP + PMI")</code></pre>
 <td>看 <code>detail</code> 字段——它会写清偏差多少、容差依据、怎么改。
 最常见是场景与信道剖面的视距类别不匹配</td></tr>
 <tr><td>离线装报 <code>install build dependencies did not run successfully</code></td><td>用 thin 包做了 <code>pip install -e .</code>，缺构建后端 setuptools</td><td>thin 包别加 <code>-e .</code>，直接装依赖；或改用 full 包</td></tr>
-<tr><td>服务端报 <code>No module named 'mcp.server.fastmcp'</code></td><td>装到了 mcp 2.x，该模块已被删除</td><td>升级 superwireless 到含兼容层的版本；或退回 <code>pip install "mcp&lt;2"</code></td></tr>
+<tr><td>服务端报 <code>No module named 'mcp.server.fastmcp'</code></td><td>装到了 mcp 2.x，该模块已被删除</td><td>升级 superran 到含兼容层的版本；或退回 <code>pip install "mcp&lt;2"</code></td></tr>
 <tr><td>生成很慢</td><td>射线追踪比统计信道慢一个量级</td>
 <td>统计信道约 0.2 秒/样本，射线追踪 2~6 秒/样本。先跑 20 个探路</td></tr>
 </tbody>
@@ -670,15 +670,15 @@ sw_deliver(dataset_id="ds_xxxx", want="信道 + PDP + PMI")</code></pre>
 </div>
 
 <h3>卸载</h3>
-<pre><code>claude mcp remove superwireless
-codex  mcp remove superwireless
+<pre><code>claude mcp remove superran
+codex  mcp remove superran
 rm -rf ~/.claude/skills/channel-sim ~/.codex/skills/channel-sim
-pip uninstall superwireless
+pip uninstall superran
 <span class="cm"># 数据在仓库的 artifacts/ 下，删仓库即可全清</span></code></pre>
 
 <footer>
-<p><strong>superwireless</strong> v0.1.0 · MIT ·
-<a href="https://github.com/TianLin0509/superwireless">github.com/TianLin0509/superwireless</a></p>
+<p><strong>superran</strong> v0.1.0 · MIT ·
+<a href="https://github.com/TianLin0509/superran">github.com/TianLin0509/superran</a></p>
 <p>物理内核来自 <a href="https://github.com/wangxz0803-lab/ChannelHub_main">ChannelHub</a>；
 射线追踪基于 Sionna RT；工作流设计参考 superpowers。</p>
 <p>配套文档：<strong>CAPABILITIES.html</strong>（能产生什么信道、能拿到什么观察量）·

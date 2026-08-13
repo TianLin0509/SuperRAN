@@ -1,5 +1,7 @@
 # 生成的数据与场景缓存 —— 体积大且可重新生成
 artifacts/
+output/
+tmp/
 
 # Python
 __pycache__/

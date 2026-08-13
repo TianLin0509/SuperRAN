@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>superwireless 通宵进展与待审问题</title>
+<title>superran 通宵进展与待审问题</title>
 <style>
   :root{
     --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
@@ -247,7 +247,7 @@ rank 自适应于是退到低秩。<b>但现网密集城区的 rank 恰恰更高
 <h4><span class="pill p-ok">已自查并修复</span> 5% 用户谱效曾经差一个数量级</h4>
 <p>原本 0.040 vs ITU 的 0.3。我的第一个怀疑（覆盖外用户拉低了分位数）
 <b>查下来是错的</b>——实测 outage 全是 0%，没人被饿死。</p>
-<p>真因是 <code>sw_system_sim</code> 的 API bug：<b>把样本数当成了用户数</b>。
+<p>真因是 <code>sr_system_sim</code> 的 API bug：<b>把样本数当成了用户数</b>。
 数据集里 40 个样本分布在 10 个 UE 位置上（同一 UE 的多个样本是时间相关的，
 多普勒就是从相邻样本算的），我却把每个样本当成一个独立用户，
 小区里凭空多出 4 倍的人。修复后 5% 用户谱效 0.040 → <b>0.194</b>，
@@ -426,7 +426,7 @@ MU 侧固定 2 意味着<b>信道差的用户在 MU 下反而被强制开 2 流<
 
 
 <footer>
-superwireless · 通宵进展与待审问题 · 2026-08-02 凌晨<br>
+superran · 通宵进展与待审问题 · 2026-08-02 凌晨<br>
 所有数字来自实跑，脚本在会话 scratchpad。代码：mumimo.py / system.py / algorithms.py。
 测试：test_mumimo 57 项、test_system 30 项、test_interference 277 项。
 </footer>

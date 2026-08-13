@@ -15,14 +15,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # 把测试输出吓成"失败"。统一 reconfigure，本文件的 print 全部 replace 兜底。
 sys.stdout.reconfigure(errors="replace")
 
-from superwireless import calibration as cal  # noqa: E402
-from superwireless import channelhub as ch  # noqa: E402
-from superwireless import decisions as dec  # noqa: E402
-from superwireless import gates as g  # noqa: E402
-from superwireless import generate as gen  # noqa: E402
-from superwireless import load  # noqa: E402
-from superwireless import plan as pl  # noqa: E402
-from superwireless import spec38901 as spec  # noqa: E402
+from superran import calibration as cal  # noqa: E402
+from superran import channelhub as ch  # noqa: E402
+from superran import decisions as dec  # noqa: E402
+from superran import gates as g  # noqa: E402
+from superran import generate as gen  # noqa: E402
+from superran import load  # noqa: E402
+from superran import plan as pl  # noqa: E402
+from superran import spec38901 as spec  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -267,6 +267,12 @@ check(all("-1 个" not in i.fix for i in gz.items),
 pk = g.paired_compare(np.full(20, 5.5), np.full(20, 5.0))
 print(f"  恒定 +0.5：t={pk.t_stat}  p={pk.p_value}  显著={pk.decision_significant}")
 check(pk.decision_significant, "恒定非零差值判为显著")
+check(g.gate_conclusion(pk, expected_direction="positive").passed,
+      "正向预注册接受显著正差")
+_wrong_direction = g.gate_conclusion(pk, expected_direction="negative")
+check(not _wrong_direction.passed
+      and any(i.name == "差异方向符合预注册" for i in _wrong_direction.blockers),
+      "负向预注册会拦住统计显著但方向相反的劣化")
 
 # ⑤ statement 与 gate3.passed 不得矛盾
 for name, pp in (("冲突", pc), ("全零", pz)):
@@ -414,7 +420,7 @@ sinr = np.asarray(multi.sinr_dB)
 snr = np.asarray(multi.snr_dB)
 check(not np.allclose(sinr, snr), "SINR 不等于纯热噪声 SNR")
 
-from superwireless import validate as va  # noqa: E402
+from superran import validate as va  # noqa: E402
 
 c = va.check_interference_modeled(multi)
 print(f"  检查：{c.detail}")

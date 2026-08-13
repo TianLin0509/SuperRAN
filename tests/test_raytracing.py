@@ -11,12 +11,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from superwireless import channelhub as ch  # noqa: E402
-from superwireless import decisions as dec  # noqa: E402
-from superwireless import generate as gen  # noqa: E402
-from superwireless import plan as pl  # noqa: E402
-from superwireless import scenes as sc  # noqa: E402
-from superwireless import load  # noqa: E402
+from superran import channelhub as ch  # noqa: E402
+from superran import decisions as dec  # noqa: E402
+from superran import generate as gen  # noqa: E402
+from superran import load  # noqa: E402
+from superran import plan as pl  # noqa: E402
+from superran import scenes as sc  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -147,7 +147,7 @@ else:
         print(f"    已拦截：{str(e).splitlines()[0][:70]}…")
         check(True, "paths() 在射线追踪数据上正确报错")
 
-    from superwireless import deliver as dlv  # noqa: E402
+    from superran import deliver as dlv  # noqa: E402
 
     res_rt = dlv.build_code(s2["dataset_id"], "信道 + 角度")
     print(f"    取货提示 {len(res_rt['notes'])} 条")
@@ -207,7 +207,7 @@ for _ in range(6):
     check(not dup, f"第 {pp['round']} 轮不重复问已答过的（重复：{dup or '无'}）")
     seen_questions |= set(keys)
     if not pp["has_more_rounds"]:
-        print(f"    → has_more_rounds=false，停止提问")
+        print("    → has_more_rounds=false，停止提问")
         break
     ov = {q["key"]: q["default"] for q in pp["questions"]}
     dg = {q["key"]: "（用户已答）" for q in pp["design_questions"]}

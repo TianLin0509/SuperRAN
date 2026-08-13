@@ -1,4 +1,4 @@
-"""生成 AUDIT.html：superwireless 全库自审 + Top 任务清单。
+"""生成 AUDIT.html：superran 全库自审 + Top 任务清单。
 
 每条任务都要回答"**为什么我认为该做**"，用白话，不堆术语。
 实测数字来自 ``measurements/seed_variance.json`` 等，不手填。
@@ -12,8 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from superwireless import katex as kx  # noqa: E402
-from superwireless import mathml as mm  # noqa: E402
+from superran import katex as kx  # noqa: E402
+from superran import mathml as mm  # noqa: E402
 
 
 def M(tex: str, *, block: bool = False) -> str:
@@ -27,7 +27,7 @@ F_CI = M(r"\pm 1.96\,\sigma/\sqrt{n}")
 def head() -> str:
     src = (ROOT / "TONIGHT.html").read_text(encoding="utf-8")
     h = src.split("</head>")[0]
-    h = h.replace("superwireless 通宵成果与待审", "superwireless 全库自审")
+    h = h.replace("superran 通宵成果与待审", "superran 全库自审")
     extra = """
 <style>
   .why{background:#f0f7ff;border-left:4px solid #0071e3;padding:14px 18px;
@@ -130,13 +130,13 @@ TASKS = [
              "换种子只要重跑 TTI 循环，一次 1.1 秒。实测 8 个种子总共 19.4 秒，"
              "比单次的 11.6 秒<b>只多 8 秒</b>。"),
     dict(
-        n=2, cls="rk1", title="把 sw_system_sim 写进 SKILL.md",
+        n=2, cls="rk1", title="把 sr_system_sim 写进 SKILL.md",
         effort="很小 · 约 80 行", roi="这个功能现在事实上不可达",
         what="在 skill 里加「第 5 段 · 系统级体验速率」，"
              "交代什么时候该从链路级切到系统级、"
              "数据集要满足什么条件（每 UE 多快照）、KPI 怎么读。",
         why="skill 是给 agent 看的操作手册。<b>整本手册里没提过系统级仿真这个工具</b>"
-            "（<code>sw_system_sim</code> 在 SKILL.md 里出现 <b>0 次</b>），"
+            "（<code>sr_system_sim</code> 在 SKILL.md 里出现 <b>0 次</b>），"
             "所以任何按手册干活的 agent 都不会用它。"
             "<br><br>后果不是「效率低一点」，是<b>功能事实上不存在</b>。"
             "用户问「这个小区的体验速率是多少」，agent 会去翻链路级的谱效工具，"
@@ -335,10 +335,10 @@ bimodal 抽出的 RBG 数只用来定 burst 的字节数，<b>不影响实际占
 <h2 id="a2">二、Skill 与机制：对照 superpowers</h2>
 
 <div class="callout c-red">
-<p><b>最大的路由缺口：<code>sw_system_sim</code> 在 SKILL.md 里出现 0 次。</b>
+<p><b>最大的路由缺口：<code>sr_system_sim</code> 在 SKILL.md 里出现 0 次。</b>
 体验速率是你说的「真正最关心的 KPI」，系统级仿真是最近两轮最大的功能，
 但照着 skill 走的 agent <b>根本不会发现它</b>。
-<code>sw_describe_dataset</code> 同样是 0 次。</p>
+<code>sr_describe_dataset</code> 同样是 0 次。</p>
 </div>
 
 <div class="tbl-wrap"><table>
@@ -401,7 +401,7 @@ MU 是标量近似而非逐 TTI 真配对、<code>interference_model="precoded"<
 它是唯一需要重构的一条。</p>
 </div>
 
-<footer>superwireless 全库自审 · 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>
+<footer>superran 全库自审 · 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>
 </div>
 {kx.upgrade_script()}
 </body></html>

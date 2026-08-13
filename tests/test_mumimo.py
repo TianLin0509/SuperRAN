@@ -12,7 +12,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.stdout.reconfigure(errors="replace")
 
-from superwireless import mumimo as mu  # noqa: E402
+from superran import linklevel as ll  # noqa: E402
+from superran import mumimo as mu  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -46,6 +47,10 @@ _he = mu.effective_user_channels(_H, streams_per_user=1)
 check(_he.shape == (6, 1, 4, 16), f"形状 [K,S,RB,BS]（实得 {_he.shape}）")
 _he2 = mu.effective_user_channels(_H, streams_per_user=2)
 check(_he2.shape == (6, 2, 4, 16), "多流时 S 维展开")
+# 入口承诺同时支持 3D [RB,BS,UE]；去掉单快照维后必须与 4D 路径逐位一致。
+_he_3d = mu.effective_user_channels([h[0] for h in _H], streams_per_user=2)
+check(_he_3d.shape == _he2.shape and np.array_equal(_he_3d, _he2),
+      "3D [RB,BS,UE] 与 4D [1,RB,BS,UE] 等效信道逐位一致")
 # 第一条等效行的范数就是最大奇异值，第二条是次大 —— 顺序不能乱
 _dl = _H[0].mean(axis=0)[0].conj().T
 _sv = np.linalg.svd(_dl, compute_uv=False)
@@ -172,12 +177,77 @@ for _err in (0.0, 0.03, 0.1, 0.3):
         check(_r.csi_for_precoding == "h_est", "CSI 口径如实带回结果")
     _prev_leak, _prev_se = _r.leakage_ratio, _r.sum_se
 
-# 理想 CSI + ZF 必须零残余干扰 —— 这是 ZF 的定义，破了就是实现错了
+# 理想 CSI + ZF 的检测后残余应为数值零。LMMSE 求逆会留下约 1e-8 的
+# 浮点残差，不能拿 scalar-effective 路径的 1e-12 阈值误杀完整接收机。
 _ideal = mu.mu_link_performance(_Hm, noise_power=0.01, precoder="zf",
-                                criterion="sus", max_users=4)
-check(_ideal.leakage_ratio < 1e-12,
+                                 criterion="sus", max_users=4)
+check(_ideal.leakage_ratio < 1e-6,
       f"理想 CSI 下 ZF 残余干扰为零（实得 {_ideal.leakage_ratio:.2e}）")
 check(_ideal.csi_for_precoding == "h_true", "没传估计信道时标成 h_true")
+
+# rank2 接收基旋转反例：两个用户占据互不重叠的发射子空间，因此没有真正的
+# MU 干扰。UE0 的两条本用户流在 h_true 中旋转 45°；固定 scalar combiner 会把
+# 另一条可联合解调的流误记成干扰，而每 UE LMMSE 应恢复两条流。
+_h0p = np.zeros((1, 1, 4, 2), dtype=complex)
+_h1p = np.zeros_like(_h0p)
+_h0p[0, 0, 0, 0], _h0p[0, 0, 1, 1] = 2.0, 1.0
+_h1p[0, 0, 2, 0], _h1p[0, 0, 3, 1] = 2.0, 1.0
+_theta = np.pi / 4
+_rot = np.eye(4)
+_rot[:2, :2] = [[np.cos(_theta), -np.sin(_theta)],
+                 [np.sin(_theta), np.cos(_theta)]]
+_h0t = np.einsum("ab,trbc->trac", _rot, _h0p)
+_he_t = mu.effective_user_channels([_h0t, _h1p], streams_per_user=2)
+_he_p = mu.effective_user_channels([_h0p, _h1p], streams_per_user=2)
+_scalar = mu.mu_link_performance_from_effective(
+    _he_t, _he_p, noise_power=np.array([1e-3, 1e-3]),
+    precoder="zf", rb_per_rbg=1)
+_lmmse = mu.mu_link_performance_lmmse(
+    [_h0t, _h1p], [_h0p, _h1p], noise_power=np.array([1e-3, 1e-3]),
+    streams_per_user=2, precoder="zf", rb_per_rbg=1)
+check(_scalar.sinr_per_user_db[0] < 3.0,
+      "固定接收基反例确实会把本用户流旋转误判成强干扰")
+check(_lmmse.sinr_per_user_db[0] > 20.0
+      and _lmmse.sum_se > _scalar.sum_se + 10.0,
+      "逐用户 LMMSE 联合解调恢复 rank2 接收基旋转，不把本用户流算成 MU 干扰")
+check(_lmmse.receiver == "per_user_lmmse" and _lmmse.leakage_ratio < 1e-12,
+      "MU 结果显式上报 LMMSE 接收机，正交用户反例的检测后泄漏为零")
+
+# 随机非正交信道再用闭式误差协方差独立重算，防止上面的构造反例只验证了
+# 一个特殊几何。对用户 u：E=(I+Gdᴴ Rn⁻¹ Gd)⁻¹，SINR_k=1/Ekk-1。
+_rg_lmmse = np.random.default_rng(2026080917)
+_hp_lmmse, _ht_lmmse = [], []
+for _ in range(2):
+    _hp_u = ((_rg_lmmse.standard_normal((1, 1, 8, 2))
+              + 1j * _rg_lmmse.standard_normal((1, 1, 8, 2))) / np.sqrt(2))
+    _ht_u = _hp_u + (
+        _rg_lmmse.standard_normal(_hp_u.shape)
+        + 1j * _rg_lmmse.standard_normal(_hp_u.shape)) * 0.08
+    _hp_lmmse.append(_hp_u)
+    _ht_lmmse.append(_ht_u)
+_noise_lmmse = np.array([0.07, 0.11])
+_random_lmmse = mu.mu_link_performance_lmmse(
+    _ht_lmmse, _hp_lmmse, noise_power=_noise_lmmse,
+    streams_per_user=2, precoder="rzf", rb_per_rbg=1)
+_he_lmmse = mu.effective_user_channels(_hp_lmmse, streams_per_user=2)
+_w_lmmse, _pw_lmmse = mu.mu_precoder(
+    _he_lmmse, method="rzf", noise_power=_noise_lmmse,
+    power_constraint="ebf")
+_q_lmmse = _w_lmmse * np.sqrt(_pw_lmmse)[:, None, :]
+_closed_form_se = []
+for _u in range(2):
+    _g = _ht_lmmse[_u][0, 0].conj().T @ _q_lmmse[0]
+    _own = np.arange(_u * 2, (_u + 1) * 2)
+    _other = np.setdiff1d(np.arange(4), _own)
+    _gd, _gi = _g[:, _own], _g[:, _other]
+    _rn = _noise_lmmse[_u] * np.eye(2) + _gi @ _gi.conj().T
+    _error_cov = np.linalg.inv(
+        np.eye(2) + _gd.conj().T @ np.linalg.solve(_rn, _gd))
+    _sinr_closed = 1.0 / np.real(np.diag(_error_cov)) - 1.0
+    _closed_form_se.append(float(np.sum(np.log2(1.0 + _sinr_closed))))
+check(np.allclose(_random_lmmse.se_per_user, _closed_form_se,
+                  rtol=1e-10, atol=1e-10),
+      "随机 MU LMMSE 逐用户谱效与 1/Ekk-1 闭式解逐位一致")
 # ---------------------------------------------------------------------------
 sect("6  单码字谱效与 rank 自适应")
 
@@ -210,22 +280,20 @@ check(len(_hi.candidates) == 4, "四个 rank 候选都算过并留在结果里")
 check(all(c["rank"] == i + 1 for i, c in enumerate(_hi.candidates)), "候选按 rank 排列")
 check(_hi.se == max(c["se"] for c in _hi.candidates), "选中的就是谱效最高的候选")
 
-# **噪声口径**：用 mean(|h|^2) 反推会把阵列增益算两遍，实测差 12 dB
+# **噪声口径**：当前几何 SINR 是预波束定义，必须锚到 mean(|h|²)。
 _n_anchor = mu.noise_from_geometric_sinr(_hh, 15.0)
-_hb = _hh.mean(axis=0)
-_n_naive = float(np.mean(np.abs(_hb) ** 2)) / 10 ** 1.5
-_delta = 10 * np.log10(_n_anchor / _n_naive)
-print(f"  两种噪声口径相差 {_delta:.1f} dB")
-check(_delta > 6.0, f"锚定口径的噪声显著高于 mean(|h|²) 口径（差 {_delta:.1f} dB）")
-check(mu.su_rank_adaptation(_hh, noise_power=_n_naive).mcs
-      > mu.su_rank_adaptation(_hh, noise_power=_n_anchor).mcs,
-      "错口径会系统性高估 MCS —— 这正是它危险的地方")
+_n_expected = float(np.mean(np.abs(_hh) ** 2)) / 10 ** 1.5
+check(np.isclose(_n_anchor, _n_expected, rtol=1e-12),
+      "几何 SINR 噪声锚点等于 mean(|h|²)/SINR")
 
 _r1 = [c for c in mu.su_rank_adaptation(
     _hh, noise_power=mu.noise_from_geometric_sinr(_hh, 12.0)).candidates
     if c["rank"] == 1][0]
-check(abs(_r1["sinr_db"] - 12.0) < 1.5,
-      f"rank1 的用户级 SINR 锚在几何 SINR 上（实得 {_r1['sinr_db']}，目标 12.0）")
+_bf = 10 * np.log10(
+    ll.rank1_reference_power(_hh) / ll.prebeam_reference_power(_hh)
+)
+check(abs(_r1["sinr_db"] - (12.0 + _bf)) < 1.5,
+      f"rank1 用户级 SINR含 H 的数字 BF 增益（实得 {_r1['sinr_db']:.1f} dB）")
 
 # ---------------------------------------------------------------------------
 sect("7  SU / MU 自适应")
@@ -243,6 +311,25 @@ check(all(d["rank"] <= mu.MU_MAX_RANK for d in _dec.mu_per_user),
       f"MU 每用户秩不超过 {mu.MU_MAX_RANK}（工程约束）")
 check(bool(_dec.mu_users), "MU 方案确实配了人")
 check(len(_dec.mu_per_user) == len(_dec.mu_users), "逐用户明细齐全")
+
+# SU/MU 比较的 CSI 信息集必须对称：估计权与真实信道正交时，SU 也必须吃到
+# 预编码失配，不能只让 MU 用 h_est、SU 偷看 h_true。
+_h_true, _h_est = [], []
+for _u in range(2):
+    _ht = np.zeros((1, 32, 4, 1), dtype=np.complex128)
+    _hp = np.zeros_like(_ht)
+    _ht[:, :, _u, 0] = 1.0
+    _hp[:, :, _u + 2, 0] = 1.0
+    _h_true.append(_ht)
+    _h_est.append(_hp)
+_oracle = mu.su_mu_adaptation(
+    _h_true, noise_power=np.array([0.01, 0.01]),
+    max_mu_users=2, mu_rank=1)
+_mismatch = mu.su_mu_adaptation(
+    _h_true, h_users_for_precoding=_h_est,
+    noise_power=np.array([0.01, 0.01]), max_mu_users=2, mu_rank=1)
+check(_mismatch.su_se < _oracle.su_se / 5,
+      "显式 h_est 时 SU 也只用估计信道选权，正交错估计会显著降低 SU 实际谱效")
 
 # 功率按流均分：rank2 的用户拿 2 份
 _he2 = mu.effective_user_channels(_Hs[:3], streams_per_user=2)
@@ -281,6 +368,42 @@ print(f"  平均后奇异值比 σ4/σ1 = {_sv_avg[3] / _sv_avg[0]:.3f}；"
       f"取代表点 {_sv_rep[3] / _sv_rep[0]:.3f}")
 check(_sv_rep[3] / _sv_rep[0] < _sv_avg[3] / _sv_avg[0] * 3,
       "取代表点保留了真实的奇异值分布，没有被平均抹平")
+
+# ---------------------------------------------------------------------------
+sect("9  CSI 误差鲁棒 RZF：不与每天线约束混为一谈")
+
+_reg = mu.robust_rzf_regularization(
+    n_stream=4, n_bs=8, mean_noise_power=0.01,
+    csi_error_variance=0.01)
+check(abs(_reg.noise_loading - 0.04) < 1e-12,
+      "常规 RZF 噪声加载为 N_stream·sigma_n²/P")
+check(abs(_reg.csi_error_loading - 0.08) < 1e-12,
+      "CSI 不确定性加载为 N_BS·sigma_e²")
+
+_rng_r = np.random.default_rng(65)
+_ht_r = ((_rng_r.standard_normal((4, 1, 4, 8))
+          + 1j * _rng_r.standard_normal((4, 1, 4, 8))) / np.sqrt(2))
+_err_std = 0.1
+_he_r = _ht_r + _err_std * (
+    _rng_r.standard_normal(_ht_r.shape) + 1j * _rng_r.standard_normal(_ht_r.shape)
+) / np.sqrt(2)
+_w0, _p0 = mu.mu_precoder(_he_r, method="rzf", noise_power=0.01)
+_wz, _pz = mu.mu_precoder(
+    _he_r, method="rzf", noise_power=0.01, csi_error_variance=0.0)
+check(np.array_equal(_w0, _wz) and np.array_equal(_p0, _pz),
+      "sigma_e²=0 与历史 RZF 逐位兼容")
+_base_r = mu.mu_link_performance_from_effective(
+    _ht_r, _he_r, noise_power=0.01, precoder="rzf")
+_robust_r = mu.mu_link_performance_from_effective(
+    _ht_r, _he_r, noise_power=0.01, precoder="rzf",
+    csi_error_variance=_err_std ** 2)
+print(f"  固定失配反例：noise-only {_base_r.sum_se:.4f}，"
+      f"robust {_robust_r.sum_se:.4f} bit/s/Hz")
+check(_robust_r.sum_se > _base_r.sum_se + 0.2,
+      "固定 CSI 失配反例中鲁棒加载提高真实和谱效")
+check(_robust_r.rzf_regularization is not None
+      and _robust_r.rzf_regularization["csi_error_loading"] > 0,
+      "结果显式带回鲁棒加载分解，不能只给一个来路不明的 alpha")
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:

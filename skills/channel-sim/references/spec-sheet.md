@@ -7,7 +7,7 @@
 "7 站 3 扇区 ISD 500"要还原成六边形栅格上 21 个扇区的指向、"272 RB"要还原成
 17 个 RBG——**这一步在脑子里做，就一定有人做错。**
 
-`sw_spec_sheet(draft_id=... | dataset_id=... | preset=...)` 出一份离线 HTML。
+`sr_spec_sheet(draft_id=... | dataset_id=... | preset=...)` 出一份离线 HTML。
 **信息是分级的**：首屏只有网络拓扑图 + 关键信息卡，其余折进页签。
 
 首屏 —— 打开就看见，不用点：
@@ -43,13 +43,13 @@
 
 | 打开方式 | `writeback` | 用户怎么做 | 你怎么接 |
 |---|---|---|---|
-| `http://127.0.0.1:…`（默认） | `post` | 点「应用到仿真」 | `sw_await_config()` |
+| `http://127.0.0.1:…`（默认） | `post` | 点「应用到仿真」 | `sr_await_config()` |
 | `file://`（把 HTML 拷走、换台机器打开） | `clipboard` | 点「复制配置改动」再粘回对话框 | 读用户粘的文本 |
 
 页面自己判断走哪条——`file://` 下浏览器不许跨到环回源，按钮会自动隐藏。
 `writeback == "clipboard"` 时原因在 `serve_error` 里。
 
-`sw_await_config()` 拿到的是：
+`sr_await_config()` 拿到的是：
 
 ```json
 {"got": 1, "overrides": {"num_sites": 19, "isd_m": 300}, "spec_id": "...", "text": "..."}
@@ -60,8 +60,8 @@
 被顶掉的在 `superseded` 里。
 
 **先复述再动手**：「你把站点数改到 19、站间距改到 300 m，我这就重配」——
-用户点错了得有机会喊停。然后 `sw_revise(draft_id, **overrides)` 或
-`sw_generate(config=...)`，完事**重新出一份说明书**。
+用户点错了得有机会喊停。然后 `sr_revise(draft_id, **overrides)` 或
+`sr_generate(config=...)`，完事**重新出一份说明书**。
 
 复制粘贴那条路粘回来的东西长这样，**照着做就行**：
 
@@ -73,11 +73,11 @@
 
 overrides = {"num_sites":19,"isd_m":300}
 
-请用这个 overrides 重新配置并重跑（sw_revise / sw_generate），完事再出一份说明书。
+请用这个 overrides 重新配置并重跑（sr_revise / sr_generate），完事再出一份说明书。
 ```
 
 **只带改动过的项**，没动的不进 payload——所以直接把 `overrides` 传给
-`sw_revise` / `sw_generate` 即可，不会把默认值当成用户意图固化下来。
+`sr_revise` / `sr_generate` 即可，不会把默认值当成用户意图固化下来。
 
 拓扑预览的坐标是**生成时由 ChannelHub 现算后内嵌**的（ISD=1 的单位布局），
 前端只做线性缩放，不在 JS 里重写栅格逻辑——预览和真跑的几何一致。
@@ -86,4 +86,4 @@ overrides = {"num_sites":19,"isd_m":300}
 7 站）、阵列走了 legacy 而非本地 1 驱 3 硬件——这些差异都按实际画，
 并写进 `notes`。用户看到"这 17 项是我没管、系统替我定的"才有机会喊停。
 
-`sw_generate` 会自动再出一份（带真实撒点），句柄在 `summary.spec_sheet`。
+`sr_generate` 会自动再出一份（带真实撒点），句柄在 `summary.spec_sheet`。

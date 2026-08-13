@@ -9,26 +9,26 @@
 
 | 你想说的话 | 必须已经拿到 | 不够格的替代 |
 |---|---|---|
-| 信道可信 | `sw_gate` 返回 `passed: true` | 上次跑过、参数看着对 |
-| A 比 B 好 | `sw_compare_arms` 的门 3 通过 | 均值更大、箱线图看着分开 |
+| 信道可信 | `sr_gate` 返回 `passed: true` | 上次跑过、参数看着对 |
+| A 比 B 好 | `sr_compare_arms` 的门 3 通过 | 均值更大、箱线图看着分开 |
 | 提升 X% | `paired.ci95` 且区间不跨零 | 点估计 |
 | 已经收敛 | `converged: true` | 样本数看着不少 |
 | 干扰已建模 | 门 1 的"干扰是否进入 SINR"通过 | 配了多小区 |
 | 用的是标准 CDL 剖面 | 门 1 的"CDL 剖面对标 38.901"通过 | 配置里写了 CDL-C |
-| 自研算法比基线好 | `sw_compare_results` 门 2+门 3 通过 | 自己脚本里 print 的均值 |
+| 自研算法比基线好 | `sr_compare_results` 门 2+门 3 通过 | 自己脚本里 print 的均值 |
 | 这是预注册主结论 | `identity.status == "primary"` | 口头说"我本来就打算看这个" |
 | 两臂配对有效 | 门 2 的"两臂可配对"通过 | 样本数一样 |
-| 吞吐 X Mbps | `sw_throughput` 的返回 | 香农谱效 × 带宽 |
+| 吞吐 X Mbps | `sr_throughput` 的返回 | 香农谱效 × 带宽 |
 | BLER 是 X% | 表 1/2 只能称分析模型；表 3 只能称用户曲线插值 | 不许说成 3GPP 实测 |
 | 边缘用户吞吐 | `cell_edge_mbps_5pct` | 最差那个样本 |
-| 干扰强度是 X dB IoT | `sw_interference_report` 的返回 | `snr_dB - sinr_dB` |
-| 体验速率 X Mbps | `sw_system_sim` 的返回 + `notes` 一起给 | 吞吐均值折算 |
-| 体验速率 A 比 B 高 | 逐用户配对过 `sw_compare_results` 门 3 | 两次 `cell_experienced_mbps` 之差 |
+| 干扰强度是 X dB IoT | `sr_interference_report` 的返回 | 未声明参考面的外部/旧数据直接做 `snr_dB-sinr_dB` |
+| 体验速率 X Mbps | `sr_system_sim` 的返回 + `notes` 一起给 | 吞吐均值折算 |
+| 体验速率 A 比 B 高 | 逐用户配对过 `sr_compare_results` 门 3 | 两次 `cell_experienced_mbps` 之差 |
 | CSI 老化的代价是 X | 每 UE ≥8 个快照且 `csi_aging` 开着 | 单快照数据集上跑出来的数 |
-| 确证还需要 N 个样本 | `sw_sample_size` 的返回 | 拿置信区间反推标准误手算 |
+| 确证还需要 N 个样本 | `sr_sample_size` 的返回 | 拿置信区间反推标准误手算 |
 | 这个方向统计上成立 | 门 3 通过 | 手算的符号检验、正负样本计数 |
 
-## 门 1 · 信道可信 —— `sw_gate(dataset_id)`
+## 门 1 · 信道可信 —— `sr_gate(dataset_id)`
 
 **18 项检查**，分四类：对 3GPP 标准（路损逐点比对、CDL 剖面逐簇比对、角度扩展）、
 对物理定律（时频能量守恒、谱效不超容量上界、SISO 退化到香农）、对配置
@@ -41,13 +41,13 @@
 - **小区数被悄悄改掉** —— 六边形栅格站数只能是 1/7/19，配 2 站实际生成 7 站
 - **干扰没进 SINR** —— 多小区配置下 SINR 若等于纯热噪声 SNR，干扰类结论全不成立
 
-`sw_gate` 是门 1 的**唯一入口**——它把可信度体检翻译成门禁判决；
-`sw_validate` 是那份体检的报告形态，手动排查细节时看它，走流程一律 `sw_gate`。
+`sr_gate` 是门 1 的**唯一入口**——它把可信度体检翻译成门禁判决；
+`sr_validate` 是那份体检的报告形态，手动排查细节时看它，走流程一律 `sr_gate`。
 
 想看 3GPP 口径的校准量（耦合损耗、几何量、时延/角度扩展、PRB 奇异值三条 CDF），
-用 `sw_calibrate`。它只出数不判决，数拿去对 R1-165974 / R1-165975 的参考曲线。
+用 `sr_calibrate`。它只出数不判决，数拿去对 R1-165974 / R1-165975 的参考曲线。
 
-## 门 2 + 门 3 · `sw_compare_arms`
+## 门 2 + 门 3 · `sr_compare_arms`
 
 **两个方案必须跑在同一批信道上。** 共同的路损、撒点、衰落起伏会被差分抵消，
 剩下的才是方案本身的差别；配对设计所需样本数常比非配对少一个数量级。
@@ -83,18 +83,18 @@
 - 事后分组找出"在某某条件下显著"——可以做，但**只能标成探索性**，
   且必须写明是看过结果之后才分的组。
 
-## 自研算法怎么进门 —— `sw_export_eval_template` + `sw_compare_results`
+## 自研算法怎么进门 —— `sr_export_eval_template` + `sr_compare_results`
 
-**`sw_compare_arms` 只认六种内置预编码。** 用户自己的 CSI 压缩、信道估计、
+**`sr_compare_arms` 只认六种内置预编码。** 用户自己的 CSI 压缩、信道估计、
 波束管理、定位、调度算法进不去——而那恰恰是这个项目最核心的用途。走这条路：
 
-1. `sw_export_eval_template(dataset_id)` → 拿到一份可直接运行的脚本
+1. `sr_export_eval_template(dataset_id)` → 拿到一份可直接运行的脚本
 2. **写进 .py 文件，让用户替换 `my_algorithm` 的函数体**。不改也能跑
    （预填示例是估计 CSI 下的 SVD vs Type I），先确认管道通再换算法
 3. 用户运行它 → 注册两个臂，打印两个 `result_id`
-4. `sw_compare_results(a, b)` → 过门 2、门 3，拿 `statement`
+4. `sr_compare_results(a, b)` → 过门 2、门 3，拿 `statement`
 
-`sw_list_results(dataset_id=None)` 列出已注册的结果与全部预注册记录。
+`sr_list_results(dataset_id=None)` 列出已注册的结果与全部预注册记录。
 
 **MCP 不执行用户代码。** 脚本在用户自己的进程里跑，只把标准化的逐样本结果
 注册回来。这条边界不要试图绕过。判决用的是**同一套统计与门控实现**，
@@ -115,14 +115,14 @@ p 值 1.63e-11 → 1.63e-11，一模一样）。
 `values` 长度默认必须等于数据集样本数；**只覆盖一部分样本（比如按 UE 聚合的
 系统级 KPI）时必须显式传 `ids=`**，两臂用同一份、顺序不动。
 
-## 预注册：生成之前把主指标定下来 —— `sw_lock_analysis`
+## 预注册：生成之前把主指标定下来 —— `sr_lock_analysis`
 
 三道门证明不了一件事：**主指标是看数据之前定的，还是跑完之后挑出来的那个
 最好看的。** 真实过程往往是——跑完发现平均谱效没提升，顺手换成 5% 边缘用户
 谱效，有提升就报了这个。每一步都合理，合起来是在多个指标里挑赢的那个。
 
-所以第 1 步在生成前调 `sw_lock_analysis`，把 `prereg_id` 传给 `sw_generate`。
-之后 `sw_compare_results` 会判身份：
+所以第 1 步在生成前调 `sr_lock_analysis`，把 `prereg_id` 传给 `sr_generate`。
+之后 `sr_compare_results` 会判身份：
 
 | 身份 | 含义 | 结论句怎么写 |
 |---|---|---|
@@ -137,7 +137,7 @@ p 值 1.63e-11 → 1.63e-11，一模一样）。
 **事后补绑没有价值，所以没有这个接口**——预注册的全部意义就是"这是看数据
 之前写下的"。未绑定时是 `unregistered` 而不是 `primary`。
 
-用户改主意换指标时：再调一次 `sw_lock_analysis` 得到新 `prereg_id`，
+用户改主意换指标时：再调一次 `sr_lock_analysis` 得到新 `prereg_id`，
 旧的不动。但要说清——**拿同一批数据换指标不算独立验证**，想把新指标
 当主结论得用新数据。
 
@@ -148,10 +148,10 @@ N ≥ ( (1.96 + 0.84) · σ_d / Δ )^2
 ```
 
 σ_d 是**逐样本差值**的标准差，Δ 是想检出的最小效应。流程：先跑 20 个样本试点，
-从 `sw_compare_arms` 的 `paired.std_diff` 拿 σ_d，喂给 `sw_sample_size` 算正式样本数。
+从 `sr_compare_arms` 的 `paired.std_diff` 拿 σ_d，喂给 `sr_sample_size` 算正式样本数。
 
-反过来更该先看一眼：给定样本数，`sw_sample_size` 会算出**最小可检出效应**。
+反过来更该先看一眼：给定样本数，`sr_sample_size` 会算出**最小可检出效应**。
 它比用户期望的增益还大时，**这次实验无论跑出什么结果都不足以下结论**——
 该加样本，不是跑完再解释。
 
-**这个数由 `sw_sample_size` 算，不许在对话里手推。**
+**这个数由 `sr_sample_size` 算，不许在对话里手推。**

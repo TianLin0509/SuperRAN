@@ -1,10 +1,10 @@
-﻿# 场景预设。加新场景只改这个文件，不改代码。
+# 场景预设。加新场景只改这个文件，不改代码。
 #
 # 每个 preset 只给"场景骨架"（站点规模、传播场景、天线规模），
 # 具体参数由决策点协商决定。preset 里没写的键一律走 ChannelHub 默认值。
 #
 # 可选字段：
-#   group    分组名，sw_list_presets 按它归类
+#   group    分组名，sr_list_presets 按它归类
 #   expect   这个场景**实测**出来的特征量（IoT、SINR 中位数等）。
 #            填进来的必须是真跑过的数，不是设计意图——写错了比不写更糟。
 #   verify   怎么复核这个场景确实是它声称的样子
@@ -15,7 +15,11 @@
 # 这一组是**默认口径**：64T = 8H x 4V x 2pol 的 RF 端口，1 驱 3 驱动 192 个
 # 物理阵子，水平 0.5λ、垂直 0.67λ（RF 端口垂直相位中心 2.01λ，有栅瓣）。
 # 载波 2.6 GHz(n41) / 30 kHz / 100 MHz / 272 RB（17 RBG x 16 RB），
-# 终端默认 4R 收、下行。仿真粒度到 RB 为止。
+# 终端默认 4Tx/4Rx，成对生成下行真值和上行 SRS 估计。UE 阵列暂按
+# 2H x 1V x 2pol；这是可覆盖的工程假设，
+# 不是公司终端阵列实测值。仿真粒度到 RB 为止。
+# SRS 用 C_SRS=63 / B_SRS=1 / b_hop=0：每次 16 RB，17 跳扫 272 RB；
+# 30 kHz SCS 下 T_SRS=20 slot = 10 ms，完整宽带采集窗为 170 ms。
 #
 # 阵列模型由 hardware.apply_array_defaults 自动挂上（面板是 8x4x2 就切），
 # 不需要在这里重复写 bs_antenna。**几何 SINR / IoT 不受阵列模型影响**，
@@ -33,19 +37,24 @@ company_64t4r:
     source: internal_sim
     scenario: UMa_NLOS
     channel_model: CDL-C
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
     num_sites: 1
     sectors_per_site: 1
     num_ues: 10
     num_bs_tx_ant: 64
     num_bs_rx_ant: 64
-    num_ue_tx_ant: 2
+    num_ue_tx_ant: 4
     num_ue_rx_ant: 4
     bandwidth_hz: 100000000.0
     subcarrier_spacing: 30000
     num_rb: 272
     carrier_freq_hz: 2600000000.0
-    link: DL
-    channel_est_mode: ls_linear
+    link: BOTH
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
 
 company_64t4r_multicell:
   group: 本地默认
@@ -53,11 +62,15 @@ company_64t4r_multicell:
   summary: 默认配置的多小区版本，干扰环境完整。做干扰、调度、链路自适应类
     课题时的默认起点。
   typical_for: [干扰协调, 调度, 链路自适应, 系统级评估]
-  verify: sw_probe_scenario 复核 IoT；summary.antenna_model 应为 effective_subarray
+  verify: sr_probe_scenario 复核 IoT；summary.antenna_model 应为 effective_subarray
   config:
     source: internal_sim
     scenario: UMa_NLOS
     channel_model: CDL-C
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
     num_sites: 7
     sectors_per_site: 3
     isd_m: 500.0
@@ -65,14 +78,15 @@ company_64t4r_multicell:
     num_interfering_ues: 10
     num_bs_tx_ant: 64
     num_bs_rx_ant: 64
-    num_ue_tx_ant: 2
+    num_ue_tx_ant: 4
     num_ue_rx_ant: 4
     bandwidth_hz: 100000000.0
     subcarrier_spacing: 30000
     num_rb: 272
     carrier_freq_hz: 2600000000.0
-    link: DL
-    channel_est_mode: ls_linear
+    link: BOTH
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
 
 company_64t4r_legacy_array:
   group: 本地默认
@@ -88,27 +102,32 @@ company_64t4r_legacy_array:
     source: internal_sim
     scenario: UMa_NLOS
     channel_model: CDL-C
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
     antenna_model_mode: legacy_64
     num_sites: 1
     sectors_per_site: 1
     num_ues: 10
     num_bs_tx_ant: 64
     num_bs_rx_ant: 64
-    num_ue_tx_ant: 2
+    num_ue_tx_ant: 4
     num_ue_rx_ant: 4
     bandwidth_hz: 100000000.0
     subcarrier_spacing: 30000
     num_rb: 272
     carrier_freq_hz: 2600000000.0
-    link: DL
-    channel_est_mode: ls_linear
+    link: BOTH
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
 
 single_cell_64t4r:
   group: 基线
   label: 单小区 · 64T4R 宏站
   summary: 最常用的算法验证基线。城区宏站非视距，64 发 4 收，100 MHz。
   typical_for: [CSI 压缩, 预编码, 码本设计, 信道估计]
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 1
     sinr_db: 27.12
     pathloss_db: 113.52
@@ -138,7 +157,7 @@ single_cell_4t4r:
   label: 单小区 · 4T4R 最小配置
   summary: 维度最小、跑得最快，适合先把流程跑通再放大。
   typical_for: [冒烟测试, 流程验证]
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 1
     sinr_db: 27.5
     pathloss_db: 113.13
@@ -168,7 +187,7 @@ multicell_7site:
   label: 多小区 · 7 站 21 扇区
   summary: 密集城区，中心小区被一圈邻区包围，干扰环境完整。
   typical_for: [干扰协调, 调度, 切换]
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 27.16      # 高干扰
     iot_ul_db: 0.89
@@ -203,7 +222,7 @@ multicell_19site:
   label: 多小区 · 19 站 57 扇区（38.901 Case 1）
   summary: 两圈邻区的标准宏站基准，中心小区干扰最完整。耗时约为 7 站的三倍。
   typical_for: [干扰协调, 系统级评估, 论文对标]
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 57
     iot_dl_db: 14.68      # 较高干扰
     iot_ul_db: 0.14
@@ -236,7 +255,7 @@ multicell_19site:
 # --- 射线追踪场景 ---------------------------------------------------------
 # `scene` 字段会在 resolve 时展开成 scenario / osm_path / 站点布局，
 # 真实城市场景还会自动完成资产准备（修 PLY 头）。
-# 场景清单用 sw_list_scenes 查，或直接在 overrides 里换 scene。
+# 场景清单用 sr_list_scenes 查，或直接在 overrides 里换 scene。
 
 rt_munich:
   group: 射线追踪
@@ -303,7 +322,7 @@ indoor_factory:
   label: 室内工厂 · InF
   summary: 38.901 §7.2 室内工厂场景，时延扩展与城区差别明显。
   typical_for: [室内定位, 工业物联]
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 4
     iot_dl_db: 46.94      # 极高干扰
     iot_ul_db: 45.45
@@ -336,7 +355,7 @@ indoor_factory:
 # 干扰场景
 # ===========================================================================
 # 用 IoT（噪声抬升，(I+N)/N）刻画干扰强度，20 dB 以上算高干扰。
-# 生成后用 sw_interference_report 复核，别用配置意图代替实测。
+# 生成后用 sr_interference_report 复核，别用配置意图代替实测。
 #
 # **哪些旋钮真的能动 IoT，是按 ChannelHub 几何模型实测过的**，
 # 不是照搬教科书直觉——细节见 interference.py 与 SCENARIOS.md。
@@ -348,8 +367,8 @@ high_iot_dense:
     33 dBm 默认值——**不要为了凑高 IoT 去堆 46 dBm**，那是宏站功率，
     配 150 m 站距在物理上讲不通（实测会把 IoT 推到 48.8 dB，等效负载 0.99999）。
   typical_for: [干扰抑制, 干扰协调, 链路自适应鲁棒性, 边缘用户]
-  verify: sw_probe_scenario 看 interference.dl_iot.median_db，应落在高干扰档
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  verify: sr_probe_scenario 看 interference.dl_iot.median_db，应落在高干扰档
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 35.76      # 极高干扰
     iot_ul_db: 2.89
@@ -389,11 +408,11 @@ low_iot_reference:
     作为对照：早先那版用 ISD 800 m 拉低干扰，两组 SNR 差了 45 dB，根本不是同一个工况。
     注意剩下的 2 个同站扇区仍会互扰，IoT 不归零，20.3 dB 按现场口径**仍算高干扰**。
   typical_for: [干扰场景对照, 消融实验]
-  verify: 与 high_iot_dense 并排 sw_compare_scenarios，看 IoT 拉开而 SNR 基本齐平
+  verify: 与 high_iot_dense 并排 sr_compare_scenarios，看 IoT 拉开而 SNR 基本齐平
   caveat: 在这套模型里 **IoT 与 SNR 无法完全解耦** —— 两者都含热噪声 N。
     靠拉大站间距来降 IoT 会同时把 SNR 拉低（实测 ISD 800 m 时 SNR 中位数 -5.9 dB），
     那样的"对照组"混了两个变量。减站数是能想到的最干净的做法。
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 3
     iot_dl_db: 20.31      # 高干扰
     iot_ul_db: 16.71
@@ -429,8 +448,8 @@ high_iot_uplink:
   label: 上行高干扰 · 邻区满调度
   summary: 上行 IoT 是干扰抬升的经典口径（基站侧噪声抬升）。邻区每小区多个 UE 满负载同发。
   typical_for: [上行干扰, 功控, 上行调度, 接收机算法]
-  verify: sw_interference_report 看 traffic_domain.ul.iot；上行 IoT 由 pusch_load 乘每小区 UE 数决定
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  verify: sr_interference_report 看 traffic_domain.ul.iot；上行 IoT 由 pusch_load 乘每小区 UE 数决定
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 23.68      # 高干扰
     iot_ul_db: 6.25
@@ -454,7 +473,7 @@ high_iot_uplink:
     pusch_load: 1.0
     num_bs_tx_ant: 64
     num_bs_rx_ant: 64
-    num_ue_tx_ant: 2
+    num_ue_tx_ant: 4
     num_ue_rx_ant: 4
     bandwidth_hz: 100000000.0
     subcarrier_spacing: 30000
@@ -467,15 +486,16 @@ high_iot_uplink:
 # ===========================================================================
 # 这一组和上面那组是**两回事**：业务域 SINR 还过得去、测量域已经崩了，
 # 是实网里最常见也最难查的一类问题——预编码用的是被污染的信道估计。
-# 必须 link: BOTH（paired）才会产生 ul_sir_dB / dl_sir_dB 两列。
+# 必须 link: BOTH（paired）才会产生 ul_sir_dB / dl_sir_dB 两列。paired 数据的
+# UL SRS 要形成 64x4 下行预编码 CSI，因此 UE SRS 端口数必须与下行 4R 对齐。
 
 srs_congested:
   group: 测量干扰
   label: SRS 测量拥塞 · 邻区多 UE 同发、无序列跳变
   summary: 每个邻区 24 个 UE 同时发 SRS，comb=2、关掉组跳与序列跳，导频碰撞最严重。
   typical_for: [信道估计鲁棒性, SRS 容量, 导频污染, 上行 CSI 获取]
-  verify: sw_interference_report 看 measurement_domain.ul_srs.sir_dB 中位数与 nmse_floor_db
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  verify: sr_interference_report 看 measurement_domain.ul_srs.sir_dB 中位数与 nmse_floor_db
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 29.08      # 高干扰
     iot_ul_db: 1.06
@@ -502,7 +522,7 @@ srs_congested:
     srs_periodicity: 2
     num_bs_tx_ant: 64
     num_bs_rx_ant: 64
-    num_ue_tx_ant: 2
+    num_ue_tx_ant: 4
     num_ue_rx_ant: 4
     bandwidth_hz: 100000000.0
     subcarrier_spacing: 30000
@@ -516,7 +536,7 @@ srs_clean_reference:
   summary: 与 srs_congested 配对。邻区只有 2 个 UE 发 SRS，comb=4 并开组跳变。
   typical_for: [测量干扰对照, 消融实验]
   verify: 与 srs_congested 只差导频配置，两者 measurement_domain 之差就是导频方案的净效应
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 29.02      # 高干扰
     iot_ul_db: 1.44
@@ -543,7 +563,7 @@ srs_clean_reference:
     srs_periodicity: 10
     num_bs_tx_ant: 64
     num_bs_rx_ant: 64
-    num_ue_tx_ant: 2
+    num_ue_tx_ant: 4
     num_ue_rx_ant: 4
     bandwidth_hz: 100000000.0
     subcarrier_spacing: 30000
@@ -558,7 +578,7 @@ srs_hopping_partial_band:
     低功率 UE 的常规做法，代价是拼出的信道跨越多个时刻、动了就不准。
   typical_for: [SRS 跳频, 信道老化, 时变信道估计, TDD 互易性]
   verify: 与 srs_clean_reference 比 h_est 的 NMSE；跳频的损失随速度放大
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 26.66      # 高干扰
     iot_ul_db: 1.57
@@ -585,7 +605,7 @@ srs_hopping_partial_band:
     ue_speed_kmh: 30.0
     num_bs_tx_ant: 64
     num_bs_rx_ant: 64
-    num_ue_tx_ant: 2
+    num_ue_tx_ant: 4
     num_ue_rx_ant: 4
     bandwidth_hz: 100000000.0
     subcarrier_spacing: 30000
@@ -606,9 +626,9 @@ large_isd_1732m:
   summary: 3GPP 农村 eMBB 的标准站间距，配 UMa 路损与 35 m 站高、2.1 GHz。
     小区边缘路损大、信噪比低，干扰反而弱——覆盖受限而非干扰受限。
   typical_for: [覆盖分析, 边缘用户, 低信噪比算法, 上行受限]
-  verify: sw_interference_report 的 IoT 应当明显低于密集城区；SNR 分布左移
+  verify: sr_interference_report 的 IoT 应当明显低于密集城区；SNR 分布左移
   caveat: 用的是 UMa_NLOS 路损公式，不是 RMa。站间距是农村口径，传播模型不是。
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 2.47      # 轻载
     iot_ul_db: 0.03
@@ -647,7 +667,7 @@ large_isd_5km:
   typical_for: [极限覆盖, 低频段, 广域物联]
   verify: 路损分布与距离分布；这个场景多数样本是噪声受限的
   caveat: 同 large_isd_1732m —— 用的是 UMa_NLOS 路损公式，不是 RMa。
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 3.55      # 低干扰
     iot_ul_db: 0.01
@@ -689,7 +709,7 @@ vehicular_120kmh:
   summary: 3.5 GHz 下多普勒约 389 Hz，相干时间约 1 ms。CSI 老化开始明显。
   typical_for: [信道预测, CSI 老化, 多普勒鲁棒性, 波束跟踪]
   verify: meta__doppler_hz 分布；与静止场景比 h_est 的 NMSE
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 2.59      # 轻载
     iot_ul_db: 0.14
@@ -729,7 +749,7 @@ highspeed_350kmh:
     一个时隙内信道已经变了。用来压测预测与跟踪类算法。
   typical_for: [高铁, 信道预测极限, 多普勒补偿]
   verify: meta__doppler_hz 中位数应接近 1100 Hz
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 0.59      # 轻载
     iot_ul_db: 0.02
@@ -778,7 +798,7 @@ umi_los_canyon:
     路损公式（不看逐链路的 is_los），但数据里的 is_los 仍按几何视距概率抽样——
     实测 los_ratio 是 0.46 而不是 1。判断这批数据是不是视距的，看 scenario 字段，
     不看 los_ratio。
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 38.57      # 极高干扰
     iot_ul_db: 14.83
@@ -815,7 +835,7 @@ hotspot_cluster:
     均匀撒点会高估空分复用的收益，这个场景是它的对照。
   typical_for: [MU-MIMO 配对, 用户相关性, 调度公平性]
   verify: ue_position 的空间分布；同小区用户信道相关性
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 26.03      # 高干扰
     iot_ul_db: 1.26
@@ -848,14 +868,19 @@ hotspot_cluster:
 
 massive_mimo_256t:
   group: 传播条件
-  label: 大规模天线 · 256T
-  summary: 16x8x2 面板，波束更窄、空间分辨力更强，干扰泄漏更低。
+  label: 公司 256T · 16H×8V×2pol · 垂直 1驱6
+  summary: 按产品图编号的 16H×8V×2pol 面板；每个垂直 T 固定驱动 6 个
+    0.67λ 间隔的物理阵子，水平 T 为 1驱1、间距 0.5λ。端口顺序是
+    pol_h_v：第一极化 1..128，第二极化 129..256；每个极化内从顶部向底部递增。
     单样本耗时按天线数近似线性增长，做蒙特卡洛前先估时间。
   typical_for: [大规模天线, 波束赋形增益, 高维 CSI 压缩]
-  verify: sw_interference_report 复核 IoT。**别想当然认为天线多了干扰就小**——
-    几何模型里旁瓣泄漏约为 1/n_h，256T 的 (16,8,2) 面板 n_v*n_p=16、64T 的 (8,4,2) 是 8，
-    干扰功率反而更高。实测 16T 的 IoT 比 64T 低约 1 dB，方向与此一致。
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  verify: 先核对 summary.antenna_model：rf_shape=[16,8,2]、physical_shape=[16,48,2]、
+    elements_per_rf_port=6、port_order=pol_h_v、vertical_index_order=top_to_bottom、
+    F 尺寸 1536x256 且每列 6 个非零；
+    再看干扰与波束 KPI。旧 expect 来自“256 个独立端口”的 legacy 模型，已失效，
+    真实 1驱6 模型完成重测前不得复用旧数值。
+  expect:   # 旧 legacy_64 探测，仅保留为迁移警示，不能作真实 256T 基线
+    status: stale_legacy_independent_ports
     cells: 21
     iot_dl_db: 44.68      # 极高干扰
     iot_ul_db: 2.02
@@ -905,10 +930,10 @@ hst_350kmh:
     整列车 350 km/h 移动。车体穿透损耗 20 dB 是高铁场景与普通高速移动最大的区别——
     它把链路预算整体压低 20 dB，很多在开阔地成立的结论到车厢里就不成立了。
   typical_for: [高铁, 切换, 多普勒补偿, 车体穿透, 沿线覆盖]
-  verify: sw_probe_scenario 看多普勒中位数与路损；路损应明显高于同距离的开阔场景
+  verify: sr_probe_scenario 看多普勒中位数与路损；路损应明显高于同距离的开阔场景
   caveat: 不是 38.104 HST-SFN 一致性配置（那套是单频网合并）。
     穿透损耗是配置项不是模型，改 train_penetration_loss_db 直接平移路损。
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 1.92      # 轻载
     iot_ul_db: 0.99
@@ -955,10 +980,10 @@ hst_hypercell_comp:
     并让最强的 2 个 TRP 联合发送。沿线切换次数大幅减少，代价是小区变大、
     小区内干扰变成同频叠加。
   typical_for: [超级小区, CoMP 联合发送, 切换优化, 单频网]
-  verify: 与 hst_350kmh 并排 sw_compare_scenarios，看 IoT 与 SINR 的变化方向
+  verify: 与 hst_350kmh 并排 sr_compare_scenarios，看 IoT 与 SINR 的变化方向
   caveat: 联合发送在这套引擎里是把多个 TRP 的信道按天线维拼接、接收功率相加，
     不含相位对齐误差与时延差建模。
-  expect:   # 实测，63 样本 · sw_probe_scenario
+  expect:   # 实测，63 样本 · sr_probe_scenario
     cells: 21
     iot_dl_db: 2.13      # 轻载
     iot_ul_db: 2.53

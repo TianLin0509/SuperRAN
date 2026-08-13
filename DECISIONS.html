@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>superwireless 决策落地</title>
+<title>superran 决策落地</title>
 <style>
   :root{
     --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
@@ -177,13 +177,14 @@
 
 <div class="callout c-blue">
 <p><b>你说的「17 倍跳频」，是 38.211 里逐字有的。</b>
-TS 38.211 Table 6.4.1.4.3-1 的 <b>C_SRS = 57 行</b>：</p>
-<p style="text-align:center"><span class="kx" data-display="1" data-tex="m_{SRS} = (272,\ 16,\ 4,\ 4), \qquad N = (1,\ 17,\ 4,\ 1)"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>m</mi><mrow><mi>S</mi><mi>R</mi><mi>S</mi></mrow></msub><mo>=</mo><mo stretchy="true">(</mo><mn>272</mn><mo>,</mo><mi> </mi><mn>16</mn><mo>,</mo><mi> </mi><mn>4</mn><mo>,</mo><mi> </mi><mn>4</mn><mo stretchy="true">)</mo><mo>,</mo><mi>qquad</mi><mi>N</mi><mo>=</mo><mo stretchy="true">(</mo><mn>1</mn><mo>,</mo><mi> </mi><mn>17</mn><mo>,</mo><mi> </mi><mn>4</mn><mo>,</mo><mi> </mi><mn>1</mn><mo stretchy="true">)</mo></mrow></math></span></p>
+TS 38.211 Table 6.4.1.4.3-1 的 <b>C_SRS = 63 行</b>：</p>
+<p style="text-align:center"><span class="kx" data-display="1" data-tex="m_{SRS} = (272,\ 16,\ 8,\ 4), \qquad N = (1,\ 17,\ 2,\ 2)"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block"><mrow><msub><mi>m</mi><mrow><mi>S</mi><mi>R</mi><mi>S</mi></mrow></msub><mo>=</mo><mo stretchy="true">(</mo><mn>272</mn><mo>,</mo><mi> </mi><mn>16</mn><mo>,</mo><mi> </mi><mn>8</mn><mo>,</mo><mi> </mi><mn>4</mn><mo stretchy="true">)</mo><mo>,</mo><mi>qquad</mi><mi>N</mi><mo>=</mo><mo stretchy="true">(</mo><mn>1</mn><mo>,</mo><mi> </mi><mn>17</mn><mo>,</mo><mi> </mi><mn>2</mn><mo>,</mo><mi> </mi><mn>2</mn><mo stretchy="true">)</mo></mrow></math></span></p>
 <p>取 <span class="kx" data-tex="B_{SRS}=1"><math xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mi>B</mi><mrow><mi>S</mi><mi>R</mi><mi>S</mi></mrow></msub><mo>=</mo><mn>1</mn></mrow></math></span>、<span class="kx" data-tex="b_{hop}=0"><math xmlns="http://www.w3.org/1998/Math/MathML"><mrow><msub><mi>b</mi><mrow><mi>h</mi><mi>o</mi><mi>p</mi></mrow></msub><mo>=</mo><mn>0</mn></mrow></math></span> 时，每次 SRS 占 <b>16 RB —— 正好一个 RBG</b>，
 要 <b>17 跳</b>才扫完 272 RB。这和本项目 17 RBG × 16 RB 的载波配置 <b>1:1 对上</b>。</p>
 <p class="src">跳频序列直接调 ChannelHub 的 <code>srs_rb_indices</code>（它实现了 §6.4.1.4.3
 的完整跳频树），没有自己重写。实测 <code>srs_hopping_cycle_length</code> 返回 17、
-扫描顺序就是 RBG 0→1→…→16 循环。</p>
+扫描顺序为 RBG 0→8→16→7→15→6→14→5→13→4→12→3→11→2→10→1→9，
+17 跳的并集恰好覆盖全带且每个 RBG 一次。</p>
 </div>
 
 <h3>核心：不是给 SINR 打折扣，是让预编码真的算错</h3>
@@ -365,11 +366,11 @@ Type I 的 IBLER 普遍低于目标 10%（0.043~0.081），是 MCS 整数档卡�
 <div class="tbl-wrap"><table>
 <thead><tr><th style="min-width:170px">坑</th><th>症状</th><th>为什么难发现</th></tr></thead>
 <tbody>
-<tr><td><b>跳频兜底路径的输出和标准实现一模一样</b></td>
+<tr><td><b>跳频兜底路径曾被误当成标准实现</b></td>
 <td><code>hop_order()</code> 没先 <code>_ensure_path()</code>，静默走了恒等扫描兜底</td>
-<td>C_SRS=57 的标准序列<b>就是</b>顺序扫描，所以兜底给出完全相同的结果——
-除了看返回的 <code>source</code>，<b>没有任何办法发现自己没在用标准实现</b>。
-测试因此直接断言 <code>source</code> 以 <code>channelhub:</code> 开头。</td></tr>
+<td>正确口径是 C_SRS=63，标准序列为
+<code>0,8,16,7,15,6,14,5,13,4,12,3,11,2,10,1,9</code>，与恒等扫描不同。
+测试同时断言完整顺序和 <code>source</code> 以 <code>channelhub:</code> 开头。</td></tr>
 
 <tr><td><b>测试信道里 MU/SU 比值是个死数</b></td>
 <td>扫遍 0~20 dB，比值<b>恒等于 2.000</b></td>
@@ -402,7 +403,7 @@ Type I 的 IBLER 普遍低于目标 10%（0.043~0.081），是 MCS 整数档卡�
 <code>main</code> 分支仍落后 <code>agent/company-bler-curves</code>，合不合由你定。</p>
 </div>
 
-<footer>superwireless 决策落地 · 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>
+<footer>superran 决策落地 · 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>
 </div>
 <script>(function(){if(typeof katex==='undefined')return;var n=document.querySelectorAll('.kx');for(var i=0;i<n.length;i++){var e=n[i],t=e.getAttribute('data-tex');if(!t)continue;try{var d=e.getAttribute('data-display')==='1';var h=katex.renderToString(t,{displayMode:d,throwOnError:false,output:'html',strict:false});e.innerHTML=h;e.classList.add('kx-ok');}catch(err){/* 保留 MathML 兜底，不动它 */}}})();</script>
 </body></html>

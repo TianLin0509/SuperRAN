@@ -4,7 +4,7 @@
 或者要拿本项目的数字跟别处的仿真结果对账时。
 
 **不确定用什么配置时，用 `company_64t4r`（单小区）或
-`company_64t4r_multicell`（多小区）。** `sw_plan` 已经默认挑它们。
+`company_64t4r_multicell`（多小区）。** `sr_plan` 已经默认挑它们。
 
 | | 默认值 |
 |---|---|
@@ -17,7 +17,7 @@
 
 **这不是可选项，是本地硬件事实。** ChannelHub 的默认 `legacy_64` 把 64 个端口
 当成 64 个独立阵元、间距一律 0.5λ——那是另一套阵列。面板是 8x4x2 时
-superwireless 会自动切到真实模型，`summary.antenna_model` 里能查。
+superran 会自动切到真实模型，`summary.antenna_model` 里能查。
 
 实测两者的差距（同 seed、单小区、30 样本）：
 
@@ -32,9 +32,9 @@ superwireless 会自动切到真实模型，`summary.antenna_model` 里能查。
 
 两条边界要记住：
 
-- **几何 SINR / IoT 不受阵列模型影响。** ChannelHub 的几何 SINR 走另一套
-  简化模型（水平 0.5λ、垂直平坦），阵列模型只改信道矩阵——所以它影响
-  预编码/谱效/吞吐/CSI，不影响干扰画像。
+- **固定阵列增益与数字 BF 分层。** 阵元方向图、1 驱 3 固定馈电、电下倾与
+  垂直几何会进入 conducted-power 链路预算，因此会影响几何 SNR/SIR/SINR；
+  64 端口数字预编码增益仍在 H 中，只由链路级计算一次。
 - **阵元方向图是 3GPP 式参数化模型，不是实测方向图**
   （`element_pattern_is_measured: false`），别说成实测。
 

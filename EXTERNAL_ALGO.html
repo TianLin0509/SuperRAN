@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>superwireless 接入自研算法 · 预注册分析口径</title>
+<title>superran 接入自研算法 · 预注册分析口径</title>
 <style>
   :root{
     --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
@@ -148,7 +148,7 @@
 但在这轮之前，<strong>那个思路的代码进不来</strong>。</p>
 
 <div class="callout c-red">
-<p><code>sw_compare_arms</code> 的 <code>method</code> 只认六个值：
+<p><code>sr_compare_arms</code> 的 <code>method</code> 只认六个值：
 <code>svd</code> / <code>svd_wideband</code> / <code>type1</code> / <code>dft</code> /
 <code>mrt</code> / <code>identity</code>。</p>
 <p style="margin-top:8px;">也就是说：内置预编码之间能互相比、能过三道门、能拿到可引用的结论句；
@@ -168,18 +168,18 @@
 
 <div class="step">
 <h3>生成之前先锁口径 <span class="badge b-mcp">MCP</span></h3>
-<pre><code>sw_lock_analysis(primary_metric="spectral_efficiency",
+<pre><code>sr_lock_analysis(primary_metric="spectral_efficiency",
                  baseline="type1", csi_basis="estimated",
                  expected_effect=1.0, secondary_metrics=["sinr_db"])
 <span class="cm"># → prereg_id = "pr_334ba54c"，摘要 6c49cd18513c6fcf…</span>
 
-sw_generate(..., prereg_id="pr_334ba54c")</code></pre>
+sr_generate(..., prereg_id="pr_334ba54c")</code></pre>
 <p>为什么必须在生成之前，见<a href="#s5">第五节</a>。</p>
 </div>
 
 <div class="step">
 <h3>导一份评测脚本 <span class="badge b-mcp">MCP</span></h3>
-<pre><code>code = sw_export_eval_template(dataset_id)["code"]</code></pre>
+<pre><code>code = sr_export_eval_template(dataset_id)["code"]</code></pre>
 <p>返回一份可直接运行的 Python。<strong>预填的示例本身就是一个合法对比</strong>
 （估计 CSI 下的 SVD vs Type I），所以不改也能跑通全链路——
 先确认管道通了再换自己的算法，比一上来全套自己写省事得多。</p>
@@ -202,7 +202,7 @@ art_a = results.register(dataset_id, "我的方法", mine,
 
 <div class="step">
 <h3>交给 MCP 判决 <span class="badge b-mcp">MCP</span></h3>
-<pre><code>sw_compare_results("res_xxxxxxxx", "res_yyyyyyyy")</code></pre>
+<pre><code>sr_compare_results("res_xxxxxxxx", "res_yyyyyyyy")</code></pre>
 <p>过门 2、门 3，返回可直接写进报告的 <code>statement</code>。
 <strong>与内置方案用的是同一套统计与门控实现</strong>——自研算法不走宽松通道。</p>
 </div>
@@ -381,7 +381,7 @@ p=1.63e-11。区别只在<strong>能不能当主结论</strong>。</p>
 
 <div class="who">
 <div>
-<h4>MCP 负责 <span class="badge b-mcp">superwireless</span></h4>
+<h4>MCP 负责 <span class="badge b-mcp">superran</span></h4>
 <p>生成可信信道 · 出观察量 · 校验配对前提 · 跑统计 · 判门 · 判预注册身份 · 写结论句</p>
 </div>
 <div>
@@ -408,7 +408,7 @@ p=1.63e-11。区别只在<strong>能不能当主结论</strong>。</p>
 
 <div class="callout c-blue">
 <p><strong>逐样本值不进 MCP JSON。</strong>值落 <code>.npz</code>，MCP 只回句柄与统计摘要
-——和信道数据同一条规矩。实测 <code>sw_compare_results</code> 的完整响应
+——和信道数据同一条规矩。实测 <code>sr_compare_results</code> 的完整响应
 <strong>3768 字符</strong>，不含 <code>values</code> 字段。</p>
 </div>
 
@@ -419,18 +419,18 @@ p=1.63e-11。区别只在<strong>能不能当主结论</strong>。</p>
 <table>
 <thead><tr><th>工具</th><th>作用</th></tr></thead>
 <tbody>
-<tr><td><code>sw_lock_analysis</code></td>
+<tr><td><code>sr_lock_analysis</code></td>
 <td>预注册：生成前把主指标、基线、CSI 口径、期望效应写下来，返回 <code>prereg_id</code> 与摘要</td></tr>
-<tr><td><code>sw_export_eval_template</code></td>
+<tr><td><code>sr_export_eval_template</code></td>
 <td>导出评测脚本骨架，替换一个函数即可；不改也能跑</td></tr>
-<tr><td><code>sw_compare_results</code></td>
+<tr><td><code>sr_compare_results</code></td>
 <td>判决两个外部结果：配对校验 + 门 2 + 门 3 + 预注册身份 + 结论句</td></tr>
-<tr><td><code>sw_list_results</code></td>
+<tr><td><code>sr_list_results</code></td>
 <td>列出已注册结果与预注册记录</td></tr>
 </tbody>
 </table>
 </div>
-<p class="q"><code>sw_generate</code> 新增可选参数 <code>prereg_id</code>。</p>
+<p class="q"><code>sr_generate</code> 新增可选参数 <code>prereg_id</code>。</p>
 
 <h3>2 个新模块</h3>
 <div class="tbl-wrap">
@@ -498,8 +498,8 @@ ds.eval_template()</code></pre>
 </div>
 
 <footer>
-<p><strong>superwireless</strong> · MIT ·
-<a href="https://github.com/TianLin0509/superwireless">github.com/TianLin0509/superwireless</a></p>
+<p><strong>superran</strong> · MIT ·
+<a href="https://github.com/TianLin0509/superran">github.com/TianLin0509/superran</a></p>
 <p>配套文档：<strong>SETUP.html</strong>（组成与安装）·
 <strong>CAPABILITIES.html</strong>（能力边界）·
 <strong>SHOWCASE.html</strong>（三道门与踩过的坑）。</p>

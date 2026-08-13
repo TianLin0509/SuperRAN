@@ -13,10 +13,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.stdout.reconfigure(errors="replace")
 
-from superwireless import channelhub as ch  # noqa: E402
-from superwireless import generate as gen  # noqa: E402
-from superwireless import linkadapt as la  # noqa: E402
-from superwireless import load  # noqa: E402
+from superran import channelhub as ch  # noqa: E402
+from superran import generate as gen  # noqa: E402
+from superran import linkadapt as la  # noqa: E402
+from superran import load  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -314,23 +314,49 @@ def main() -> None:
     check("边缘用户" in st.as_dict()["note"], "说明 5% 分位的含义")
 
     # -----------------------------------------------------------------------
-    sect("9  耗时预估的标定")
+    sect("9  RB 表口径与调度估计的版本化锚点")
 
+    check(gen._rb_from_bandwidth({"bandwidth_hz": 20e6,
+                                  "subcarrier_spacing": 30_000}) == 51,
+          "带宽反查复用标准表：20 MHz @ 30 kHz = 51 RB，不再近似成 52")
+    check(gen._rb_from_bandwidth({"bandwidth_hz": 100e6,
+                                  "subcarrier_spacing": 30_000}) == 273,
+          "带宽反查复用标准表：100 MHz @ 30 kHz = 273 RB")
+    try:
+        gen._rb_from_bandwidth({"bandwidth_hz": 17e6,
+                                "subcarrier_spacing": 30_000})
+        nonstandard_rejected = False
+    except (KeyError, ValueError):
+        nonstandard_rejected = True
+    check(nonstandard_rejected,
+          "非标准带宽不再静默做 0.95 除法近似；synthetic grid 要显式给 num_rb")
+
+    # 这些是 2026-08-11、20-ray 内核、热进程的历史基准锚点，不是本测试
+    # 现场测出来的值。普通 CI 不跑 timing，避免把宿主负载变成随机正确性门。
     pts = [
-        (dict(num_sites=1, sectors_per_site=1, num_bs_tx_ant=32, num_rb=51), 24),
-        (dict(num_sites=7, sectors_per_site=3, num_bs_tx_ant=32, num_rb=51), 410),
-        (dict(num_sites=1, sectors_per_site=1, num_bs_tx_ant=64, num_rb=273), 191),
-        (dict(num_sites=7, sectors_per_site=3, num_bs_tx_ant=64, num_rb=273), 2054),
+        ("1c/32T/20M", dict(num_sites=1, sectors_per_site=1,
+                            num_bs_tx_ant=32, num_rb=51), 0.158),
+        ("1c/64T/100M", dict(num_sites=1, sectors_per_site=1,
+                             num_bs_tx_ant=64, num_rb=273), 1.074),
+        ("21c/16T/20M", dict(num_sites=7, sectors_per_site=3,
+                             num_bs_tx_ant=16, num_rb=51), 7.479),
     ]
-    for cfg, meas in pts:
-        est = gen.estimate_seconds(cfg, 1) * 1000
-        err = est / meas - 1
-        print(f"  实测 {meas:5d} ms / 预估 {est:6.0f} ms  误差 {err:+.0%}")
-        check(abs(err) < 0.35, f"耗时预估误差在 35% 内（实测 {meas} ms）")
+    for name, cfg_anchor, recorded_s in pts:
+        estimate_s = gen.estimate_seconds(cfg_anchor, 1)
+        err = estimate_s / recorded_s - 1
+        print(f"  历史锚点 {name:12s} {recorded_s:6.3f}s / "
+              f"调度估计 {estimate_s:6.3f}s  偏差 {err:+.0%}")
+        check(abs(err) < 0.35,
+              f"20ray-2026-08-11 锚点 {name} 的调度估计偏差在 35% 内")
+
+    check(gen.estimate_seconds({}, 0) == 0.0, "零样本估时为零")
 
     light = dict(num_sites=1, sectors_per_site=1, num_bs_tx_ant=32, num_rb=51)
     heavy = dict(num_sites=7, sectors_per_site=3, num_bs_tx_ant=64, num_rb=273)
-    check(gen._resolve_workers("auto", 200, light) == 1, "轻配置不起进程（启动成本不划算）")
+    check(gen._resolve_workers("auto", 8, light) == 1,
+          "小批轻配置仍不起进程（启动成本不划算）")
+    check(gen._resolve_workers("auto", 200, light) > 1,
+          "20-ray 下大批轻配置也会并行，不再套用旧 24 ms 假设")
     check(gen._resolve_workers("auto", 200, heavy) > 4, "重配置自动多进程")
     check(gen._resolve_workers("auto", 2, heavy) <= 2, "进程数不超过样本数")
     check(gen._resolve_workers(1, 200, heavy) == 1, "显式 workers=1 强制串行")
@@ -357,13 +383,13 @@ def main() -> None:
     check(set(d1.keys()) == set(dp.keys()), "字段集一致")
     check(d1.h_true.shape[1:] == dp.h_true.shape[1:], "样本形状一致")
     check(sp["parallel"]["workers"] == 4, "摘要记录了进程数")
-    check("统计等价但逐样本不同" in (sp["parallel"]["note"] or ""), "如实说明并行不是逐样本复现")
+    check("逐样本、逐位一致" in (sp["parallel"]["note"] or ""), "摘要声明 worker-count invariant")
     check(sp["parallel"]["fallback_reason"] is None, "并行未降级")
 
-    from scipy import stats as sst
-    p = float(sst.ks_2samp(d1.sinr_dB, dp.sinr_dB).pvalue)
-    print(f"  SINR 分布 KS 检验 p={p:.3f}")
-    check(p > 0.01, "串行与并行的 SINR 分布统计上相容")
+    check(np.array_equal(d1.sinr_dB, dp.sinr_dB),
+          "串行与并行的 SINR 逐样本相同（强于分布 KS）")
+    check(np.array_equal(d1.h_true, dp.h_true),
+          "串行与并行的复信道逐位相同")
 
     # 同 seed 同 workers 必须可复现
     sp2 = gen.generate(dict(cfg), num_samples=N, workers=4)

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect as _inspect
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -13,10 +14,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.stdout.reconfigure(errors="replace")
 
-from superwireless import bler_curves as bc  # noqa: E402
-from superwireless import experience as expm  # noqa: E402
-from superwireless import mumimo as mu  # noqa: E402
-from superwireless import system as sysm  # noqa: E402
+from superran import bler_curves as bc  # noqa: E402
+from superran import experience as expm  # noqa: E402
+from superran import linkadapt as la  # noqa: E402
+from superran import mumimo as mu  # noqa: E402
+from superran import rng as rg  # noqa: E402
+from superran import system as sysm  # noqa: E402
+from superran import traffic as trafm  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -71,6 +75,8 @@ print(f"  到达 {_c['offered_mbps']:.1f} Mbps / 发出 {_c['cell_served_mbps']:
 check(_c["accounting_error_pct"] < 1.0,
       f"字节对得上账（误差 {_c['accounting_error_pct']}%）")
 check(_c["cell_served_mbps"] <= _c["offered_mbps"] + 1e-6, "发出去的不可能多于到达的")
+check(_c["offered_bytes"] == _c["served_bytes"] + _c["backlog_bytes"],
+      "整数原始字节严格守恒，不靠 Mbps 舍入容差")
 
 # ---------------------------------------------------------------------------
 sect("3  体验速率的三种口径")
@@ -251,6 +257,24 @@ check(len(_g["per_snapshot"]) >= 2, "多个快照各测一次")
 check("标量近似" in _g["note"], "把这是个近似说清楚了")
 check("relative_spread" in _g, "离散度一起返回——它就是这个近似的可信度")
 
+_g_3d = sysm.measure_mu_gain([h[0] for h in _hm], [15.0] * 8)
+_g_4d_one = sysm.measure_mu_gain([h[0:1] for h in _hm], [15.0] * 8)
+check(_g_3d["per_snapshot"] == _g_4d_one["per_snapshot"]
+      and _g_3d["ratio"] == _g_4d_one["ratio"],
+      "measure_mu_gain 的 3D 单快照与显式 T=1 完全一致，不把 RB 当时间")
+
+_g_loaded = sysm.measure_mu_gain(
+    _hm, [15.0] * 8, geo_sir_db=[18.0] * 8,
+    neighbor_load=0.3, neighbor_load_jitter=0.0)
+_g_full = sysm.measure_mu_gain(
+    _hm, [15.0] * 8, geo_sir_db=[18.0] * 8,
+    neighbor_load=1.0, neighbor_load_jitter=0.0)
+_eff_loaded = np.asarray(_g_loaded["effective_geo_sinr_db"])
+_eff_full = np.asarray(_g_full["effective_geo_sinr_db"])
+check(np.all(_eff_loaded > _eff_full)
+      and _g_loaded["neighbor_load"]["prb_utilization"] == 0.3,
+      "capacity MU/SU 标量与链路表复用同一邻区负载工作点，不再拿 full-buffer 比值回乘")
+
 _g_bad = sysm.measure_mu_gain(_hm[:1], [15.0], max_mu_users=4)
 check(_g_bad["measured"] is False, "单用户时 MU 增益明确标成未测得")
 check(bool(_g_bad.get("errors")), "MU 配对失败返回可审计错误，而不是静默吞掉")
@@ -283,7 +307,7 @@ check(bool(_tn[1].outage.all()), "nan 的用户判为覆盖外，而不是随便
 check(bool(np.all(np.isfinite(_tn[0].se))), "正常用户不受影响")
 
 # MCS 选择必须自己兜住非有限输入
-from superwireless import linkadapt as _la2  # noqa: E402
+from superran import linkadapt as _la2  # noqa: E402
 
 for _v, _want in ((float("nan"), 0), (float("-inf"), 0), (float("inf"), 27)):
     check(_la2.select_mcs(_v, table=3).index == _want,
@@ -327,6 +351,22 @@ check(any("覆盖外" in n for n in _rz.notes), "notes 里点明覆盖外")
 check(abs(sysm.apply_neighbor_load(10.0, 12.0, 0.0)
           - sysm.interference_free_sinr(10.0, 12.0)) < 1e-6,
       "邻区负载 0 等价于无干扰")
+
+# API 的抖动幅度必须真的进入建表，不能无论传什么都暗中固定成 ±5%。
+_load_h = np.ones((1, 16, 8, 2), dtype=np.complex128)
+_load_fixed = sysm.build_link_tables(
+    [_load_h], [10.0], geo_sir_db=[12.0], neighbor_load=0.3,
+    neighbor_load_jitter=0.0, load_jitter_rng=np.random.default_rng(7))
+_load_wide = sysm.build_link_tables(
+    [_load_h], [10.0], geo_sir_db=[12.0], neighbor_load=0.3,
+    neighbor_load_jitter=0.5, load_jitter_rng=np.random.default_rng(7))
+check(abs(_load_fixed[0].geo_sinr_db - _load_wide[0].geo_sinr_db) > 0.1,
+      "neighbor_load_jitter 的实参真实改变逐快照负载折算，不再写死 ±5%")
+try:
+    sysm.NeighborLoadConfig(prb_utilization=1.1)
+    check(False, "非法邻区利用率应硬失败")
+except ValueError:
+    check(True, "邻区利用率与抖动范围在入口硬校验")
 
 # **快照间隔是 5 ms 不是一个 TTI。** ChannelHub 的多时隙输出是连续的
 # SRS/CSI-RS 机会（每快照推进 max(srs_per,csirs_per)×slot_duration），
@@ -485,6 +525,8 @@ _bp = expm.BusyPeriod(start_tti=0, traffic_class="large", pdb_ms=10,
 _bm = expm.burst_metrics(_bp, 0.5)
 check(abs((_bm.throughput_mbps or 0) - 1.6) < 1e-9,
       f"large burst 用首传→倒数第二 ACK 的 300 B/1.5 ms（实得 {_bm.throughput_mbps} Mbps）")
+check(abs((_bm.head_inclusive_throughput_mbps or 0) - 0.96) < 1e-9,
+      "含头速率保持 300 B numerator 与去尾规则，只把 1.0 ms 首调度等待加进分母")
 check(_bm.queue_wait_ms == 1.0 and _bm.completion_delay_ms == 4.0,
       "排队等待与 arrival→completion 时延单独上报，不混进标准吞吐")
 
@@ -495,10 +537,27 @@ _sp = expm.BusyPeriod(start_tti=3, traffic_class="small", pdb_ms=1,
                       ack_events=[expm.AckEvent(3, 250, 1000, 750)])
 _sm = expm.burst_metrics(_sp, 0.5, "fractional_slot")
 check(abs((_sm.throughput_mbps or 0) - 16.0) < 1e-9
+      and _sm.head_inclusive_throughput_mbps == _sm.throughput_mbps
       and _sm.throughput_kind == "rel19_fractional_slot",
       f"小 burst 250/1000 TB 折成 0.125 ms，吞吐 16 Mbps（实得 {_sm.throughput_mbps}）")
+_sp_wait = expm.BusyPeriod(
+    start_tti=1, traffic_class="small", pdb_ms=10,
+    bytes_arrived=250, bytes_acked=250, first_tx_tti=3, last_ack_tti=3,
+    tx_attempts=1, ack_events=[expm.AckEvent(3, 250, 1000, 750)])
+_sm_wait = expm.burst_metrics(_sp_wait, 0.5, "fractional_slot")
+check(abs((_sm_wait.head_inclusive_throughput_mbps or 0) - (2000 / 0.001125 / 1e6)) < 1e-9,
+      "单 TB 小包含头速率 = payload / (首包时延 + fractional-slot airtime)")
 check(expm.burst_metrics(_sp, 0.5, "exclude").throughput_mbps is None,
       "可显式保留旧式 exclude 口径，但不再声称小 burst 永远不可测")
+
+# queue-wait 在 first TX 发生时已经是完整观测，不应等对象完成才保留。
+_incomplete_started = expm.ArrivalItem(
+    arrival_tti=2, total_bytes=1_000, remaining_bytes=500,
+    first_tx_tti=6, completion_tti=-1)
+_iwait, _icomp, _imiss = expm.arrival_item_metrics(
+    _incomplete_started, 0.5, 20.0)
+check(_iwait == 2.0 and _icomp is None and _imiss is None,
+      "未完成但已首传的 arrival 保留精确 queue-wait，不被完成条件删样")
 
 # --- 真正跑 experience_v2：一 TTI 多 UE、实际 RBG、scheduled-TBS PF、守恒 ---
 _ex_cfg = sysm.SystemConfig(evaluation_mode="experience", duration_s=0.8,
@@ -525,16 +584,38 @@ check(_ex.cell["multi_ue_tti_share"] > 0,
       f"按需分配后同一 TTI 确实能服务多个 UE（占比 {_ex.cell['multi_ue_tti_share']:.1%}）")
 check(_ex.cell["accounting_error_pct"] < 1e-9,
       f"experience 字节守恒：arrived=acked+queued（误差 {_ex.cell['accounting_error_pct']}%）")
+check(_ex.cell["measurement_accounting_error_pct"] < 1e-9,
+      "测量窗口独立守恒：start backlog + arrivals = ACK + end backlog")
 check(_ex.cell["small_burst_fractional_mbps"] is not None,
       "单 TTI 小 burst 用 Rel-19 fractional-slot KPI 得到可测样本")
 check(_ex.cell["small_queue_wait_ms_p95"] is not None
       and _ex.cell["completed_arrival_objects"] > 0
       and _ex.cell["class_arrival_kpis"]["small"]["is_small"],
       "小包 FIFO 到达对象的等待/PDB 与 DRB busy-period 吞吐分层统计")
+check(_ex.cell["first_packet_delay_ms_p95"] == _ex.cell["arrival_queue_wait_ms_p95"]
+      and _ex.cell["first_packet_delay_observed_share"]
+      == _ex.cell["queue_wait_observed_share"],
+      "首包时延复用每个 arrival object 的生成→首次调度事件，并保留右删失覆盖率")
+check(_ex.cell["drb_throughput_head_inclusive_mbps"]
+      <= _ex.cell["drb_throughput_rel19_mbps"] + 1e-12,
+      "含头速率只扩大 denominator，因此逐汇总不高于对应掐头去尾速率")
+check(0.0 <= _ex.cell["queue_wait_observed_share"] <= 1.0
+      and "queue_wait_observation" in _ex.diagnostics,
+      "queue-wait 报告已观测/从未调度右删失覆盖率，不把删样藏起来")
 check("small 到达对象等待 P95" in _ex.text(),
       "experience_v2 单次结果摘要使用体验模式字段，不访问 legacy 专属字段")
 check(_ex.cell["resource_utilization"] <= _ex.cell["occupancy"] + 1e-12,
       "resource utilization 与 busy-TTI occupancy 分开，不用 padding 伪装满带")
+check(_ex.cell["serving_cell_prb_utilization"] == _ex.cell["resource_utilization"],
+      "本小区 PRB 利用率用明确新名称输出，旧 resource_utilization 仅作兼容别名")
+_tti_dist = _ex.cell["tti_occupied_rbg_distribution"]
+check(len(_tti_dist["bins"]) == 18
+      and sum(b["tti_count"] for b in _tti_dist["bins"]) == _ex.cell["dl_tti"]
+      and abs(sum(b["tti_share"] for b in _tti_dist["bins"]) - 1.0) < 1e-12,
+      "逐 TTI RBG 分布覆盖 0..17，包含 idle，并与测量窗全部 DL 调度机会严格对账")
+check(_ex.cell["actual_rbg_size_hist"]["scope"]
+      == "nonzero_grant_size_not_tti_total",
+      "旧 RBG histogram 明示为 per-grant，禁止冒充逐 TTI 小区占用分布")
 _partial = [a for a in _ex.diagnostics["allocation_sample"] if a["n_rbg"] < 17]
 check(bool(_partial) and all(a["pf_credit_bytes"] == a["scheduled_bytes"] for a in _partial),
       "只拿部分 RBG 的 UE 按实际 scheduled TBS 记 PF，不按全带记账")
@@ -545,6 +626,27 @@ for _a in _ex.diagnostics["allocation_sample"]:
     _sample_overlap |= bool(_seen.intersection(_a["rbg_indices"]))
     _seen.update(_a["rbg_indices"])
 check(not _sample_overlap, "allocation 明细中的 RBG bitmap 也逐 TTI 无重叠")
+
+# 服务小区 PRB 利用率是内生 KPI：full-buffer 必须 100%，无到达必须 0%。
+_load_cfg = sysm.SystemConfig(
+    evaluation_mode="experience", duration_s=0.02, seed=410, tdd_pattern="DDDSU")
+_load_sched = sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False)
+_load_kpi = sysm.KpiConfig(warmup_tti=0)
+_full_load = sysm.simulate(
+    _T, sys_cfg=_load_cfg, traffic=sysm.TrafficConfig(model="full_buffer"),
+    sched=_load_sched, kpi=_load_kpi)
+_idle_load = sysm.simulate(
+    _T, sys_cfg=_load_cfg,
+    traffic=sysm.TrafficConfig(
+        model="mixed", small_ue_share=1.0,
+        small_arrival_rate_hz=0.0, arrival_rate_hz=0.0),
+    sched=_load_sched, kpi=_load_kpi)
+check(abs(_full_load.cell["serving_cell_prb_utilization"] - 1.0) < 1e-12
+      and _full_load.cell["tti_occupied_rbg_distribution"]["bins"][17]["tti_share"] == 1.0,
+      "full-buffer 占满每个可用 DL TTI，服务小区 PRB 利用率和 17-RBG 桶都为 100%")
+check(_idle_load.cell["serving_cell_prb_utilization"] == 0.0
+      and _idle_load.cell["tti_occupied_rbg_distribution"]["bins"][0]["tti_share"] == 1.0,
+      "无到达时 PRB 利用率为 0，全部 DL TTI 落入 0-RBG idle 桶")
 
 # 反向控制只验证“口径真的错开”，不把收益方向写成单测硬门禁。
 _wrong = sysm.simulate(
@@ -557,16 +659,215 @@ check(bool(_wrong_partial)
       and any(a["pf_credit_bytes"] > a["scheduled_bytes"] for a in _wrong_partial),
       "反向控制 legacy_fullband 确实会给部分带宽用户按全带记账；效果方向留给门3")
 
+# 两 UE 饱和反向哨兵：宽松主场景的 P95 会卡在 0.5 ms 地板，不能据此误判
+# PF 记账没有影响。固定链路、固定 CRN、关闭 OLLA 后，唯一自变量就是 RU 更新口径。
+_pf_sentinel_tables: list[sysm.UeLinkTable] = []
+for _u in range(2):
+    _sinr = np.full((2, 1), 15.0)
+    _mcs = np.full((2, 1), 12, dtype=int)
+    _se = np.full((2, 1), la.MCS_TABLES[3][12].se)
+    _pf_sentinel_tables.append(sysm.UeLinkTable(
+        ue=_u, sinr_db=_sinr, mcs=_mcs, se=_se,
+        best_rank=np.ones(2, dtype=int), best_se=_se[:, 0],
+        geo_sinr_db=15.0, outage=np.zeros(2, dtype=bool),
+        iot_db=3.0, sir_db=12.0, se_gnb=_se.copy(),
+        best_se_gnb=_se[:, 0].copy()))
+_pf_sentinel_cfg = sysm.SystemConfig(
+    evaluation_mode="experience", duration_s=1.0,
+    tdd_pattern="DDDSU", seed=9)
+_pf_sentinel_traffic = sysm.TrafficConfig(
+    model="mixed", small_ue_share=0.5,
+    small_file_bytes=1500, small_arrival_rate_hz=1500.0,
+    file_bytes=500_000, arrival_rate_hz=20.0)
+_pf_sentinel_common = dict(
+    sys_cfg=_pf_sentinel_cfg, traffic=_pf_sentinel_traffic,
+    kpi=sysm.KpiConfig(warmup_tti=0))
+_pf_correct = sysm.simulate(
+    _pf_sentinel_tables,
+    sched=sysm.SchedulerConfig(
+        algorithm="pf", mu_enabled=False, olla_enabled=False,
+        pf_accounting="scheduled_tbs"),
+    rng=rg.RngBook(123, 0), **_pf_sentinel_common)
+_pf_wrong = sysm.simulate(
+    _pf_sentinel_tables,
+    sched=sysm.SchedulerConfig(
+        algorithm="pf", mu_enabled=False, olla_enabled=False,
+        pf_accounting="legacy_fullband"),
+    rng=rg.RngBook(123, 0), **_pf_sentinel_common)
+check((_pf_wrong.cell["small_queue_wait_ms_mean"]
+       - _pf_correct.cell["small_queue_wait_ms_mean"]) > 0.5
+      and (_pf_wrong.cell["small_queue_wait_ms_p95"]
+           > _pf_correct.cell["small_queue_wait_ms_p95"])
+      and (_pf_wrong.cell["small_immediate_service_ratio"]
+           < _pf_correct.cell["small_immediate_service_ratio"]),
+      "反向哨兵：全带 PF 误记账显著拉长小包等待并降低到达 TTI 即时服务率")
+
 # legacy 路径保持独立；不允许跨模式参数静默退化。
 check(sysm.SystemConfig().as_dict()["model_version"] == "legacy_v1",
       "默认 capacity 路径仍标 legacy_v1，历史结果可复现")
 try:
-    sysm.simulate(_T, sys_cfg=sysm.SystemConfig(evaluation_mode="experience"),
-                  traffic=sysm.TrafficConfig(model="mixed"),
-                  sched=sysm.SchedulerConfig(mu_enabled=True))
-    check(False, "experience_v2 开 MU 时硬报错")
+    sysm.simulate(
+        _T, sys_cfg=sysm.SystemConfig(power_constraint="pebf"),
+        sched=sysm.SchedulerConfig(mu_enabled=False))
+    check(False, "链路表与系统功率约束不一致应硬失败")
 except ValueError as _e:
-    check("只支持 SU" in str(_e), f"experience_v2 开 MU 时硬报错（{_e}）")
+    check("功率约束" in str(_e) and "不一致" in str(_e),
+          "capacity/experience 都拒绝错配的 EBF/PEBF/NEBF 链路表")
+# --- 数据受限 SU/MU 自适应：PF 先排序，方案比较后才执行 ---
+_mu_rg = np.random.default_rng(23)
+_mu_h = [((_mu_rg.standard_normal((4, 32, 16, 2))
+           + 1j * _mu_rg.standard_normal((4, 32, 16, 2))) / np.sqrt(2))
+         for _ in range(4)]
+_mu_tables = sysm.build_link_tables(
+    _mu_h, [15.0] * 4, num_snapshots=4, rb_per_rbg=16,
+    csi=sysm.ca.CsiConfig(enabled=False), max_rank=2, mu_enabled=True)
+_pair = _mu_tables[0].mu_links[1]
+_recon = np.column_stack((_mu_tables[0].sinr_db[:, 1],
+                          _mu_tables[1].sinr_db[:, 1])) \
+    + _pair.power_loss_db + _pair.corr_loss_true_db
+check(np.allclose(_recon, _pair.true_sinr_db, atol=1e-10),
+      "MU true SINR 可逐点重构为 SU SINR + powerLoss + CorrLoss")
+check(abs(_pair.power_loss_db + 10 * np.log10(2)) < 1e-12,
+      "两个 rank2 UE 相对 SU rank2 的功率损失精确为 -3.0103 dB")
+check("P/4" in _pair.as_dict()["power_loss_scope"],
+      "MU powerLoss 输出显式限定为 rank2+rank2 等功率分流口径")
+check(_pair.as_dict()["receiver"] == "per_user_lmmse",
+      "MU pair 表显式记录逐用户 LMMSE 接收机，不再冒充固定标量接收基")
+
+# 鲁棒 RZF 必须真正贯通系统建表，而不是只存在于 mumimo 单元函数。
+_rzf_tables = sysm.build_link_tables(
+    _mu_h, [15.0] * 4, num_snapshots=4, rb_per_rbg=16,
+    csi=sysm.ca.CsiConfig(enabled=False), max_rank=2, mu_enabled=True,
+    mu_precoder="rzf", mu_csi_error_variance=0.03)
+_rzf_pair = _rzf_tables[0].mu_links[1]
+_rzf_diag = _rzf_pair.as_dict()
+check(_rzf_diag["precoder"] == "rzf"
+      and abs(_rzf_diag["csi_error_variance"] - 0.03) < 1e-15
+      and len(_rzf_diag["rzf_regularization"]) == 4,
+      "系统建表把 RZF 与 CSI 误差方差传到每个 MU 快照并保留诊断")
+check(all(abs(x["csi_error_loading"] - 16 * 0.03) < 1e-12
+          for x in _rzf_diag["rzf_regularization"]),
+      "鲁棒 RZF 的 CSI 加载逐快照精确为 N_BS·sigma_e²")
+check(sysm.SchedulerConfig(
+          mu_precoder="rzf", mu_csi_error_variance=0.03).as_dict()[
+              "mu_csi_error_variance"] == 0.03,
+      "系统配置与结果合同显式携带鲁棒 RZF 误差方差")
+try:
+    sysm.SchedulerConfig(mu_csi_error_variance=-1e-3)
+    check(False, "负 CSI 误差方差应硬失败")
+except ValueError as _e:
+    check("mu_csi_error_variance" in str(_e),
+          "负 CSI 误差方差在启动仿真前硬失败")
+
+_mu_cfg = sysm.SystemConfig(evaluation_mode="experience", duration_s=0.5,
+                            seed=51, tdd_pattern="DDDSU")
+_large = sysm.simulate(
+    _mu_tables, sys_cfg=_mu_cfg,
+    traffic=sysm.TrafficConfig(model="mixed", small_ue_share=0.0,
+                               file_bytes=500_000, arrival_rate_hz=20.0),
+    sched=sysm.SchedulerConfig(mu_enabled=True, max_mu_users=2,
+                               mu_corr_threshold=0.99),
+    kpi=sysm.KpiConfig(warmup_tti=0))
+check(_large.cell["mu_share"] > 0
+      and _large.cell["su_mu_plan"]["mu_selected"] > 0,
+      "大队列下数据受限 MU 方案确实被选中，不再用固定 MU 增益比例")
+check(0 < _large.cell["mu_paired_prb_utilization"]
+      <= _large.cell["serving_cell_prb_utilization"] + 1e-12
+      and 0 < _large.cell["mu_paired_prb_share_of_used"] <= 1.0
+      and _large.cell["mu_paired_prb_equivalent"] > 0,
+      "MU 同时报配对 PRB 原始等效量、占全部可用 PRB 比例和占已用 PRB 比例")
+check(abs(_large.cell["mu_paired_prb_utilization"]
+          - _large.cell["serving_cell_prb_utilization"]
+          * _large.cell["mu_paired_prb_share_of_used"]) < 1e-12,
+      "MU 配对绝对占用 = 本小区 PRB 利用率 × 已用资源中的 MU 配对比例")
+_mu_alloc = [a for a in _large.diagnostics["allocation_sample"]
+             if a["transmission_mode"] == "MU"]
+check(bool(_mu_alloc) and _large.diagnostics["rbg_overlap_violations"] == 0,
+      "MU 两个 TB 共享同一物理 RBG group，资源账只扣一次且无非法重叠")
+_grp: dict[int, list[dict]] = {}
+for _a in _mu_alloc:
+    _grp.setdefault(int(_a["mu_group_id"]), []).append(_a)
+_full_groups = [v for v in _grp.values() if len(v) == 2]
+check(bool(_full_groups) and all(
+    x[0]["rbg_indices"] == x[1]["rbg_indices"] for x in _full_groups),
+    "同一 MU group 的两用户使用完全相同的 RBG bitmap")
+check(all(a["pf_credit_bytes"] == a["scheduled_bytes"] for a in _mu_alloc),
+      "MU PF-RU 同样按本 UE 实际 scheduled TBS 更新，不按全带或和速率记账")
+_a0 = _mu_alloc[0]
+_formula_sinr = (_a0["base_tx_sinr_db"] + _a0["su_olla_before_db"]
+                 + _a0["corr_loss_db"] + _a0["power_loss_db"]
+                 + _a0["mu_olla_before_db"])
+check(la.select_mcs(_formula_sinr, table=3, target_bler=0.1).index == _a0["mcs"],
+      "MU MCS 严格使用 CQI+BF+SU-OLLA+CorrLoss+powerLoss+MU-OLLA")
+_lookup = expm.TbsLookup.build(17, 16)
+_snap = 0
+_ordered = list(range(len(_mu_tables)))
+_rank_of = {u: int(_mu_tables[u].best_rank[_snap]) for u in _ordered}
+_mcs_of = {u: int(_mu_tables[u].mcs_tx[_snap, _rank_of[u] - 1]) for u in _ordered}
+_base_of = {u: float(_mu_tables[u].sinr_tx_db[_snap, _rank_of[u] - 1])
+            for u in _ordered}
+_true_of = {u: float(_mu_tables[u].sinr_db[_snap, _rank_of[u] - 1])
+            for u in _ordered}
+_potential_of = {u: _lookup.tbs_bytes("D", _mcs_of[u], _rank_of[u], 17)
+                 for u in _ordered}
+_floor_plan = expm._build_mu_plan(
+    _ordered, queue_bytes={u: 500_000 for u in _ordered}, lookup=_lookup,
+    slot="D", num_rbg=17, rank_of=_rank_of, mcs_of=_mcs_of,
+    base_tx_sinr_of=_base_of, mcs_without_olla_of=_mcs_of,
+    true_sinr_of=_true_of, potential_of=_potential_of,
+    tables=_mu_tables, snap=_snap,
+    sched=sysm.SchedulerConfig(mu_enabled=True, mu_corr_threshold=1.0),
+    su_olla_db=np.full(len(_ordered), -100.0),
+    mu_olla_db=np.zeros(len(_ordered)), blocked_data=False)
+check(not _floor_plan.has_mu,
+      "MU OLLA 压到 MCS0 仍超过 50% BLER 时判 pair 不可用并回退 SU")
+_olla_state = _large.diagnostics["olla_state_final"]
+check(_olla_state["su_db"] != _olla_state["mu_db"]
+      and "not pair-specific" in _olla_state["scope"],
+      "SU/MU OLLA 是两组独立用户级状态，不按配对关系拆分")
+_target_cfg = sysm.SystemConfig(
+    evaluation_mode="experience", duration_s=0.02, seed=151, tdd_pattern="DDDSU")
+_target_run = sysm.simulate(
+    _mu_tables, sys_cfg=_target_cfg,
+    traffic=sysm.TrafficConfig(model="mixed", small_ue_share=0.0,
+                               file_bytes=500_000, arrival_rate_hz=100.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=True, mu_corr_threshold=1.0,
+        olla_step_up_db=0.01, olla_step_down_db=0.09,
+        mu_olla_step_up_db=0.02, mu_olla_step_down_db=0.08),
+    kpi=sysm.KpiConfig(warmup_tti=0))
+_targets = _target_run.cell["olla_convergence"]["target_bler_by_mode"]
+check(abs(_targets["SU"] - 0.1) < 1e-12 and abs(_targets["MU"] - 0.2) < 1e-12,
+      "OLLA 收敛门按 SU/MU 各自步长比检查，不拿 SU target 误判 MU")
+
+_small = sysm.simulate(
+    _mu_tables, sys_cfg=_mu_cfg,
+    traffic=sysm.TrafficConfig(model="mixed", small_ue_share=1.0,
+                               small_file_bytes=500, small_arrival_rate_hz=200.0),
+    sched=sysm.SchedulerConfig(mu_enabled=True, olla_enabled=False,
+                               max_mu_users=2, mu_corr_threshold=0.99),
+    kpi=sysm.KpiConfig(warmup_tti=0))
+check(_small.cell["mu_share"] == 0
+      and _small.cell["su_mu_plan"]["su_forced_all_queues_clear"] > 0,
+      "SU 能在本 TTI 清完全部队列时强制 SU，尾部 RBG 留空")
+check(sysm.KpiConfig().resolve_warmup_tti(0.5) == 2000,
+      "默认预启动 1 s 在 30 kHz SCS 下精确换算为 2000 TTI")
+_warm_cfg = sysm.SystemConfig(evaluation_mode="experience", duration_s=1.2,
+                              seed=52, tdd_pattern="DDDSU")
+_warm = sysm.simulate(
+    _mu_tables, sys_cfg=_warm_cfg,
+    traffic=sysm.TrafficConfig(model="mixed", small_ue_share=1.0,
+                               small_file_bytes=500, small_arrival_rate_hz=200.0),
+    sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+    kpi=sysm.KpiConfig())
+check(_warm.cell["measurement_start_s"] == 1.0
+      and abs(_warm.cell["measurement_duration_s"] - 0.2) < 1e-12,
+      "1.2 s 仿真默认前 1 s 只收敛状态，KPI 统计后 0.2 s")
+check(_warm.cell["measurement_accounting_error_pct"] == 0.0
+      and _warm.diagnostics["measurement_window"]["balance_error_bytes"] == 0,
+      "预启动跨界 backlog 显式带入测量窗字节守恒，不混成窗内 offered load")
+check(all(a["tti"] >= 2000 for a in _warm.diagnostics["allocation_sample"]),
+      "吞吐/BLER/资源 allocation 样本全部从预启动结束后开始")
 try:
     sysm.simulate(_T, sys_cfg=sysm.SystemConfig(evaluation_mode="experience"),
                   traffic=sysm.TrafficConfig(model="bimodal"),
@@ -574,6 +875,338 @@ try:
     check(False, "experience_v2 拒绝按目标 RBG 反推包长")
 except ValueError as _e:
     check("请用 mixed" in str(_e), f"experience_v2 拒绝因果倒置的 bimodal（{_e}）")
+
+try:
+    sysm.simulate(
+        _T, sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.01),
+        traffic=_ex_tr,
+        sched=sysm.SchedulerConfig(
+            mu_enabled=False, olla_step_up_db=0.0, olla_step_down_db=0.0),
+        kpi=sysm.KpiConfig(warmup_tti=0))
+    check(False, "零 OLLA 步长应被拒绝")
+except ValueError as _e:
+    check("olla_step_up_db" in str(_e), "OLLA 步长非正时硬失败，不产生零除或伪 target")
+
+# ---------------------------------------------------------------------------
+sect("13  配置入口：非法值硬失败，不静默钳位")
+
+
+def _expect_value_error(factory, needle: str, label: str) -> None:
+    try:
+        factory()
+        check(False, label)
+    except ValueError as exc:
+        check(needle in str(exc), f"{label}（{exc}）")
+
+
+_expect_value_error(
+    lambda: sysm.TrafficConfig(arrival_rate_hz=float("nan")),
+    "arrival_rate_hz", "话务到达率 NaN 在配置入口被拒绝")
+_expect_value_error(
+    lambda: sysm.TrafficConfig(p_small_rbg=0.8, p_full_rbg=0.3),
+    "不能超过 1", "bimodal 概率和超过 1 被拒绝")
+_expect_value_error(
+    lambda: sysm.TrafficConfig(small_priority=0),
+    "small_priority", "业务优先级拒绝深层钳位为 1")
+_expect_value_error(
+    lambda: sysm.TrafficConfig(classes=(
+        sysm.TrafficClassConfig(
+            name="zero", ue_share=0.0, file_bytes=1, arrival_rate_hz=0.0),)),
+    "ue_share 之和", "自定义业务类不能全部为零权重")
+_expect_value_error(
+    lambda: sysm.SchedulerConfig(pf_window_tti=1.5),
+    "pf_window_tti", "PF 窗口拒绝非整数")
+_expect_value_error(
+    lambda: sysm.SchedulerConfig(qos_delay_exponent=float("inf")),
+    "qos_delay_exponent", "QoS 指数拒绝无穷值")
+_expect_value_error(
+    lambda: sysm.SchedulerConfig(mu_rank_per_user=True),
+    "mu_rank_per_user", "MU rank 拒绝布尔值冒充整数")
+_expect_value_error(
+    lambda: sysm.KpiConfig(warmup_tti=-1),
+    "warmup_tti", "预启动 TTI 拒绝负数")
+_expect_value_error(
+    lambda: sysm.KpiConfig().resolve_warmup_tti(float("nan")),
+    "tti_ms", "预启动换算拒绝 NaN TTI")
+_expect_value_error(
+    lambda: sysm.SystemConfig(duration_s=float("nan")),
+    "duration_s", "仿真时长拒绝 NaN")
+_expect_value_error(
+    lambda: sysm.SystemConfig(num_rbg=17.0),
+    "num_rbg", "RBG 数拒绝浮点数冒充整数")
+_expect_value_error(
+    lambda: sysm.SystemConfig(tdd_pattern="DDDX"),
+    "tdd_pattern", "TDD pattern 拒绝 D/S/U 之外的字符")
+_expect_value_error(
+    lambda: sysm.SystemConfig(seed=-1),
+    "seed", "系统随机种子拒绝负数")
+_expect_value_error(
+    lambda: sysm.NeighborLoadConfig(seed=-1),
+    "seed", "邻区负载随机种子拒绝负数")
+_expect_value_error(
+    lambda: sysm.NeighborLoadConfig().realized(1.5),
+    "n", "邻区负载样本数拒绝浮点数冒充整数")
+_expect_value_error(
+    lambda: sysm.apply_neighbor_load(10.0, 12.0, float("nan")),
+    "utilization", "邻区利用率 NaN 不再传播到 SINR")
+_expect_value_error(
+    lambda: expm.TbsLookup.build(17.0, 16),
+    "num_rbg", "TBS 表维度拒绝浮点数截断")
+_expect_value_error(
+    lambda: expm.TbsLookup.build(17, 16, float("nan")),
+    "s_slot_fraction", "TBS S 时隙比例拒绝 NaN")
+_expect_value_error(
+    lambda: _lut.row("D", 12.5, 2),
+    "MCS", "TBS MCS 索引拒绝浮点数截断")
+_expect_value_error(
+    lambda: _lut.tbs_bytes("D", 12, 2, 1.5),
+    "n_rbg", "TBS RBG 索引拒绝浮点数截断")
+_expect_value_error(
+    lambda: _lut.required_rbg("D", 12, 2, 0),
+    "payload_bytes", "TBS 反查拒绝零字节伪需求")
+_expect_value_error(
+    lambda: sysm.simulate_replications(_T, num_replications=1.5),
+    "必须为整数", "多次仿真入口不再截断浮点重复次数")
+_expect_value_error(
+    lambda: sysm.simulate_replications(_T, num_replications=1, master_seed=1.5),
+    "master_seed", "多次仿真入口不再截断浮点主种子")
+_expect_value_error(
+    lambda: sysm.simulate_replications(_T, num_replications=1,
+                                       replication_start=-1),
+    "replication", "多次仿真入口拒绝负数 RngRun 起点")
+
+# ---------------------------------------------------------------------------
+sect("14  CDF 话务、双标量、显式用户映射与资源归因")
+
+with tempfile.TemporaryDirectory() as _tmp:
+    _tmp_path = Path(_tmp)
+    _size_cdf = _tmp_path / "packet-size.csv"
+    _interval_cdf = _tmp_path / "packet-interval.csv"
+    _size_cdf.write_text(
+        "bytes,cdf\n100,50\n200,100\n", encoding="utf-8")
+    _interval_cdf.write_text(
+        "interval_ms,cdf\n2,0.5\n4,1.0\n", encoding="utf-8")
+    _parsed = trafm.load_empirical_cdf(
+        _size_cdf, kind="packet_size", value_unit="byte")
+    check(_parsed.probability_input_scale == "percent"
+          and _parsed.quantile(0.5) == 100.0
+          and _parsed.mean == 150.0
+          and len(_parsed.sha256) == 64,
+          "value,cdf 支持百分数、逆查、离散均值与输入 SHA-256")
+    _draw_a = _parsed.sample(np.random.default_rng(7), 64)
+    _draw_b = _parsed.sample(np.random.default_rng(7), 64)
+    check(np.array_equal(_draw_a, _draw_b), "CDF 逆变换在同种子下逐位可复现")
+
+    _bad_cdf = _tmp_path / "bad.csv"
+    _bad_cdf.write_text("value,cdf\n100,0.8\n90,1.0\n", encoding="utf-8")
+    _expect_value_error(
+        lambda: trafm.load_empirical_cdf(
+            _bad_cdf, kind="packet_size", value_unit="byte"),
+        "严格递增", "CDF value 倒序硬失败，不排序后假装输入正确")
+
+    _base_cfg = sysm.TrafficConfig(
+        model="cdf", packet_size_cdf=str(_size_cdf),
+        interarrival_cdf=str(_interval_cdf))
+    _half_size_cfg = sysm.TrafficConfig(
+        model="cdf", packet_size_cdf=str(_size_cdf),
+        interarrival_cdf=str(_interval_cdf), packet_size_scale=0.5)
+    _base_tr = expm.ExperienceTraffic(
+        _base_cfg, 2, 0.5, np.random.default_rng(123))
+    _half_size_tr = expm.ExperienceTraffic(
+        _half_size_cfg, 2, 0.5, np.random.default_rng(123))
+    for _tti in range(80):
+        _base_tr.step(_tti)
+        _half_size_tr.step(_tti)
+    _base_sizes = _base_tr.traffic_samples["packet_size_bytes"]
+    _half_sizes = _half_size_tr.traffic_samples["packet_size_bytes"]
+    check(len(_base_sizes) == len(_half_sizes) > 0
+          and _half_sizes == [int(x * 0.5) for x in _base_sizes],
+          "包长 scale=0.5 在相同基础抽样上逐包精确减半")
+
+    _half_interval_cfg = sysm.TrafficConfig(
+        model="cdf", packet_size_cdf=str(_size_cdf),
+        interarrival_cdf=str(_interval_cdf), interarrival_scale=0.5)
+    _base_interval_tr = expm.ExperienceTraffic(
+        _base_cfg, 2, 0.5, np.random.default_rng(321))
+    _half_interval_tr = expm.ExperienceTraffic(
+        _half_interval_cfg, 2, 0.5, np.random.default_rng(321))
+    for _tti in range(120):
+        _base_interval_tr.step(_tti)
+        _half_interval_tr.step(_tti)
+    _base_intervals = _base_interval_tr.traffic_samples["interarrival_ms"]
+    _half_intervals = _half_interval_tr.traffic_samples["interarrival_ms"]
+    check(_half_interval_tr.arrival_events > _base_interval_tr.arrival_events
+          and np.allclose(
+              _half_intervals[:len(_base_intervals)],
+              np.asarray(_base_intervals) * 0.5),
+          "包间隔 scale=0.5 保持基础 interval 抽样并产生更密的到达")
+
+    _profiles = (
+        sysm.TrafficClassConfig(
+            name="video", ue_share=0.0, file_bytes=100,
+            arrival_rate_hz=0.0, packet_size_cdf=str(_size_cdf),
+            interarrival_cdf=str(_interval_cdf), ue_ids=(0,)),
+        sysm.TrafficClassConfig(
+            name="xr", ue_share=0.0, file_bytes=100,
+            arrival_rate_hz=0.0, packet_size_cdf=str(_size_cdf),
+            interarrival_cdf=str(_interval_cdf), ue_ids=(1,), is_small=True),
+    )
+    _profile_cfg = sysm.TrafficConfig(model="cdf", classes=_profiles)
+    _profile_tr = expm.ExperienceTraffic(
+        _profile_cfg, 2, 0.5, np.random.default_rng(8))
+    check([q.traffic_class.name for q in _profile_tr.queues] == ["video", "xr"],
+          "ue_ids 可显式绑定多话务 profile；全覆盖时允许 ue_share 全为 0")
+    _expect_value_error(
+        lambda: expm.ExperienceTraffic(
+            _profile_cfg, 1, 0.5, np.random.default_rng(8)),
+        "只有 0..0", "profile 指向越界 UE 时在生成前硬失败")
+
+    _cdf_run = sysm.simulate(
+        _T[:2],
+        sys_cfg=sysm.SystemConfig(
+            evaluation_mode="experience", duration_s=0.08, tdd_pattern="D"),
+        traffic=_profile_cfg,
+        sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+        kpi=sysm.KpiConfig(warmup_tti=0))
+    _user_attr = sum(
+        float(row["allocated_prb_equivalent_attributed"])
+        for row in _cdf_run.users)
+    check(abs(_user_attr - _cdf_run.cell["allocated_prb_equivalent"]) < 1e-9,
+          "用户 attributed PRB 跨 UE 求和严格等于小区已用 PRB")
+    check(_cdf_run.diagnostics["traffic_profiles"][0]["packet_size_cdf"]["sha256"]
+          == _parsed.sha256
+          and _cdf_run.diagnostics["traffic_samples"]["packet_size_bytes"],
+          "结果保留 CDF 来源哈希、profile 摘要与抽样前缀供审计")
+
+    _cdf_rep = sysm.simulate_replications(
+        _T[:2], num_replications=2, master_seed=9,
+        sys_cfg=sysm.SystemConfig(
+            evaluation_mode="experience", duration_s=0.08, tdd_pattern="D"),
+        traffic=_profile_cfg,
+        sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+        kpi=sysm.KpiConfig(warmup_tti=0))
+    check(all(isinstance(row["allocated_prb_equivalent_attributed"], dict)
+              for row in _cdf_rep.users)
+          and "traffic_samples" in _cdf_rep.as_dict(),
+          "用户新增 KPI 自动跨 replication 汇总，CDF 证据进入序列化结果")
+    _offset_rep = sysm.simulate_replications(
+        _T[:2], num_replications=1, master_seed=9, replication_start=5,
+        sys_cfg=sysm.SystemConfig(
+            evaluation_mode="experience", duration_s=0.04, tdd_pattern="D"),
+        traffic=_profile_cfg,
+        sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+        kpi=sysm.KpiConfig(warmup_tti=0))
+    check(_offset_rep.as_dict()["replications"] == [5]
+          and _offset_rep.config["rng"]["replication"] == "5..5",
+          "simulate_replications 可选择不重叠的 RngRun 起点且完整回传")
+
+    _calibration_cfg = sysm.TrafficConfig(
+        model="cdf", packet_size_cdf=str(_size_cdf),
+        interarrival_cdf=str(_interval_cdf), packet_size_scale=20.0)
+    _calibration = sysm.calibrate_traffic_to_prb(
+        _T[:2], target_prb_utilization=0.30, tolerance=0.05,
+        max_iterations=7, probe_replications=2, num_replications=4,
+        master_seed=9,
+        sys_cfg=sysm.SystemConfig(
+            evaluation_mode="experience", duration_s=0.3, tdd_pattern="D"),
+        traffic=_calibration_cfg,
+        sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+        kpi=sysm.KpiConfig(warmup_tti=0))
+    _cal_dict = _calibration.as_dict()
+    check(_calibration.status == "target_met"
+          and abs(_cal_dict["achieved_prb_utilization"] - 0.30) <= 0.05,
+          "双标量控制器最终以正式仿真实测值落入 30%±5% PRB 目标")
+    check(len(_calibration.history) >= 2
+          and _calibration.history[0]["offered_load_factor_vs_input"] == 1.0
+          and "ci95" in _calibration.history[0]
+          and "common_random_numbers" in _cal_dict,
+          "校准保留初始点、每轮置信区间、负载倍率与公共随机数证据")
+    check(not set(_cal_dict["probe_replication_ids"])
+          & set(_cal_dict["formal_replication_ids"])
+          and _cal_dict["formal_replication_ids"]
+          == _calibration.result.as_dict()["replications"],
+          "probe 与正式反馈使用同 master seed 下互不重叠的 RngRun")
+    _expect_value_error(
+        lambda: sysm.calibrate_traffic_to_prb(
+            _T[:2], target_prb_utilization=0.30,
+            sys_cfg=sysm.SystemConfig(evaluation_mode="capacity"),
+            traffic=_calibration_cfg,
+            sched=sysm.SchedulerConfig(mu_enabled=False)),
+        "只支持 evaluation_mode='experience'",
+        "容量评估不允许把目标 PRB 话务校准混进来")
+    for _invalid_target in (0.0, 1.0, float("nan")):
+        _expect_value_error(
+            lambda _target=_invalid_target: sysm.calibrate_traffic_to_prb(
+                _T[:2], target_prb_utilization=_target,
+                sys_cfg=sysm.SystemConfig(
+                    evaluation_mode="experience", duration_s=0.05),
+                traffic=_calibration_cfg,
+                sched=sysm.SchedulerConfig(mu_enabled=False)),
+            "必须是 (0,1)",
+            f"目标 PRB 利用率 {_invalid_target!r} 在启动仿真前硬失败")
+    _expect_value_error(
+        lambda: sysm.calibrate_traffic_to_prb(
+            _T[:2], target_prb_utilization=0.30, formal_refinements=-1,
+            sys_cfg=sysm.SystemConfig(
+                evaluation_mode="experience", duration_s=0.05),
+            traffic=_calibration_cfg,
+            sched=sysm.SchedulerConfig(mu_enabled=False)),
+        "formal_refinements 必须是非负整数",
+        "正式反馈轮数拒绝负数而不是静默钳到 0")
+    _expect_value_error(
+        lambda: expm.ExperienceTraffic(
+            sysm.TrafficConfig(
+                model="cdf",
+                packet_size_cdf=str(_tmp_path / "missing-size.csv"),
+                interarrival_cdf=str(_interval_cdf)),
+            1, 0.5, np.random.default_rng(1)),
+        "CDF 文件不存在",
+        "缺失 CDF 在生成到达前硬失败并返回解析后的绝对路径")
+    _expect_value_error(
+        lambda: sysm.TrafficConfig(
+            model="cdf",
+            classes=(
+                sysm.TrafficClassConfig(
+                    name="a", ue_share=0.0, file_bytes=100,
+                    arrival_rate_hz=0.0, packet_size_cdf=str(_size_cdf),
+                    interarrival_cdf=str(_interval_cdf), ue_ids=(0,)),
+                sysm.TrafficClassConfig(
+                    name="b", ue_share=0.0, file_bytes=100,
+                    arrival_rate_hz=0.0, packet_size_cdf=str(_size_cdf),
+                    interarrival_cdf=str(_interval_cdf), ue_ids=(0,)),
+            )),
+        "被重复分配",
+        "一个 UE 不能同时绑定两个 traffic profile")
+    _expect_value_error(
+        lambda: sysm.TrafficConfig(
+            model="cdf",
+            classes=(sysm.TrafficClassConfig.from_dict({
+                "name": "bad-share", "ue_share": "0.5",
+                "file_bytes": 100, "arrival_rate_hz": 0.0,
+                "packet_size_cdf": str(_size_cdf),
+                "interarrival_cdf": str(_interval_cdf),
+            }),)),
+        "ue_share 必须有限非负",
+        "嵌套 profile 的字符串数值返回 ValueError，不泄漏 TypeError")
+    _expect_value_error(
+        lambda: sysm.TrafficConfig(
+            model="cdf",
+            classes=(sysm.TrafficClassConfig.from_dict({
+                "name": "bad-bool", "ue_share": 1.0,
+                "file_bytes": 100, "arrival_rate_hz": 0.0,
+                "is_small": "false",
+                "packet_size_cdf": str(_size_cdf),
+                "interarrival_cdf": str(_interval_cdf),
+            }),)),
+        "is_small 必须是布尔值",
+        "字符串 false 不会被 Python 真值规则误当成小包 profile")
+    _expect_value_error(
+        lambda: sysm.TrafficConfig(model="cdf",
+                                   packet_size_cdf=str(_size_cdf),
+                                   interarrival_cdf=str(_interval_cdf),
+                                   packet_size_scale=True),
+        "packet_size_scale 必须是有限正数",
+        "布尔值不能冒充全局话务缩放标量")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)

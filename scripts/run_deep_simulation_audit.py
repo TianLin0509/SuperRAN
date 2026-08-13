@@ -17,10 +17,10 @@ from typing import Any
 
 import numpy as np
 
-from superwireless import gates, load
-from superwireless import linklevel as ll
-from superwireless import rng as rg
-from superwireless import system as sy
+from superran import gates, load
+from superran import linklevel as ll
+from superran import rng as rg
+from superran import system as sy
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "artifacts" / "results" / "deep_simulation_audit.json"

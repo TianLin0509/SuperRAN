@@ -1,0 +1,10 @@
+# Synthetic example only; not company data and not a 3GPP standard CDF.
+interval_ms,cdf
+5,0.05
+10,0.12
+20,0.25
+50,0.45
+100,0.65
+200,0.82
+500,0.94
+1000,1.00

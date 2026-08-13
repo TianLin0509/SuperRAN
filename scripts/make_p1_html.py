@@ -14,8 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from superwireless import katex as kx  # noqa: E402
-from superwireless import mathml as mm  # noqa: E402
+from superran import katex as kx  # noqa: E402
+from superran import mathml as mm  # noqa: E402
 
 
 def M(tex: str, *, block: bool = False) -> str:
@@ -41,7 +41,7 @@ F_CONV = M(r"\frac{1}{\eta I + N}")
 def head() -> str:
     src = (ROOT / "TONIGHT.html").read_text(encoding="utf-8")
     h = src.split("</head>")[0]
-    h = h.replace("superwireless 通宵成果与待审", "superwireless P1 方案评审")
+    h = h.replace("superran 通宵成果与待审", "superran P1 方案评审")
     extra = """
 <style>
   .vfy{border-collapse:collapse;width:100%}
@@ -98,7 +98,7 @@ VERIFY = [
      "算术无误：20 个干扰小区 × 272 RB × 64 × 4 × 8 B(complex64) = "
      "<b>11.14 MB/样本</b>，服务信道 0.56 MB，正好 20 倍。"),
     ("rx_power_all_dbm 存在但没被存下来", "ok",
-     "<code>internal_sim.py:2896</code> 确实产出它；superwireless 全库搜 "
+     "<code>internal_sim.py:2896</code> 确实产出它；superran 全库搜 "
      "<code>rx_power_all</code> <b>命中数为 0</b>，"
      "<code>generate.py</code> 的 <code>_SCALAR_META_FIELDS</code> 里只有 "
      "<code>rx_power_serving_dbm</code>。"),
@@ -595,7 +595,7 @@ def build() -> str:
 第 1 条最重要——它决定 P1-A 要不要改 burst 定义。</p>
 {open_html}
 
-<footer>superwireless P1 方案评审 · 底稿 P1_DESIGN.md 855 行 ·
+<footer>superran P1 方案评审 · 底稿 P1_DESIGN.md 855 行 ·
 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>
 </div>
 {kx.upgrade_script()}

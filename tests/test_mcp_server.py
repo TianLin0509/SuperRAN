@@ -43,7 +43,7 @@ async def main() -> None:
     env = {**get_default_environment(), "PYTHONPATH": str(ROOT / "src"), "PYTHONIOENCODING": "utf-8"}
     params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "superwireless.server"],
+        args=["-m", "superran.server"],
         env=env,
     )
 
@@ -58,16 +58,41 @@ async def main() -> None:
                 first = (t.description or "").strip().splitlines()[0]
                 print(f"  {t.name:<22} {first}")
             expected = {
-                "sw_capabilities", "sw_list_presets", "sw_list_scenes", "sw_plan",
-                "sw_revise", "sw_generate", "sw_deliver",
-                "sw_describe_dataset", "sw_list_datasets", "sw_mcs_info", "sw_bler_curve",
-                "sw_tdd_mcs",
+                "sr_capabilities", "sr_list_presets", "sr_list_scenes", "sr_plan",
+                "sr_revise", "sr_generate", "sr_deliver",
+                "sr_describe_dataset", "sr_list_datasets", "sr_mcs_info", "sr_bler_curve",
+                "sr_tdd_mcs",
             }
             check(expected.issubset(set(names)), f"12 个核心工具全部注册（实际 {len(names)} 个）")
+            sim_tool = next((t for t in tools.tools if t.name == "sr_system_sim"), None)
+            if sim_tool is None:
+                sim_schema = {}
+            else:
+                try:
+                    sim_schema = sim_tool.inputSchema or {}
+                except AttributeError:
+                    # MCP 1.x/2.x 的 Tool 模型分别暴露 camelCase / snake_case。
+                    sim_schema = sim_tool.input_schema or {}
+            sim_props = sim_schema.get("properties", {})
+            mu_tuning = {
+                "mu_corr_threshold", "mu_olla_step_up_db", "mu_olla_step_down_db"}
+            check(sim_tool is not None and mu_tuning.issubset(sim_props),
+                  "系统仿真 MCP 公开 MU 相关性门限与 MU-OLLA 独立步长")
+            discrete = {"seed", "num_replications", "pf_window_tti",
+                        "file_bytes", "small_file_bytes"}
+            check(all(sim_props.get(k, {}).get("type") == "integer" for k in discrete),
+                  "MCP schema 把 seed/重复次数/PF 窗口/字节数声明为整数")
+            traffic_kpi_args = {
+                "packet_size_cdf", "interarrival_cdf", "traffic_profiles",
+                "target_prb_utilization", "load_calibration_axis",
+                "load_calibration_formal_refinements",
+                "kpi_focus", "kpi_intent"}
+            check(traffic_kpi_args.issubset(sim_props),
+                  "MCP schema 公开 CDF、多 profile、目标 PRB 校准与 Agent KPI 编排")
 
             print("\n" + "=" * 68 + "\n1.5  表驱动 BLER 查询\n" + "=" * 68)
             curve = _payload(await session.call_tool(
-                "sw_bler_curve",
+                "sr_bler_curve",
                 {"mcs": 15, "tx_mode": "newtx", "sinr_db_list": [14.0, 14.05]},
             ))
             check(curve.get("source_id") == "company_20b_256qam", "MCP 返回曲线来源")
@@ -79,14 +104,14 @@ async def main() -> None:
                   "MCP 在原始 SINR 网格点逐值返回 BLER")
 
             mcs3 = _payload(await session.call_tool(
-                "sw_mcs_info", {"table": 3, "show_bler_anchors": True}
+                "sr_mcs_info", {"table": 3, "show_bler_anchors": True}
             ))
             check(len(mcs3.get("mcs_table", [])) == 28 and
                   mcs3.get("verify", {}).get("consistent") is True,
                   "MCP 表 3 覆盖 28 档且完整性自检通过")
 
-            print("\n" + "=" * 68 + "\n2  sw_capabilities\n" + "=" * 68)
-            caps = _payload(await session.call_tool("sw_capabilities", {}))
+            print("\n" + "=" * 68 + "\n2  sr_capabilities\n" + "=" * 68)
+            caps = _payload(await session.call_tool("sr_capabilities", {}))
             engines = {e["name"]: e for e in caps.get("engines", [])}
             for e in engines.values():
                 print(f"  {e['name']:<16} {'可用' if e['available'] else '不可用'}")
@@ -105,7 +130,7 @@ async def main() -> None:
             qr = engines.get("quadriga_real", {})
             check(qr.get("available") is False and bool(qr.get("missing")), "不可用引擎列出缺失项")
 
-            scenes = _payload(await session.call_tool("sw_list_scenes", {}))
+            scenes = _payload(await session.call_tool("sr_list_scenes", {}))
             print(f"\n  射线追踪场景 {len(scenes['scenes'])} 个 "
                   f"(内置 {sum(1 for s in scenes['scenes'] if s['builtin'])} / "
                   f"真实OSM {sum(1 for s in scenes['scenes'] if not s['builtin'])})")
@@ -117,10 +142,10 @@ async def main() -> None:
             )
             check(len(scenes["scenes"]) >= 10, "场景清单完整（不依赖 sionna-rt 是否安装）")
 
-            print("\n" + "=" * 68 + "\n3  sw_plan —— 交互提案\n" + "=" * 68)
+            print("\n" + "=" * 68 + "\n3  sr_plan —— 交互提案\n" + "=" * 68)
             prop = _payload(
                 await session.call_tool(
-                    "sw_plan",
+                    "sr_plan",
                     {
                         "intent": "帮我验证一个 CSI 压缩的想法，先弄一批单小区 64T4R 的信道数据",
                         "max_questions": 5,
@@ -147,10 +172,10 @@ async def main() -> None:
 
             draft_id = prop["draft_id"]
 
-            print("\n" + "=" * 68 + "\n4  sw_revise —— 用户表态\n" + "=" * 68)
+            print("\n" + "=" * 68 + "\n4  sr_revise —— 用户表态\n" + "=" * 68)
             rev = _payload(
                 await session.call_tool(
-                    "sw_revise",
+                    "sr_revise",
                     {
                         "draft_id": draft_id,
                         "overrides": {
@@ -168,8 +193,8 @@ async def main() -> None:
                 print(f"    {c}")
             check(len(rev["changes"]) >= 4, "差分修正生效")
 
-            print("\n" + "=" * 68 + "\n5  sw_generate\n" + "=" * 68)
-            gen = _payload(await session.call_tool("sw_generate", {"draft_id": draft_id}))
+            print("\n" + "=" * 68 + "\n5  sr_generate\n" + "=" * 68)
+            gen = _payload(await session.call_tool("sr_generate", {"draft_id": draft_id}))
             check(gen.get("status") == "ok", "生成成功")
             s = gen["summary"]
             print(f"  dataset_id {gen['dataset_id']}")
@@ -184,9 +209,9 @@ async def main() -> None:
 
             ds_id = gen["dataset_id"]
 
-            print("\n" + "=" * 68 + "\n5.5  sw_tdd_mcs —— TDD CQI/BF Gain/OLLA\n" + "=" * 68)
+            print("\n" + "=" * 68 + "\n5.5  sr_tdd_mcs —— TDD CQI/BF Gain/OLLA\n" + "=" * 68)
             tdd = _payload(await session.call_tool(
-                "sw_tdd_mcs",
+                "sr_tdd_mcs",
                 {
                     "dataset_id": ds_id,
                     "cqi": 9,
@@ -216,19 +241,19 @@ async def main() -> None:
                   "NACK 只更新下一时刻 OLLA 状态")
 
             cqi0 = _payload(await session.call_tool(
-                "sw_tdd_mcs", {"dataset_id": ds_id, "cqi": 0},
+                "sr_tdd_mcs", {"dataset_id": ds_id, "cqi": 0},
             ))
             check(cqi0.get("scheduled") is False and cqi0.get("final_mcs") is None,
                   "MCP 对 CQI0 返回不调度")
 
-            print("\n" + "=" * 68 + "\n6  sw_deliver —— 取货代码\n" + "=" * 68)
-            d1 = _payload(await session.call_tool("sw_deliver", {"dataset_id": ds_id, "want": "信道"}))
+            print("\n" + "=" * 68 + "\n6  sr_deliver —— 取货代码\n" + "=" * 68)
+            d1 = _payload(await session.call_tool("sr_deliver", {"dataset_id": ds_id, "want": "信道"}))
             print(f"  第一次点单：{d1['measurements']}")
             check(d1["measurements"] == ["channel"], "只要信道时只给信道")
 
             d2 = _payload(
                 await session.call_tool(
-                    "sw_deliver", {"dataset_id": ds_id, "want": "我还想看 PMI 和 SRS RSRP"}
+                    "sr_deliver", {"dataset_id": ds_id, "want": "我还想看 PMI 和 SRS RSRP"}
                 )
             )
             print(f"  改主意后：{d2['measurements']}")
@@ -241,7 +266,7 @@ async def main() -> None:
             print("\n" + "=" * 68 + "\n7  体检拦截（走 MCP 全链路）\n" + "=" * 68)
             blocked = _payload(
                 await session.call_tool(
-                    "sw_generate",
+                    "sr_generate",
                     {
                         "intent": "做一个基于到达角的波束搜索算法",
                         "overrides": {"channel_model": "TDL-C"},
@@ -254,13 +279,13 @@ async def main() -> None:
                 print(f"           建议：{i['suggestion']}")
             check(blocked.get("status") == "blocked", "波束任务 + TDL 被 MCP 拦截")
 
-            print("\n" + "=" * 68 + "\n8  sw_describe_dataset / sw_list_datasets\n" + "=" * 68)
-            desc = _payload(await session.call_tool("sw_describe_dataset", {"dataset_id": ds_id}))
+            print("\n" + "=" * 68 + "\n8  sr_describe_dataset / sr_list_datasets\n" + "=" * 68)
+            desc = _payload(await session.call_tool("sr_describe_dataset", {"dataset_id": ds_id}))
             print(f"  形状 {desc['shape']}  含角度 {desc['has_angles']}")
             print(f"  可用测量量 {desc['available_measurements']}")
             check(bool(desc.get("available_measurements")), "描述包含可用测量量清单")
 
-            lst = _payload(await session.call_tool("sw_list_datasets", {}))
+            lst = _payload(await session.call_tool("sr_list_datasets", {}))
             print(f"  本机已有 {len(lst['datasets'])} 个数据集")
             check(len(lst["datasets"]) >= 1, "数据集列表可用")
 
@@ -268,7 +293,7 @@ async def main() -> None:
             # `got=0` 是**正常路径**，不是错误：用户可能还在看，也可能改用对话说了。
             # 早先这里若抛异常或长时间挂住，agent 就会以为工具坏了并放弃这条交互。
             _t0 = time.time()
-            wait = _payload(await session.call_tool("sw_await_config", {"timeout_s": 2}))
+            wait = _payload(await session.call_tool("sr_await_config", {"timeout_s": 2}))
             _el = time.time() - _t0
             print(f"  等了 {_el:.1f} 秒，got={wait.get('got')}")
             check(wait.get("got") == 0 and "error" not in wait, "没人点时干净返回 got=0")

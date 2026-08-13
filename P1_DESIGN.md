@@ -20,7 +20,7 @@
 |---|---|---|
 | P1-A | 加个 RBG 循环，中等工作量 | KPI 口径要重定义（体验速率、PRB 利用率、burst 定义都变），历史数字全部不可比 |
 | P1-B | 中等 | 确实中等，但**必须和 HARQ 进程池一起做**，只加 RTT 不加进程会把吞吐打崩，那是假结果 |
-| P1-C | 要重构架构、拿不到逐小区干扰 | **逐小区干扰拿得到，而且几乎不要钱**——`meta["rx_power_all_dbm"]` 里有全部 K 个小区的 RSRP，只是 superwireless 从来没存过它 |
+| P1-C | 要重构架构、拿不到逐小区干扰 | **逐小区干扰拿得到，而且几乎不要钱**——`meta["rx_power_all_dbm"]` 里有全部 K 个小区的 RSRP，只是 superran 从来没存过它 |
 
 推荐顺序：**P1-C 的第一阶段 → P1-B → P1-A → P1-C 的第二阶段**。理由见第 5 节，核心是"先把最便宜、能立刻改变干扰画像的那一半做掉"。
 
@@ -69,7 +69,7 @@ mumimo.user_sinr_db()           mumimo.py:44-71        立刻把 RBG 维压成�
 
 `sample.meta` 里有（生成时不用开任何开关，本文实测确认存在）：
 
-| 字段 | 内容 | superwireless 存了吗 |
+| 字段 | 内容 | superran 存了吗 |
 |---|---|---|
 | `rx_power_all_dbm` | **全部 K 个小区**的接收功率（dBm，含路损与扇区天线增益，不含阵列增益） | ❌ `generate.py:32-39` 的 `_SCALAR_META_FIELDS` 里没有 |
 | `pathloss_all_db` | 全部 K 个小区的路损 | ❌ |
@@ -272,7 +272,7 @@ sinr_per_rbg_db: np.ndarray | None   # [snapshot, rank, rbg]  真实（评估）
 |---|---|---|
 | `system.py` | `_Packet` / `_Flow` / `_Traffic` 重写、RBG 分配器、TBS 反查表、前缀和、KPI | ~400 |
 | `system.py` | `UeLinkTable.sinr_per_rbg_db` + `build_link_tables` 存它 | ~30 |
-| `server.py` | `sw_system_sim` 新参数（`max_ue_per_tti` / `min_rbg_per_ue` / `packet_size_bytes` / `fdm_enabled`）+ 转述 | ~50 |
+| `server.py` | `sr_system_sim` 新参数（`max_ue_per_tti` / `min_rbg_per_ue` / `packet_size_bytes` / `fdm_enabled`）+ 转述 | ~50 |
 | `spec.py` | `_SIM_DEFAULTS` 必须同步（`system.py` 的注释里点名了这条约定） | ~15 |
 | `tests/test_system.py` | 新增不变量 | ~180 |
 | **合计** | | **~650 行** |
@@ -493,7 +493,7 @@ bler = _bler_lookup(proc.mcs, sinr_at(u, snap, proc.rank), "retx")
 | `system.py` | `TddConfig` + k1 求解器 | ~80 |
 | `system.py` | `_HarqProc` + 进程池 + 两个定时环 + 主循环重排 | ~180 |
 | `system.py` | 时延 KPI + notes | ~70 |
-| `server.py` | `sw_system_sim` 新参数（`n_harq_proc` / `n1_slots` / `gnb_proc_slots` / `harq_rtt_enabled`） | ~35 |
+| `server.py` | `sr_system_sim` 新参数（`n_harq_proc` / `n1_slots` / `gnb_proc_slots` / `harq_rtt_enabled`） | ~35 |
 | `spec.py` | `_SIM_DEFAULTS` 同步 | ~10 |
 | `tests/` | 新增不变量 | ~140 |
 | **合计** | | **~450~520 行** |
@@ -741,7 +741,7 @@ eta = W @ a                             # [n_ue] 一次矩阵向量乘，21×12 
 | C1 | `tests/` | | ~180 |
 | **C1 合计** | | | **~800 行 + 一次数据集重生成** |
 | C2 | `system.py` / `multicell.py` | 多小区 TTI 循环、逐小区调度器状态 | ~300 |
-| C2 | `server.py` | 新工具 `sw_multicell_sim` | ~120 |
+| C2 | `server.py` | 新工具 `sr_multicell_sim` | ~120 |
 | C2 | `tests/` | | ~150 |
 | **C2 合计** | | | **~570 行 + 一批大数据集（20~55 分钟生成）** |
 
@@ -834,7 +834,7 @@ E14 体检     ②  ──┤
 | E7 | 每 UE 只有 1 个 HARQ 槽、立即重传、最多 3 次；重传 BLER 查的是 `tables[u].mcs` 不是实发的 `m` | `system.py:1062, 1161-1162, 1194` |
 | E8 | S 时隙在主循环里按满下行处理，而 `dl_ratio` 按 0.7 报告；`dl_ratio` 不被主循环读 | `system.py:1083, 289-291`，grep 确认 |
 | E9 | 系统级没有任何时延 KPI | grep `delay`/`latency`/`时延` |
-| E10 | `meta` 有 `rx_power_all_dbm` / `pathloss_all_db` / `antenna_gain_all_db` / `serving_cell_index`（全 K 个小区），superwireless 一个都没存 | 实测 meta 键；`generate.py:32-39` |
+| E10 | `meta` 有 `rx_power_all_dbm` / `pathloss_all_db` / `antenna_gain_all_db` / `serving_cell_index`（全 K 个小区），superran 一个都没存 | 实测 meta 键；`generate.py:32-39` |
 | E11 | 几何 SINR 的 `i_dl` 是逐小区求和，`I_k = rx_lin[k]·N_ant·avg_leak_k` | `_system_sinr.py:416-500` |
 | E12 | `mean_b bg[k,b] = 0.1250` 对每个小区**逐位相同**，跨小区标准差 0 ⇒ 干扰份额 = RSRP 份额（期望意义精确） | 实测，包了一层钩子抓 `bg`，4 个样本 |
 | E13 | `n_dl_sched = max(1, round((num_ues//K) · pdsch_load))`；默认预设下 = 1 | `internal_sim.py:2494`、`_system_sinr.py` |

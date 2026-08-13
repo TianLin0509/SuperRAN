@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from superwireless import analysis, generate
+from superran import analysis, generate
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAN_PATH = ROOT / "artifacts" / "plans" / "SRS_PMI_AND_EXPERIENCE_AUDIT_PLAN.md"

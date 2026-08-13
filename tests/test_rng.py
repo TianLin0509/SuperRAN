@@ -17,14 +17,15 @@ import os
 import sys
 from pathlib import Path
 
-os.environ.setdefault("SUPERWIRELESS_NO_BROWSER", "1")
+os.environ.setdefault("SUPERRAN_NO_BROWSER", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np  # noqa: E402
 
-from superwireless import gates as gt  # noqa: E402
-from superwireless import rng as rg  # noqa: E402
-from superwireless import system as sy  # noqa: E402
+from superran import gates as gt  # noqa: E402
+from superran import kpi_view as kv  # noqa: E402
+from superran import rng as rg  # noqa: E402
+from superran import system as sy  # noqa: E402
 
 _n_pass = 0
 _n_fail = 0
@@ -414,6 +415,70 @@ check(_rep.runs[0].config["rng"]["master_seed"] == 0
       and "spawn_key" in _rep.runs[0].config["rng"]["scheme"],
       "单次结果里也记下随机数方案")
 
+# mixed 类别映射属于 replication 随机性；用户级汇总不能拿第 1 次标签冒充
+# 所有重复的固定标签。
+_mixed_rep = sy.simulate_replications(
+    _T[:2], num_replications=4, master_seed=0,
+    sys_cfg=sy.SystemConfig(evaluation_mode="experience", duration_s=0.1),
+    traffic=sy.TrafficConfig(
+        model="mixed", small_ue_share=0.5,
+        small_arrival_rate_hz=200.0, arrival_rate_hz=20.0),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+    kpi=sy.KpiConfig(warmup_tti=0))
+check(all(sum(u["traffic_class_counts"].values()) == 4 for u in _mixed_rep.users)
+      and any(u["traffic_class"] == "varies_across_replications"
+              for u in _mixed_rep.users),
+      "用户业务类跨重复变化时显式给出 varies 与逐类计数，不误贴首轮标签")
+for _k in ("cell_head_inclusive_experienced_mbps",
+           "first_packet_delay_ms_p95", "serving_cell_prb_utilization",
+           "mu_paired_prb_share_of_used"):
+    check(_mixed_rep.cell[_k]["n_rep"] == 4,
+          f"新增 KPI {_k} 逐 replication 汇总，不退化成第一轮裸数")
+_dist = _mixed_rep.cell["tti_occupied_rbg_distribution"]
+check(len(_dist["bins"]) == 18
+      and all(b["tti_share"]["n_rep"] == 4 for b in _dist["bins"])
+      and abs(sum(b["tti_share"]["mean"] for b in _dist["bins"]) - 1.0) < 5e-4,
+      "0..17 RBG 的逐 TTI share 每个桶都跨 repetition 带置信区间且均值归一")
+check("first_packet_delay" in _mixed_rep.as_dict()["kpi_definitions"],
+      "多重复结果保留 KPI 公式/分母元数据，前端无需猜字段含义")
+check(all(isinstance(u.get("allocated_prb_equivalent_attributed"), dict)
+          for u in _mixed_rep.users)
+      and "traffic_profiles" in _mixed_rep.as_dict(),
+      "用户资源归因由通用数值聚合器自动带区间，话务 profile 元数据不丢")
+_kpi_html = kv.render_html(_mixed_rep.as_dict(), dataset_id="ds_kpi_test")
+check(_kpi_html.startswith("<!doctype html>")
+      and _kpi_html.count('class="bar-col"') == 18
+      and all(label in _kpi_html for label in (
+          "小区级", "用户级", "跨 UE 经验 CDF"))
+      and "neighbor_prb_util 是邻区干扰输入" in _kpi_html
+      and ".scope-tabs>input{position:absolute;opacity:0" in _kpi_html
+      and ".scope-tabs>input{display:none}" not in _kpi_html
+      and ('<div class="svg-scroll"><svg class="user-svg" role="img" '
+           'aria-label="用户掐头去尾体验速率 跨用户经验 CDF"') in _kpi_html
+      and ".plot-grid>*{min-width:0}" in _kpi_html
+      and '="nan"' not in _kpi_html.casefold()
+      and "\ufffd" not in _kpi_html,
+      "KPI 页含小区/用户双层键盘 tab、完整 0..17 柱图、用户 CDF 且 UTF-8 正常")
+_selection = kv.select_kpis(
+    _mixed_rep.as_dict(), kpi_focus=["MU", "PRB", "首包时延"])
+check(_selection["source"] == "llm_agent_explicit"
+      and "mu_paired_prb_share_of_used" in _selection["cell"]["prioritized"]
+      and "first_packet_delay_ms_p95" in _selection["cell"]["prioritized"],
+      "调用 Agent 可显式编排 KPI，选择来源与优先 key 可审计")
+_bounded_html = kv.render_html({
+    "cell": {
+        "small_pdb_miss_ratio": {
+            "mean": 0.5, "ci95": [-0.1, 1.1], "n_rep": 8},
+        "backlog_bytes": {
+            "mean": 2.0, "ci95": [-3.0, 4.0], "n_rep": 8},
+    },
+    "config": {"system": {"model_version": "experience_v2"}},
+})
+check("95% CI [0.00%, 100.00%]" in _bounded_html
+      and "95% CI [0, 4]" in _bounded_html
+      and '<link rel="icon" href="data:,">' in _bounded_html,
+      "KPI 页只在显示层裁剪有界区间，并用内嵌 favicon 避免离线 404")
+
 # 重复次数少时区间必须更宽——这是"多跑几次"值不值的直接依据
 _rep2 = sy.simulate_replications(_T, num_replications=2, master_seed=0,
                                  sys_cfg=sy.SystemConfig(duration_s=3.0))
@@ -518,6 +583,22 @@ try:
     check(False, "simulate_replications 的重复次数 0 应当被拒")
 except ValueError:
     check(True, "simulate_replications 的重复次数 0 被拒")
+
+# 种子/重复号是离散实验身份，不能把 1.9 静默截成 1，也不能让负值直到
+# NumPy SeedSequence 深处才以晦涩错误失败。
+for _factory, _label in (
+    (lambda: rg.RngBook(1.5, 0), "master_seed 拒绝浮点数截断"),
+    (lambda: rg.RngBook(0, -1), "replication 拒绝负数"),
+    (lambda: rg.RngBook(True, 0), "master_seed 拒绝布尔值冒充整数"),
+    (lambda: rg.replications(0, 2.5), "重复次数拒绝浮点数截断"),
+    (lambda: rg.replications(0, 2, start=-1), "重复起点拒绝负数"),
+    (lambda: rg.derive_generate_seed(0, 1.5), "信道 seed 派生拒绝浮点 replication"),
+):
+    try:
+        _factory()
+        check(False, _label)
+    except ValueError:
+        check(True, _label)
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)

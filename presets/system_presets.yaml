@@ -1,7 +1,7 @@
 # 系统级场景预设 —— 一整套仿真条件打包成一个名字。
 #
 # 结构：channel_preset（复用信道预设，不重新定义）+ generate（生成覆盖）
-#      + system（sw_system_sim 参数）+ expect（实测锚点）
+#      + system（sr_system_sim 参数）+ expect（实测锚点）
 #
 # 两条硬规矩：
 # 1. expect 只写**实测过**的值，measured: false 时不许拿设计意图充数。
@@ -122,9 +122,9 @@ sys_urban_macro_field_csi:
   group: 系统级 · CSI 时延对照
   label: 城区宏站 · 现网 SRS 配置（10 ms + 17 倍跳频）
   summary: >-
-    38.211 Table 6.4.1.4.3-1 的 C_SRS=57：每跳 16 RB 正好一个 RBG，
+    38.211 Table 6.4.1.4.3-1 的 C_SRS=63：每跳 16 RB 正好一个 RBG，
     17 跳扫完 272 RB。10 ms 周期下全带扫一遍要 170 ms，
-    平均 CSI 年龄 87 ms——**这是默认配置，也是现网的样子**。
+    平均 CSI 陈旧时长 87 ms——**这是默认配置，也是现网的样子**。
   answers:
     - 现网 SRS 配置下体验速率是多少
     - CSI 老化吃掉了多少

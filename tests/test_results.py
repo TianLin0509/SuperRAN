@@ -17,13 +17,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # Windows 中文控制台是 GBK，print 到它可能编不出某些字符；统一 replace 兜底。
 sys.stdout.reconfigure(errors="replace")
 
-from superwireless import analysis as an  # noqa: E402
-from superwireless import channelhub as ch  # noqa: E402
-from superwireless import gates as g  # noqa: E402
-from superwireless import generate as gen  # noqa: E402
-from superwireless import load  # noqa: E402
-from superwireless import plan as pl  # noqa: E402
-from superwireless import results as rs  # noqa: E402
+from superran import analysis as an  # noqa: E402
+from superran import channelhub as ch  # noqa: E402
+from superran import gates as g  # noqa: E402
+from superran import generate as gen  # noqa: E402
+from superran import load  # noqa: E402
+from superran import plan as pl  # noqa: E402
+from superran import results as rs  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -166,7 +166,8 @@ reloaded = rs.load(art_a.result_id)
 check(reloaded.values_sha256 == art_a.values_sha256, "存盘再读回一致")
 
 # 非有限值必须当场报错，不能悄悄丢样本
-bad = mine_vals.copy(); bad[3] = np.nan
+bad = mine_vals.copy()
+bad[3] = np.nan
 try:
     ds.register_results("坏的", bad)
     check(False, "含 nan 的结果应当被拒")

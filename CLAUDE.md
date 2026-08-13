@@ -1,4 +1,4 @@
-# superwireless 开发规范
+# SuperRAN 开发规范
 
 ## 项目定位
 
@@ -9,7 +9,7 @@
 
 - Python ≥ 3.10，需要 numpy / scipy / pydantic v2 / pyyaml / structlog / mcp
 - ChannelHub 源码由 `channelhub.channelhub_root()` 自动发现（同级或上级目录），
-  环境变量 `SUPERWIRELESS_CHANNELHUB` 可覆盖
+  环境变量 `SUPERRAN_CHANNELHUB` 可覆盖
 - 射线追踪需 `pip install sionna-rt`（连带 mitsuba + drjit，约 300 MB）；
   实测不会降级 numpy/scipy/torch
 - **ChannelHub 自己的 CLAUDE.md 写的 `D:\MSG\.venv312` 是源工程路径，多数机器上不存在，不要照抄**
@@ -17,21 +17,27 @@
 ## 测试
 
 ```bash
-python tests/test_e2e.py         # 端到端 39 项
-python tests/test_mcp_server.py  # MCP 全链路 37 项
-python tests/test_raytracing.py  # 射线追踪与决策层 40 项
-python tests/test_linklevel.py   # 谱效、可信度、物理层、IRC 45 项
-python tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
-python tests/test_results.py     # 外部算法结果契约、预注册 80 项
-python tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
-python tests/test_mumimo.py      # MU-MIMO 配对、预编码、rank/SU-MU 自适应、单码字、RBG 粒度 63 项
-python tests/test_system.py      # 系统级：话务、PF 调度、HARQ、体验速率口径、守恒、MU 80 项
-python tests/test_interference.py # IoT、测量域、预设、说明书回传、算法页、文档计数 362 项
-python tests/test_csi_aging.py   # CSI 时延与老化、SRS 跳频、基站/真实视角分离 84 项
-python tests/test_rng.py         # 随机数分流、重复实验、公共随机数、置信区间 107 项
+python tests/test_e2e.py                    # 端到端
+python tests/test_mcp_server.py             # MCP 全链路
+python tests/test_raytracing.py             # 射线追踪与决策层
+python tests/test_linklevel.py              # 谱效、可信度、物理层、IRC
+python tests/test_gates.py                  # 校准、标准表、三道门、统计判决
+python tests/test_results.py                # 外部算法结果契约、预注册
+python tests/test_linkadapt.py              # 链路自适应、吞吐、并行生成
+python tests/test_mumimo.py                 # MU-MIMO、单码字、RBG 粒度
+python tests/test_system.py                 # 系统级 capacity / experience
+python tests/test_interference.py           # IoT、预设、说明书、算法页、文档计数
+python tests/test_csi_aging.py              # CSI 时延、SRS 跳频、真实/估计视角
+python tests/test_rng.py                    # 随机数分流、重复实验、CRN、置信区间
+python tests/test_sysscenes.py              # 系统场景预设与成对受控性
+python tests/test_power_control.py          # EBF/PEBF/NEBF 与逐 RB 功率耦合
+python tests/test_physics_invariants.py     # 极化、子阵、SRS/LMMSE 物理不变量
+python tests/test_channel_generation_contract.py # ChannelHub 生成合同与最小网格
+python tests/test_developer_guide.py         # 开发者文档覆盖、离线结构与漂移检查
 ```
 
-共 **1227 项**，全绿才算通过。
+当前共 **17 个可执行测试文件**。不要手写“总检查项”——循环内检查数会随配置展开，
+静态 `check()` 调用点也不等于运行时检查数；以实际运行输出和开发者文档自动盘点为准。
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
 后前三个都要跑；改动 `linklevel.py` / `validate.py` / `calibration.py` /
@@ -39,10 +45,13 @@ python tests/test_rng.py         # 随机数分流、重复实验、公共随机
 改动 `results.py` / `analysis.py` / `loader.py` 要跑 test_results；
 改动 `interference.py` / `scenario.py` / `presets.yaml` / `spec.py` / `bridge.py`
 要跑 test_interference（说明书与回传桥都在它第 9 节）；
-改动 `mumimo.py` 要跑 test_mumimo；
-改动 `system.py` 要跑 test_system + test_csi_aging + test_rng；
+改动 `mumimo.py` / `beamforming.py` / `power_control.py` 要跑 test_mumimo +
+test_power_control + test_physics_invariants；
+改动 `system.py` / `experience.py` / `traffic.py` / `kpi_view.py` 要跑 test_system +
+test_csi_aging + test_rng；
 改动 `csi_aging.py` 要跑 test_csi_aging；改动 `rng.py` 要跑 test_rng + test_system；
-改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）。
+改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）；
+改动开发者文档生成器要跑 `tests/test_developer_guide.py`。
 
 公式渲染是**两层**：`katex.py` 内联 KaTeX（628 KB，资产由
 `python scripts/vendor_katex.py` 生成）负责排版，`mathml.py` 是没有 JS 时的兜底，
@@ -82,18 +91,18 @@ KaTeX 未必收，光看 Python 源码看不出来。
 用 `faulthandler.dump_traceback_later` 抓栈才定位到卡在
 `scipy/interpolate/_fitpack_impl.py` 的 `create_module`。
 
-调试时设 `SUPERWIRELESS_DEBUG=1`，会开 faulthandler 并打点到 stderr。
+调试时设 `SUPERRAN_DEBUG=1`，会开 faulthandler 并打点到 stderr。
 
 ### 系统级 KPI 不带置信区间就是在报噪声
 
-同一批信道、同一套配置**只改种子**跑 `sw_system_sim`，实测
+同一批信道、同一套配置**只改种子**跑 `sr_system_sim`，实测
 `cell_experienced_mbps` 的变异系数 **9.4%**（64 次重复）、
 `ue_experienced_p5_mbps` **18.6%**。**已经发生过把噪声当效应的事故**：
 上一轮报「Type I 权老化后 +14%」，而噪声 1σ 就有 11%。
 
 链路级早就有三道门（`gates.py`），系统级一直绕过去了——在 `system.py` 里搜
 `confidence|t_test|wilcoxon|paired` 命中数曾经是 0。现在 `simulate_replications`
-把每个 KPI 报成 `mean/std/ci95/n_rep`，`sw_system_sim` 默认 `num_replications=8`。
+把每个 KPI 报成 `mean/std/ci95/n_rep`，`sr_system_sim` 默认 `num_replications=8`。
 **统计一律复用 `gates.paired_compare` / `gate_conclusion`，不另写一套。**
 
 四条不能忘的量级：
@@ -179,7 +188,7 @@ MCS 查表都不含随机），所以 n 次重复只重跑 TTI 主循环。代�
 64 次 replication 与 32 次 master seed 扫描（每次重建表）的变异系数，
 五个 KPI 里四个的区间重叠——**冻结并没有可分辨地把离散度报小**，
 系统级的主导方差就是话务与 HARQ。数据在 `measurements/rng_replication.json`。
-**信道实现本身的不确定度是另一个更大的分量，那个只能重新 `sw_generate`。**
+**信道实现本身的不确定度是另一个更大的分量，那个只能重新 `sr_generate`。**
 
 ### 配对的有效性靠样本 ID，统计查不出错位
 
@@ -206,7 +215,7 @@ MCS 查表都不含随机），所以 n 次重复只重跑 TTI 主循环。代�
 
 ### 预注册只在生成前绑定才有意义
 
-`sw_generate(prereg_id=...)` 把主指标写进 `summary.json`。**事后补绑没有价值**
+`sr_generate(prereg_id=...)` 把主指标写进 `summary.json`。**事后补绑没有价值**
 ——预注册的全部意义就是"这是看数据之前写下的"。所以没有"给已有数据集补绑"
 的接口，也不要加。
 
@@ -240,7 +249,7 @@ MCS 查表都不含随机），所以 n 次重复只重跑 TTI 主循环。代�
 表 3 没有 CQI 曲线，所以 CQI 仍用 38.214 Table 2 + 分析 BLER，并通过
 `cqi_source` 明示，不能谎称 CQI 也来自公司曲线。
 
-TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sw_tdd_mcs` 实现：
+TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sr_tdd_mcs` 实现：
 `CQI index → 按谱效映射初始 MCS → 该 MCS 的 NewTx 目标 BLER SINR 门限
 → + BF Gain → 按 SINR 重映射 MCS → + OLLA MCS offset → floor → 最终 MCS`。
 CQI 是 PMI 权测得的 pre-BF 值。BF Gain 逐 RB、逐流计算为同一信道、CSI、rank、
@@ -259,9 +268,11 @@ RB×流在 dB 域做算术平均。OLLA 的单位是连续 MCS 档位，不是 d
 不设的话每个 worker 各开满核数的线程：20 worker × 20 线程抢 20 个核，
 上下文切换吃掉全部收益——实测 10 进程只有 1.34 倍加速，设了才拿到应有的加速比。
 
-并行分块靠**给每块不同的 `seed`**。`ue_seed_offset` 实测对撒点没有影响
-（同 offset 与不同 offset 给出逐位相同的路损），只有 `seed` 真正换随机流。
-因此并行与串行不是同一批样本，统计等价但逐样本不同，摘要的 `parallel` 块必须写明。
+并行分块**不能给每块换 seed**。static `internal_sim` 的一个 seed 固定 UE 几何；旧实现
+给 worker 用 `seed=S..S+W-1`，于是并行混入 W 个几何，串行却只有一个，连条件分布都变了。
+现在 ChannelHub 支持 `sample_index_offset`，所有 worker 保持同一 seed，只切互不重叠的全局
+sample index；`workers=1/4` 必须逐样本、逐位相同。移动轨迹、拒绝采样或未实现全局索引的
+source 会显式回退串行并把原因写进摘要，不能以“统计等价”为理由偷偷改变实验条件。
 
 多进程在某些宿主里起不来（Windows spawn 需要可导入的 `__main__`，REPL 和
 `python -c` 里没有）。`generate` 会**降级串行并把原因记进摘要**，不让整次生成失败——
@@ -384,21 +395,22 @@ Mitsuba 3.8 的解析器直接报错。`scenes.prepare_scene()` 会复制到 art
 缓存再清理，**不动 ChannelHub 原文件**。加新城市场景时如果报
 "invalid PLY header"，就是这个原因。
 
-### ChannelHub 的 CDL-A/B/C 角度表与 38.901 不符
+### CDL-A~E 表、20-ray 展开与 K 因子都有硬门
 
-三张表都标着 "TS 38.901 Table 7.7.1-x"，**时延与功率两列是对的，角度列从中段起不是**。
-CDL-C 有 23/24 簇有出入、占总功率 93.8%，按 Annex A.1 算 ASA 偏 14.5°、ASD 偏 7.1°。
+2026-08 审计确认旧 ChannelHub 的 CDL-A/B/C 角度列错误、CDL-C 少一行，CDL-D/E
+也不是完整标准表；更隐蔽的是，兼容覆盖曾因新版 dataclass 字段触发 `TypeError`，异常又被
+上层吞掉，导致生成继续使用错误表。现在相邻 MSG-Platform 源码内五张表均与
+38.901 Table 7.7.1-1~5 逐字段一致（23/23/24/14/15 个表分量）。
 
-`spec38901.py` 放了一份逐字核对过的标准表（**手抄 + 从 PDF 机械解析两条独立路径
-对过账**），`apply_spec_tables()` 在 `channelhub._ensure_path()` 里灌回仿真器——
-替换的是 `get_cdl_profile` 读的 `_PROFILES` 字典，**不改 ChannelHub 一行源码**。
+`spec38901.py` 仍保留独立录入副本，兼容旧 checkout 时只覆盖已安装 dataclass 支持的字段；
+`channelhub._ensure_path()` 会在任何 ChannelHub 入口先校准，shape mismatch 视为全表失败，
+异常会阻断生成，不能再静默降级。`SUPERRAN_CDL_SPEC=0` 只用于复现历史结果，
+关闭后不得把数据称为标准 CDL。
 
-挂在 `_ensure_path` 而不是只挂 `warmup` 是有意的：任何取 ChannelHub 东西的路径
-都会先过它，包括直接调 `cdl_profile`、跑测试、REPL 里试。只挂 `warmup` 会出现
-"跑 MCP 时信道是标准的、跑测试时不是"这种最难查的不一致。
-
-`SUPERWIRELESS_CDL_SPEC=0` 可关闭。CDL-D/E 未覆盖——表结构含 `Cluster PAS` 列、
-首簇拆成镜面与 Laplacian 两行，没逐字核对过的表宁可不放。
+生成器对每个 diffuse component 按 Table 7.5-3 展开 20 rays，并使用每簇角扩展、逐 ray
+XPR/Jones 相位和 Doppler。CDL-D/E 的镜面/Laplacian 功率差已经把 K=13.3/22 dB 写在
+row 0/1 中，**禁止再做第二次 Rician K 混合**；回归测试通过篡改 K 元数据并要求输出逐位
+不变来防止复发。
 
 ### 默认阵列是 1 驱 3，不是 64 个独立阵元
 
@@ -422,18 +434,19 @@ ChannelHub 的 `phy_sim/effective_array.py` 就是照这套硬件写的（模块
 | 吞吐均值 | 1055.5 Mbps | 1337.5 Mbps |
 | 边缘用户 | 582.4 Mbps | 940.0 Mbps |
 
-**legacy 把吞吐高估 27%、边缘用户高估 61%**——2026-07-31 之前生成的所有
-谱效/吞吐数字都偏乐观。`validate.check_antenna_model` 会把它标出来。
+上表是 2026-07-31 的**历史对照**，证明 legacy 与真实 1 驱 3 不是同一信道；
+2026-08-11 重构了大尺度功率参考与链路级预波束锚点后，不能把 27%/61% 当成
+当前通用增益。`validate.check_antenna_model` 仍会标出 legacy，但所有百分比必须
+在当前版本、同一批信道上重跑配对实验。
 
 三条边界：
 
 * `h_serving_true` 与 legacy 的**相对差 4.03**，完全是另一个信道。
 * `effective_subarray` 与 `physical_reference`（真跑 192 阵子再用 F 投影）
   相对差 **4.8e-7**，快路径复现了参考路径，放心用快的。
-* **几何 SINR / SIR / IoT 逐位不变**。ChannelHub 的几何 SINR 走
-  `_system_sinr.py` 自己那套简化模型（水平 0.5λ DFT 码本、垂直完全平坦），
-  **不读阵列模型**。所以换阵列只改信道矩阵，不改干扰画像——
-  预设里的 `expect`（IoT/SINR/路损）不用重测。
+* 阵元方向图、固定 1 驱 3 子阵、垂直几何与电下倾会进入 conducted-power
+  链路预算，因而会改变几何 SNR/SIR/SINR；64 端口数字 BF 增益仍留在 H 中。
+  预设 `expect` 必须随当前内核重新校准，不能沿用旧“几何量逐位不变”结论。
 
 垂直 0.67λ 是用户实测纠正过的值（早期按 0.5λ 算，全盘产物失真），
 见记忆 `project_reconfig_mimo_sim` 方法论教训第 4 条。**别改回 0.5。**
@@ -518,22 +531,20 @@ TDD 图里有 `.sl{fill:#fff}`（时隙标号）。结果小区编号糊成蓝�
 
 `effective_rank(R_uu)` 会把有效秩报出来，逼近 `N_rx` 时 IRC 增益必然趋近 0。
 
-### ChannelHub 早就有三档信道估计器，只是没暴露
+### LMMSE 必须从真实 pilot 位置直接映射到目标频点
 
-`msg_embedding/channel_est/` 提供 `ideal` / `ls_linear` / `ls_mmse`
-（LS + 线性插值 / LS + 频域 MMSE 用指数 PDP 先验 + 线性时域插值），
-`internal_sim` 还多两档 `ls_hop_concat` / `ls_hop_sequential`（SRS 跳频，仅上行）。
-默认 `ls_linear`。**配置是整个 dict 直通的，所以这个键一直可用**，
-只是 superwireless 从没提过它——2026-08-01 之前的数据集全部默默走了默认档。
+`msg_embedding/channel_est/` 对外稳定名字是 `ideal` / `ls_linear` / `ls_mmse`；
+`ls_lmmse` 是完全等价、物理命名更精确的兼容 alias。`internal_sim` 还多两档 `ls_hop_concat` /
+`ls_hop_sequential`（SRS 跳频，仅上行），默认仍为 `ls_linear`。
 
-实测（company_64t4r_multicell，24 样本）：
+旧 LMMSE 只在 compact pilot grid 上做一次平滑，随后仍用线性插值补洞；对非均匀、punctured
+或 hopping SRS，这并不是 LMMSE。当前实现直接计算
+`R_tp (R_pp + R_v)^-1 h_LS,p`，支持任意唯一 pilot position 和可选有色 `R_v`；没有 Doppler
+协方差时，时间维明确保持线性插值，不冒充 2D LMMSE。
 
-| | 干扰 UE=0 | 干扰 UE=16 |
-|---|---|---|
-| `ls_linear` DL NMSE | −7.14 dB | −10.96 dB |
-| `ls_mmse` DL NMSE | −9.79 dB | **−14.54 dB** |
-
-**导频越挤，MMSE 赢得越多**（0.7 → 3.6 dB）——它靠 PDP 先验把被污染的部分压掉。
+验收口径不是“每个 realization、每个 SNR 都优于 LS”——先验失配时这不成立。硬门是：
+匹配指数 PDP 的低 SNR Monte Carlo 显著降 MSE、非均匀位置正确、输出有限、full-pilot 高 SNR
+极限收敛到 LS，且 `ls_mmse == ls_lmmse`。
 
 ### num_interfering_ues 是上行旋钮，下行不读它
 
@@ -669,19 +680,19 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 
 ### "17 倍跳频"是 38.211 里逐字有的
 
-`SRS_BW_TABLE` 第 57 行（`srs.py:118`）：`m_SRS=(272,16,4,4)`、`N=(1,17,4,1)`。
+`SRS_BW_TABLE` 第 63 行：`m_SRS=(272,16,8,4)`、`N=(1,17,2,2)`。
 取 `B_SRS=1`、`b_hop=0` 时每次 SRS 占 **16 RB 正好一个 RBG**，**17 跳**扫完 272 RB，
 和本项目 17 RBG × 16 RB 的载波配置 1:1 对上。实测 `srs_hopping_cycle_length` 返回 17、
-扫描顺序就是 RBG 0→16 循环。
+标准扫描顺序是 RBG `0,8,16,7,15,6,14,5,13,4,12,3,11,2,10,1,9`，17 跳并集恰好覆盖全带。
 
 **跳频是老化的主导项**：`T_SRS=10 ms` 时全带扫一遍要 170 ms，
-某个 RBG 的年龄在 0~160 ms 之间轮转（平均 80 ms），而 2.6 GHz、30 km/h 的
+某个 RBG 的 CSI 陈旧时长在 0~160 ms 之间轮转（平均 80 ms，另加周期相位与处理时延），而 2.6 GHz、30 km/h 的
 相干时间只有约 3 ms。实测 MU/SU 比值 0.816 → 0.449（−45%），SU 谱效 −27%；
 把信道换成慢变（ρ=0.99）后损失掉到 10%——**这条对照证明损失确实来自时变**。
 
-序列直接调 ChannelHub 的 `srs_rb_indices`，不自己写。**兜底路径的输出和标准实现
-碰巧一模一样**（C_SRS=57 就是顺序扫描），所以除了看 `hop_order()` 返回的 `source`
-没有任何办法发现自己没在用标准实现——测试因此直接断言 `source` 以 `channelhub:` 开头。
+序列直接调 ChannelHub 的 `srs_rb_indices`，不自己写。兜底的恒等扫描与 C_SRS=63
+的标准镜像顺序不同；测试既断言完整标准顺序，也断言 `hop_order()` 返回的 `source`
+以 `channelhub:` 开头，防止依赖缺失时静默换算法。
 `hop_order` 里要先 `_ensure_path()`，否则静默走兜底。
 
 ### 测试信道所有用户统计相同时，MU/SU 比值是个死数
@@ -729,18 +740,19 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 ### 页面上的 select 回传的是字符串，bool() 会失灵
 
 说明书的开关控件回传 `"on"` / `"off"`，而 `"off"` 是 Python 真值——
-`bool("off")` 是 `True`，开关**完全无声地失效**。`sw_system_sim` 里的 `_flag()`
+`bool("off")` 是 `True`，开关**完全无声地失效**。`sr_system_sim` 里的 `_flag()`
 负责把 `"off"/"false"/"0"/"no"/""` 都判成假。新加 select 型开关时记得走它。
 
 `spec._SIM_DEFAULTS` 给系统级旋钮提供页面默认值（它们不在 ChannelHub 的信道
-生成配置里），**必须和 `sw_system_sim` 的函数签名保持一致**——漂了的话页面显示
+生成配置里），**必须和 `sr_system_sim` 的函数签名保持一致**——漂了的话页面显示
 的就不是实际会跑的值，而这种不一致没有任何提示。有一条测试逐个比对。
 
 ### 样本数不是用户数
 
 数据集里 `num_samples` 个样本分布在 `num_ues` 个 UE 位置上（轮转分配）。
-同一个 UE 的多个样本是**时间相关的**（多普勒就是从相邻样本的位移算的），
-正好当这个 UE 的信道快照序列用。
+只有 `mobility_mode!=static` 时，同一个 UE 的多个样本才沿连续轨迹形成时间序列；
+`static` 模式固定几何位置但各样本小尺度实现独立。`doppler_hz=|v|/lambda`
+描述单个快照内部的最大 Doppler，不是“相邻样本距离变化”这个统计量。
 
 把每个样本当成一个独立用户，小区里就凭空多出好几倍的人。实测 40 样本 / 10 UE：
 每用户谱效从应有的 0.32 掉到 **0.08**，5% 边缘从 0.194 掉到 0.040——
@@ -748,7 +760,7 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 查了半天 outage 全是 0%。真因只是分母大了 4 倍。
 
 `system.group_samples_by_ue()` 负责分组，`build_link_tables(num_ues=...)` 用它。
-`sw_system_sim` 从 `ds.config["num_ues"]` 自动读。
+`sr_system_sim` 从 `ds.config["num_ues"]` 自动读。
 
 ### 回执要先于落盘发出，而且必须幂等
 
@@ -768,11 +780,11 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 
 ### 说明书默认不弹浏览器，只给地址
 
-`write_spec` / `sw_spec_sheet` 的 `open_browser` 默认 **False**——把 `url`
+`write_spec` / `sr_spec_sheet` 的 `open_browser` 默认 **False**——把 `url`
 给用户，他自己在浏览器或 AI HUB 里点开。**自动弹窗对一部分人是打断而不是便利**，
 这是用户明确要求的（2026-08-01）。只有他说"帮我打开"时才传 True。
 
-测试文件仍在 **import spec 之前**设 `SUPERWIRELESS_NO_BROWSER=1` 兜底，
+测试文件仍在 **import spec 之前**设 `SUPERRAN_NO_BROWSER=1` 兜底，
 防止哪天有人把默认改回去、或某条路径显式传了 True。
 
 真要打开时走 `os.startfile` 而不是 `webbrowser.open`：后者在没有 DISPLAY 或被
@@ -810,19 +822,17 @@ POST 回来被拒"或者反过来"页面没有的键也能塞进去"。
 让 `_ensure_bs_panel` 从 `num_bs_tx_ant` 推：64 -> `[8,4,2]` 正是要的，
 4 -> `[2,1,2]` 也自动落回 legacy（4T 没有 1 驱 3）。
 
-### 没有 bs_panel 时干扰根本不进 SINR
+### bs_panel 决定空间阵列，不再是几何干扰的开关
 
-`internal_sim.py:1436` 只在 `bs_panel is not None` 时才建 DFT 码本，
-而几何 SINR 的前提是 `self._sinr_codebook is not None and K > 1`（`:2446`）。
-拿不到码本就走兜底：`sir_dB = 49.9`（贴着 ±50 dB 契约边界的哨兵值）、
-`sinr_dB = snr_db`。**这条路径不报错、不告警、不打日志。**
+当前 first-party 后端直接从服务与全部邻区的 received-power budget 形成
+`snr_dB / sir_dB / sinr_dB`，已经不再依赖旧 `_system_sinr` 的 DFT 码本分支。
+`bs_panel` 仍不可省：它定义二维端口几何、双极化排布，并决定 64T 时能否启用
+1 驱 3 effective-subarray；缺失时 `generate._ensure_bs_panel()` 会由端口数推导。
 
-后果是配了 21 个小区、报出来的"SINR"是单小区热噪声 SNR。实测同配置修复前后
-SINR 中位数 35.7 → 18.1 dB。`generate._ensure_bs_panel()` 现在由 `num_bs_tx_ant`
-推导排布，`validate.check_interference_modeled()` 用两条判据复查
-（SINR 是否逐点等于 SNR、SIR 是否恒为 49.9）。
-
-2026-07-29 之前生成的数据集都没有这一步，它们的干扰类结论不成立。
+`validate.check_interference_modeled()` 仍保留来源退化门：多小区下若 SIR 恒为
+49.9 dB 哨兵，或 SINR 与纯热噪声 SNR 逐点相同，则邻区功率没有进入预算，
+干扰类结论全部阻断。根因应检查来源版本、真实小区数与 `rx_power_all_dbm`，
+不能再归因于“没建 DFT 码本”。
 
 ### Type I 码本必须做秩自适应
 
@@ -839,21 +849,19 @@ SINR 中位数 35.7 → 18.1 dB。`generate._ensure_bs_panel()` 现在由 `num_b
 套用 CDL 标准剖面会得到一组与数据无关的假角度——所以 `loader.paths()`
 在这种数据上直接抛 `NotImplementedError`，不返回错误结果。
 
-### IoT 不是 snr_dB 减 sinr_dB
+### IoT 的主契约是 SIR + SINR；first-party 的 SNR 差值可作旁证
 
-教科书上 IoT = SNR/SINR 成立，但 ChannelHub 这两个字段**口径不同**：
-`snr_dB`（`internal_sim.py:2441`）不含阵列增益、还额外减了 `10log10(RB)`；
-几何 `sinr_dB` 的信号项含 `N_ant·|w^H a|^2`。273 RB、64 天线时差**约 40 dB**。
+当前 InternalSim 与 Sionna RT 都把 `snr_dB / sir_dB / sinr_dB` 定义在同一个
+**预数字波束、每 RB**参考面：总载波功率先减 `10log10(N_RB)`，阵元方向图与
+固定子阵增益已进入 received-power budget，64 端口数字 BF 增益仍留在 H 中。
+因此对当前 first-party 数据，`snr_dB - sinr_dB` 数学上就是 IoT。
 
-相减得到的数形状对、随场景变化的趋势也对，**只是整体偏了几十 dB**——
-拿它当 IoT 会把中等干扰场景报成"极高干扰"。
-
-正确算法只用同口径的两个量（都出自 `compute_geometry_sinr_single_ue`）：
+实现仍以同口径的 SIR+SINR 为稳定跨源契约：
 
     IoT = SIR / (SIR - SINR)      （线性域）
 
-`validate.check_interference_modeled` 的 `measured` 因此**只报"相同/不同"
-而不报差值**——放个数字进去就会有人把它读成干扰强度。
+原因是外部或旧数据源未必声明 SNR 信号参考面；而业务域 SIR/SINR 是报告接口已经
+要求的一对。`snr-sinr` 用于 first-party 一致性反查，不作为跨源唯一真相。
 
 `num_slots_per_sample > 1` 时这个式子只是近似：`sinr_dB` 是各 slot 的 dB 均值，
 `sir_dB` 取最后一个 slot。`interference_report` 会把 `iot_exact` 标成 false。
@@ -869,65 +877,43 @@ SINR 中位数 35.7 → 18.1 dB。`generate._ensure_bs_panel()` 现在由 `num_b
 
 测量域两列**只在 `link="BOTH"`（paired）时才产生**，单向链路的数据里根本没有。
 
-### 上行几何 SIR 只能靠钩子取，且必须自检
+### 上行几何 SIR 走显式 metadata，钩子只兼容旧内核
 
-`compute_geometry_sinr_single_ue` 同时算出上下行几何 SIR，但 `internal_sim`
-只把下行那个存进 `ChannelSample.sir_dB`，上行的在函数返回后就丢了
-（`ChannelSample.ul_sir_dB` 存的是测量域的，完全是另一个量）。
+`ChannelSample.ul_sir_dB` 是 SRS 导频测量域，不能承载业务域上行几何 SIR。
+当前 first-party 后端通过稳定键 `meta["ul_geometry_sir_dB"]` 交接，并同时写明
+`ul_geometry_sir_model=shared_dl_geometry_sir_symmetric_neighbour_power_v1`：这是
+“上下行邻区活动/功率对称”的粗粒度工程假设，不是逐 UE 上行功控模型。
 
-`interference.install_geometry_capture()` 包一层暂存，`take_ul_geometry_sir(sample)`
-取走。**包装函数自带自检**：把暂存里的 `dl_sinr_avg` / `sir_dl_db` 与样本自己的
-`sinr_dB` / `sir_dB` 对一遍，对不上就返回 nan——一次调用对一个样本的假设一旦破了
-（比如 ChannelHub 改成批量算），宁可没有上行 IoT 也不给错的。
+`interference.take_ul_geometry_sir(sample)` 优先读该 metadata；只有旧 checkout
+才尝试兼容钩子。新代码不得再 monkey-patch 已移除的 `_system_sinr` 内部函数。
 
-取值必须**紧跟在 `_SCALAR_SAMPLE_FIELDS` 循环之后**，隔一个样本就串了。
+### 信道级几何预算不是业务负载仿真
 
-### 负载类旋钮在下行完全不起作用
+当前 first-party 几何预算把每个非服务小区的 received power 都计入分母，
+`pdsch_load` 不参与这条计算。它描述“邻区均活动时的大尺度工作点”，不是逐 TTI
+调度轨迹。拿 `pdsch_load` 做轻载/满载扫参不会得到可解释的业务负载结论，
+`decisions.check_guards` 会拦这种混层设计。
 
-几何模型里每个非服务小区都**无条件**贡献一份波束泄漏，`pdsch_load` 只决定
-对几个波束取平均——均值不变，只是方差变小。实测 0.2 与 1.0 两组的
-SINR / SIR / IoT **逐位相同**。
+真正的负载效应在系统/体验层：业务 CDF 与到达间隔决定本小区 PRB 利用率，
+`neighbor_prb_util` 决定邻区在一个 TTI 是否占用 PRB；RB 功控再用每个邻区的
+独立 (I_k) 计算 `q_serv*S/(N+ηΣq_kI_k)`。目标 10%/30%/50% PRB 利用率必须
+通过业务生成后的 KPI 校准，不能拿信道级 `pdsch_load` 代替。
 
-上行的 `pusch_load` 是有效的，但调度 UE 数是 `max(1, round(num_ues/K x load))`，
-每小区 UE 数不足 2 时取整后恒为 1，同样无效。
+### 逐小区干扰分母项直接落盘（2026-08-11 契约恢复）
 
-后果很具体：拿它做"轻载 vs 满载"对比会生成两批一模一样的数据，然后得出
-「负载不影响性能」。`decisions.check_guards` 现在会拦，`_LOAD_SWEEP` 也已经
-从 `prb_utilization` 改成 `isd_m`。**真正能动下行 IoT 的实测值**：
-ISD 100 m 38.3 dB / 200 m 24.9 / 500 m 4.4 / 1732 m 0.2；
-tx_power +16 dB 则 IoT +16 dB（SIR 一动不动）；NF 与带宽按噪声底精确换算。
+InternalSim 与 Sionna RT 在形成业务域几何预算时，同时保存同一参考面、同一单位的
+`dl_signal_power_mw`、`dl_thermal_noise_power_mw` 与
+`dl_interference_power_per_slot_per_cell_mw[slot,cell]`；服务小区列严格为 0。
+当前来源时轴是一个 slot 内的 OFDM symbol 网格，因此 metadata 只写 **1 个 slot 行**，
+不会把 14 个 symbol 伪装成 14 个独立 TTI。`generate.py` 原样落成
+`[sample,1,cell]`，门 1 / RB 功控入口验证
 
-**更精确的根因（2026-08-07 查到）**：`_system_sinr.py:484` 是
-`n_dl_sched = max(1, round(ues_per_cell · pdsch_load))`，而默认预设
-21 UE / 21 小区给出 `ues_per_cell = 1`，于是 `round(1×0.5)=0` 被 `max(1,·)`
-兜成 **1**——每个干扰小区只随机抽**一个**波束。`pdsch_load` 0.5 与 1.0
-算出来都是 1，所以逐位相同。
+    SINR = S / (N + Σ_k I_k)
 
-顺带一个**没人注意过的后果**：只抽一个波束意味着几何 SIR 里带着可观的
-抽签噪声。实测 42 个样本，`SIR_geo` 与按 RSRP 份额重构的 `SIR_rsrp` 之差
-标准差是 **4.74 dB**——**这部分不是物理，是抽签**。所有干扰类结论都含着它。
-
-### 逐小区干扰份额拿得到，只是 superwireless 没存
-
-**这条推翻了上面"只能靠聚合量"的旧判断**（原话是"几何 SIR 是聚合量，
-拿不到哪个邻区贡献了多少"）。存下来的确实只有聚合量，但分解是可恢复的。
-
-`_system_sinr.py:500` 的干扰求和式是
-
-    I = Σ_k rx_lin[k] · N_ant · avg_leak_k
-
-其中 `avg_leak_k` 是小区 k 在其 DFT 码本上被抽中波束的平均增益。
-**在整个码本上取平均时它跨小区是常数**（Parseval：Σ_b |w_b^H a|² = |a|²），
-所以**在期望意义上逐小区干扰份额精确等于 RSRP 份额**。
-而 `internal_sim.py:2896` 已经算出了全部 K 个小区的 RSRP（`rx_power_all_dbm`），
-只是 `generate._SCALAR_META_FIELDS` 只吃标量，这个**数组**字段被
-`_as_float` 变成 nan 丢掉了——全库搜 `rx_power_all` 命中数为 0。
-
-代价约 **168 字节/样本**。这让"逐小区负载"这类课题比原先估的便宜得多。
-
-**注意"期望意义"这个限定**：单次实现下 `avg_leak_k` 只是一个波束的抽样
-（见上一条的 `n_dl_sched=1`），所以 4.74 dB 的抽样噪声依然在。
-要拿它做逐小区干扰合成，得先把 `n_dl_sched` 的问题解决掉。
+这比聚合 SIR 更强：不同邻区采用不同 RB profile 后，只有逐小区 (I_k) 能重算
+`q_serv*S/(N+ηΣq_k I_k)`。旧数据集缺字段时硬失败并要求重新生成，禁止从聚合
+SIR 按比例猜。2026-08-11 审查发现旧 `_system_sinr` 移除后这些字段曾断链，
+现已在两套后端恢复并加了 source→NPZ→loader 的端到端重构测试。
 
 **反过来，存 `h_interferers` 不值得**：`max_per_ue_intf_cells` 默认只存 3 个，
 设成 20 是 11.14 MB/样本（服务信道才 0.56 MB）；而干扰信道已经是秩 1 的、
@@ -935,53 +921,44 @@ tx_power +16 dB 则 IoT +16 dB（SIR 一动不动）；NF 与带宽按噪声底�
 
 ### 压 num_rb 探测场景是安全的，但 snr_dB 会撞夹逼
 
-同一 seed 下 `num_rb` 取 273 / 24 / 12，几何量**逐位相同**：sinr / sir / 路损 /
-距离 / 视距 / 多普勒 / UE 位置 / 上行几何 SIR 全部零差异。唯一变的是 `snr_dB`，
-因为它的定义里显式带 `-10log10(RB)`，273→24 实测差 10.56 dB，
-与 `10log10(273/24)=10.559` 吻合——**可以精确还原**。
+同一 seed 下压 `num_rb` 时，传播状态、SIR、路损、距离、视距、多普勒、UE 位置与
+上行几何 SIR 保持不变。总载波功率被均分到更少 RB，raw SNR 会按
+`10log10(RB_full/RB_probe)` 升高；raw SINR 在噪声不可忽略时也会随之变化。
+`scenario.probe` 先精确还原全带 SNR，再与不变 SIR 重算全带 SINR/IoT。
 
 **但修正只对没被夹逼的样本成立。** ChannelHub 把 `snr_dB` 夹到 ±50 dB，
 探测口径下 snr 高了 10.4 dB，高信噪比场景会**先撞天花板再被减回去**，
 得到一个看起来正常的假值。实测 InF 与密集城区两个完全不同的场景，
 探测出的 SNR 都是 39.5 dB（= 49.9 - 10.4）。`scenario.probe` 现在剔除并计数。
-SINR / SIR / IoT 不受影响，它们不含 `10log10(RB)` 项。
+依赖 SNR 的重算 SINR/IoT 同样剔除撞夹逼样本；SIR 与传播几何不受影响。
 
-`num_ofdm_symbols` 同样可压，但**有一道悬崖，位置是 1**：14 降到 7 / 4 / 2 时
-几何量逐位相同，降到 1 时 `sir_dB` 直接偏 16.1 dB。`PROBE_NUM_SYM` 取 4 而不是 2
-是有意的——离悬崖两格，不贴着边站。这个旋钮**只对探测模式安全**，正式生成里
-它实打实地改信道矩阵（14→7 时 `h_true` 相对差 2.5e-2，14→1 差 4.3），
-因为存下来的单快照是在这些符号上平均出来的。所以它只在 `probe()` 里，不在
-`generate()` 里。
+`num_ofdm_symbols` 同样可压；ChannelHub 已把几何量移出 symbol 网格，14 / 7 / 4 /
+2 / 1 下 SINR、SIR、路损、距离、LOS 与位置逐位相同。`PROBE_NUM_SYM` 仍取 4，
+是为了保留一小段时域结构并更容易暴露误用，不是因为 1 有几何悬崖。这个旋钮
+**只对探测模式安全**：正式信道会随时间网格改变。适配器也不再做复信道平均——
+系统层保留中间 symbol 的 length-1 快照；链路估计在压缩前仍使用完整网格。
 
-发货参数（num_rb 24 + num_ofdm_symbols 4 + 关 SSB）实测 **11.5 倍速**
-（2602 → 226 ms/样本，交错重测 3 轮取中位数，基准自身波动 17.7%）。
+性能数字必须绑定内核版本。旧单簇内核曾测得 11.5×；20-ray 内核在 2026-08-11
+用 21 小区 16T/20 MHz、6 样本交错两轮重测，full 为 7.80/9.45 s/样本，probe
+为 4.78/4.79 s/样本，约 **1.80×**。绝对值和比例都不是 SLA，以调用返回的
+`elapsed_s` 为准。
 
-### 探测模式的正确性依赖 bs_panel
+### 探测模式仍补齐 bs_panel，但原因是空间阵列一致
 
-**没有 `bs_panel` 时，压 num_rb 会让 `sinr_dB` 平移 10.56 dB。** 原因是缺 panel
-时 ChannelHub 建不出 DFT 码本，几何 SINR 整条路径被跳过、`sinr_dB` 退化成
-`snr_dB`，而后者带 `-10log10(RB)`。
+`probe_config` 调 `_ensure_bs_panel`，保证 probe 与 full 使用相同二维端口、极化和
+effective-subarray 配置。当前几何干扰不再由 panel/DFT 码本开关控制；probe 的
+raw SINR 变化来自每 RB PSD 改变，必须按上一节的 SNR→SINR 重构处理。
 
-这个坑极其隐蔽：那时 `sir_dB` 是 49.9 哨兵、逐位相同，路损/距离/多普勒也逐位
-相同，**只有 sinr_dB 一个字段偏**，看起来像探测模式本身不可靠。实际是配置缺
-panel 导致连全量跑出来的"SINR"都不是真 SINR（见前面 bs_panel 那一条）。
+### 多普勒定义与移动轨迹边界
 
-`probe_config` 现在自己调 `_ensure_bs_panel`。写探测相关的测试时，
-**对照组也必须补 panel**，否则比的是两个都错的东西。
+ChannelHub 的 `doppler_hz` 明确定义为最大 Doppler
+`f_max = |v| / lambda`，CDL 内部再按每条 ray 的方向余弦投影一次。旧实现先把
+速度投影到最近站的径向、随后又在 CDL 内投影一次，会把高铁场景严重压低；
+`hst_350kmh` 在 2.6 GHz 下现在稳定为 **842.59 Hz**，与解析值一致。
 
-### 多普勒需要每个 UE 至少 2 个样本
-
-ChannelHub 的 `doppler_hz` 来自**同一个 UE 相邻样本之间的位移**，
-`samples_per_ue == 1` 时没有位移可算，恒为 0。实测 `hst_350kmh`（21 个 UE）：
-`num_samples=21` 报 **0.0 Hz**，`num_samples=42` 报 **817.94 Hz**。
-
-一个 350 km/h 的场景探测出"多普勒 0"，任谁都会以为移动配置没生效。
-`scenario.probe` 现在检测到配了移动（`ue_speed_kmh > 3` 或
-`mobility_mode != static`）而每 UE 不足 2 个样本时**自动补到 2 倍并写进
-`num_samples_note`**——补，但不静默地补。静止场景不补，不白花时间。
-
-同理，`num_samples` 恰好等于 `num_ues` 是个很自然的写法，
-所以这个坑很容易撞上。
+`mobility_mode=static` 只表示跨 snapshot 的 UE 几何位置固定、样本间不构成连续
+轨迹；它不覆盖 `ue_speed_kmh`。因此可用 `static + 3 km/h` 生成独立位置快照下的
+步行小尺度时变。要真正零 Doppler，必须显式设 `ue_speed_kmh=0`。
 
 ### 比耗时必须交错重测
 
@@ -991,16 +968,16 @@ ChannelHub 的 `doppler_hz` 来自**同一个 UE 相邻样本之间的位移**�
 其余四个根本没被引用。
 
 正确方法：每轮把所有变体各跑一次、轮转多轮取中位数，并把基准自身的轮间波动
-一起报出来。本机基准波动 **11.9%**，低于这个量级的"加速"就是噪声。
-交错重测后只剩两条是真的：关 SSB **1.40×**、`num_interfering_ues` 设小
-（0 → 1.62×、2 → 1.40×，但它改变物理）。
+一起报出来。`num_interfering_ues` 设小确实会改变工作量，但也改变物理，不能
+作为无损优化。关 SSB 也会少算数据；旧内核的 1.40× 在 20-ray 版本未重标，
+不再当作当前性能承诺。
 
 ### 文档里的计数要和代码绑死
 
 "19 项体检"这句话在 README / SKILL.md / 两份 HTML 里写了八处，
 而 `full_report` 从第一版（f44b46a）起就只有 16 项——数字凭印象写的，从没对过账。
 `test_interference` 第 10 节现在用正则从四份文档里抽计数，与
-`len(full_report(ds).checks)` 和 `sw_` 工具数比对。加检查/加工具时会红。
+`len(full_report(ds).checks)` 和 `sr_` 工具数比对。加检查/加工具时会红。
 
 ### YAML 里以 `*` 开头的值是别名
 
@@ -1033,7 +1010,7 @@ ChannelHub 的 `doppler_hz` 来自**同一个 UE 相邻样本之间的位移**�
   **画的必须是实际会跑的配置**，不是用户以为的那个
 - 新的可在页面上改的参数 → `spec._EDITABLE`，**只加这一处**：控件、payload、
   回传白名单都从它派生（`spec.editable_keys()`）
-- 新场景 → `presets/presets.yaml`，不改代码。**加完必须跑一遍 `sw_probe_scenario` 把实测值写进 `expect`**——preset 里的 label 是设计意图，写着「高干扰」实际只有 2 dB 的事发生过
+- 新场景 → `presets/presets.yaml`，不改代码。**加完必须跑一遍 `sr_probe_scenario` 把实测值写进 `expect`**——preset 里的 label 是设计意图，写着「高干扰」实际只有 2 dB 的事发生过
 - 新的干扰量或分级 → `interference.py`，门限改动等于改现场约定，先和用户对齐
 - 新射线追踪城市 → ChannelHub 的 `configs/scenes/`，`scenes.py` 自动发现
 - 新任务类型 / 新决策点 / 新对比组 / 新陷阱 → `decisions.py` 的

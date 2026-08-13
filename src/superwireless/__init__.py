@@ -1,16 +1,27 @@
-"""superwireless —— 给 Agent 用的无线仿真信道供应站。
+"""Deprecated import bridge for the former package name.
 
-用法（取货代码里就这两行）::
-
-    from superwireless import load
-    ds = load("ds_a3f21c")
-
-MCP 服务端入口在 :mod:`superwireless.server`。
+All implementation lives in :mod:`superran`.  This package remains only so
+existing notebooks can migrate without silently changing their data roots or
+simulation behaviour.  New code must import :mod:`superran` directly.
 """
 from __future__ import annotations
 
-__version__ = "0.1.0"
+import warnings
 
-from .loader import Dataset, load  # noqa: E402
+import superran as _superran
+
+warnings.warn(
+    "The former package name is deprecated; import 'superran' instead.",
+    FutureWarning,
+    stacklevel=2,
+)
+
+# Only the former top-level public API is bridged.  Internal submodules are not
+# mirrored: retaining a second module namespace would duplicate module-level
+# state and make simulations depend on which spelling was imported first.
+__version__ = _superran.__version__
+
+Dataset = _superran.Dataset
+load = _superran.load
 
 __all__ = ["Dataset", "load", "__version__"]

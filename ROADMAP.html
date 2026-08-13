@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>superwireless 还缺什么</title>
+<title>superran 还缺什么</title>
 <style>
   :root{
     --bg:#fafafa; --card:#fff; --ink:#1d1d1f; --ink-soft:#6e6e73;
@@ -285,7 +285,7 @@ CQI/BF Gain/OLLA 那条链本来就是按 TDD 互易性写的。</li>
 </div>
 
 <p>"纯链路仿真"这个定位很有用，因为它一刀切掉了一大片东西。但它也有歧义——
-业界的"链路级"通常指<b>单条收发链路的比特级仿真</b>，而 superwireless 目前做的是
+业界的"链路级"通常指<b>单条收发链路的比特级仿真</b>，而 superran 目前做的是
 <b>多小区几何 + 信道矩阵 + 等效 SINR + 查表 BLER</b>，严格说站在链路级与系统级之间。</p>
 
 <div class="grid2">
@@ -304,7 +304,7 @@ CQI/BF Gain/OLLA 那条链本来就是按 TDD 互易性写的。</li>
 </div>
 
 <div class="callout c-purple">
-<p><b>superwireless 现在的位置：几何与信道按系统级建，评价链路按链路级的公式算。</b></p>
+<p><b>superran 现在的位置：几何与信道按系统级建，评价链路按链路级的公式算。</b></p>
 <p>往上：有 7/19 站、57 小区、干扰小区信道矩阵、IoT——这是系统级的规模。<br>
 往下：有逐 RB 逐流的后处理 SINR、EESM/MIESM 有效 SINR、38.214 MCS/TBS、
 BLER 曲线插值——这是链路到系统映射（L2S）的标准做法。<br>
@@ -355,12 +355,12 @@ BLER 曲线插值——这是链路到系统映射（L2S）的标准做法。<br
 
 <h2 id="s4">四、逐模块对照表</h2>
 
-<p class="lead">✅ 有 · ◐ 部分 · ✗ 无 · — 不在范围内（对 superwireless 这一列，"—"表示<b>明确不做</b>，不是遗漏）</p>
+<p class="lead">✅ 有 · ◐ 部分 · ✗ 无 · — 不在范围内（对 superran 这一列，"—"表示<b>明确不做</b>，不是遗漏）</p>
 
 <div class="tbl-wrap">
 <table>
 <thead><tr>
-  <th style="min-width:150px">模块</th><th>superwireless</th><th>Sionna PHY</th><th>Sionna SYS</th>
+  <th style="min-width:150px">模块</th><th>superran</th><th>Sionna PHY</th><th>Sionna SYS</th>
   <th>MATLAB 5G TB</th><th>QuaDRiGa</th><th>5G-LENA</th>
 </tr></thead>
 <tbody>
@@ -432,7 +432,7 @@ BLER 曲线插值——这是链路到系统映射（L2S）的标准做法。<br
 <p><b>这里也判断错了。</b> 原文说"估计算法换不了"——实际上 ChannelHub 的
 <code>channel_est/</code> 一直有 <code>ideal</code> / <code>ls_linear</code> /
 <code>ls_mmse</code> 三档（上行还多两档 SRS 跳频），而且配置是整个 dict 直通的，
-<b>这个键一直可用，只是 superwireless 从没提过它</b>。
+<b>这个键一直可用，只是 superran 从没提过它</b>。
 2026-08-01 之前所有数据集都默默走了默认的 <code>ls_linear</code>。</p>
 <div class="tbl-wrap"><table>
 <thead><tr><th>DL NMSE</th><th>干扰 UE = 0</th><th>干扰 UE = 16</th></tr></thead>
@@ -576,7 +576,7 @@ CSI NMSE 掉 22 dB，MU 和谱效就掉一半，Type I 的量化误差在 MU 下
 
 
 <footer>
-superwireless · 还缺什么 · 2026-08-01 首版 / 2026-08-02 修订<br>
+superran · 还缺什么 · 2026-08-01 首版 / 2026-08-02 修订<br>
 左列对着本仓库代码核过；右列来自各库公开文档，未逐个装起来实测。
 工作量为量级判断，不构成排期。<br>
 修订记录：IRC / 信道估计器 / MU-MIMO 三项已完成（含两处首版判断有误的更正）；

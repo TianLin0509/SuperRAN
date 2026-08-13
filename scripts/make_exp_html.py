@@ -1,7 +1,7 @@
 """生成 EXPERIENCE_MODE.html：单小区 burst 业务 + 掐头去尾体验速率方案。
 
 用户 2026-08-09 的口径：
-* superwireless 分两种模式——谱效评估型（现状，full buffer）与体验评估型（新增）
+* superran 分两种模式——谱效评估型（现状，full buffer）与体验评估型（新增）
 * 体验评估型先做**单小区、不考虑重传**
 * 顺序：业务模型 → EPF 优先级 → 按需 RBG 分配（恰够传完，大包吃全带）→ 掐头去尾体验速率
 """
@@ -13,8 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from superwireless import katex as kx  # noqa: E402
-from superwireless import mathml as mm  # noqa: E402
+from superran import katex as kx  # noqa: E402
+from superran import mathml as mm  # noqa: E402
 
 
 def M(tex: str, *, block: bool = False) -> str:
@@ -60,7 +60,7 @@ F_NSTAR = M(r"n^{\ast}")
 def head() -> str:
     src = (ROOT / "TONIGHT.html").read_text(encoding="utf-8")
     h = src.split("</head>")[0]
-    h = h.replace("superwireless 通宵成果与待审", "superwireless 体验评估模式方案")
+    h = h.replace("superran 通宵成果与待审", "superran 体验评估模式方案")
     extra = """
 <style>
   .mode{display:flex;gap:16px;margin:20px 0;flex-wrap:wrap}
@@ -409,7 +409,7 @@ I-8 专门钉住它「不许被修好」。</p>
 逐 RBG SINR（P1-A）、多小区（P1-C）、MU 配对（体验模式下先只跑 SU）。</p>
 </div>
 
-<footer>superwireless 体验评估模式方案 · 待评审 ·
+<footer>superran 体验评估模式方案 · 待评审 ·
 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>
 </div>
 {kx.upgrade_script()}

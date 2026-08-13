@@ -11,12 +11,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from superwireless import generate as gen  # noqa: E402
-from superwireless import linklevel as ll  # noqa: E402
-from superwireless import load  # noqa: E402
-from superwireless import mumimo as mu  # noqa: E402
-from superwireless import physical as ph  # noqa: E402
-from superwireless import plan as pl  # noqa: E402
+from superran import generate as gen  # noqa: E402
+from superran import linklevel as ll  # noqa: E402
+from superran import load  # noqa: E402
+from superran import mumimo as mu  # noqa: E402
+from superran import physical as ph  # noqa: E402
+from superran import plan as pl  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -56,21 +56,29 @@ check(r.spectral_efficiency <= r.capacity_bound * 1.001, "谱效不超容量上�
 check(len(r.sinr_per_layer_db) == r.rank, "逐层 SINR 数量等于 rank")
 check(r.sinr_per_rb_db.shape[0] == ds.h_true.shape[2], "逐 RB SINR 维度正确")
 
-# Dataset 默认工作点是 ChannelHub 几何 SINR，已经含服务波束阵列增益。
-# 它必须锚到 rank-1 σ1²；显式 snr_db 才走合成预波束 SNR 的旧路径。
+# Dataset 默认工作点是 ChannelHub 的预数字波束几何 SINR；数字 BF 增益由 H
+# 在链路层计算一次。显式 snr_db 走同一预波束定义。
 geo = float(ds.sinr_dB[0])
 op = ds.geometric_impairment(0)
 expected_n0 = mu.noise_from_geometric_sinr(ds.h_true[0], geo)
 check(np.isclose(op.noise_power, expected_n0, rtol=1e-12),
-      "Dataset 默认噪声与系统仿真共用 rank-1 几何 SINR 锚点")
+      "Dataset 默认噪声与系统仿真共用预波束几何 SINR 锚点")
 r_geo = ds.link(0, method="svd", max_rank=1, rank_threshold=0.0)
-check(abs(float(r_geo.sinr_per_layer_db[0]) - geo) < 0.25,
-      "rank-1 默认后波束 SINR 锚在数据集几何 SINR（不重复计阵列增益）")
+mean_postbeam_db = 10.0 * np.log10(np.mean(
+    10.0 ** (np.asarray(r_geo.sinr_per_rb_db[:, 0], dtype=float) / 10.0)))
+bf_gain_db = 10.0 * np.log10(
+    ll.rank1_reference_power(ds.h_true[0])
+    / ll.prebeam_reference_power(ds.h_true[0])
+)
+check(abs(float(mean_postbeam_db) - (geo + bf_gain_db)) < 0.10,
+      "rank-1 后波束 SINR = 预波束几何 SINR + H 的数字 BF 增益")
+check(float(r_geo.sinr_per_layer_db[0]) <= float(mean_postbeam_db) + 1e-9,
+      "频选信道的速率等效 SINR 不高于线性功率平均（Jensen 口径）")
 r_synthetic = ds.link(0, snr_db=geo, method="svd", max_rank=1, rank_threshold=0.0)
 check(np.isclose(r_synthetic.noise_power, ll._noise_from_snr(ds.h_true[0], geo)),
       "显式 snr_db 保持合成预波束 SNR 语义")
-check(r_synthetic.spectral_efficiency > r_geo.spectral_efficiency,
-      "把几何 SINR 错当预波束 SNR 会显著高估谱效，反向哨兵有效")
+check(np.isclose(r_synthetic.spectral_efficiency, r_geo.spectral_efficiency),
+      "first-party 几何 SINR 与显式预波束 snr_db 走同一功率锚点")
 check(np.isclose(ds.capacity(0), ll.capacity_upper_bound(
     ds.h_true[0], op.noise_power, interference_cov=op.interference_cov)),
       "Dataset.capacity 使用同一几何损伤口径的注水上界")
@@ -165,18 +173,18 @@ check(any(c["name"] == "预编码性能排序" for c in d_["checks"]), "含预�
 check(any(c["name"] == "蒙特卡洛收敛" for c in d_["checks"]), "含收敛检查")
 
 # ---------------------------------------------------------------------------
-sect("7  验证能抓出矛盾配置")
-ds_bad, _ = make(30, scenario="UMa_LOS", channel_model="CDL-C")
-rep_bad = ds_bad.validate()
-names = [c.name for c in rep_bad.checks if not c.passed]
-print(f"  UMa_LOS + CDL-C（视距场景配非视距剖面）→ 未通过：{names}")
-check("场景与信道模型自洽" in names, "抓出场景与信道模型矛盾")
-
-ds_ok, _ = make(30, scenario="UMa_LOS", channel_model="CDL-D")
-rep_ok = ds_ok.validate()
+sect("7  验证逐链路实际剖面")
+ds_auto, _ = make(30, scenario="UMa_LOS", channel_model="CDL-C")
+rep_auto = ds_auto.validate()
+auto_failed = [c.name for c in rep_auto.checks if not c.passed]
+print(f"  UMa_LOS + 配置 CDL-C → 实际 {set(ds_auto.effective_channel_models)}；未通过：{auto_failed}")
 check(
-    "场景与信道模型自洽" not in [c.name for c in rep_ok.checks if not c.passed],
-    "UMa_LOS + CDL-D 自洽配置放行",
+    set(ds_auto.effective_channel_models) == {"CDL-D"},
+    "显式 LOS 场景把 NLOS 配置入口逐链路切到 CDL-D",
+)
+check(
+    "场景与信道模型自洽" not in auto_failed,
+    "体检按实际 CDL-D 判定，不再误读配置 CDL-C",
 )
 
 # ---------------------------------------------------------------------------
@@ -220,7 +228,11 @@ for m in ("ls", "mmse"):
                                tau_rms_s=tau)["nmse_db"] for x in (5, 15, 25)]
     res[m] = row
     print(f"  {m:<7}{row[0]:>10.2f}{row[1]:>11.2f}{row[2]:>11.2f}")
-check(all(res["mmse"][i] <= res["ls"][i] + 0.1 for i in range(3)), "MMSE 不劣于 LS")
+check(res["mmse"][0] <= res["ls"][0] + 0.1,
+      "匹配指数-PDP 先验的 LMMSE 在低 SNR 抑噪优于 LS")
+check(all(np.isfinite(res["mmse"])), "LMMSE 三个 SNR 工作点均为有限值")
+if res["mmse"][-1] > res["ls"][-1]:
+    print("  NOTE  高 SNR 单条 CDL 上指数-PDP 先验失配，LMMSE 不保证逐样本支配 LS")
 check(res["ls"][2] < res["ls"][0], "信噪比越高 LS 估计越准")
 check(ph.estimate_channel(ds.h_true[0], method="ideal")["nmse_db"] < -100, "理想模式无误差")
 

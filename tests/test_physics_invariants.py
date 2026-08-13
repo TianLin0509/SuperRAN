@@ -16,15 +16,16 @@ from scipy.stats import t as student_t
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from superwireless import csi_aging as ca  # noqa: E402
-from superwireless import experience as ex  # noqa: E402
-from superwireless import interference as itf  # noqa: E402
-from superwireless import linkadapt as la  # noqa: E402
-from superwireless import linklevel as ll  # noqa: E402
-from superwireless import measure  # noqa: E402
-from superwireless import mumimo as mu  # noqa: E402
-from superwireless import rng as rg  # noqa: E402
-from superwireless import system as sy  # noqa: E402
+from superran import beamforming as bf  # noqa: E402
+from superran import csi_aging as ca  # noqa: E402
+from superran import experience as ex  # noqa: E402
+from superran import interference as itf  # noqa: E402
+from superran import linkadapt as la  # noqa: E402
+from superran import linklevel as ll  # noqa: E402
+from superran import measure  # noqa: E402
+from superran import mumimo as mu  # noqa: E402
+from superran import rng as rg  # noqa: E402
+from superran import system as sy  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -102,7 +103,7 @@ check(np.allclose(s_mmse, s_irc, rtol=1e-10, atol=1e-10),
 # 标定协方差的平均功率必须与 S/I 对账，链路谱效和有色噪声容量都逐点不升。
 hi_op = ((rng.standard_normal((2, 3, 9, 6, 3))
           + 1j * rng.standard_normal((2, 3, 9, 6, 3))) / np.sqrt(2)).astype(np.complex64)
-s_ref = ll.rank1_reference_power(h)
+s_ref = ll.prebeam_reference_power(h)
 n_fixed = s_ref / (10.0 ** (20.0 / 10.0))
 op_se: list[float] = []
 op_cap: list[float] = []
@@ -266,6 +267,94 @@ s_lo = ca.mmse_stream_sinr(h_eval, w_svd[:, :, :2],
 s_hi = ca.mmse_stream_sinr(h_eval, w_svd[:, :, :2],
                             power_per_stream=0.5, noise_power=1.0)
 check(bool(np.all(s_hi <= s_lo + 1e-10)), "CSI 老化子模块的 MMSE SINR 随噪声不升")
+
+# 三种功率约束不是一个模式的三个参数，而是三个可独立审计的物理矩阵。
+# 项目矩阵是 Q[F,antenna,stream]，所以用户口径的“列归一”在这里对应天线行归一。
+z = rng.standard_normal((7, 64, 4)) + 1j * rng.standard_normal((7, 64, 4))
+q_dir, _ = np.linalg.qr(z)
+power_rows: dict[str, bf.PowerDiagnostics] = {}
+for mode in ("ebf", "pebf", "nebf"):
+    _q, _wm, _pd = bf.equal_power_weights(q_dir, mode=mode, total_power=1.0)
+    power_rows[mode] = _pd
+    check(float(np.max(_pd.total_power_used)) <= 1.0 + 1e-10,
+          f"{mode.upper()}：总发射功率不越界")
+check(float(np.max(power_rows["pebf"].per_antenna_power)) <= 1 / 64 + 1e-10,
+      "PEBF：最大天线满足 P/M，且只做全局缩放")
+check(np.allclose(power_rows["nebf"].per_antenna_power, 1 / 64, atol=1e-12),
+      "NEBF：每根非零天线都恰好使用 P/M")
+check(np.allclose(power_rows["nebf"].total_power_used, 1.0, atol=1e-12),
+      "NEBF：64 根非零天线时总功率用满")
+check(np.allclose(power_rows["pebf"].orthogonality_error,
+                  power_rows["ebf"].orthogonality_error, atol=1e-12),
+      "PEBF：全局缩放保持流间几何关系")
+check(float(np.mean(power_rows["nebf"].orthogonality_error))
+      > float(np.mean(power_rows["ebf"].orthogonality_error)) + 1e-4,
+      "NEBF：逐天线归一会改变流间正交性")
+
+# EBF 是历史默认基线，显式指定与省略参数必须逐位一致。
+h_ebf = ((rng.standard_normal((1, 5, 8, 3))
+          + 1j * rng.standard_normal((1, 5, 8, 3))) / np.sqrt(2))
+ebf_default = ll.link_performance(h_ebf, noise_power=0.1, max_rank=3)
+ebf_explicit = ll.link_performance(
+    h_ebf, noise_power=0.1, max_rank=3, power_constraint="ebf")
+check(ebf_default.rank == ebf_explicit.rank
+      and np.array_equal(ebf_default.sinr_per_rb_db, ebf_explicit.sinr_per_rb_db)
+      and ebf_default.spectral_efficiency == ebf_explicit.spectral_efficiency,
+      "显式 EBF 与历史默认路径逐位一致")
+_pebf_batch = ll.compare_precoders(
+    h_ebf[None], methods=("svd",), snr_db=10.0,
+    power_constraint="pebf")
+check(_pebf_batch["svd"]["power_constraint"] == "pebf",
+      "批量 Monte Carlo/compare_precoders 真正下传并记录每天线功率模式")
+
+# 64T SU 的代表例：NEBF 使用全部每天线功率，速率接近 EBF；PEBF 被峰值天线
+# 限住，只使用约 20% 总功率。这里断言具体 realization，不用“总体趋势”救结论。
+rg_su = np.random.default_rng(0)
+h_su64 = ((rg_su.standard_normal((1, 17, 64, 1))
+           + 1j * rg_su.standard_normal((1, 17, 64, 1))) / np.sqrt(2))
+su_power = {
+    mode: ll.link_performance(
+        h_su64, noise_power=0.1, method="svd", max_rank=1,
+        power_constraint=mode)
+    for mode in ("ebf", "pebf", "nebf")
+}
+check(abs(su_power["nebf"].spectral_efficiency
+          / su_power["ebf"].spectral_efficiency - 1.0) < 0.05,
+      "64T SU：NEBF 谱效与 EBF 相差 <5%")
+check(su_power["nebf"].spectral_efficiency
+      > su_power["pebf"].spectral_efficiency + 1.5,
+      "64T SU：NEBF 明显高于受峰值天线限制的 PEBF")
+
+# 强相关 MU + 高 SNR + 单接收天线 UE 是 NEBF 破坏 ZF 的反向哨兵：
+# 接收侧没有多余自由度替发射机再置零，因此即使 NEBF 用满功率，残余干扰
+# 也能让它输给只用部分功率但保持零陷的 PEBF。
+rg_mu = np.random.default_rng(0)
+shape_mu = (1, 4, 4, 1)
+h_mu0 = ((rg_mu.standard_normal(shape_mu) + 1j * rg_mu.standard_normal(shape_mu))
+         / np.sqrt(2))
+h_mu1 = h_mu0 + 0.001 * (
+    rg_mu.standard_normal(shape_mu) + 1j * rg_mu.standard_normal(shape_mu)) / np.sqrt(2)
+mu_pebf = mu.mu_link_performance(
+    [h_mu0, h_mu1], noise_power=1e-8, streams_per_user=1,
+    criterion="all", precoder="zf", power_constraint="pebf")
+mu_nebf = mu.mu_link_performance(
+    [h_mu0, h_mu1], noise_power=1e-8, streams_per_user=1,
+    criterion="all", precoder="zf", power_constraint="nebf")
+check(mu_nebf.leakage_ratio > 0.4 and mu_pebf.leakage_ratio < 1e-10,
+      "强相关 MU：NEBF 产生残余干扰，PEBF 保持 ZF 零陷")
+check(mu_nebf.sum_se < mu_pebf.sum_se,
+      "强相关 MU：存在 NEBF < PEBF 的确定性反例")
+
+# 每个 UE 的几何工作点不同，MU 分母必须使用逐用户噪声，不能拿 UE0 代替全组。
+he_orth = np.zeros((2, 1, 1, 2), dtype=np.complex128)
+he_orth[0, 0, 0, 0] = 1.0
+he_orth[1, 0, 0, 1] = 1.0
+mu_noise = mu.mu_link_performance_from_effective(
+    he_orth, he_orth, noise_power=np.array([0.1, 1.0]), precoder="zf",
+    rb_per_rbg=1)
+check(np.allclose(mu_noise.sinr_per_user_db, [10 * np.log10(5.0),
+                                             10 * np.log10(0.5)], atol=1e-10),
+      "MU 使用逐用户噪声功率（正交两用户解析 SINR 精确一致）")
 
 
 # ---------------------------------------------------------------------------
