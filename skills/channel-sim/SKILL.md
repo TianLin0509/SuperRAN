@@ -253,7 +253,7 @@ SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且�
 
 **先小后大。** 正式实验前先跑 20 个样本确认流程通再放大；`sr_plan` 的 `estimated.size_mb` 超过 1 GB 时提醒用户。**信噪比不能直接设定**——它由路损、发射功率、撒点位置共同决定；要求特定区间时走拒绝采样，可能很慢甚至取不到样本。
 
-**默认阵列是真实 AAU 的 1 驱 3，不是 64 个独立阵元**（本地硬件事实，不是可选项；legacy 模型把吞吐高估 27%、边缘用户高估 61%）→ `references/default-hardware.md`。
+**公司 64T/256T 都走已确认的真实子阵，并统一 `pol_h_v + top_to_bottom`**；旧 64T 布局只作显式历史兼容，历史性能差值不能当当前通用结论 → `references/default-hardware.md`。
 **CDL 剖面表已被替换为逐字核对过的 38.901 标准值**（`SUPERRAN_CDL_SPEC=0` 可复现未修正前的结果；CDL-D/E 未覆盖）。**引擎不可用时如实说缺什么，不要假装能跑**（`sr_capabilities` 查；`quadriga_real` 需要 MATLAB/Octave）。
 
 ## 工具地图与参考文件

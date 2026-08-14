@@ -122,8 +122,21 @@ class Dataset:
                 kwargs["n_v"] = panel[1]
         antenna = self.summary.get("antenna_model", {}) or {}
         order = antenna.get("port_order")
+        if order is None and self.summary.get("source") in {"internal_sim", "sionna_rt"}:
+            # Datasets predating array provenance used the historical
+            # EffectiveArray/legacy flattening. Do not reinterpret them with
+            # the new 64T default merely because the fields are absent.
+            order = "h_v_pol"
         if order and kwargs.get("port_order") is None:
             kwargs["port_order"] = str(order)
+        vertical_order = antenna.get("vertical_index_order")
+        if vertical_order is None and order:
+            # Pre-migration summaries carried only port_order.
+            vertical_order = (
+                "bottom_to_top" if str(order) == "h_v_pol" else "top_to_bottom"
+            )
+        if vertical_order and kwargs.get("vertical_index_order") is None:
+            kwargs["vertical_index_order"] = str(vertical_order)
 
     def keys(self) -> list[str]:
         return sorted(self._npz.files)
@@ -261,6 +274,16 @@ class Dataset:
         n_h = panel[0] if len(panel) == 3 else None
         n_v = panel[1] if len(panel) == 3 else None
         port_order = antenna.get("port_order")
+        if port_order is None and self.summary.get("source") in {
+            "internal_sim",
+            "sionna_rt",
+        }:
+            port_order = "h_v_pol"
+        vertical_index_order = antenna.get("vertical_index_order")
+        if vertical_index_order is None and port_order:
+            vertical_index_order = (
+                "bottom_to_top" if str(port_order) == "h_v_pol" else "top_to_bottom"
+            )
         if index is not None:
             return measure.pmi_type_i(
                 self.h_true[index],
@@ -268,6 +291,7 @@ class Dataset:
                 n_h=n_h,
                 n_v=n_v,
                 port_order=port_order,
+                vertical_index_order=vertical_index_order,
             )
         return [
             measure.pmi_type_i(
@@ -276,6 +300,7 @@ class Dataset:
                 n_h=n_h,
                 n_v=n_v,
                 port_order=port_order,
+                vertical_index_order=vertical_index_order,
             )
             for h in self.h_true
         ]

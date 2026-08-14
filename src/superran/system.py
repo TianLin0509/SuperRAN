@@ -932,6 +932,7 @@ def _type1_precoder(
     n_h: int | None = None,
     n_v: int | None = None,
     port_order: str | None = None,
+    vertical_index_order: str | None = None,
 ) -> np.ndarray:
     """Type-I-style 单面板**宽带列码本近似**，强制到指定 rank。
 
@@ -957,6 +958,7 @@ def _type1_precoder(
         n_h=n_h,
         n_v=n_v,
         port_order=port_order,
+        vertical_index_order=vertical_index_order,
     ).w
 
 
@@ -1098,6 +1100,7 @@ def build_link_tables(
     power_geometry: pc.DownlinkPowerGeometry | None = None,
     bs_panel: list[int] | tuple[int, int, int] | None = None,
     port_order: str | None = None,
+    vertical_index_order: str | None = None,
 ) -> list[UeLinkTable]:
     """第一相：逐 UE 把 rank 1..max_rank 的 SINR / MCS / 谱效全部算好。
 
@@ -1470,6 +1473,7 @@ def build_link_tables(
                 n_h=_nh,
                 n_v=_nv,
                 port_order=port_order,
+                vertical_index_order=vertical_index_order,
             )
 
             # 预编码用 h_prec、评估用当前快照。零时延时两者相同，

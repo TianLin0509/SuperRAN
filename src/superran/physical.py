@@ -253,6 +253,7 @@ def dft_codebook(
     n_p: int = 2,
     *,
     port_order: str | None = None,
+    vertical_index_order: str | None = None,
 ) -> np.ndarray:
     """CSI-RS 的 DFT 波束码本 ``[n_beams, n_ports]``。
 
@@ -270,10 +271,21 @@ def dft_codebook(
     )
     if port_order is None:
         return codebook
-    from msg_embedding.phy_sim.effective_array import PortIndex  # noqa: PLC0415
+    from .hardware import type1_to_port_permutation
 
-    idx = PortIndex(n_h=n_h, n_v=n_v, n_p=n_p, port_order=port_order)
-    perm = idx.type1_to_canonical()
+    resolved_vertical_order = vertical_index_order or (
+        "bottom_to_top" if port_order == "h_v_pol" else "top_to_bottom"
+    )
+    perm = np.asarray(
+        type1_to_port_permutation(
+            n_h,
+            n_v,
+            n_p,
+            port_order=port_order,
+            vertical_index_order=resolved_vertical_order,
+        ),
+        dtype=np.intp,
+    )
     out = np.empty_like(codebook)
     out[:, perm] = codebook
     return out

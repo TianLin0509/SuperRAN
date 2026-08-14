@@ -751,18 +751,17 @@ def check_interference_modeled(ds: Any) -> Check:
 def check_antenna_model(ds: Any) -> Check:
     """基站阵列模型是不是本地真实硬件。
 
-    真实 AAU 是 **1 驱 3**：64 个 RF 端口（8H x 4V x 2pol），每端口固定驱动
-    垂直相邻 3 个阵子，共 192 个物理阵子，水平 0.5λ、垂直 **0.67λ**。
-    ChannelHub 的默认 ``legacy_64`` 把 64 个端口当成 64 个**独立**阵元、
-    间距一律 0.5λ——那是另一套阵列，空间自由度高得多。
+    已确认两个真实 AAU：64T 是 8H x 4V x 2pol / 1 驱 3 / 192 AE；
+    256T 是 16H x 8V x 2pol / 1 驱 6 / 1536 AE。二者水平 0.5λ、
+    物理垂直 **0.67λ**，并统一 ``pol_h_v + top_to_bottom``。
+    ChannelHub 的 ``legacy_64`` 是独立端口历史基线，不是这两款硬件。
 
     实测同 seed 单小区 30 样本：legacy 的 SVD 谱效 33.23 vs 真实 28.20，
     吞吐 1337.5 vs 1055.5 Mbps，边缘用户 940.0 vs 582.4 Mbps——
-    **legacy 把吞吐高估 27%、边缘用户高估 61%**。
+    以上仅是 2026-07-31 旧内核历史消融，不能作为当前通用百分比。
 
-    这一项是 warn 不是 error：非 64T 面板（16T / 256T 之类）本来就没有
-    1 驱 3 这回事，legacy 是合理的；显式指定 legacy 做对照也合理。
-    但**默认配置下拿 legacy 报吞吐必须被看见**。
+    这一项是 warn 不是 error：16T 等未确认面板不能猜 1 驱 N，legacy 合理；
+    显式指定 legacy 做对照也合理。但公司 64T/256T 拿 legacy 报结果必须被看见。
     """
     from . import hardware as hw  # noqa: PLC0415
 
@@ -775,12 +774,14 @@ def check_antenna_model(ds: Any) -> Check:
         return Check(
             "基站阵列模型", False,
             "数据集没有记录 antenna_model —— 2026-07-31 之前生成的都没有这一项，"
-            "它们用的是 legacy_64 独立阵元模型（吞吐偏高约 27%）。",
+            "它们按 legacy_64 独立阵元解释。旧内核消融曾测到吞吐 +27%，"
+            "但该百分比不能外推到当前版本；请重新成对生成。",
             measured=None, expected="effective_subarray（64T 面板）",
             severity="warn",
         )
 
-    is_64t = hw.is_company_panel(panel)
+    is_company = hw.is_company_panel(panel)
+    expected_m = 3 if list(panel or []) == hw.COMPANY_RF_PANEL else 6
     if mode != "legacy_64":
         detail = (
             f"{block.get('elements_per_rf_port')} 驱动/端口、"
@@ -791,27 +792,35 @@ def check_antenna_model(ds: Any) -> Check:
         )
         ok = (
             abs(float(block.get("ae_vertical_spacing_lambda") or 0) - 0.67) < 1e-9
-            if is_64t else True
+            if is_company else True
         )
+        if is_company:
+            ok = ok and int(block.get("elements_per_rf_port") or 0) == expected_m
+            ok = ok and block.get("port_order") == hw.COMPANY_CANONICAL_PORT_ORDER
+            ok = ok and (
+                block.get("vertical_index_order")
+                == hw.COMPANY_CANONICAL_VERTICAL_INDEX_ORDER
+            )
         if not ok:
-            detail += " —— **垂直间距不是 0.67λ**，这是实测纠正过的硬件值，别改"
+            detail += (
+                " —— **公司阵列合同不匹配**：应为垂直 0.67λ、"
+                f"1 驱 {expected_m}、pol_h_v + top_to_bottom")
         return Check("基站阵列模型", ok, detail,
                      measured=mode, expected="effective_subarray",
-                     tolerance="64T 面板的垂直阵子间距必须是 0.67λ",
+                     tolerance="公司 64T/256T 必须匹配馈电数、垂直间距和 canonical 端口布局",
                      severity="warn")
 
-    if not is_64t:
+    if not is_company:
         return Check(
             "基站阵列模型", True,
-            f"面板 {panel} 不是 64T 的 8x4x2，1 驱 3 不适用，legacy_64 是合理选择",
+            f"面板 {panel} 的馈电结构未确认，legacy_64 是可接受的独立端口基线",
             measured=mode, severity="info",
         )
     return Check(
         "基站阵列模型", False,
-        "64T 面板却用了 legacy_64（64 个独立阵元、一律 0.5λ）—— 不是本地硬件。"
-        "真实 AAU 是 1 驱 3、192 阵子、垂直 0.67λ。"
-        "实测 legacy 把吞吐高估约 27%、边缘用户高估约 61%。"
-        "只作口径对照时可以忽略这一项。",
+        f"公司面板 {panel} 却用了 legacy_64 独立阵元模型。"
+        f"当前硬件合同应为 1 驱 {expected_m}、垂直 0.67λ、"
+        "pol_h_v + top_to_bottom；只有显式历史兼容/消融实验才应这样做。",
         measured=mode, expected="effective_subarray",
         severity="warn",
     )

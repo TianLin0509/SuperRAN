@@ -13,6 +13,8 @@ from typing import Any
 
 import numpy as np
 
+from . import hardware
+
 _EPS = 1e-30
 
 
@@ -375,6 +377,8 @@ class PMIResult:
     layer_gain_db: list[float]  # 每层匹配增益
     codebook_size: int
     layout: tuple[int, int]  # (n_h, n_v)
+    port_order: str | None = None
+    vertical_index_order: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -384,6 +388,8 @@ class PMIResult:
             "layer_gain_db": self.layer_gain_db,
             "codebook_size": self.codebook_size,
             "layout": list(self.layout),
+            "port_order": self.port_order,
+            "vertical_index_order": self.vertical_index_order,
         }
 
 
@@ -392,7 +398,17 @@ def _infer_layout(n_ports: int, n_h: int | None, n_v: int | None) -> tuple[int, 
     if n_h and n_v:
         dual = n_ports == 2 * n_h * n_v
         return n_h, n_v, dual
-    known = {64: (8, 4), 32: (8, 2), 16: (4, 2), 8: (2, 2), 4: (2, 1)}
+    known = {
+        256: (16, 8),
+        192: (16, 6),
+        128: (16, 4),
+        96: (8, 6),
+        64: (8, 4),
+        32: (8, 2),
+        16: (4, 2),
+        8: (2, 2),
+        4: (2, 1),
+    }
     if n_ports in known:
         h, v = known[n_ports]
         return h, v, True
@@ -408,6 +424,7 @@ def pmi_type_i(
     o1: int = 4,
     o2: int = 4,
     port_order: str | None = None,
+    vertical_index_order: str | None = None,
 ) -> PMIResult:
     """在 Type-I-style 单面板列集合上做宽带 PMI 近似搜索。
 
@@ -421,6 +438,11 @@ def pmi_type_i(
     n_ports = h.shape[2]
 
     nh, nv, dual = _infer_layout(n_ports, n_h, n_v)
+    resolved_vertical_order = None
+    if port_order is not None:
+        resolved_vertical_order = vertical_index_order or (
+            "bottom_to_top" if port_order == "h_v_pol" else "top_to_bottom"
+        )
     o2_eff = o2 if nv > 1 else 1
     cb = type_i_codebook(nh, o1, nv, o2_eff, dual_pol=dual)
 
@@ -430,14 +452,21 @@ def pmi_type_i(
         nh, nv = n_ports, 1
 
     # Type-I columns use protocol p/v/h order. Generated channels retain the
-    # EffectiveArray order declared in metadata (64T h/v/p or 256T p/h/v).
+    # EffectiveArray order declared in metadata. New company 64T/256T both use
+    # p/h/v + top-to-bottom; old 64T samples remain an explicit h/v/p boundary.
     # Re-index codebook rows once so all covariance math below stays in the
     # actual channel-port order and the returned W can be applied directly.
     if dual and port_order is not None:
-        from msg_embedding.phy_sim.effective_array import PortIndex
-
-        idx = PortIndex(n_h=nh, n_v=nv, n_p=2, port_order=port_order)
-        perm = idx.type1_to_canonical()
+        perm = np.asarray(
+            hardware.type1_to_port_permutation(
+                nh,
+                nv,
+                2,
+                port_order=port_order,
+                vertical_index_order=resolved_vertical_order,
+            ),
+            dtype=np.intp,
+        )
         cb_input = np.empty_like(cb)
         cb_input[perm, :] = cb
         cb = cb_input
@@ -476,6 +505,8 @@ def pmi_type_i(
         layer_gain_db=gains,
         codebook_size=cb.shape[1],
         layout=(nh, nv),
+        port_order=port_order,
+        vertical_index_order=resolved_vertical_order,
     )
 
 

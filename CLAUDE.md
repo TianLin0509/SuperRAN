@@ -412,7 +412,7 @@ XPR/Jones 相位和 Doppler。CDL-D/E 的镜面/Laplacian 功率差已经把 K=1
 row 0/1 中，**禁止再做第二次 Rician K 混合**；回归测试通过篡改 K 元数据并要求输出逐位
 不变来防止复发。
 
-### 默认阵列是 1 驱 3，不是 64 个独立阵元
+### 公司 64T/256T 使用同一端口顺序合同
 
 真实 AAU：**64 个 RF 端口（8H x 4V x 2pol），每端口固定驱动垂直相邻 3 个阵子，
 共 192 个物理阵子；水平 0.5λ、垂直 0.67λ**（RF 端口垂直相位中心 2.01λ > λ，
@@ -423,10 +423,17 @@ row 0/1 中，**禁止再做第二次 Rician K 混合**；回归测试通过篡�
 ChannelHub 的 `phy_sim/effective_array.py` 就是照这套硬件写的（模块文档
 "Target AAU" 一节逐条对得上），但默认没启用——`antenna_model_mode` 默认
 `legacy_64`，把 64 个端口当成 64 个**独立**阵元、间距一律 0.5λ。
-`hardware.apply_array_defaults()` 现在在面板是 8x4x2 时自动切到
-`effective_subarray`。
+`hardware.apply_array_defaults()` 现在对两个已确认面板自动切到
+`effective_subarray`：64T 的 8x4x2 / 1 驱 3，以及 256T 的
+16x8x2 / 1 驱 6。
 
-**实测差距（同 seed、单小区 30 样本）**：
+两者统一采用 **`pol_h_v + top_to_bottom`**，0-based 端口公式为
+`r = p*N_H*N_V + h*N_V + v`，`v=0` 是物理顶部。64T 的 1-based 公式是
+`p*32+h*4+v+1`，256T 是 `p*128+h*8+v+1`。历史 64T
+`h_v_pol + bottom_to_top` 只用于读取旧样本；迁移必须把 H、W、F 同时按物理位置
+置换，禁止只 reshape 或只改元数据。
+
+**历史消融（2026-07-31 旧内核、同 seed、单小区 30 样本；百分比不能外推到当前版本）**：
 
 | | 真实 AAU | legacy_64 |
 |---|---|---|
@@ -443,16 +450,17 @@ ChannelHub 的 `phy_sim/effective_array.py` 就是照这套硬件写的（模块
 
 * `h_serving_true` 与 legacy 的**相对差 4.03**，完全是另一个信道。
 * `effective_subarray` 与 `physical_reference`（真跑 192 阵子再用 F 投影）
-  相对差 **4.8e-7**，快路径复现了参考路径，放心用快的。
-* 阵元方向图、固定 1 驱 3 子阵、垂直几何与电下倾会进入 conducted-power
+  当时相对差 **4.8e-7**。当前仍必须由 effective↔physical 数值等价门验证，
+  不能把历史误差当成永久承诺。
+* 阵元方向图、固定 1 驱 N 子阵、垂直几何与电下倾会进入 conducted-power
   链路预算，因而会改变几何 SNR/SIR/SINR；64 端口数字 BF 增益仍留在 H 中。
   预设 `expect` 必须随当前内核重新校准，不能沿用旧“几何量逐位不变”结论。
 
 垂直 0.67λ 是用户实测纠正过的值（早期按 0.5λ 算，全盘产物失真），
 见记忆 `project_reconfig_mimo_sim` 方法论教训第 4 条。**别改回 0.5。**
 
-1 驱 3 是**这一款 AAU 的硬件事实，不是通用规律**，所以只对 8x4x2 生效；
-16T/256T 之类的面板保持 legacy。
+1 驱 N 是**具体 AAU 的硬件事实，不是按端口数猜出的通用规律**：只对已确认的
+8x4x2（1 驱 3）和 16x8x2（1 驱 6）自动生效；16T 等未知面板保持 legacy。
 
 ### 说明书文件名要唯一到秒以下
 
@@ -826,8 +834,9 @@ POST 回来被拒"或者反过来"页面没有的键也能塞进去"。
 
 当前 first-party 后端直接从服务与全部邻区的 received-power budget 形成
 `snr_dB / sir_dB / sinr_dB`，已经不再依赖旧 `_system_sinr` 的 DFT 码本分支。
-`bs_panel` 仍不可省：它定义二维端口几何、双极化排布，并决定 64T 时能否启用
-1 驱 3 effective-subarray；缺失时 `generate._ensure_bs_panel()` 会由端口数推导。
+`bs_panel` 仍不可省：它定义二维端口几何、双极化排布，并决定 64T/256T 能否启用
+已确认的 1 驱 3 / 1 驱 6 effective-subarray；缺失时
+`generate._ensure_bs_panel()` 会由端口数推导。
 
 `validate.check_interference_modeled()` 仍保留来源退化门：多小区下若 SIR 恒为
 49.9 dB 哨兵，或 SINR 与纯热噪声 SNR 逐点相同，则邻区功率没有进入预算，

@@ -144,8 +144,8 @@ _PANEL_BY_PORTS = {
 def _panel_from_ports(n_ports: int) -> list[int]:
     """把端口数拆成面板排布。
 
-    ``bs_panel`` 决定端口的二维几何、双极化排布以及 64T 时能否启用真实的
-    1 驱 3 effective-subarray。当前 first-party 几何 SINR 已不再依赖旧 DFT
+    ``bs_panel`` 决定端口的二维几何、双极化排布，以及 64T/256T 是否能启用
+    已确认的 1 驱 3 / 1 驱 6 effective-subarray。当前 first-party 几何 SINR 已不再依赖旧 DFT
     码本分支，但信道矩阵、固定子阵方向图和预编码仍必须知道面板结构。
 
     对不在表里的端口数，退化成单极化水平线阵——能让码本建起来，
@@ -649,9 +649,8 @@ def generate(
     panel, panel_derived = _ensure_bs_panel(cfg)
     ue_panel, ue_panel_derived = _ensure_ue_panel(cfg)
 
-    # 真实阵列模型：64T 面板自动切到 1 驱 3 / 192 阵子 / 垂直 0.67λ。
-    # 不切的话走 ChannelHub 默认的 legacy_64（64 个独立阵元、一律 0.5λ），
-    # 那不是本地硬件——实测两者的 h_true 相对差 4.03，完全是另一个信道。
+    # 真实阵列模型：64T/256T 面板分别自动切到 1 驱 3 / 1 驱 6，二者统一
+    # pol_h_v + top_to_bottom。显式 legacy_64 只用于历史兼容或对照。
     from . import hardware as hw  # noqa: PLC0415
 
     hw.apply_array_defaults(cfg)

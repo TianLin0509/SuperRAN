@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from superran import analysis, generate
+from superran import analysis, generate, hardware
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAN_PATH = ROOT / "artifacts" / "plans" / "SRS_PMI_AND_EXPERIENCE_AUDIT_PLAN.md"
@@ -43,23 +43,9 @@ CONFIG = {
     "num_slots_per_sample": 1,
     "bs_panel": [8, 4, 2],
     "antenna_model_mode": "effective_subarray",
-    "bs_antenna": {
-        "horizontal_port_spacing_lambda": 0.5,
-        "reference_frequency_hz": 2_600_000_000.0,
-        "element_pattern": {
-            "source": "parametric_temporary",
-            "horizontal_hpbw_deg": 65.0,
-            "vertical_hpbw_deg": 65.0,
-            "peak_gain_dbi": 8.0,
-            "xpd_db": 8.0,
-        },
-        "fixed_vertical_subarray": {
-            "elements_per_rf_port": 3,
-            "ae_vertical_spacing_lambda": 0.67,
-            "fixed_downtilt_deg": 6.0,
-            "calibration_id": "company-64T-1to3-192ae-v1",
-        },
-    },
+    # Use the hardware truth source rather than copying layout/calibration
+    # fields here.  New 64T and 256T generators share pol_h_v + top_to_bottom.
+    "bs_antenna": hardware.company_antenna_block(),
     "measurements": {
         "ssb_rsrp": False,
         "interferer_channels": True,

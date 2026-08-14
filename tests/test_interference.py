@@ -483,6 +483,10 @@ check(hw.strip_markers(c1) == "company_1to3_192ae", "64T 面板自动切真实�
 check(c1["antenna_model_mode"] == "effective_subarray", "模式为 effective_subarray")
 check(c1["bs_antenna"]["fixed_vertical_subarray"]["ae_vertical_spacing_lambda"] == 0.67,
       "挂上去的垂直间距是 0.67λ")
+check(c1["bs_antenna"]["port_order"] == "pol_h_v",
+      "64T 与 256T 统一使用 pol_h_v 顺序")
+check(c1["bs_antenna"]["vertical_index_order"] == "top_to_bottom",
+      "64T 与 256T 统一从物理顶部向底部编号")
 
 c2 = {"bs_panel": [16, 8, 2]}
 hw.apply_array_defaults(c2)
@@ -536,6 +540,9 @@ print(f"  summary.antenna_model: mode={_am.get('antenna_model_mode')} "
       f"AE={_am.get('physical_elements')} dv={_am.get('ae_vertical_spacing_lambda')}")
 check(_am.get("antenna_model_mode") == "effective_subarray", "summary 记录了真实阵列模式")
 check(_am.get("physical_elements") == 192, "summary 记录了 192 物理阵子")
+check(_am.get("port_order") == "pol_h_v"
+      and _am.get("vertical_index_order") == "top_to_bottom",
+      "64T summary 使用与 256T 相同的 canonical 端口布局")
 check(_am.get("element_pattern_is_measured") is False,
       "明示阵元方向图不是实测的（是 3GPP 式参数化模型）")
 check("数字预编码增益仍留在 H" in (_am.get("note") or ""),
@@ -884,8 +891,13 @@ check(not _no_why, f"每条算法都写了为什么这么选（缺：{_no_why}�
 _leg = _alg.algorithm_list({"num_bs_tx_ant": 4, "num_sites": 1, "sectors_per_site": 1})
 _a64 = next(a for a in _ai if a["key"] == "antenna_model")
 _a4 = next(a for a in _leg if a["key"] == "antenna_model")
-check("1 驱 3" in _a64["choice"] and "legacy" in _a4["choice"],
-      "阵列模型那条随配置变（64T 走 1 驱 3、4T 走 legacy）")
+_a256 = next(a for a in _alg.algorithm_list({
+    "num_bs_tx_ant": 256, "bs_panel": [16, 8, 2],
+    "num_sites": 1, "sectors_per_site": 1,
+}) if a["key"] == "antenna_model")
+check("1 驱 3" in _a64["choice"] and "1 驱 6" in _a256["choice"]
+      and "legacy" in _a4["choice"],
+      "阵列模型随配置变（64T/256T 走真实子阵，4T 走 legacy）")
 _r64 = next(a for a in _ai if a["key"] == "receiver")
 _r4 = next(a for a in _leg if a["key"] == "receiver")
 check(_r64["caveat"] != _r4["caveat"], "接收机那条在单/多小区下说法不同")

@@ -26,8 +26,62 @@ def formula(tex: str) -> str:
 
 
 def inline_svg(path: Path) -> str:
+    if not path.exists():
+        return f_matrix_svg() if path == F_SVG else dual_polarization_svg()
     text = path.read_text(encoding="utf-8")
     return re.sub(r"^<\?xml[^>]*>\s*", "", text, count=1)
+
+
+def f_matrix_svg() -> str:
+    """Deterministic canonical 64T feed topology; no external image required."""
+    return r'''<svg viewBox="0 0 1200 560" role="img" aria-label="64T canonical 端口与 192×64 馈电矩阵拓扑">
+<defs><marker id="fm-arr" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#52727c"/></marker></defs>
+<rect width="1200" height="560" rx="18" fill="#f8fbfb"/>
+<text x="38" y="45" font-size="20" font-weight="800" fill="#0c3140">64T canonical：极化块 → 水平列 → 垂直行</text>
+<text x="38" y="72" font-size="13" fill="#60737c">r=32p+4h+v；v=0 在物理顶部；历史 h_v_pol 只能经显式置换读取</text>
+<rect x="38" y="102" width="275" height="352" rx="16" fill="#e8f4f2" stroke="#5aa69d"/>
+<text x="58" y="132" font-size="16" font-weight="750" fill="#0c3140">RF / 数字端口 · 8H×4V×2pol</text>
+<rect x="61" y="157" width="108" height="235" rx="12" fill="#fff" stroke="#cfdddd"/>
+<rect x="183" y="157" width="108" height="235" rx="12" fill="#fff" stroke="#cfdddd"/>
+<text x="115" y="184" text-anchor="middle" font-size="13" font-weight="700" fill="#c44c48">p=0 · +45°</text>
+<text x="237" y="184" text-anchor="middle" font-size="13" font-weight="700" fill="#3570b4">p=1 · −45°</text>
+<g font-family="Consolas,monospace" font-size="12" fill="#294a54"><text x="78" y="218">h0: 1 2 3 4</text><text x="78" y="248">h1: 5 6 7 8</text><text x="78" y="278">…</text><text x="78" y="308">h7: 29…32</text><text x="199" y="218">h0: 33…36</text><text x="199" y="248">h1: 37…40</text><text x="199" y="278">…</text><text x="199" y="308">h7: 61…64</text></g>
+<text x="176" y="420" text-anchor="middle" font-size="12" fill="#60737c">锚点：1 / 5 / 33</text>
+<path d="M313 278 L395 278" stroke="#52727c" stroke-width="2" marker-end="url(#fm-arr)"/>
+<text x="354" y="264" text-anchor="middle" font-size="12" fill="#60737c">每端口 1→3</text>
+<rect x="405" y="102" width="350" height="352" rx="16" fill="#fff" stroke="#cfdddd"/>
+<text x="425" y="132" font-size="16" font-weight="750" fill="#0c3140">F ∈ ℂ¹⁹²ˣ⁶⁴ · 物理接线表</text>
+<g stroke="#dde6e6" stroke-width="1"><line x1="438" y1="170" x2="722" y2="170"/><line x1="438" y1="218" x2="722" y2="218"/><line x1="438" y1="266" x2="722" y2="266"/><line x1="438" y1="314" x2="722" y2="314"/><line x1="438" y1="362" x2="722" y2="362"/></g>
+<g font-family="Consolas,monospace" font-size="12" fill="#294a54"><text x="438" y="158">column</text><text x="520" y="158">physical rows (1-based)</text><text x="438" y="202">port 1</text><text x="520" y="202">1, 2, 3</text><text x="438" y="250">port 5</text><text x="520" y="250">13, 14, 15</text><text x="438" y="298">port 33</text><text x="520" y="298">97, 98, 99</text><text x="438" y="346">every r</text><text x="520" y="346">3 nonzeros · disjoint support</text></g>
+<g fill="#12a397"><circle cx="675" cy="198" r="6"/><circle cx="675" cy="246" r="6"/><circle cx="675" cy="294" r="6"/></g>
+<text x="580" y="399" text-anchor="middle" font-size="13" font-weight="700" fill="#247149">每列 ‖F[:,r]‖₂=1；FᴴF=I₆₄</text>
+<path d="M755 278 L837 278" stroke="#52727c" stroke-width="2" marker-end="url(#fm-arr)"/>
+<rect x="847" y="102" width="315" height="352" rx="16" fill="#eef5fb" stroke="#8eb5ce"/>
+<text x="867" y="132" font-size="16" font-weight="750" fill="#0c3140">物理 AE · 8H×12V×2pol</text>
+<g stroke="#8eb5ce" stroke-width="2" fill="#fff"><line x1="915" y1="170" x2="915" y2="352"/><circle cx="915" cy="185" r="10"/><circle cx="915" cy="225" r="10"/><circle cx="915" cy="265" r="10"/><circle cx="915" cy="305" r="10"/><circle cx="915" cy="345" r="10"/></g>
+<g font-size="12" fill="#60737c"><text x="943" y="190">物理垂直间距 0.67λ</text><text x="943" y="230">相邻 RF 中心 2.01λ</text><text x="943" y="270">同一位置两条 ±45° feed</text><text x="943" y="310">192 行，64 维可控子空间</text><text x="943" y="350">a_port = Fᴴa_AE</text></g>
+<rect x="38" y="482" width="1124" height="50" rx="12" fill="#0c3140"/>
+<text x="600" y="514" text-anchor="middle" font-size="14" fill="#eafafa">物理含义：F 只分配端口功率与固定相位；它不创造 128 个额外数字自由度，也不等于数字预编码 W</text>
+</svg>'''
+
+
+def dual_polarization_svg() -> str:
+    """Jones/XPR topology aligned with company p0=+45°, p1=-45°."""
+    return r'''<svg viewBox="0 0 1200 430" role="img" aria-label="双极化 Jones 与射线耦合拓扑">
+<defs><marker id="pol-arr" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#52727c"/></marker></defs>
+<rect width="1200" height="430" rx="18" fill="#f8fbfb"/>
+<text x="38" y="45" font-size="20" font-weight="800" fill="#0c3140">双极化不是“天线数 ×2”：每条 ray 都要做 Jones 收缩</text>
+<rect x="38" y="92" width="250" height="245" rx="16" fill="#fff" stroke="#cfdddd"/>
+<circle cx="163" cy="166" r="40" fill="#eef6f5" stroke="#6aa9a0"/><line x1="135" y1="194" x2="191" y2="138" stroke="#c44c48" stroke-width="5"/><line x1="135" y1="138" x2="191" y2="194" stroke="#3570b4" stroke-width="5"/>
+<text x="163" y="235" text-anchor="middle" font-size="14" font-weight="700" fill="#c44c48">p0 = +45°</text><text x="163" y="262" text-anchor="middle" font-size="14" font-weight="700" fill="#3570b4">p1 = −45°</text><text x="163" y="302" text-anchor="middle" font-size="12" fill="#60737c">同一空间位置 · 两个端口</text>
+<path d="M288 214 L365 214" stroke="#52727c" stroke-width="2" marker-end="url(#pol-arr)"/>
+<rect x="375" y="92" width="300" height="245" rx="16" fill="#e8f4f2" stroke="#5aa69d"/>
+<text x="525" y="128" text-anchor="middle" font-size="16" font-weight="750" fill="#0c3140">路径极化矩阵 Jℓ</text><text x="525" y="168" text-anchor="middle" font-family="Consolas,monospace" font-size="15" fill="#294a54">[ co-pol      xpol/√κ ]</text><text x="525" y="198" text-anchor="middle" font-family="Consolas,monospace" font-size="15" fill="#294a54">[ xpol/√κ    co-pol ]</text><text x="525" y="246" text-anchor="middle" font-size="13" fill="#60737c">XPR κ、四个随机相位、方向/时延/Doppler</text><text x="525" y="283" text-anchor="middle" font-size="13" font-weight="700" fill="#247149">cℓ = fRXᵀ Jℓ fTX</text>
+<path d="M675 214 L752 214" stroke="#52727c" stroke-width="2" marker-end="url(#pol-arr)"/>
+<rect x="762" y="92" width="400" height="245" rx="16" fill="#eef5fb" stroke="#8eb5ce"/>
+<text x="962" y="128" text-anchor="middle" font-size="16" font-weight="750" fill="#0c3140">进入每条 ray 的 MIMO 系数</text><text x="962" y="176" text-anchor="middle" font-family="Consolas,monospace" font-size="14" fill="#294a54">Hℓ ∝ √Pℓ · cℓ · aRX aTXᴴ</text><text x="962" y="208" text-anchor="middle" font-family="Consolas,monospace" font-size="14" fill="#294a54">· exp(−j2πfτℓ) · exp(j2πνℓt)</text><text x="962" y="258" text-anchor="middle" font-size="13" fill="#60737c">方向图决定复场幅相；F 形成有效端口；</text><text x="962" y="284" text-anchor="middle" font-size="13" fill="#60737c">数字 W 在端口域随后计算，不能重复加增益</text>
+<text x="600" y="385" text-anchor="middle" font-size="13" fill="#8b620f">当前 ±45° 与参数化包络是理想模型；公司 (az,el,f) 复 Jones、XPD 与馈电标定仍需实测输入</text>
+</svg>'''
 
 
 HTML = r"""<!doctype html>
@@ -57,25 +111,25 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
   <div class="eyebrow">SuperRAN × ChannelHub × Sionna · physical-model audit</div>
   <h1>AAU 馈电矩阵、双极化、slot 采样与 SRS 估计深审</h1>
   <p class="lead">回答 6° 电下倾从哪来、192×64 的 F 为什么成立、+45° 信息还缺什么、14-symbol 是否必要，以及 LS/MMSE 会不会改变干扰方向性。结论严格区分“数学自洽”“当前代码行为”和“已由实物证明”。</p>
-  <div class="pills"><span class="pill">源码逐行对账</span><span class="pill">标准与 Sionna 2.0.1 对照</span><span class="pill">52 项相关测试通过</span><span class="pill warn">发现 4 个模型级缺口</span><span class="pill">2026-08-10</span></div>
+  <div class="pills"><span class="pill">源码逐行对账</span><span class="pill">标准与 Sionna 2.0.1 对照</span><span class="pill">Internal / RT / QuaDRiGa 分层验证</span><span class="pill warn">公司实测标定仍待输入</span><span class="pill">2026-08-13</span></div>
 </div></header>
 <nav class="nav"><div><a href="#answer">结论</a><a href="#tilt">6° 下倾</a><a href="#fmatrix">F 矩阵</a><a href="#polar">双极化</a><a href="#compare">三方对照</a><a href="#time">slot 采样</a><a href="#srs">SRS/估计</a><a href="#roadmap">落地路线</a><a href="#decisions">待决策</a><a href="#evidence">证据</a></div></nav>
 
 <main class="page">
 <section id="answer" class="section">
   <div class="kicker">00 · Direct answers</div><h2>先给结论：哪些成立，哪些只是“看上去成立”</h2>
-  <div class="verdict"><b>F 的拓扑和功率归一在数学上是正确的；6°、方向图和双极化参数尚未被公司实测数据闭环。</b> 更关键的是，当前 internal CDL 的逐 ray Frobenius 归一会把公共标量方向图和 1→3 子阵的下倾阵因子消掉，因此“配置了 6°”并不等于“6° 已经影响信道”。slot 级系统仿真只保留一个 H 是合理抽象，但不能直接把 <code>num_ofdm_symbols</code> 改成 1，因为当前单点路径会漏掉非零时刻的 Doppler 相位。</div>
+  <div class="verdict"><b>F 的拓扑和功率归一在数学上成立；参数化方向图、固定下倾与理想 ±45° 已贯通 InternalSim 和 Sionna RT，但公司实测复 Jones/馈电标定仍未闭环。</b> 旧版逐 ray Frobenius 归一已经移除，不同方向 ray 的相对阵元/子阵增益会保留。slot 级系统仿真只保留一个 H 是合理抽象，但 InternalSim 目前仍不能把 <code>num_ofdm_symbols</code> 直接改成 1，因为单点 Doppler 分支尚未在非零 slot midpoint 求相位。</div>
   <div class="grid g4" style="margin-top:16px">
     <div class="card metric"><span class="status warn">参数未溯源</span><div class="big" style="margin-top:10px">6°</div><div class="lab">2026-08-01 提交时加入的默认值</div><div class="tiny">commit 说明没有给产品规格、测量或标准出处</div></div>
     <div class="card metric"><span class="status ok">数学通过</span><div class="big" style="margin-top:10px">192×64</div><div class="lab">F：64 个互不重叠的 1→3 馈电列</div><div class="tiny">rank=64；FᴴF=I；每列 3 非零</div></div>
-    <div class="card metric"><span class="status bad">后端不一致</span><div class="big" style="margin-top:10px">±45°</div><div class="lab">internal 理想定义 vs RT 的 VH</div><div class="tiny">Sionna 当前实际传入 0°/90°，不是公司交叉极化</div></div>
+    <div class="card metric"><span class="status ok">后端已对齐</span><div class="big" style="margin-top:10px">±45°</div><div class="lab">p0=+45° / p1=−45°</div><div class="tiny">Internal Jones 与 Sionna 专用 slant registry 同序；仍非公司实测 Jones</div></div>
     <div class="card metric"><span class="status warn">需改后降维</span><div class="big" style="margin-top:10px">14 → 1</div><div class="lab">系统级默认可降为 slot midpoint</div><div class="tiny">先修 T=1 Doppler 与 Sionna 采样频率</div></div>
   </div>
   <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>用户问题</th><th>明确回答</th><th>当前实现</th><th>建议</th></tr></thead><tbody>
     <tr><td>6° 从哪来？</td><td>仓库里找不到外部依据，是工程默认，不是已验证产品事实。</td><td>低层可传任意浮点数；普通用户面板未暴露。</td><td>暴露 <code>electrical_downtilt_deg</code>，机械下倾另设；未拿到标定前标记 assumed。</td></tr>
     <tr><td>F 为什么对？</td><td>它精确编码“每个 RF 端口只驱动同位置、同极化的 3 个垂直阵子”；列支撑不相交且单位范数。</td><td>数值结构和功率守恒通过；产品幅相、互耦、端口序未实测闭环。</td><td>保留 F 拓扑，加载公司馈电幅相/互耦矩阵后再称产品级正确。</td></tr>
-    <tr><td>公司 +45° 信息够吗？</td><td>有用但不够。还需第二支路角度、端口顺序、XPD/XPR、方向/频率相关复 Jones、幅相校准。</td><td>internal 的 helper 假定 p0=+45、p1=−45；Sionna RT 却配置 VH。</td><td>建立统一 <code>slant_angles + port_order + Jones pattern</code> 约定。</td></tr>
-    <tr><td>一 slot 一个 H 行吗？</td><td>对 RBG/TTI 系统级仿真是典型且推荐的；对 DMRS 插值、ICI、symbol 波束切换不够。</td><td>先生成 14 个，再取第 7 号 symbol；RT 的时间采样参数有误。</td><td>默认 <code>slot_midpoint</code>；按研究目的可选 <code>pilot_and_data</code> / <code>symbol_grid</code>。</td></tr>
+    <tr><td>公司 +45° 信息够吗？</td><td>有用但不够。还需第二支路角度、端口顺序、XPD/XPR、方向/频率相关复 Jones、幅相校准。</td><td>当前临时合同为 p0=+45°、p1=−45°；Internal 与 Sionna RT 已同序执行并落盘。</td><td>拿到端口定义和实测 Jones 后替换临时模型，不改 canonical 端口编号。</td></tr>
+    <tr><td>一 slot 一个 H 行吗？</td><td>对 RBG/TTI 系统级仿真是典型且推荐的；对 DMRS 插值、ICI、symbol 波束切换不够。</td><td>Internal 先生成 symbol 网格再取中点；RT 已显式传 symbol sampling frequency 与 UE velocity。</td><td>先补 Internal 单点 midpoint Doppler，再把 <code>slot_midpoint</code> 作为系统默认。</td></tr>
     <tr><td>LS 会让干扰没方向吗？</td><td>不会。污染项仍包含干扰信道的空间向量；LS 只是不会利用协方差去抑制它。</td><td><code>ls_mmse</code> 只有频域 PDP LMMSE，不是时频空 MMSE；更大的问题是当前观测不是物理的 Y=HX。</td><td>先修多端口观测，再提供 LS、LMMSE-f/t/s、Kalman 等可选档。</td></tr>
   </tbody></table></div>
 </section>
@@ -85,9 +139,9 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
   <p class="intro"><code>company_antenna_block()</code> 在 2026-08-01 的提交中把默认值写成 6.0；提交说明详细记录了 1→3、0.5λ/0.67λ，却没有说明 6° 来自 BOM、天线规格书、RET 配置还是方向图测量。因此它只能被称为当前工程假设。</p>
   <div class="grid g2">
     <div class="card"><h3>1→3 子阵的下倾相位</h3><div class="eq">__EQ_TILT__</div><p>对于 <code>z=[−0.67,0,+0.67]λ</code>、等幅馈电和 β=6°，三路附加相位约为 <b>[−25.21°, 0°, +25.21°]</b>。按当前符号约定，发射阵因子在水平面以下 6° 附近取峰值。</p></div>
-    <div class="card"><h3>任意配置：低层已支持，产品层未支持</h3><ul class="tight"><li><b>支持：</b><code>FixedVerticalSubarrayConfig.fixed_downtilt_deg</code> 接受浮点值，<code>company_antenna_block(fixed_downtilt_deg=x)</code> 也能传入。</li><li><b>未支持：</b>普通用户的顶层可编辑参数没有该键，只能直接提供嵌套 <code>bs_antenna</code> 配置。</li><li><b>标签 bug：</b>不管 x 是多少，<code>calibration_id</code> 都还是 <code>company-64T-1to3-192ae-v1</code>，与注释“改下倾等于换校准版本”矛盾。</li><li><b>应区分：</b>电下倾改变馈电相位；机械下倾改变整个面板坐标系，不能共用一个参数。</li></ul></div>
+    <div class="card"><h3>任意配置：低层已支持，产品层未支持</h3><ul class="tight"><li><b>支持：</b><code>FixedVerticalSubarrayConfig.fixed_downtilt_deg</code> 接受浮点值，<code>company_antenna_block(fixed_downtilt_deg=x)</code> 也能传入。</li><li><b>未支持：</b>普通用户的顶层可编辑参数没有该键，只能直接提供嵌套 <code>bs_antenna</code> 配置。</li><li><b>标签已修复：</b><code>calibration_id</code> 现在同时编码端口布局版本与下倾角，例如 <code>...pol-h-v-top-down-v2-dt6deg</code>；改下倾不会再沿用旧标签。</li><li><b>应区分：</b>电下倾改变馈电相位；机械下倾改变整个面板坐标系，不能共用一个参数。</li></ul></div>
   </div>
-  <div class="callout red" style="margin-top:15px"><h3>确定性反例：当前 internal CDL 里 6° 实际被归一掉</h3>同 seed、同几何下，把水平 HPBW 65°→110°、65°→isotropic、下倾 6°→0°/10°，生成 H 的相对差都只有约 <code>4×10⁻¹⁶</code>。原因是每条 ray 的空间矩阵在求和前都除以自己的 Frobenius 范数；对所有端口共同乘上的方向图/子阵标量因此被精确消掉。必须把方向增益保留到 ray power，才能让电下倾改变不同到离角 ray 的相对功率。</div>
+  <div class="callout green" style="margin-top:15px"><h3>逐 ray 归一缺陷已修复，并有反向门</h3>当前 InternalSim 不再把每条 ray 除以自身 Frobenius 范数；只在所有簇/ray 合成后执行一次全信道小尺度归一。因此 HPBW、isotropic-vs-directional 与 0°/6°/10° 下倾会改变不同到离角 ray 的相对功率。单方向增益、multi-cluster 方向形状和绝对链路预算均有回归测试；尚未完成的是公司实测复 Jones/馈电数据，而不是“6° 完全不生效”。</div>
   <div class="callout blue" style="margin-top:13px"><h3>推荐接口</h3><code>electrical_downtilt_deg</code>：用户可配置、按天线校准版本校验范围；<code>mechanical_downtilt_deg</code>：独立旋转面板；<code>downtilt_source</code>：<code>measured | product_spec | assumed</code>。在公司值未确认前，默认 6°可以保留以兼容，但结果页必须显示“假设值”。</div>
 </section>
 
@@ -96,7 +150,7 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
   <p class="intro">64 是 RF/数字端口数：8H×4V×2pol；192 是极化支路数：8H×12V×2pol，也就是 96 个空间位置、每个位置两条极化 feed。F 不是“凭空把 64 维扩成 192 维”，而是 64 个不可独立调节的固定模拟子阵。</p>
   <div class="figure">__F_SVG__<div class="caption">图 1：F 的行/列、1→3 馈电以及 192 条物理极化支路。SVG 可单独用于文档。</div></div>
   <div class="grid g2" style="margin-top:16px">
-    <div class="card"><h3>索引和非零元素</h3><div class="eq">__EQ_F_INDEX__</div><p>每个列索引 r 只连接 <code>e(h,3v+q,p)</code> 三行，不跨水平位置、不跨 RF 垂直端口，也不跨极化。若硬件存在有意的交叉极化馈电或互耦，则需要在 F 前后另加校准/互耦矩阵，不能靠改端口数解决。</p></div>
+    <div class="card"><h3>canonical 索引和非零元素</h3><div class="eq">__EQ_F_INDEX__</div><p>64T 与 256T 统一使用 <code>pol_h_v + top_to_bottom</code>：极化块最慢，垂直行最快。每个列索引 r 只连接 <code>e(h,3v+q,p)</code> 三行，不跨水平位置、不跨 RF 垂直端口，也不跨极化。若硬件存在有意的交叉极化馈电或互耦，则需要在 F 前后另加校准/互耦矩阵，不能靠改端口数解决。</p></div>
     <div class="card"><h3>功率守恒与可控子空间</h3><div class="eq">__EQ_F_PROOF__</div><p>不同列支撑不相交；每列的 <code>w</code> 已归一。因此 F 是半酉矩阵：它保留 64 端口向量的总能量。<code>FFᴴ</code> 不是 192 维单位阵，而是秩 64 的投影，说明另 128 个物理模式不能由数字基带独立控制——这正是固定模拟馈电的物理含义。</p></div>
   </div>
   <div class="truth" style="margin-top:15px"><h3>“F 正确”的三层证据，不能混为一谈</h3><ol class="tight"><li><b>结构正确：</b>shape=[192,64]，每列 3 个非零、每行 1 个非零，极化不串线。</li><li><b>数学正确：</b>rank=64，最大 <code>|FᴴF−I|=2.23×10⁻¹⁶</code>，随机向量相对功率误差 <code>4.20×10⁻¹⁶</code>。</li><li><b>产品正确：</b><span class="muted">尚未证明。</span>还需实测/规格给出的三路幅相、端口顺序、频率响应、互耦和 Jones 方向图。当前 effective 与 physical-reference 一致性测试共用同一个 F，只能证明实现一致，不能独立证明硬件。</li></ol></div>
@@ -110,16 +164,16 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
     <div class="card"><h3>每条 ray 还有 2×2 传播耦合</h3><div class="eq">__EQ_POL_RAY__</div><p>κ 是 ray 的 XPR；四个 Φ 是传播相位。最终系数由接收 Jones、传播 G、发射 Jones、阵列几何相位共同决定。双极化增加的是两个共址可激励端口，不是两个独立空间位置。</p></div>
   </div>
   <div class="callout" style="margin-top:14px"><h3>“公司用 +45°”是需要的信息，但还不能完成配置</h3>它至少确认了一条支路的斜角。还要确认：第二支路是否 −45°；<code>p=0/p=1</code> 的物理端口顺序；发射和接收端口是否同序；XPD/XPR 随方向、频率的定义；两支路相对幅相；1→3 馈电在两极化上是否同一标定。建议临时预设为 <code>p0=+45°, p1=−45°</code>，但元数据明确写 <code>provisional=true</code>。</div>
-  <div class="callout red" style="margin-top:13px"><h3>当前 ChannelHub 的两条路径互相不一致</h3><b>internal CDL：</b>定义了理想 <code>element_jones()</code> 的 +45/−45，但生成器实际上只用极化 mask 与随机 XPR 2×2 矩阵，没有调用该 Jones helper。<b>Sionna RT：</b>对公司阵列传入 <code>polarization="VH"</code>，即 0°/90°；Sionna 的 <code>"cross"</code> 才是 −45°/+45°，而且顺序与当前 helper 的 +45/−45 相反。不能只把字符串换成 <code>cross</code>，还要同步端口 permutation。</div>
+  <div class="callout green" style="margin-top:13px"><h3>两条后端的临时极化合同已对齐</h3><b>InternalSim：</b><code>element_jones()</code> 的理想 +45°/−45° 会与每条 ray 的 2×2 XPR coupling 收缩。<b>Sionna RT：</b>没有误用内置 <code>cross</code>（其顺序是 −45°/+45°），而是按配置注册专用 <code>[+π/4,−π/4]</code> slant 列表，保持 p0/p1 与 canonical 端口一致。边界仍是：两者使用参数化/理想 Jones，尚未导入公司方向与频率相关的实测复场。</div>
 </section>
 
 <section id="compare" class="section">
   <div class="kicker">04 · ChannelHub vs Sionna</div><h2>取长补短：谁已经有哪块能力，谁又在哪些地方踩空</h2>
   <div class="table-wrap"><table><thead><tr><th>维度</th><th>ChannelHub internal</th><th>ChannelHub 的 Sionna RT 适配层</th><th>Sionna 原生能力</th><th>SuperRAN 目标</th></tr></thead><tbody>
     <tr><td>阵列/F</td><td>有 1→3 的 192×64 F、端口排列、相位中心与两条等价计算路径。</td><td>能用 64 有效端口或 192 AE 后投影 F。</td><td>双极化共址位置、一/双极化 pattern、任意自定义 pattern。</td><td>保留 F；补产品标定、互耦、统一端口语义。</td></tr>
-    <tr><td>方向图/下倾</td><td>3GPP 式抛物线标量 pattern；measured_jones 尚未实现；逐 ray 归一会抵消效果。</td><td>自定义 port/element pattern 可进入逐 path 响应。</td><td>pattern 返回复 <code>(Cθ,Cφ)</code>，可计算增益并注册自定义 pattern。</td><td>用同一份 Jones 数据驱动 internal 与 RT，禁止后端口径漂移。</td></tr>
-    <tr><td>双极化</td><td>mask + 2×2 XPR 随机耦合；helper 假定 +45/−45。</td><td>当前误用 VH。</td><td><code>cross=[−π/4,+π/4]</code>，支持两种 38.901 极化模型。</td><td>显式 slant/order；Sionna 自定义顺序或映射到 canonical。</td></tr>
-    <tr><td>时间采样</td><td>14 symbol 后取中点，能做逐 ray Doppler；T=1 时非零 offset 有缺口。</td><td><code>cfr(...num_time_steps=T)</code> 未传 sampling_frequency，Receiver 也未设 velocity。</td><td>CFR 支持指定采样频率、时间步数和 path Doppler。</td><td>系统默认单中点；PHY 研究才保留 14，并强制采样周期显式。</td></tr>
+    <tr><td>方向图/下倾</td><td>3GPP 式抛物线标量 pattern；相对 ray 增益保留；measured_jones 尚未实现。</td><td>自定义 port/element pattern 已进入逐 path 响应。</td><td>pattern 返回复 <code>(Cθ,Cφ)</code>，可计算增益并注册自定义 pattern。</td><td>用同一份公司 Jones 数据替换两端临时模型，禁止后端口径漂移。</td></tr>
+    <tr><td>双极化</td><td>理想 +45/−45 Jones + 2×2 XPR 随机耦合。</td><td>专用 slant registry 保持 +45/−45 与 canonical 同序。</td><td><code>cross=[−π/4,+π/4]</code>，支持两种 38.901 极化模型。</td><td>临时合同已对齐；下一步导入实测复 Jones/XPD。</td></tr>
+    <tr><td>时间采样</td><td>symbol 网格后取中点，能做逐 ray Doppler；T=1 时非零 offset 仍有缺口。</td><td>CFR 已显式传 symbol sampling frequency，Receiver 已设置 velocity。</td><td>CFR 支持指定采样频率、时间步数和 path Doppler。</td><td>补 Internal 单中点求值；系统默认单中点，PHY 研究才保留 14。</td></tr>
     <tr><td>SRS</td><td>comb 2/4/8、带宽表、跳频、长 ZC 与短低 PAPR 序列都较完整；默认生成端仍写死单端口。</td><td>复用了同一估计抽象。</td><td>PHY 提供通用资源栅格 LS 与时/频/空 LMMSE，但不是替代 NR SRS 资源生成器。</td><td>复用当前 38.211 SRS 生成器；重建物理多端口 Y=HX 观测。</td></tr>
     <tr><td>估计器</td><td>ideal、LS+线性、频域 PDP-LMMSE、两类跳频 LS。</td><td>同上。</td><td>LS 基线；LMMSE 可按 f/t/s 顺序组合，PUSCH 默认仍是 LS+线性。</td><td>估计器可配置，但先确保协方差来源与观测模型真实。</td></tr>
   </tbody></table></div>
@@ -139,7 +193,7 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
     <div class="step"><span class="n">3</span><b>symbol_grid</b><small>14 点；只给 symbol 级 PHY/ICI/插值研究</small></div>
   </div>
   <div class="callout red" style="margin-top:14px"><h3>不能现在直接设 T=1</h3>30 kHz SCS 下 slot=0.5 ms，平均 symbol 周期约 35.714 μs，当前取索引 7，即 250 μs。确定性检查显示：CDL 的 14 点中点与当前 T=1 相对差约 <b>0.306</b>，TDL 约 <b>2.046</b>；而 T=1 改变 <code>t_offset_s</code> 的结果完全不变。根因是 TDL 只在 <code>T&gt;1</code> 时加 Doppler，CDL 的单点 Doppler helper 也直接返回 1。正确优化是“直接在中点求一次相位”，不是“把 T 改成 1 然后沿用旧分支”。</div>
-  <div class="callout red" style="margin-top:13px"><h3>Sionna RT 适配层还有独立错误</h3>当前调用 <code>paths.cfr(freqs, num_time_steps=T)</code> 没传 <code>sampling_frequency</code>；Sionna 默认是 1 Hz，所以 14 点被解释为相隔 1 秒而不是相隔一个 OFDM symbol。当前 Receiver 又没有 velocity，通常没有 Doppler 时间演化，14 点很可能完全重复。若保留 symbol_grid，必须传约 28 kHz 的采样频率并设置设备速度；若走 slot_midpoint，只取 1 点并保持跨 slot 相位连续。</div>
+  <div class="callout green" style="margin-top:13px"><h3>Sionna RT 时间采样已修复</h3>适配层现在从 normal-CP 平均 symbol 周期计算 <code>sampling_frequency</code>，并把真实三维 UE velocity 写入 Receiver；120 km/h 的真实 RT 回归会检查相邻 symbol 的 H 确实变化。剩余优化是 InternalSim 的单点 midpoint Doppler，以及跨 slot 相位连续的显式合同。</div>
 </section>
 
 <section id="srs" class="section">
@@ -169,9 +223,9 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
 <section id="roadmap" class="section">
   <div class="kicker">07 · Implementation route</div><h2>落地调整：先修物理正确性，再做复杂算法</h2>
   <div class="table-wrap"><table><thead><tr><th>优先级</th><th>改动</th><th>主要模块</th><th>验收方式</th></tr></thead><tbody>
-    <tr><td><span class="status bad">P0</span></td><td>改变逐 ray 功率归一口径，保留 Jones/方向图/子阵阵因子的相对路径功率。</td><td><code>internal_sim.py::_spatial_ray</code> 与最终小尺度归一</td><td>固定 seed 下 0°/6°/10° 的波束峰方向和小区几何响应按预期变化；isotropic 与 directional 不再逐位相同。</td></tr>
-    <tr><td><span class="status bad">P0</span></td><td>统一极化契约：slant angle、port order、Jones pattern；Sionna 不再硬编码 VH。</td><td><code>effective_array.py</code>、<code>sionna_rt.py</code>、配置/元数据</td><td>单 ray 的 co/cross 极化解析值；端口交换只导致可解释 permutation；两后端统计 XPD 一致。</td></tr>
-    <tr><td><span class="status bad">P0</span></td><td>新增单时刻 Doppler 求值，修 RT 的 sampling_frequency/velocity。</td><td>TDL/CDL generator、Sionna RT adapter</td><td><code>slot_midpoint(T=1)</code> 与 14 点第 7 点同 seed 等价；静止 UE 时间不变，移动 UE 相位连续。</td></tr>
+    <tr><td><span class="status ok">已完成</span></td><td>移除逐 ray 功率归一，保留 Jones/方向图/子阵阵因子的相对路径功率。</td><td><code>internal_sim.py::_spatial_ray</code> 与最终小尺度归一</td><td>单方向、multi-cluster、isotropic/directional 与链路预算测试已通过。</td></tr>
+    <tr><td><span class="status ok">已完成</span></td><td>统一临时极化合同：p0=+45°、p1=−45°；Sionna 使用专用 slant registry。</td><td><code>effective_array.py</code>、<code>sionna_rt.py</code>、配置/元数据</td><td>Internal Jones、Sionna registry、real-RT effective/physical 等价门均通过。</td></tr>
+    <tr><td><span class="status warn">部分完成</span></td><td>RT sampling_frequency/velocity 已修；Internal 单时刻 midpoint Doppler 待补。</td><td>TDL/CDL generator、Sionna RT adapter</td><td><code>slot_midpoint(T=1)</code> 与 symbol 网格中点同 seed 等价；静止 UE 不变，移动 UE 相位连续。</td></tr>
     <tr><td><span class="status bad">P0</span></td><td>把 SRS 观测改成物理矩阵 Y=HX，并保留 RE/port 结构。</td><td>SRS resource、pilot builder、channel_est pipeline</td><td>1/2/4（后续 8）端口无噪声精确恢复；非正交干扰产生可预测空间污染。</td></tr>
     <tr><td><span class="status info">P1</span></td><td>暴露电/机械下倾、时间采样模式、估计器与协方差来源。</td><td>SuperRAN spec/UI、ChannelHub config contract</td><td>结果元数据完整、非法组合早失败、旧配置可迁移。</td></tr>
     <tr><td><span class="status info">P1</span></td><td>实现 <code>lmmse_tf</code> 与 <code>lmmse_tfs</code>，接口对齐 Sionna 的 f/t/s 可组合思想。</td><td>channel_est</td><td>匹配先验的 Monte Carlo MSE/BLER 在置信区间内优于 LS；错配场景明确标注退化。</td></tr>
@@ -194,7 +248,7 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
 <section id="evidence" class="section">
   <div class="kicker">09 · Evidence ledger</div><h2>源码锚点、确定性验证与官方依据</h2>
   <div class="grid g2">
-    <div class="card"><h3>本轮验证</h3><ul class="tight"><li>F/effective-array：<b>42 passed</b>（14.31 s）。</li><li>SRS bandwidth/hopping：<b>10 passed</b>（3.66 s）。</li><li>F 数值审计：rank=64、192 nonzeros、每列 3、每行 1、<code>max|FᴴF−I|=2.23e−16</code>。</li><li>下倾/方向图敏感性反例与 T=1 Doppler 差异：固定 seed 的确定性对比，不是趋势猜测。</li></ul></div>
+    <div class="card"><h3>本轮验证</h3><ul class="tight"><li>MSG 当前源码全量 unit：<b>427 passed</b>、14 skipped；Sionna 专项含真实 RT：<b>11 passed</b>。</li><li>SuperRAN 64T/256T 合同：<b>14 passed</b>；真实 Octave/QuaDRiGa 已跑 64T <code>get_channels→fr()</code>，并用真实 builder 验证 64T/256T 的 192×64 与 1536×256 coupling。</li><li>64T F 数值审计：rank=64、192 nonzeros、每列 3、每行 1、<code>max|FᴴF−I|=2.23e−16</code>。</li><li>下倾/方向图敏感性反例与 T=1 Doppler 差异：固定 seed 的确定性对比，不是趋势猜测。</li></ul></div>
     <div class="card"><h3>关键源码锚点</h3><div class="path">SuperRAN: src/superran/hardware.py:81-110</div><div class="path">ChannelHub: src/msg_embedding/phy_sim/effective_array.py:133-187, 421-443, 475-493</div><div class="path">ChannelHub: src/msg_embedding/data/sources/internal_sim.py:860-889, 1958-1987, 3419-3433</div><div class="path">ChannelHub: src/msg_embedding/data/sources/sionna_rt.py:1148-1172, 1588-1620</div><div class="path">ChannelHub: src/msg_embedding/ref_signals/srs.py:1-13, 164-181, 240-321</div><div class="path">ChannelHub: src/msg_embedding/channel_est/pipeline.py:120-165</div></div>
   </div>
   <div class="card sources" style="margin-top:15px"><h3>官方资料</h3><ul>
@@ -211,7 +265,7 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
   <div class="callout" style="margin-top:14px"><h3>结论边界</h3>本报告完成了代码行为、标准能力和确定性数学性质的审查，并给出了可实施路线；没有把缺失的公司端口定义、实测 Jones 方向图或馈电标定“猜成已知”。在这些输入到位前，F 可称为拓扑正确/功率正确，不能称为公司产品全物理正确。</div>
 </section>
 
-<footer class="foot"><b>SuperRAN · AAU/F/polarization/time/SRS audit</b><br>离线自包含 KaTeX：__KATEX_STATUS__；公式带原生 MathML 回退。生成脚本：<span class="mono">C:\Vibe\Wireless\superran\scripts\make_aau_polarization_srs_audit.py</span></footer>
+<footer class="foot"><b>SuperRAN · AAU/F/polarization/time/SRS audit</b><br>离线自包含 KaTeX：__KATEX_STATUS__；公式带原生 MathML 回退。生成脚本：<span class="mono">C:\Vibe\Wireless\SuperRAN\scripts\make_aau_polarization_srs_audit.py</span></footer>
 </main>
 __KATEX_UPGRADE__
 </body></html>
@@ -220,7 +274,7 @@ __KATEX_UPGRADE__
 
 FORMULAS = {
     "__EQ_TILT__": r"w_q=\frac{A_q e^{j\phi_q}e^{j2\pi z_q\sin\beta}}{\sqrt{\sum_{\ell=0}^{2}A_\ell^2}},\qquad z_q\in\{-0.67,0,+0.67\}\lambda",
-    "__EQ_F_INDEX__": r"\begin{aligned}r(h,v,p)&=(4h+v)2+p,\quad e(h,v_{\rm AE},p)=(12h+v_{\rm AE})2+p\\F_{e(h,3v+q,p),\,r(h,v,p)}&=w_q,\quad q\in\{0,1,2\}\end{aligned}",
+    "__EQ_F_INDEX__": r"\begin{aligned}r(h,v,p)&=32p+4h+v,\quad e(h,v_{\rm AE},p)=96p+12h+v_{\rm AE}\\F_{e(h,3v+q,p),\,r(h,v,p)}&=w_q,\quad q\in\{0,1,2\}\end{aligned}",
     "__EQ_F_PROOF__": r"\begin{aligned}\operatorname{supp}(F_{:,r})\cap\operatorname{supp}(F_{:,s})&=\varnothing\ (r\ne s),\quad \|F_{:,r}\|_2=1\\F^{\mathrm H}F&=I_{64},\quad \|Fx\|_2=\|x\|_2,\quad \operatorname{rank}(F)=\operatorname{rank}(FF^{\mathrm H})=64\end{aligned}",
     "__EQ_JONES__": r"\mathbf f^{(p)}(\theta,\varphi,f)=\begin{bmatrix}C_\theta^{(p)}(\theta,\varphi,f)\\C_\varphi^{(p)}(\theta,\varphi,f)\end{bmatrix},\qquad \mathbf f_{\pm45^\circ}\approx\frac{g}{\sqrt2}\begin{bmatrix}1\\\pm1\end{bmatrix}",
     "__EQ_POL_RAY__": r"\mathbf G_{n,m}=\begin{bmatrix}e^{j\Phi_{\theta\theta}}&\kappa_{n,m}^{-1/2}e^{j\Phi_{\theta\varphi}}\\\kappa_{n,m}^{-1/2}e^{j\Phi_{\varphi\theta}}&e^{j\Phi_{\varphi\varphi}}\end{bmatrix},\qquad h_{n,m}\propto \mathbf f_{\rm rx}^{\mathsf T}\mathbf G_{n,m}\mathbf f_{\rm tx}\,e^{j\psi_{\rm array}}e^{j2\pi\nu_{n,m}t}",

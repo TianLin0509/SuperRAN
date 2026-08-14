@@ -5,27 +5,28 @@
 间距一律 0.5λ。真实硬件不是这样：
 
 ===============================  ==========================================
-项                                真实 AAU
+项                                已确认公司 AAU
 ===============================  ==========================================
-RF / 数字端口                      8H x 4V x 2pol = **64**
-物理阵子                           8H x 12V x 2pol = **192**
-馈电                              每个 RF 端口固定驱动同一 (h, pol) 列上
-                                  **垂直相邻的 3 个阵子**（1 驱 3）
+RF / 数字端口                      64T: 8H x 4V x 2pol；256T: 16H x 8V x 2pol
+物理阵子                           64T: 192；256T: 1536
+馈电                              64T 每端口 1 驱 3；256T 每端口 1 驱 6
 水平阵子间距                       **0.5λ**
 垂直阵子间距                       **0.67λ**（不是 0.5λ）
-RF 端口垂直相位中心间距             3 x 0.67 = **2.01λ**（> λ，有栅瓣）
+RF 端口垂直相位中心间距             64T: 2.01λ；256T: 4.02λ
+端口展平                           ``pol_h_v + top_to_bottom``（两者统一）
 ===============================  ==========================================
 
 ChannelHub 的 ``phy_sim/effective_array.py`` 就是照这套硬件写的
 （模块文档里 "Target AAU" 一节逐条对得上），只是默认没启用。启用它要两件事：
 ``antenna_model_mode="effective_subarray"`` 加一个 ``bs_antenna`` 配置块。
 
-**实测影响**（同 seed、64T/4R、2.6 GHz、272 RB）：
+**历史实测证据**（旧内核、同 seed、64T/4R、2.6 GHz、272 RB）：
 
 * ``h_serving_true`` 与 legacy 的**相对差 4.03**——完全是另一个信道。
   所有从信道算出来的量（预编码、谱效、吞吐、CSI 压缩）都跟着变。
-* ``effective_subarray`` 与 ``physical_reference``（真跑 192 阵子再用 F 投影）
-  的相对差 **4.8e-7**——快路径复现了参考路径，可以放心用快的。
+* ``effective_subarray`` 与 ``physical_reference``（真跑物理阵子再用 F 投影）
+  的相对差曾为 **4.8e-7**。当前版本仍必须由数值门重新验证，不能把历史误差
+  当永久承诺。
 * **数字 BF 与大尺度链路预算分层**。当前 ChannelHub 的 conducted-power 预算会
   读取阵元方向图、固定 1 驱 3 子阵、垂直几何与电下倾，所以它们会改变服务/邻区
   接收功率及几何 SNR/SIR/SINR；64 端口数字预编码增益则刻意留在 ``H`` 中，
@@ -55,11 +56,19 @@ from typing import Any
 COMPANY_RF_PANEL: list[int] = [8, 4, 2]          # 默认 64T：N_H, N_V, N_pol
 COMPANY_UE_PANEL: list[int] = [2, 1, 2]          # 暂定 2H x 1V x 2pol -> 4R
 COMPANY_ELEMENTS_PER_PORT = 3                     # 1 驱 3
-COMPANY_PORT_ORDER = "h_v_pol"
+# 64T/256T 统一的产品端口编号合同：先极化块，再水平列，最后垂直行；
+# v=0 在物理顶部。新模块只能引用这两个 canonical 常量。旧 64T 顺序仅用于
+# 读取历史数据，不能再成为新配置的默认值。
+COMPANY_CANONICAL_PORT_ORDER = "pol_h_v"
+COMPANY_CANONICAL_VERTICAL_INDEX_ORDER = "top_to_bottom"
+COMPANY_LEGACY_64T_PORT_ORDER = "h_v_pol"
+COMPANY_LEGACY_64T_VERTICAL_INDEX_ORDER = "bottom_to_top"
+COMPANY_PORT_ORDER = COMPANY_CANONICAL_PORT_ORDER
+COMPANY_VERTICAL_INDEX_ORDER = COMPANY_CANONICAL_VERTICAL_INDEX_ORDER
 COMPANY_256T_RF_PANEL: list[int] = [16, 8, 2]     # 图示 256T
 COMPANY_256T_ELEMENTS_PER_PORT = 6                # 每个垂直 T 后接 1 驱 6
-COMPANY_256T_PORT_ORDER = "pol_h_v"               # pol block, h, v fastest
-COMPANY_256T_VERTICAL_INDEX_ORDER = "top_to_bottom"  # 图中 1 在上、8 在下
+COMPANY_256T_PORT_ORDER = COMPANY_CANONICAL_PORT_ORDER
+COMPANY_256T_VERTICAL_INDEX_ORDER = COMPANY_CANONICAL_VERTICAL_INDEX_ORDER
 COMPANY_H_SPACING_LAMBDA = 0.5
 COMPANY_V_SPACING_LAMBDA = 0.67                   # 实测值，别改回 0.5
 DEFAULT_ELECTRICAL_DOWNTILT_DEG = 6.0              # 工程基线；用户可在配置中覆盖
@@ -96,6 +105,94 @@ COMPANY_LINK = "BOTH"             # DL 真值 + UL SRS 估计，TDD 成对生成
 # 默认值，这里仍要显式落盘：硬件真相不能依赖下游库某个可能漂移的默认参数。
 COMPANY_POLARIZATION_SLANTS_DEG: list[float] = [45.0, -45.0]
 
+_SUPPORTED_PORT_ORDERS = {
+    COMPANY_CANONICAL_PORT_ORDER,
+    COMPANY_LEGACY_64T_PORT_ORDER,
+}
+_SUPPORTED_VERTICAL_INDEX_ORDERS = {
+    COMPANY_CANONICAL_VERTICAL_INDEX_ORDER,
+    COMPANY_LEGACY_64T_VERTICAL_INDEX_ORDER,
+}
+
+
+def port_flat_index(
+    h: int,
+    v: int,
+    p: int,
+    *,
+    n_h: int,
+    n_v: int,
+    n_p: int,
+    port_order: str = COMPANY_CANONICAL_PORT_ORDER,
+) -> int:
+    """Return the flat RF-port index under the declared layout contract.
+
+    New code should normally omit ``port_order`` and therefore use the shared
+    ``pol_h_v`` contract.  ``h_v_pol`` exists only at an explicit historical
+    64T compatibility boundary.
+    """
+    dims = (int(n_h), int(n_v), int(n_p))
+    coords = (int(h), int(v), int(p))
+    if any(size < 1 for size in dims):
+        raise ValueError(f"port dimensions must be positive, got {dims}")
+    if not all(0 <= value < size for value, size in zip(coords, dims, strict=True)):
+        raise IndexError(f"port coordinate {coords} outside dimensions {dims}")
+    if port_order not in _SUPPORTED_PORT_ORDERS:
+        raise ValueError(
+            f"port_order {port_order!r} not in {sorted(_SUPPORTED_PORT_ORDERS)}"
+        )
+    if port_order == COMPANY_LEGACY_64T_PORT_ORDER:
+        return (coords[0] * dims[1] + coords[1]) * dims[2] + coords[2]
+    return coords[2] * (dims[0] * dims[1]) + coords[0] * dims[1] + coords[1]
+
+
+def type1_to_port_permutation(
+    n_h: int,
+    n_v: int,
+    n_p: int = 2,
+    *,
+    port_order: str = COMPANY_CANONICAL_PORT_ORDER,
+    vertical_index_order: str = COMPANY_CANONICAL_VERTICAL_INDEX_ORDER,
+) -> list[int]:
+    """Map 38.214 Type-I row indices into a channel's RF-port order.
+
+    The returned list obeys ``perm[type1_index] = channel_port_index``.
+    Type-I rows are polarization blocks with ``v`` outer / ``h`` inner::
+
+        s_type1 = p * (N_V * N_H) + v * N_H + h
+
+    The vertical-order argument is validated and carried at the boundary even
+    though this row permutation uses the layout's *logical* ``v``.  A physical
+    top/bottom reversal belongs to the separate channel-layout migration, not
+    to codebook row reindexing.  Keeping this tiny implementation in SuperRAN
+    prevents offline ``Dataset.pmi()`` from acquiring a runtime dependency on
+    the MSG source tree.
+    """
+    dims = (int(n_h), int(n_v), int(n_p))
+    if any(size < 1 for size in dims):
+        raise ValueError(f"port dimensions must be positive, got {dims}")
+    if vertical_index_order not in _SUPPORTED_VERTICAL_INDEX_ORDERS:
+        raise ValueError(
+            "vertical_index_order "
+            f"{vertical_index_order!r} not in {sorted(_SUPPORTED_VERTICAL_INDEX_ORDERS)}"
+        )
+    total = dims[0] * dims[1] * dims[2]
+    perm = [0] * total
+    for p in range(dims[2]):
+        for v in range(dims[1]):
+            for h in range(dims[0]):
+                source = p * (dims[1] * dims[0]) + v * dims[0] + h
+                perm[source] = port_flat_index(
+                    h,
+                    v,
+                    p,
+                    n_h=dims[0],
+                    n_v=dims[1],
+                    n_p=dims[2],
+                    port_order=port_order,
+                )
+    return perm
+
 
 def company_antenna_block(
     *,
@@ -113,20 +210,23 @@ def company_antenna_block(
     if profile_key in {"64", "64t", "company_64t"}:
         m = COMPANY_ELEMENTS_PER_PORT
         port_order = COMPANY_PORT_ORDER
-        calibration_id = "company-64T-1to3-192ae-v1"
+        profile_id = "company-64T-1to3-192ae-pol-h-v-top-down-v2"
     elif profile_key in {"256", "256t", "company_256t"}:
         m = COMPANY_256T_ELEMENTS_PER_PORT
         port_order = COMPANY_256T_PORT_ORDER
-        calibration_id = "company-256T-1to6-1536ae-v1"
+        profile_id = "company-256T-1to6-1536ae-pol-h-v-top-down-v1"
     else:
         raise ValueError(f"unknown company antenna profile {profile!r}")
 
+    # 下倾进入 F 的复馈电权，所以不同下倾必须有不同 calibration_id。
+    # 用纯 ASCII、文件名安全的短表示，避免 6 与 6.0 被误判成两个校准版本。
+    tilt_tag = f"{float(fixed_downtilt_deg):.6f}".rstrip("0").rstrip(".")
+    tilt_tag = tilt_tag.replace("-", "m").replace(".", "p")
+    calibration_id = f"{profile_id}-dt{tilt_tag}deg"
+
     return {
         "port_order": port_order,
-        "vertical_index_order": (
-            "bottom_to_top" if profile_key in {"64", "64t", "company_64t"}
-            else COMPANY_256T_VERTICAL_INDEX_ORDER
-        ),
+        "vertical_index_order": COMPANY_CANONICAL_VERTICAL_INDEX_ORDER,
         "horizontal_port_spacing_lambda": COMPANY_H_SPACING_LAMBDA,
         "reference_frequency_hz": float(carrier_freq_hz),
         "element_pattern": {
@@ -145,6 +245,9 @@ def company_antenna_block(
         "fixed_vertical_subarray": {
             "elements_per_rf_port": m,
             "ae_vertical_spacing_lambda": COMPANY_V_SPACING_LAMBDA,
+            "calibration_vertical_index_order": (
+                COMPANY_CANONICAL_VERTICAL_INDEX_ORDER
+            ),
             "fixed_downtilt_deg": float(fixed_downtilt_deg),
             "calibration_id": calibration_id,
         },
@@ -154,8 +257,8 @@ def company_antenna_block(
 def is_company_panel(panel: Any) -> bool:
     """这个面板是不是已确认物理结构的公司 64T 或 256T。
 
-    64T 使用 1 驱 3 / ``h_v_pol``；256T 使用 1 驱 6 / 图示
-    ``pol_h_v``。其他端口数不推断馈电结构。
+    64T 使用 1 驱 3、256T 使用 1 驱 6；二者统一采用图示
+    ``pol_h_v + top_to_bottom``。其他端口数不推断馈电结构。
     """
     try:
         p = [int(x) for x in panel]
@@ -231,10 +334,15 @@ def array_summary(cfg: dict[str, Any], applied: str | None) -> dict[str, Any]:
         ) if mode == "effective_subarray" else None,
     }
     if mode == "legacy_64":
+        n_ports = 1
+        if cfg.get("bs_panel"):
+            n_ports = int(cfg["bs_panel"][0]) * int(cfg["bs_panel"][1]) * int(cfg["bs_panel"][2])
+        out["port_order"] = COMPANY_LEGACY_64T_PORT_ORDER
+        out["vertical_index_order"] = COMPANY_LEGACY_64T_VERTICAL_INDEX_ORDER
+        out["port_layout_contract_version"] = "explicit-legacy-layout-v1"
         out["note"] = (
-            "64 个端口按**独立阵元**建模、间距一律 0.5λ —— 这不是真实 AAU。"
-            "真实硬件是 1 驱 3、192 阵子、垂直 0.67λ。"
-            "面板为 8x4x2 时会自动切到真实模型；其他面板保持 legacy。"
+            f"{n_ports} 个端口按**独立阵元**建模、间距一律 0.5λ。"
+            "这是显式历史兼容/对照模式，不是已确认的公司 64T/256T 馈电结构。"
         )
         return out
     ant = cfg.get("bs_antenna") or {}
@@ -242,6 +350,22 @@ def array_summary(cfg: dict[str, Any], applied: str | None) -> dict[str, Any]:
     elem = ant.get("element_pattern") or {}
     m = int(sub.get("elements_per_rf_port", COMPANY_ELEMENTS_PER_PORT))
     dv = float(sub.get("ae_vertical_spacing_lambda", COMPANY_V_SPACING_LAMBDA))
+    resolved_port_order = ant.get("port_order", COMPANY_CANONICAL_PORT_ORDER)
+    resolved_vertical_order = ant.get(
+        "vertical_index_order", COMPANY_CANONICAL_VERTICAL_INDEX_ORDER
+    )
+    if (
+        resolved_port_order == COMPANY_CANONICAL_PORT_ORDER
+        and resolved_vertical_order == COMPANY_CANONICAL_VERTICAL_INDEX_ORDER
+    ):
+        layout_version = "pol_h_v-top_to_bottom-v1"
+    elif (
+        resolved_port_order == COMPANY_LEGACY_64T_PORT_ORDER
+        and resolved_vertical_order == COMPANY_LEGACY_64T_VERTICAL_INDEX_ORDER
+    ):
+        layout_version = "h_v_pol-bottom_to_top-legacy-v1"
+    else:
+        layout_version = f"{resolved_port_order}-{resolved_vertical_order}-custom-v1"
     out.update({
         "elements_per_rf_port": m,
         "physical_elements": (
@@ -255,12 +379,19 @@ def array_summary(cfg: dict[str, Any], applied: str | None) -> dict[str, Any]:
         "rf_vertical_spacing_lambda": round(m * dv, 4),
         "fixed_downtilt_deg": float(sub.get("fixed_downtilt_deg", 0.0)),
         "calibration_id": sub.get("calibration_id"),
+        "calibration_vertical_index_order": sub.get(
+            "calibration_vertical_index_order",
+            ant.get(
+                "vertical_index_order", COMPANY_CANONICAL_VERTICAL_INDEX_ORDER
+            ),
+        ),
         "element_pattern_is_measured": False,
         "element_horizontal_hpbw_deg": float(elem.get("horizontal_hpbw_deg", 110.0)),
         "element_vertical_hpbw_deg": float(elem.get("vertical_hpbw_deg", 65.0)),
         "element_pattern_source": elem.get("source", "parametric_temporary"),
-        "port_order": ant.get("port_order", COMPANY_PORT_ORDER),
-        "vertical_index_order": ant.get("vertical_index_order", "bottom_to_top"),
+        "port_order": resolved_port_order,
+        "vertical_index_order": resolved_vertical_order,
+        "port_layout_contract_version": layout_version,
         "note": (
             f"真实 AAU：1 驱 {m}、{out.get('physical_elements')} 物理阵子、"
             "水平 0.5λ / 垂直 0.67λ。"
@@ -308,6 +439,15 @@ def describe() -> dict[str, Any]:
             "rf_vertical_spacing_lambda": round(
                 COMPANY_ELEMENTS_PER_PORT * COMPANY_V_SPACING_LAMBDA, 4),
             "grating_lobe": "RF 端口垂直间距 2.01λ > λ，垂直方向有栅瓣",
+            "port_order": COMPANY_PORT_ORDER,
+            "vertical_index_order": COMPANY_VERTICAL_INDEX_ORDER,
+            "drawing_formula_1based": "p*32 + h*4 + v + 1",
+            "port_layout_contract_version": "pol_h_v-top_to_bottom-v1",
+            "legacy_64t_compatibility": {
+                "port_order": COMPANY_LEGACY_64T_PORT_ORDER,
+                "vertical_index_order": COMPANY_LEGACY_64T_VERTICAL_INDEX_ORDER,
+                "policy": "只读取历史数据；新生成与新模块不得使用",
+            },
         },
         "optional_arrays": {
             "company_256t": {

@@ -1907,7 +1907,8 @@ def sr_system_sim(
             mu_csi_error_variance=float(mu_csi_error_variance),
             rb_power_control=power_cfg, power_geometry=power_geometry,
             bs_panel=ds.config.get("bs_panel"),
-            port_order=_array_md.get("port_order"))
+            port_order=_array_md.get("port_order"),
+            vertical_index_order=_array_md.get("vertical_index_order"))
     except ValueError as exc:
         return {"error": str(exc)}
     mu_gain = (sysm.measure_mu_gain(

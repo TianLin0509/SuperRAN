@@ -74,8 +74,8 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
   <div class="hero-inner">
     <div class="eyebrow">SuperRAN · channel model walkthrough</div>
     <h1>64×4 “SRS 矩阵”<br>到底是怎么来的</h1>
-    <p class="lead">从 192 个物理阵子、64 个 RF 端口、双极化 CDL 多径，一直推到 TDD 上行信道与四端口 SRS 估计；并以物理接收向量、端口解扩和 LMMSE 的当前实现为准。</p>
-    <div class="hero-meta"><span class="pill ok">KaTeX 全公式</span><span class="pill">当前源码逐层对账</span><span class="pill ok">四端口物理 SRS 已落地</span><span class="pill">100 MHz · 30 kHz · 272 RB</span></div>
+    <p class="lead">从 192 个物理阵子、64 个 RF 端口、双极化 CDL 多径，一直推到 TDD 上行信道与四端口 SRS 估计；明确区分物理正确的 <code>Y=HX+I+N</code> 与当前仍在使用的逐系数观测抽象。</p>
+    <div class="hero-meta"><span class="pill ok">KaTeX 全公式</span><span class="pill">当前源码逐层对账</span><span class="pill warn">物理多端口 SRS 待落地</span><span class="pill">100 MHz · 30 kHz · 272 RB</span></div>
   </div>
 </header>
 
@@ -101,7 +101,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
       <tr><td>默认下行真值 / CSI-RS</td><td><code>BS_tx=64, UE_rx=4</code></td><td><span class="dimtag">64×4</span></td><td>从 64 个 BS 发射端口到 4 个 UE 接收端口</td></tr>
       <tr><td>默认上行真值 / SRS</td><td><code>BS_rx=64, UE_tx=4</code></td><td><span class="dimtag">64×4</span></td><td>从 4 个 UE 发射端口到 64 个 BS 接收端口；对外存储仍为 BS×UE</td></tr>
       <tr><td>公司配对数据</td><td><code>link=BOTH</code></td><td><span class="dimtag">[1,1,272,64,4]</span></td><td>DL 真值用于评估，UL SRS 估计用于 gNB 预编码</td></tr>
-      <tr><td>物理恢复哨兵</td><td>4 port、64 BS、无噪声</td><td><span class="dimtag">[14,32,4,64]</span></td><td>最大恢复误差 2.46e−7，总 pilot 功率固定</td></tr>
+      <tr><td>目标物理恢复门</td><td>4 port、64 BS、无噪声</td><td><span class="dimtag">Y[64,L] → Ĥ[64,4]</span></td><td>待实现：满秩精确恢复、总 pilot 功率固定；rank 不足必须拒绝</td></tr>
     </tbody>
   </table></div>
 </section>
@@ -145,7 +145,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
     <div class="flow-step"><span class="num">5</span><b>有效端口响应</b><small>Fᴴa_AE → 64 维</small></div>
   </div>
   <div class="grid g2">
-    <div class="card"><h3>端口与阵子编号</h3><div class="eq">__EQ_INDEX__</div><p>其中 <code>h=0…7</code>，<code>v_RF=0…3</code>，<code>v_AE=0…11</code>，<code>p∈{0,1}</code>。一个端口 <code>(h,v_RF,p)</code> 只连接 <code>v_AE=3v_RF+q</code> 的三个阵子。</p></div>
+    <div class="card"><h3>端口与阵子编号</h3><div class="eq">__EQ_INDEX__</div><p>其中 <code>h=0…7</code>，<code>v_RF=0…3</code>，<code>v_AE=0…11</code>，<code>p∈{0,1}</code>；<code>v=0</code> 在物理顶部。一个端口 <code>(h,v_RF,p)</code> 只连接 <code>v_AE=3v_RF+q</code> 的三个阵子。该顺序与 256T 共用 <code>pol_h_v + top_to_bottom</code> 合同。</p></div>
     <div class="card"><h3>物理坐标</h3><div class="eq">__EQ_POS__</div><p>面板位于 y-z 平面，波束正前方是 +x。水平间距 0.5λ；物理垂直间距 0.67λ；相邻 RF 子阵相位中心约 3×0.67λ=2.01λ。</p></div>
     <div class="card"><h3>每个 1 驱 3 子阵的馈电</h3><div class="eq">__EQ_FEED__</div><p>默认 <code>A_q=1</code>、校准相位 <code>φ_q=0</code>、固定电下倾 6°。归一化保证每个 RF 端口馈电列的二范数等于 1。</p></div>
     <div class="card"><h3>192×64 耦合矩阵</h3><div class="eq">__EQ_F__</div><p>不同 RF 端口的三阵子集合互不重叠，因此在默认硬件映射下各列正交且单位范数；<code>F</code> 只负责模拟被动馈电网络，不把 192 个阵子暴露给系统层。</p></div>
@@ -168,7 +168,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
   </div>
   <h3 style="margin-top:23px">阵元标量方向图</h3>
   <div class="eq">__EQ_PATTERN__</div>
-  <div class="callout red"><h3>当前实现边界：Jones/XPD 还没有完全贯通</h3><code>element_jones()</code> 已定义理想 ±45° 基，但 CDL 空间 ray 当前并不直接调用它，而是用“极化端口 mask + 2×2 ray coupling matrix”。元素配置里的 <code>xpd_db=8</code> 主要作为元数据/回退值；CDL profile 自带 XPR 时优先使用 profile XPR。也就是说：<b>双极化结构和随机交叉极化已进入 H，但实测天线方向相关的 Jones/XPD 尚未进入 H。</b></div>
+  <div class="callout blue"><h3>当前实现边界：理想 ±45° 已贯通，实测复 Jones/XPD 尚未导入</h3>公司 <code>effective_subarray / physical_reference</code> 的 InternalSim CDL 路径会调用 <code>element_jones()</code>，把理想 ±45° 基与每条 ray 的 2×2 coupling matrix 收缩；legacy 面板仍按 V/H 基兼容。元素配置里的 <code>xpd_db=8</code> 不是公司实测的方向相关 XPD：CDL profile 自带 XPR 时优先使用 profile XPR。也就是说：<b>理想双极化方向和随机交叉极化已经进入 H，但公司 (az,el,f) 方向相关复 Jones/XPD 仍是明确缺口。</b></div>
 </section>
 
 <section id="cdl" class="section">
@@ -182,7 +182,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
     <div class="flow-step"><span class="num">5</span><b>簇/ray 求和</b><small>形成 MIMO 空间矩阵</small></div><div class="arrow">→</div>
     <div class="flow-step"><span class="num">6</span><b>时延 DFT</b><small>得到每个 RB 的 H(t,k)</small></div>
   </div>
-  <div class="card"><h3>第 n 簇、第 m 条 ray 的空间矩阵</h3><div class="eq">__EQ_SPATIAL__</div><p><code>a_t</code> 与 <code>a_r</code> 已经包含阵列几何；<code>M_t^(p_t)</code>、<code>M_r^(p_r)</code> 是极化 mask；<code>G_nm[p_t,p_r]</code> 是上节的 2×2 极化耦合。代码随后把每条 ray 的空间矩阵按 Frobenius 范数归一。</p></div>
+  <div class="card"><h3>第 n 簇、第 m 条 ray 的空间矩阵</h3><div class="eq">__EQ_SPATIAL__</div><p><code>a_t</code> 与 <code>a_r</code> 已经包含阵列几何和标量方向图；<code>M_t^(p_t)</code>、<code>M_r^(p_r)</code> 是极化 mask；<code>G_nm[p_t,p_r]</code> 是上节的 2×2 极化耦合。当前实现<strong>不再逐 ray 做 Frobenius 归一</strong>，因此不同方向 ray 之间的元素/子阵相对增益得以保留。</p></div>
   <div class="grid g2" style="margin-top:16px">
     <div class="card"><h3>Doppler：不同到达方向不同频移</h3><div class="eq">__EQ_DOPPLER__</div><p>UE 速度方向是 <span class="mono">φ_v</span>；ZOA 用天顶角，因此水平投影含 <span class="mono">sin(ZOA)</span>。</p></div>
     <div class="card"><h3>一个非镜面簇的时域矩阵</h3><div class="eq">__EQ_CLUSTER__</div><p><code>P_n</code> 是归一化簇功率，<code>M=20</code>。LOS specular 分量走确定性极化矩阵，不再重复叠加 K 因子。</p></div>
@@ -198,9 +198,9 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
     <div class="card"><h3>内部生成 14 个 symbol，系统层保留一个 slot 快照</h3><div class="eq">__EQ_TIME__</div><p>ChannelHub 内部按 normal-CP 的平均 symbol 周期生成 14 个 OFDM symbol 上的 Doppler 相位，随后取中间 symbol 作为本 slot 的 H。这样不会把复数相位直接平均掉。</p><p><b>所以：</b>系统级每 TTI/slot 一个 H 快照通常足够；若研究高速时变或 symbol 级波束切换，才需要把 symbol 轴暴露出来。</p></div>
     <div class="card"><h3>一个 H 快照 ≠ 一个 SRS 观测维度</h3><p>四端口 SRS 可以在同一个 OFDM symbol 内，靠不同 cyclic shift / comb / CDM 的多个 RE 形成 4 个独立导频维度。因此“不需要为 14 个 symbol 各生成一份 H”与“四端口需要至少 4 个独立观测维度”并不矛盾。</p><div class="eq">__EQ_IDENTIFY__</div></div>
     <div class="card"><h3>存储 H 是归一化小尺度信道</h3><div class="eq">__EQ_NORM__</div><p>服务小区 H 的生成块均方元素功率归一到约 1。绝对路径损耗、阴影衰落、接收功率分别写在元数据中，不直接乘进服务 H。</p></div>
-    <div class="card"><h3>方向图的绝对增益不会留在 H 中</h3><p>每条 CDL ray 的空间矩阵先除以 Frobenius 范数，最终 H 又做整体小尺度归一。因此阵元绝对增益、纯标量的子阵方向响应不会作为绝对功率留在 H；留下的是相对空间签名、相位、角度相关性和极化结构。</p><div class="eq">__EQ_RAY_NORM__</div></div>
+    <div class="card"><h3>相对方向增益留在 H，绝对增益进链路预算</h3><p>所有 ray/cluster 合成后，服务 H 只做一次整体小尺度归一；因此不同 ray 之间的元素方向图和固定子阵相对权重仍在 H 中。阵元与子阵的绝对端口增益则由 conducted-power long-term link budget 单独带入，避免和数字 BF 重复计算。</p><div class="eq">__EQ_RAY_NORM__</div></div>
   </div>
-  <div class="callout red" style="margin-top:15px"><h3>这对 6° 固定下倾的解释很重要</h3>6° 馈电相位确实进入 <code>F</code> 和 steering；但对所有同构 1 驱 3 子阵共同形成的纯标量阵因子，在逐 ray 归一后会被消掉。若要让下倾和实测方向图改变不同簇/ray 的相对接收功率，后续需要把方向增益保留到 ray power，而不是在每条 ray 上全部归一掉。</div>
+  <div class="callout blue" style="margin-top:15px"><h3>这对 6° 固定下倾的解释很重要</h3>6° 馈电相位进入 <code>F</code> 与每条 ray 的 steering；由于逐 ray 归一已移除，不同到离角 ray 会保留不同的子阵增益，所以下倾能改变簇/ray 的相对接收功率。仍未完成的是公司实测复 Jones pattern，而不是“下倾完全被归一掉”。</div>
 </section>
 
 <section id="reciprocity" class="section">
@@ -231,12 +231,12 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
 </section>
 
 <section id="gap" class="section">
-  <div class="kicker">08 · Implemented correction</div><h2>旧的逐系数 oracle 观测已经怎样被替换</h2>
+  <div class="kicker">08 · Current gap</div><h2>当前逐系数观测与目标物理模型的差距</h2>
   <div class="split">
-    <div class="card compare redtop"><span class="status bad">已删除的旧路径</span><h3>标量 pilot 广播到每个 H 元素</h3><div class="eq">__EQ_CURRENT_OBS__</div><p>这条路径把未知系数在观测前就分开，无法产生端口污染或不可辨识性，现已不再作为 UL SRS 估计入口。</p><div class="eq">__EQ_CURRENT_LS__</div></div>
-    <div class="card compare"><span class="status ok">当前路径</span><h3>4 个端口先在每根 BS 天线上叠加</h3><div class="eq">__EQ_REAL_ONE__</div><p>同一个接收向量中加入服务端口、邻区端口、干扰和噪声，再通过 cyclic-shift 延迟窗解扩；无噪声 64×4 最大恢复误差 2.46e−7。</p></div>
+    <div class="card compare redtop"><span class="status bad">当前路径</span><h3>标量 pilot 广播到每个 H 元素</h3><div class="eq">__EQ_CURRENT_OBS__</div><p>这条路径把未知系数在观测前就分开，无法真实产生端口污染、rank 不足或不可辨识性；它适合做透明的逐系数估计器基线，但不能冒充射频接收机看到的多端口 Y。</p><div class="eq">__EQ_CURRENT_LS__</div></div>
+    <div class="card compare"><span class="status info">目标路径</span><h3>4 个端口先在每根 BS 天线上叠加</h3><div class="eq">__EQ_REAL_ONE__</div><p>服务端口、邻区端口、干扰和噪声应先进入同一个接收向量，再按 cyclic shift / comb / CDM 解扩。验收必须覆盖无噪声恢复、rank 缺失拒绝和非正交污染三个反例。</p></div>
   </div>
-  <div class="callout green" style="margin-top:16px"><h3>准确结论</h3><ul class="tight"><li><b>64×4 真值 H：</b>阵列、CDL、极化、时延和 Doppler 均参与。</li><li><b>64×4 SRS 估计：</b>已由物理 Y、cyclic-shift 解扩和 LS/LMMSE 形成，不再逐元素偷看 H。</li><li><b>边界：</b>这是 RB 中心系统级抽象；8-port TDM、空间 covariance LMMSE 与实测 Jones 图仍待补。</li></ul></div>
+  <div class="callout" style="margin-top:16px"><h3>准确结论</h3><ul class="tight"><li><b>64×4 真值 H：</b>阵列、CDL、极化、时延和 Doppler 均参与。</li><li><b>当前 64×4 SRS 估计：</b>LS/频域 LMMSE 算法存在，但输入仍是逐系数 pilot 抽象，尚未由物理多端口 Y 恢复。</li><li><b>边界：</b>物理 Y、8-port TDM、时频空 covariance LMMSE 与实测 Jones 图仍待补。</li></ul></div>
   <div class="table-wrap" style="margin-top:16px"><table>
     <thead><tr><th>模块</th><th>当前状态</th><th>能宣称什么</th><th>不能宣称什么</th></tr></thead>
     <tbody>
@@ -244,16 +244,16 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
       <tr><td>CDL 多径 MIMO</td><td><span class="status ok">已实现</span></td><td>20 rays、角度、Doppler、时延、极化耦合</td><td>完整 §7.5 场景簇生成</td></tr>
       <tr><td>双极化</td><td><span class="status warn">结构已实现</span></td><td>pol mask + XPR 2×2 ray coupling</td><td>实测 Jones/XPD 已贯通</td></tr>
       <tr><td>64×4 UL 真值</td><td><span class="status ok">已实现</span></td><td>公司 BOTH preset 固定 4Tx/4Rx</td><td>任意 Tx/Rx 错配仍可配对</td></tr>
-      <tr><td>四端口 SRS 估计</td><td><span class="status ok">已实现</span></td><td>物理端口叠加、解扩、干扰与噪声</td><td>Rel-18 8-port TDM / 全 RE 接收机</td></tr>
+      <tr><td>四端口 SRS 估计</td><td><span class="status warn">接口有、物理观测待补</span></td><td>1/2/4-port 序列参数与 LS/频域 LMMSE 基线</td><td>物理端口叠加/污染已被真实建模</td></tr>
     </tbody>
   </table></div>
 </section>
 
 <section id="target" class="section">
-  <div class="kicker">09 · Implemented baseline and next step</div><h2>RB 级物理多端口基线已落地；下一步只补真正需要的精度</h2>
-  <p class="intro">当前实现保留真实 SRS comb、cyclic shift、端口功率、同一接收向量和干扰；系统层仍只存 RB 中心 H。后续按课题选择空间 LMMSE、8-port TDM 或全 RE 波形，不无条件扩大 14 倍数据。</p>
+  <div class="kicker">09 · Target baseline and next step</div><h2>先落地 RB 级物理多端口基线，再补真正需要的精度</h2>
+  <p class="intro">目标实现应保留 SRS comb、cyclic shift、端口总功率、同一接收向量和干扰；系统层仍只存 RB 中心 H。通过基础物理门后，再按课题选择空间 LMMSE、8-port TDM 或全 RE 波形，不无条件扩大 14 倍数据。</p>
   <div class="grid g2">
-    <div class="card compare"><span class="status ok">当前已做</span><h3>RB 中心 + SRS comb 多端口</h3><div class="eq">__EQ_TARGET_X__</div><ul class="tight"><li><code>N_ap=P∈{1,2,4}</code> 来自 UE Tx。</li><li>服务与邻区端口都先进入同一个 <code>Y</code>。</li><li>总 pilot 功率固定，禁止逐 H 元素广播。</li><li>LS 与频域 LMMSE 都从端口分离后的 pilot grid 估计。</li></ul></div>
+    <div class="card compare"><span class="status info">P0 目标</span><h3>RB 中心 + SRS comb 多端口</h3><div class="eq">__EQ_TARGET_X__</div><ul class="tight"><li><code>N_ap=P∈{1,2,4}</code> 来自 UE Tx。</li><li>服务与邻区端口都先进入同一个 <code>Y</code>。</li><li>总 pilot 功率固定，禁止逐 H 元素广播。</li><li>LS 与频域 LMMSE 都从端口分离后的 pilot grid 估计。</li></ul></div>
     <div class="card compare"><span class="status info">后续精细化</span><h3>RE 级 SRS comb / cyclic shift / CDM</h3><ul class="tight"><li>保留每 RB 的 6 个 SRS RE（<code>K_TC=2</code>）。</li><li>按 38.211 端口、cyclic shift、comb offset 映射真实序列。</li><li>支持同/邻小区端口碰撞、非正交污染和端口特定 hopping。</li><li>仅在研究 SRS 资源设计、端口污染或估计器细节时开启。</li></ul></div>
   </div>
   <h3 style="margin-top:24px">必须补的反向测试</h3>
@@ -265,7 +265,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
     <div class="card"><h3>功率守恒</h3><p>端口数改变时总 SRS 功率口径必须固定并写清楚，避免 4 端口相当于凭空增加 6 dB 发射功率。</p></div>
     <div class="card"><h3>Gram 条件数</h3><p>落盘 <code>rank(X)</code>、<code>cond(XXᴴ)</code>、端口相关性；条件数异常必须告警。</p></div>
   </div>
-  <div class="callout green" style="margin-top:16px"><h3>当前数据合同</h3><code>h_true</code>：DL 物理评估信道；<code>h_est</code>：UL SRS 预编码 CSI；<code>h_dl_est</code>：UE 侧 CSI-RS 估计。缺失 h_est 必须硬失败，绝不复制 h_true。</div>
+  <div class="callout green" style="margin-top:16px"><h3>必须保持的数据合同</h3><code>h_true</code>：DL 物理评估信道；<code>h_est</code>：UL SRS 预编码 CSI；<code>h_dl_est</code>：UE 侧 CSI-RS 估计。缺失 h_est 必须硬失败，绝不复制 h_true；但名字正确并不等于观测物理已经正确。</div>
 </section>
 
 <section id="tdl" class="section">
@@ -282,24 +282,21 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
   <div class="table-wrap"><table>
     <thead><tr><th>主题</th><th>文件与行</th><th>关键事实</th></tr></thead>
     <tbody>
-      <tr><td>公司硬件默认</td><td><div class="path">C:\Vibe\Wireless\superran\src\superran\hardware.py</div></td><td>8×4×2 RF、1 驱 3、192 AE、UE 4Tx/4Rx、±45°、272 RB</td></tr>
-      <tr><td>默认 preset</td><td><div class="path">C:\Vibe\Wireless\superran\presets\presets.yaml</div></td><td><code>company_64t4r</code> 是 BOTH，UE Tx/Rx 均为 4</td></tr>
-      <tr><td>F 与 steering</td><td><div class="path">C:\Vibe\AI\ChannelHub_main\src\msg_embedding\phy_sim\effective_array.py:163, 405, 421, 475, 506</div></td><td>馈电归一、位置、192×64 coupling、Jones 基、Fᴴ/Fᵀ</td></tr>
-      <tr><td>CDL H</td><td><div class="path">C:\Vibe\AI\ChannelHub_main\src\msg_embedding\data\sources\internal_sim.py:712</div></td><td>20 rays、极化矩阵、Doppler、簇求和、时延 DFT</td></tr>
-      <tr><td>链路维度选择</td><td><div class="path">C:\Vibe\AI\ChannelHub_main\src\msg_embedding\data\sources\internal_sim.py:2021</div></td><td>DL 用 BS Tx/UE Rx；UL 用 BS Rx/UE Tx</td></tr>
-      <tr><td>SRS 序列</td><td><div class="path">C:\Vibe\AI\ChannelHub_main\src\msg_embedding\data\sources\_interference_estimation.py</div></td><td><code>N_ap∈{1,2,4}</code>、38.211 cyclic shift、固定总 pilot 功率</td></tr>
-      <tr><td>互易与 UL 端口选择</td><td><div class="path">C:\Vibe\AI\ChannelHub_main\src\msg_embedding\data\sources\_interference_estimation.py:952</div></td><td>共轭转置 + 0.01 平滑校准误差；4R→2T 最强端口选择</td></tr>
-      <tr><td>当前观测器</td><td><div class="path">C:\Vibe\AI\ChannelHub_main\src\msg_embedding\data\sources\_interference_estimation.py</div></td><td><code>Y=ΣHₚXₚ+I+N</code>，cyclic-shift 延迟窗分离</td></tr>
-      <tr><td>标量 LS / LMMSE</td><td><div class="path">C:\Vibe\AI\ChannelHub_main\src\msg_embedding\channel_est\ls.py:29<br>C:\Vibe\AI\ChannelHub_main\src\msg_embedding\channel_est\mmse.py:43</div></td><td>标量 LS 与指数 PDP 频域 LMMSE</td></tr>
-      <tr><td>现有审计证据</td><td><div class="path">C:\Vibe\Wireless\superran\artifacts\channel-generation-audit\evidence.json</div></td><td>DL 数据形状 [8,1,272,64,4]；SRS 审计形状 [4,1,272,64,4]</td></tr>
+      <tr><td>公司硬件默认</td><td><div class="path">C:\Vibe\Wireless\SuperRAN\src\superran\hardware.py</div></td><td>8×4×2 RF、1 驱 3、192 AE、UE 4Tx/4Rx、±45°、canonical 端口合同</td></tr>
+      <tr><td>默认 preset</td><td><div class="path">C:\Vibe\Wireless\SuperRAN\presets\presets.yaml</div></td><td><code>company_64t4r</code> 是 BOTH，UE Tx/Rx 均为 4</td></tr>
+      <tr><td>F 与 steering</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\phy_sim\effective_array.py</div></td><td>端口索引、馈电归一、位置、192×64 coupling、Jones 基、Fᴴ/Fᵀ</td></tr>
+      <tr><td>CDL H / 链路维度</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\data\sources\internal_sim.py</div></td><td>20 rays、极化矩阵、Doppler、簇求和、时延 DFT；DL/UL 天线轴选择</td></tr>
+      <tr><td>当前 SRS pilot / 观测器</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\data\sources\_interference_estimation.py</div></td><td>serving SRS 当前固定 <code>N_ap=1</code>；<code>Y=H·X+I+N</code> 仍按 H 系数广播</td></tr>
+      <tr><td>SRS 序列生成器</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\ref_signals\srs.py</div></td><td>底层支持 <code>N_ap∈{1,2,4}</code>、cyclic shift、comb 与 hopping；调用链未完整暴露</td></tr>
+      <tr><td>LS / 频域 LMMSE</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\channel_est\</div></td><td>标量 LS、真实 pilot 位置与 PDP 先验频域 LMMSE；不是时频空 LMMSE</td></tr>
     </tbody>
   </table></div>
-  <div class="callout" style="margin-top:16px"><h3>最终一句话</h3><b>64×4 H 来自“64 个 gNB RF 端口 × 4 个 UE SRS 端口”的双极化宽带 MIMO 通道；当前 SRS 已从同一物理接收向量恢复它。</b>仍需诚实标注 RB 中心抽象、无 8-port TDM、无空间 covariance LMMSE 和无实测 Jones 图。</div>
+  <div class="callout" style="margin-top:16px"><h3>最终一句话</h3><b>64×4 H 来自“64 个 gNB RF 端口 × 4 个 UE 端口”的双极化宽带 MIMO 通道；物理 SRS 应从同一接收向量恢复它，但当前调用链尚未做到。</b>仍需诚实标注逐系数观测抽象、RB 中心抽象、无 8-port TDM、无时频空 covariance LMMSE 和无实测 Jones 图。</div>
 </section>
 
 <footer class="foot">
   <div><b>SuperRAN · 64×4 SRS/H matrix explainer</b></div>
-  <div>离线自包含 KaTeX：__KATEX_STATUS__ · 公式同时带原生 MathML 无 JS 兜底。生成脚本：<span class="mono">C:\Vibe\Wireless\superran\scripts\make_srs_64x4_explainer.py</span></div>
+  <div>离线自包含 KaTeX：__KATEX_STATUS__ · 公式同时带原生 MathML 无 JS 兜底。生成脚本：<span class="mono">C:\Vibe\Wireless\SuperRAN\scripts\make_srs_64x4_explainer.py</span></div>
 </footer>
 </main>
 __KATEX_UPGRADE__
@@ -312,25 +309,25 @@ FORMULAS = {
     "__EQ_H_COLUMNS__": r"\mathbf H_{\mathrm{UL}}[k]=\begin{bmatrix}\mathbf h_1[k]&\mathbf h_2[k]&\mathbf h_3[k]&\mathbf h_4[k]\end{bmatrix}\in\mathbb C^{64\times4},\qquad \mathbf h_p[k]\in\mathbb C^{64}",
     "__EQ_TENSOR__": r"\mathbf H_{\mathrm{store}}\in\mathbb C^{N_{\mathrm{sample}}\times N_{\mathrm{slot}}\times272\times64\times P_{\mathrm{UE}}}",
     "__EQ_RANK__": r"\operatorname{rank}(\mathbf H[k])\le\min(64,4)=4",
-    "__EQ_INDEX__": r"r(h,v_{\mathrm{RF}},p)=(4h+v_{\mathrm{RF}})\,2+p,\qquad e(h,v_{\mathrm{AE}},p)=(12h+v_{\mathrm{AE}})\,2+p",
+    "__EQ_INDEX__": r"r(h,v_{\mathrm{RF}},p)=32p+4h+v_{\mathrm{RF}},\qquad e(h,v_{\mathrm{AE}},p)=96p+12h+v_{\mathrm{AE}}",
     "__EQ_POS__": r"\frac{\mathbf x_e}{\lambda}=\begin{bmatrix}0\\(h-3.5)\cdot0.5\\(v_{\mathrm{AE}}-5.5)\cdot0.67\end{bmatrix}",
     "__EQ_FEED__": r"z_q=\left(q-\frac{M-1}{2}\right)d_v,\quad \widetilde w_q=A_q e^{j\phi_q}e^{j2\pi z_q\sin\theta_{\mathrm{tilt}}},\quad w_q=\frac{\widetilde w_q}{\sqrt{\sum_{i=0}^{M-1}|\widetilde w_i|^2}},\quad M=3",
     "__EQ_F__": r"F_{e,r}=\begin{cases}w_q,&e=e(h,3v_{\mathrm{RF}}+q,p),\ r=r(h,v_{\mathrm{RF}},p)\\0,&\text{otherwise}\end{cases},\quad \mathbf F\in\mathbb C^{192\times64},\quad \mathbf F^H\mathbf F=\mathbf I_{64}",
     "__EQ_DIRECTION__": r"\mathbf u(\varphi,\vartheta)=\begin{bmatrix}\cos\vartheta\cos\varphi&\cos\vartheta\sin\varphi&\sin\vartheta\end{bmatrix}^{T}",
     "__EQ_AE__": r"a_{\mathrm{AE},e}(\varphi,\vartheta,f)=g(\varphi,\vartheta)\exp\!\left[-j2\pi\frac{f}{f_{\mathrm{ref}}}\frac{\mathbf x_e}{\lambda}\cdot\mathbf u\right]",
     "__EQ_AEFF__": r"\mathbf a_{\mathrm{BS,rx}}=\mathbf F^H\mathbf a_{\mathrm{AE,rx}}\in\mathbb C^{64},\qquad \mathbf a_{\mathrm{BS,tx}}=\mathbf F^T\mathbf a_{\mathrm{AE,tx}}",
-    "__EQ_POL_MASK__": r"\mathbf a^{(p)}=\mathbf a\odot\mathbf m^{(p)},\qquad m_i^{(p)}=\mathbb 1\{i\bmod2=p\}",
+    "__EQ_POL_MASK__": r"\mathbf a^{(p)}=\mathbf a\odot\mathbf m^{(p)},\qquad m_i^{(p)}=\mathbb 1\!\left\{\left\lfloor\frac{i}{N_HN_V}\right\rfloor=p\right\}\quad\text{for pol\_h\_v}",
     "__EQ_JONES__": r"\mathbf e_{+45^{\circ}}=\frac{g}{\sqrt2}\begin{bmatrix}1\\1\end{bmatrix},\qquad \mathbf e_{-45^{\circ}}=\frac{g}{\sqrt2}\begin{bmatrix}1\\-1\end{bmatrix}",
     "__EQ_GPOL__": r"\mathbf G_{n,m}=\begin{bmatrix}e^{j\phi_{00}}&\kappa^{-1/2}e^{j\phi_{01}}\\\kappa^{-1/2}e^{j\phi_{10}}&e^{j\phi_{11}}\end{bmatrix},\qquad \kappa=10^{\mathrm{XPR}_{\mathrm{dB}}/10}",
-    "__EQ_PATTERN__": r"A_H=\min\!\left(12\left(\frac{\varphi}{65^{\circ}}\right)^2,30\right),\quad A_V=\min\!\left(12\left(\frac{\vartheta}{65^{\circ}}\right)^2,30\right),\quad G_{\mathrm{dBi}}=8-\min(A_H+A_V,30),\quad g=10^{G_{\mathrm{dBi}}/20}",
-    "__EQ_SPATIAL__": r"\widetilde{\mathbf S}_{n,m}=\sum_{p_t=0}^{1}\sum_{p_r=0}^{1}G_{n,m}[p_t,p_r]\left(\mathbf a_t\odot\mathbf m_t^{(p_t)}\right)\left(\mathbf a_r\odot\mathbf m_r^{(p_r)}\right)^H,\qquad \mathbf S_{n,m}=\frac{\widetilde{\mathbf S}_{n,m}}{\|\widetilde{\mathbf S}_{n,m}\|_F}",
+    "__EQ_PATTERN__": r"A_H=\min\!\left(12\left(\frac{\varphi}{110^{\circ}}\right)^2,30\right),\quad A_V=\min\!\left(12\left(\frac{\vartheta}{65^{\circ}}\right)^2,30\right),\quad G_{\mathrm{dBi}}=8-\min(A_H+A_V,30),\quad g=10^{G_{\mathrm{dBi}}/20}",
+    "__EQ_SPATIAL__": r"\mathbf S_{n,m}=\sum_{p_t=0}^{1}\sum_{p_r=0}^{1}G_{n,m}[p_t,p_r]\left(\mathbf a_t\odot\mathbf m_t^{(p_t)}\right)\left(\mathbf a_r\odot\mathbf m_r^{(p_r)}\right)^H\qquad\text{(不逐 ray 归一)}",
     "__EQ_DOPPLER__": r"f_{D,n,m}=f_{D,\max}\sin(\mathrm{ZOA}_{n,m})\cos(\mathrm{AOA}_{n,m}-\varphi_v),\qquad d_{n,m}(t)=e^{j2\pi f_{D,n,m}t}",
     "__EQ_CLUSTER__": r"\mathbf H_n(t)=\sqrt{\frac{P_n}{M}}\sum_{m=1}^{M}d_{n,m}(t)\mathbf S_{n,m},\qquad M=20",
     "__EQ_FREQ__": r"\mathbf H(t,k)=\sum_{n=1}^{N_c}\mathbf H_n(t)e^{-j2\pi f_k\tau_n},\qquad f_k=k\Delta f_{\mathrm{RB}},\quad \Delta f_{\mathrm{RB}}=12\cdot30\,\mathrm{kHz}=360\,\mathrm{kHz}",
     "__EQ_TIME__": r"\mathbf H_{\mathrm{slot}}[k]=\mathbf H(t_{\mathrm{mid}},k),\qquad t_s=s\,\frac{T_{\mathrm{slot}}}{14},\quad s=0,\ldots,13",
     "__EQ_IDENTIFY__": r"N_{H\text{-snapshot}}=1\ \text{per slot},\qquad \operatorname{rank}(\mathbf X_{\mathrm{SRS}})=4\ \text{within the SRS resources}",
     "__EQ_NORM__": r"\mathbf H_{\mathrm{norm}}=\frac{\mathbf H_{\mathrm{raw}}}{\sqrt{\mathbb E_{t,k,b,u}\{|H_{\mathrm{raw}}(t,k,b,u)|^2\}}},\qquad \mathbb E\{|H_{\mathrm{norm}}|^2\}\approx1",
-    "__EQ_RAY_NORM__": r"\mathbf S_{n,m}\leftarrow\frac{\mathbf S_{n,m}}{\|\mathbf S_{n,m}\|_F}\quad\Longrightarrow\quad \text{common scalar pattern gain is removed from that ray}",
+    "__EQ_RAY_NORM__": r"\mathbf S_{n,m}\ \text{is not normalised per ray},\qquad \mathbf H_{\mathrm{norm}}=\mathbf H_{\mathrm{raw}}/c\ \Longrightarrow\ \frac{\|\mathbf S_{n,m}\|}{\|\mathbf S_{n',m'}\|}\ \text{is preserved}",
     "__EQ_RECIP__": r"\mathbf H_{\mathrm{UL}}^{\mathrm{phys}}(t,k)=\mathbf H_{\mathrm{DL}}(t,k)^H+\epsilon_{\mathrm{cal}}\mathbf E_{\mathrm{smooth}}(t,k),\qquad \epsilon_{\mathrm{cal}}=0.01",
     "__EQ_UL4__": r"\mathbf H_{\mathrm{UL}}^{\mathrm{phys}}\in\mathbb C^{4\times64}\quad\xrightarrow{\text{store transpose}}\quad \mathbf H_{\mathrm{UL}}^{\mathrm{store}}\in\mathbb C^{64\times4}",
     "__EQ_UL2__": r"p^{\star}=\operatorname{Top2}_{p\in\{0,1,2,3\}}\ \mathbb E_{t,k,b}|H_{\mathrm{UL}}^{\mathrm{phys}}(t,k,p,b)|^2,\qquad \mathbf H_{\mathrm{UL}}^{\mathrm{store}}\in\mathbb C^{64\times2}",

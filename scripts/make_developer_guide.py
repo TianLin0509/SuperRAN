@@ -11,8 +11,10 @@ backslashes stay in module-level constants instead of f-string expressions.
 from __future__ import annotations
 
 import ast
+import cmath
 import html
 import json
+import math
 import re
 import sys
 from collections.abc import Iterable
@@ -52,13 +54,29 @@ F_DATASET = M(
     r"h_{\mathrm{true}},h_{\mathrm{est}}\in"
     r"\mathbb C^{N\times T\times RB\times N_{\mathrm{BS}}\times N_{\mathrm{UE}}}",
 )
-F_JONES = M(
-    r"e_{+45}=\frac{A(\phi,\theta)}{\sqrt2}\begin{bmatrix}1\\1\end{bmatrix},"
-    r"\qquad e_{-45}=\frac{A(\phi,\theta)}{\sqrt2}\begin{bmatrix}1\\-1\end{bmatrix}",
-)
 F_PATTERN = M(
-    r"A_{\mathrm{dB}}(\phi,\theta)=G_{\max}-\min\!\left("
-    r"12(\phi/110^\circ)^2+12(\theta/65^\circ)^2,A_m\right)",
+    r"A_H(\phi)=\min\!\left(12(\phi/\phi_{3\mathrm{dB}})^2,A_m\right),"
+    r"\qquad A_V(\epsilon)=\min\!\left(12(\epsilon/\theta_{3\mathrm{dB}})^2,A_m\right)",
+)
+F_PATTERN_COMBINE = M(
+    r"G_E(\phi,\epsilon)=G_{\max}-\min\!\left(A_H(\phi)+A_V(\epsilon),A_m\right),"
+    r"\qquad g_E(\phi,\epsilon)=10^{G_E(\phi,\epsilon)/20}",
+)
+F_JONES = M(
+    r"f_p(\phi,\epsilon)=g_E(\phi,\epsilon)"
+    r"\begin{bmatrix}\cos\zeta_p\\\sin\zeta_p\end{bmatrix},"
+    r"\qquad \zeta_0=+45^\circ,\quad\zeta_1=-45^\circ",
+)
+F_SUBARRAY_PATTERN = M(
+    r"S_M^{\mathrm{RX}}(\epsilon,f)=\sum_{q=0}^{M-1}w_q^{*}"
+    r"e^{-j2\pi(f/f_{\mathrm{ref}})z_q\sin\epsilon},"
+    r"\qquad a_{\mathrm{port}}=F^Ha_{\mathrm{AE}}",
+)
+F_RAY_POLARIZATION = M(
+    r"c_{\ell,p_t,p_r}=f_{\mathrm{RX},p_r}^{T}J_\ell f_{\mathrm{TX},p_t},"
+    r"\qquad H_\ell\propto\sqrt{P_\ell}\,c_{\ell,p_t,p_r}\,"
+    r"a_{\mathrm{RX},\ell}a_{\mathrm{TX},\ell}^{H}"
+    r"e^{-j2\pi f\tau_\ell}e^{j2\pi\nu_\ell t}",
 )
 F_FEED = M(
     r"w_q=\frac{A_qe^{j\psi_q}e^{j2\pi z_q\sin\theta_{\mathrm{tilt}}}}"
@@ -532,6 +550,139 @@ def array_256_svg() -> str:
     return svg_wrap(body, 1080, 420, "公司 256T 图纸顺序：16H×8V×2pol 端口与 1 驱 6 的 1536×256 耦合")
 
 
+def port_contract_svg() -> str:
+    """Show that layout migration is a physical permutation, not a reshape."""
+    body = svg_box(24, 22, 250, 64, "物理位置不变", "同一 (h, physical-v, p)", "good")
+    body += svg_box(365, 22, 310, 64, "canonical · 新 64T/256T", "pol_h_v + top_to_bottom", "accent")
+    body += svg_box(766, 22, 310, 64, "legacy · 仅旧 64T", "h_v_pol + bottom_to_top", "warn")
+    y_rows = (132, 186, 240, 294)
+    canonical = (1, 2, 3, 4)
+    legacy = (7, 5, 3, 1)
+    for row, y in enumerate(y_rows):
+        body += f'<circle class="physical-dot" cx="146" cy="{y}" r="9"/>'
+        body += f'<text class="tiny" x="146" y="{y + 28}">top+{row}</text>'
+        body += f'<rect class="index-cell canonical" x="452" y="{y - 18}" width="136" height="36" rx="8"/>'
+        body += f'<text class="index-text" x="520" y="{y + 5}">port {canonical[row]}</text>'
+        body += f'<rect class="index-cell legacy" x="853" y="{y - 18}" width="136" height="36" rx="8"/>'
+        body += f'<text class="index-text" x="921" y="{y + 5}">port {legacy[row]}</text>'
+        body += arrow(158, y, 452, y, "same AE")
+        body += arrow(588, y, 853, y, "P")
+    body += '<text class="ds" x="146" y="350">示例：64T、第一水平列、第一极化；编号为 1-based</text>'
+    body += '<text class="ds" x="720" y="386">H_new = P H_old，W_new = P W_old ⇒ W_newᴴH_new = W_oldᴴH_old</text>'
+    return svg_wrap(
+        body,
+        1100,
+        420,
+        "64T 新旧端口合同的物理置换：必须同步重排 H、W、F，不能只改 shape 或元数据",
+    )
+
+
+def element_pattern_svg() -> str:
+    """Formula-generated pattern cuts; explicitly illustrative, not measured data."""
+
+    def point(cx: float, cy: float, radius: float, angle_deg: float) -> tuple[float, float]:
+        angle = math.radians(angle_deg)
+        return cx + radius * math.cos(angle), cy - radius * math.sin(angle)
+
+    def radial_path(
+        cx: float,
+        cy: float,
+        values: list[tuple[float, float]],
+        *,
+        close_to_center: bool = False,
+    ) -> str:
+        coords = []
+        for angle_deg, gain_db in values:
+            radius = 18.0 + 102.0 * max(0.0, min(1.0, (gain_db + 30.0) / 30.0))
+            coords.append(point(cx, cy, radius, angle_deg))
+        start = f"M{cx:.1f},{cy:.1f} " if close_to_center else "M"
+        return start + " ".join(
+            f"{'L' if i or close_to_center else ''}{x:.1f},{y:.1f}"
+            for i, (x, y) in enumerate(coords)
+        ) + (" Z" if close_to_center else "")
+
+    def horizontal_gain(phi_deg: float) -> float:
+        return -min(12.0 * (phi_deg / 110.0) ** 2, 30.0)
+
+    z = (-0.67, 0.0, 0.67)
+    tilt = math.radians(6.0)
+    weights = tuple(cmath.exp(1j * 2.0 * math.pi * zi * math.sin(tilt)) / math.sqrt(3.0) for zi in z)
+
+    vertical_raw: list[tuple[float, float, float]] = []
+    for elevation_deg in range(-90, 91):
+        elevation = math.radians(elevation_deg)
+        element_db = -min(12.0 * (elevation_deg / 65.0) ** 2, 30.0)
+        response = sum(
+            w.conjugate() * cmath.exp(-1j * 2.0 * math.pi * zi * math.sin(elevation))
+            for w, zi in zip(weights, z, strict=True)
+        )
+        combined_db = element_db + 10.0 * math.log10(max(abs(response) ** 2, 1e-12))
+        vertical_raw.append((float(elevation_deg), element_db, combined_db))
+    peak_db = max(value[2] for value in vertical_raw)
+    vertical_element = [(angle, element_db) for angle, element_db, _ in vertical_raw]
+    vertical_port = [(angle, max(-30.0, combined_db - peak_db)) for angle, _, combined_db in vertical_raw]
+
+    body = '<rect class="plot-panel" x="18" y="20" width="340" height="350" rx="14"/>'
+    body += '<rect class="plot-panel" x="382" y="20" width="340" height="350" rx="14"/>'
+    body += '<rect class="plot-panel" x="746" y="20" width="340" height="350" rx="14"/>'
+    for cx in (188, 552):
+        for radius, label in ((120, "0 dB"), (86, "−10"), (52, "−20"), (18, "−30")):
+            body += f'<circle class="pattern-grid" cx="{cx}" cy="202" r="{radius}"/>'
+            body += f'<text class="pattern-tick" x="{cx + radius - 4}" y="198">{label}</text>'
+        body += f'<line class="pattern-axis" x1="{cx - 132}" y1="202" x2="{cx + 132}" y2="202"/>'
+        body += f'<line class="pattern-axis" x1="{cx}" y1="70" x2="{cx}" y2="334"/>'
+
+    horizontal = [(float(phi), horizontal_gain(float(phi))) for phi in range(-180, 181, 2)]
+    body += f'<path class="pattern-lobe horizontal" d="{radial_path(188, 202, horizontal)}"/>'
+    for angle, label in ((55.0, "+55°"), (-55.0, "−55°")):
+        x, y = point(188, 202, 114, angle)
+        body += f'<line class="hpbw" x1="188" y1="202" x2="{x:.1f}" y2="{y:.1f}"/>'
+        body += f'<text class="pattern-note" x="{x:.1f}" y="{y - 5:.1f}">{label}</text>'
+    body += '<text class="dt" x="188" y="48" text-anchor="middle">水平元素切面 · 110° HPBW</text>'
+    body += '<text class="ds" x="188" y="354">±55° 处为 −3 dB；后向受 30 dB floor 截断</text>'
+
+    body += f'<path class="pattern-lobe element" d="{radial_path(552, 202, vertical_element, close_to_center=True)}"/>'
+    body += f'<path class="pattern-lobe port" d="{radial_path(552, 202, vertical_port, close_to_center=True)}"/>'
+    down_x, down_y = point(552, 202, 130, -6.0)
+    body += f'<line class="tilt-ray" x1="552" y1="202" x2="{down_x:.1f}" y2="{down_y:.1f}"/>'
+    body += f'<text class="pattern-note" x="{down_x - 28:.1f}" y="{down_y + 18:.1f}">约 −6°</text>'
+    body += '<text class="dt" x="552" y="48" text-anchor="middle">垂直切面 · 元素 × 1驱3</text>'
+    body += '<line class="legend element" x1="430" y1="349" x2="465" y2="349"/><text class="pattern-note" x="472" y="353">65° 元素</text>'
+    body += '<line class="legend port" x1="565" y1="349" x2="600" y2="349"/><text class="pattern-note" x="607" y="353">有效端口</text>'
+
+    body += svg_box(776, 58, 280, 60, "① dBi → 场幅", "gE = 10^(GE/20)，不是 /10", "accent")
+    body += svg_box(776, 140, 280, 60, "② ±45° Jones", "标量包络 × 极化方向向量", "b")
+    body += svg_box(776, 222, 280, 60, "③ 固定子阵因子", "wq 相干叠加；产生下倾/栅瓣", "good")
+    body += svg_box(776, 304, 280, 60, "④ 射线与数字 BF", "进入 Jℓ、H；W 在端口域另算", "warn")
+    body += arrow(916, 118, 916, 140)
+    body += arrow(916, 200, 916, 222)
+    body += arrow(916, 282, 916, 304)
+    return svg_wrap(
+        body,
+        1105,
+        395,
+        "阵元方向图示意：曲线由当前参数公式生成并归一化，不是公司实测方向图",
+    )
+
+
+def ray_construction_svg() -> str:
+    items = (
+        (20, "元素方向图", "gE(φ,ε)"),
+        (202, "极化基", "f±45"),
+        (384, "路径耦合", "2×2 Jℓ / XPR"),
+        (566, "子阵/steering", "FᴴaAE"),
+        (748, "时延与 Doppler", "τℓ / νℓ"),
+        (930, "MIMO H(t,f)", "逐 ray/cluster 求和"),
+    )
+    body = ""
+    for i, (x, title, sub) in enumerate(items):
+        body += svg_box(x, 52, 158, 72, title, sub, "accent" if i in (0, 5) else "b")
+        if i:
+            body += arrow(items[i - 1][0] + 158, 88, x, 88)
+    body += '<text class="ds" x="550" y="174">方向图改的是每条 ray 的复场系数；随后才由数字预编码 W 决定多端口合成与用户间干扰</text>'
+    return svg_wrap(body, 1110, 205, "从阵元方向图到每个 RB 的 MIMO 信道系数")
+
+
 def srs_matrix_svg() -> str:
     body = svg_box(25, 38, 185, 80, "UE 4Tx", "4 路正交 SRS 端口", "accent")
     body += svg_box(280, 38, 210, 80, "空口", "ZC/短序列 + comb + hopping", "b")
@@ -540,6 +691,7 @@ def srs_matrix_svg() -> str:
     body += arrow(210, 78, 280, 78, "X[4]")
     body += arrow(490, 78, 560, 78, "Y[64]")
     body += arrow(770, 78, 840, 78, "估计")
+    body += '<text class="ds" x="550" y="142">目标物理链路；当前 serving pilot 仍固定 N_ap=1，观测按 BS×UE 系数广播</text>'
     colors = ["#2563eb", "#0f766e", "#7c3aed", "#c2410c", "#64748b"]
     order = [0, 8, 16, 7, 15, 6, 14, 5, 13, 4, 12, 3, 11, 2, 10, 1, 9]
     for i, value in enumerate(order):
@@ -550,7 +702,7 @@ def srs_matrix_svg() -> str:
     body += '<text class="dt" x="30" y="166">17-hop order · C_SRS=63 / B_SRS=1 · 16 RB per hop</text>'
     body += '<path class="brace" d="M30,278 L30,292 L1058,292 L1058,278"/>'
     body += '<text class="ds" x="544" y="318">10 ms SRS 周期时，扫完整带约 170 ms；再加处理时延</text>'
-    return svg_wrap(body, 1100, 350, "64×4 SRS 矩阵来源与 17 RBG 跳频时间线")
+    return svg_wrap(body, 1100, 350, "目标 64×4 SRS 物理链路与当前 17 RBG 跳频时间线")
 
 
 def power_constraints_svg() -> str:
@@ -740,7 +892,7 @@ def overview_page(modules: list[ModuleDoc], tools: list[SymbolDoc], tests: list[
 
 def quickstart_page() -> Page:
     install = r"""
-cd C:\Vibe\Wireless\superran
+cd C:\Vibe\Wireless\SuperRAN
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
@@ -884,15 +1036,16 @@ def hardware_page() -> Page:
     body += table(
         ["profile", "RF 端口", "物理 AE / 馈电", "端口顺序", "垂直编号"],
         [
-            ("64T 基线", "8H×4V×2pol = 64", "8H×12V×2pol = 192；1 驱 3", "h_v_pol", "bottom_to_top"),
+            ("64T 基线", "8H×4V×2pol = 64", "8H×12V×2pol = 192；1 驱 3", "pol_h_v", "top_to_bottom"),
             ("公司 256T", "16H×8V×2pol = 256", "16H×48V×2pol = 1536；1 驱 6", "pol_h_v", "top_to_bottom"),
         ],
     )
     body += callout(
-        "good", "256T 顺序按产品图锁定",
-        "<p>第一极化的端口 1…8 是第一水平列从上到下，9…16 是第二水平列；"
-        "第二极化从 129 开始。该顺序已同时贯通 InternalSim、Sionna RT、QuaDRiGa 配置、"
-        "Type-I/DFT 码本与系统链路表，不再靠默认 reshape 猜轴。</p>",
+        "good", "64T/256T 统一按产品图规则锁定",
+        "<p>两者都采用 <code>r=p·N_H·N_V+h·N_V+v</code>（0-based），"
+        "即先极化块、再水平列、垂直行最快，且 v=0 是物理顶部。64T 的关键端口是"
+        " 1/5/33，256T 是 1/9/129。该顺序已同时贯通 InternalSim、Sionna RT、"
+        "QuaDRiGa、Type-I/DFT 码本与系统链路表；历史 64T 顺序只经显式置换读取。</p>",
     )
     body += """
 <h2>272 不是标准表写错</h2>
@@ -909,7 +1062,7 @@ def hardware_page() -> Page:
     body += steps((
         ("carrier defaults", "<p>补 2.6 GHz、30 kHz、100 MHz、272 RB、64T/4T4R 和 BOTH。</p>"),
         ("panel guard", "<p><code>[8,4,2]</code> 挂载 64T/1 驱 3；<code>[16,8,2]</code> 挂载 256T/1 驱 6。其它面板不猜馈电结构。</p>"),
-        ("metadata", "<p>summary 记录模式、阵子数、间距、极化、方向图来源与 calibration_id。</p>"),
+        ("metadata", "<p>summary 记录模式、阵子数、间距、极化、方向图来源、calibration_id 与端口布局合同版本。</p>"),
         ("Gate", "<p>端口数、BOTH 上下行 UE 端口、方向图真实性和默认值漂移均有检查。</p>"),
     ))
     body += callout(
@@ -932,13 +1085,13 @@ def hardware_page() -> Page:
 
 
 def channel_page() -> Page:
-    body = topology_svg()
+    body = topology_svg() + ray_construction_svg()
     body += """
 <h2>信道矩阵如何建模</h2>
 <p>每条 path/cluster 把功率、时延、多普勒、收发角、阵列响应和极化 Jones 耦合成复数 MIMO
 系数；频域相位由时延决定，时间相位由多普勒决定。CDL 有逐径角度，可显式形成阵列方向；
 TDL 只有功率时延轮廓，空间相关是统计近似。</p>
-""" + F_CHANNEL + F_CHANNEL_SHAPE
+""" + F_RAY_POLARIZATION + F_CHANNEL + F_CHANNEL_SHAPE
     body += """
 <p>落盘时项目把链路方向整理为 <code>[T,RB,BS_ant,UE_ant]</code>，因此默认下行单个频点可看作
 64×4（发射端优先）存储约定；通信教材常写成 4×64。矩阵乘法时必须先看函数约定，不能凭
@@ -982,6 +1135,13 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
 基；经过路径 Jones 矩阵后会发生共极化与交叉极化耦合。只有把该耦合与空间 steering 一起
 代入，双极化才真正影响相关性、秩和 MU 干扰。</p>
 """ + F_JONES
+    body += callout(
+        "note", "Jones/XPR 的当前精确边界",
+        "<p>公司 <code>effective_subarray / physical_reference</code> 的 InternalSim CDL 路径已经调用 "
+        "<code>element_jones()</code>，将理想 ±45° 基与逐 ray 的 2×2 <code>Jℓ</code> 收缩；legacy 面板仍按 "
+        "V/H 基兼容。<code>element_xpd_db=8</code> 不是公司实测方向相关 XPD：CDL 优先使用 profile "
+        "自带 XPR，它只在无 profile 值或统计回退路径中生效。方向相关复 Jones/XPD 仍需公司实测表。</p>",
+    )
     body += """
 <h2>同站共享、异站不复制</h2>
 <p>这不是个人偏好：3GPP TR 38.901 §7.5 明确要求不同 BS–UT 链路的 LSP 不相关，且同址 BS
@@ -1035,16 +1195,17 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
 def antenna_page() -> Page:
     body = array_svg()
     body += array_256_svg()
+    body += port_contract_svg()
     body += """
 <h2>F(192×64) 不是拍脑袋矩阵</h2>
-<p>先按 <code>(h,v,p)</code> 建 192 个物理阵子：8 个水平位置、12 个垂直位置、两种极化；
-再按 <code>(h,v_RF,p)</code> 建 64 个 RF 端口：8×4×2。端口 r 只连接物理垂直索引
-<code>3v_RF, 3v_RF+1, 3v_RF+2</code> 的三个阵子，所以每列恰有三个非零值。</p>
+<p>64T 的逻辑端口按 <code>r=p·32+h·4+v</code> 展平，物理阵子按
+<code>e=p·96+h·12+(3v+q)</code> 展平；v=0 是顶部。端口 r 只连接
+<code>q=0,1,2</code> 三个相邻物理阵子，所以每列恰有三个非零值。</p>
 """ + F_FEED + F_COUPLING + F_EFFECTIVE
     body += """
-<h2>公司 256T：同一个 F 合同，换成图纸轴顺序</h2>
-<p>256T 不是把 64T 的 shape 改成 256。RF 端口是 16H×8V×2pol，但图纸把极化放在最外层、
-垂直行从上到下编号：<code>r=p·128+h·8+v</code>（0-based）。每个 T 在其背后驱动 6 个
+<h2>公司 256T：同一个展平合同，不同的面板与馈电规模</h2>
+<p>256T 不是把 64T 的 shape 改成 256；两者端口轴顺序现在相同。256T RF 端口是
+16H×8V×2pol，按 <code>r=p·128+h·8+v</code>（0-based）展平。每个 T 在其背后驱动 6 个
 垂直物理 AE，因此实际为 16H×48V×2pol=1536 AE，RF 垂直相位中心间距为 6×0.67λ=4.02λ。</p>
 """ + F_COUPLING_256
     body += """
@@ -1054,12 +1215,24 @@ def antenna_page() -> Page:
   <li><strong>不同列不重叠：</strong>两种固定馈电下每个阵子只属于一个 RF 端口；因此 F 的列天然正交。</li>
   <li><strong>相位随 6° 下倾递进：</strong>子阵阵子相干叠加，使端口方向图主瓣向水平面下方转动；top-to-bottom 只是编号，不能翻转物理下倾。</li>
   <li><strong>快路径可验证：</strong><code>effective_subarray</code> 直接算端口响应；<code>physical_reference</code>
-  先生成 192-AE 信道再乘 F。二者必须在数值容差内一致。</li>
+  先生成 192/1536-AE 信道再乘 F。二者必须在数值容差内一致。</li>
 </ul>
 <h2>阵元方向图</h2>
 <p>当前有单元阵子方向图，但它是<strong>可配置的参数化临时模型</strong>，不是公司实测表。
-水平 HPBW 110° 来自产品先验，垂直 65°、峰值 8 dBi、XPD 8 dB 当前仍是工程参数。</p>
-""" + F_PATTERN + F_JONES
+水平 HPBW 110° 来自产品先验；垂直 65°、峰值 8 dBi 与 30 dB 截断当前仍是工程参数。
+下图曲线由当前公式和默认参数直接生成，作用是帮助理解，不代表暗室实测。</p>
+""" + element_pattern_svg() + F_PATTERN + F_PATTERN_COMBINE + F_JONES
+    body += table(
+        ["量", "当前默认", "在模型中的作用", "不能误读为"],
+        [
+            ("φ3dB", "110°", "水平功率增益在 ±55° 约下降 3 dB", "已导入的公司实测 cos 表"),
+            ("θ3dB", "65°", "垂直元素包络；与固定子阵因子相乘", "整机端口垂直波宽"),
+            ("Gmax", "8 dBi", "由 /20 转成复场幅，再参与每条 ray", "数字 64T/256T 波束增益"),
+            ("Am", "30 dB", "参数化前后向衰减截断", "真实 front-to-back ratio"),
+            ("ζp", "+45° / −45°", "理想线极化 Jones 基", "方向相关复 Jones 实测值"),
+            ("element_xpd_db", "8 dB", "无 profile XPR/统计回退值与 provenance", "已贯通的公司方向相关天线 XPD"),
+        ],
+    )
     body += callout(
         "danger", "不要把它称为 cos 实测方向图",
         "<p>实现是 3GPP 风格的抛物线 dB 包络，<code>measured_jones</code> 入口目前硬报"
@@ -1067,11 +1240,21 @@ def antenna_page() -> Page:
         "极化端口校准与 hash，而不是只替换一个 HPBW 数字。</p>",
     )
     body += """
-<h3>方向图增益进入哪里</h3>
+<h3>方向图怎样一步步影响最终信号</h3>
+<ol>
+  <li><strong>dBi 是功率增益：</strong>复电场幅度必须用 <code>10^(GE/20)</code>；若误用 /10，信道幅度会多平方一次。</li>
+  <li><strong>极化方向：</strong>同一个标量包络乘 ±45° Jones 向量；InternalSim 在实现中把标量放在 steering、单位 Jones 放在极化收缩，乘积与公式一致。</li>
+  <li><strong>固定馈电：</strong>每个物理 AE 的复场按 <code>wq</code> 相干叠加，形成 1 驱 3/1 驱 6 的下倾、旁瓣和潜在栅瓣，而不是把功率增益简单乘 3/6。</li>
+  <li><strong>逐 ray 耦合：</strong>收发 Jones 经 <code>Jℓ</code>/XPR 收缩，并和收发 steering、时延、多普勒一起进入 <code>H(t,f)</code>。</li>
+  <li><strong>数字波束：</strong>SVD/PMI/ZF/EBF 权在 RF 端口域作用于 H；它改变多端口相干合成与 MU 干扰，但不能再重复加一次元素/子阵增益。</li>
+</ol>
+""" + F_SUBARRAY_PATTERN + F_RAY_POLARIZATION
+    body += """
 <p>参数化阵子增益与固定 1 驱 3/1 驱 6 子阵因子先形成<strong>有效 RF 端口绝对增益</strong>，再进入
-conducted-power 链路预算；数字 SVD/PMI/ZF 增益随后在端口域计算，二者不会重复相加。
-旧字段 <code>sector_gain_all_db</code> 为兼容保留，但有效阵列模式下其物理语义是
-element×subarray gain，不只是传统 65°/110° 扇区包络。</p>
+conducted-power 链路预算；数字 SVD/PMI/ZF 增益随后在端口域计算。InternalSim 的服务 H 会在
+全部 ray 合成后做一次整体小尺度归一化，但保留不同 ray 之间的相对方向权重；绝对端口增益由
+long-term link budget 单独带入。旧字段 <code>sector_gain_all_db</code> 为兼容保留，在有效阵列模式下
+其物理语义是 element×subarray gain，不只是传统扇区包络。</p>
 """
     body += """
 <h2>如何证明 F 正确</h2>
@@ -1102,11 +1285,19 @@ def srs_page() -> Page:
 <h2>64×4 到底怎么来</h2>
 <p>上行 SRS 时 UE 有 4 个发射端口，gNB 有 64 个接收端口。每个 UE 端口使用可分离的
 参考信号资源，gNB 在每个接收端口上解扩四路，因此得到 64×4 的上行端口信道估计。
-TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定；不是“凭空把 4×64 复制一份”。</p>
+TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定；不是“凭空把 4×64 复制一份”。
+这是应实现的物理矩阵模型，不等于当前调用链已经完成。</p>
 """ + F_SRS_RX + F_LS
+    body += callout(
+        "danger", "当前观测边界：仍不是物理多端口 Y=HX",
+        "<p>底层 <code>srs_sequence()</code> 能生成 1/2/4 端口序列，但 serving pilot 调用当前仍固定 "
+        "<code>N_ap=1,n_ap_index=0</code>；观测端再把标量 X 广播到每个 BS×UE 系数。这样可以验证 "
+        "LS/频域 LMMSE 数值，却无法真实产生端口 rank 不足、同码污染或空间协方差抑制。下一阶段必须先"
+        "构造同一接收向量上的 <code>Y=HX+I+N</code>，再讨论时频空 LMMSE。</p>",
+    )
     body += """
 <h2>当前是 ZC 吗</h2>
-<p>是。<code>pilot_type_ul="srs_zc"</code> 走 38.211 SRS 基序列：长度足够时使用 Zadoff–Chu，
+<p>序列生成层是。<code>pilot_type_ul="srs_zc"</code> 走 38.211 SRS 基序列：长度足够时使用 Zadoff–Chu，
 短长度走规范短序列；支持 comb、循环移位、group/sequence hopping 和频域 hopping。
 “SRS 周期”指发送周期；某个 RBG 距离最近一次有效 SRS 的时间应叫
 <strong>CSI 陈旧时长/lag</strong>，不叫“SRS 年龄”。</p>
@@ -1130,10 +1321,10 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
     )
     body += callout(
         "note", "LS 不会让干扰失去方向",
-        "<p>LS 只是用已知导频除出每个收发端口的复系数；空间方向仍在 64 维复向量中。"
-        "它的弱点是把同资源干扰和噪声一起带入估计。只有后续把协方差粗暴压成标量/白噪声时，"
-        "才会丢掉方向性。当前 LMMSE prior 主要是频域指数 PDP；默认 R_v=I/SNR，也可显式传有色"
-        "噪声协方差，但仍不等价于完整的时频空 MMSE/IRC。</p>",
+        "<p>在正确的多端口 <code>Y=HX+I+N</code> 中，LS 只是用已知导频解扩；污染项仍携带干扰"
+        "信道的 64 维空间向量，所以 LS 本身不会把方向抹掉。当前逐系数观测抽象却不能用来证明"
+        "这件事，因为干扰在物理接收合成之前已经被分开。当前 LMMSE prior 主要是频域指数 PDP；"
+        "它不等价于完整的时频空 MMSE/IRC。</p>",
     )
     body += callout(
         "warn", "LMMSE 不是每个 realization、每个 SNR 都必胜",
@@ -2065,8 +2256,8 @@ def tests_page(tests: list[dict[str, Any]]) -> Page:
         "note", "测试证据的准确读法",
         "<p>最终工作树已通过两个仓库全仓 Ruff；MSG-Platform 新增/受影响路径为 NR RB 表 9 passed，"
         "export/interference/paired bridge/mobility 41 passed + 1 个缺 ONNX 的条件 skip。SuperRAN 的 "
-        "interference 全套 1002 s、link adaptation 全套 266 s、Gate 390 s、results 165 s、E2E/MCP/真实 RT "
-        "以及 linklevel/MU/system/RNG/CSI-aging/物理不变量均通过；浏览器全站 QA 在最终生成后单独执行。"
+        "interference 全套约 732 s、link adaptation 压力约 538 s、RNG/Gate/MCP 组合约 669 s、results 约 18 s；"
+        "E2E、真实 RT、linklevel、MU、system、CSI-aging 与物理不变量均通过；浏览器全站 QA 在最终生成后单独执行。"
         "这些证据证明当前合同与反例，不替代公司实测方向图、完整 Type-I 多层码本或 BLER 曲线再标定。</p>",
     )
     return Page(
@@ -2276,6 +2467,7 @@ h2{font-size:27px;line-height:1.3;letter-spacing:-.025em;margin:55px 0 16px;scro
 .table-wrap{overflow:auto;margin:20px 0 28px;border:1px solid var(--line);border-radius:11px;background:var(--paper)}table{border-collapse:collapse;width:100%;font-size:13px;line-height:1.5}th{text-align:left;background:var(--soft);font-size:11px;letter-spacing:.04em;color:var(--muted);position:sticky;top:0}th,td{padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}tr:last-child td{border-bottom:0}tbody tr:hover{background:color-mix(in srgb,var(--brand) 3%,transparent)}
 .codebox{margin:21px 0 28px;border:1px solid var(--line);border-radius:11px;overflow:hidden;background:#101916;color:#dceae4;box-shadow:var(--shadow)}.codebar{height:38px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;background:#192620;color:#9eb5ab;font-size:12px}.copy{border:1px solid #40544b;background:#22352d;color:#dceae4;border-radius:6px;padding:3px 9px;cursor:pointer}.codebox pre{margin:0;padding:17px 19px;overflow:auto;line-height:1.62}.codebox code{font-size:12.5px;background:none;border:0;padding:0;color:inherit;white-space:pre}.signature,.mini-json{overflow:auto;background:var(--soft);border:1px solid var(--line);padding:12px;border-radius:8px;font:12px/1.55 "Cascadia Code",Consolas,monospace;white-space:pre-wrap}.mini-json{max-height:310px;white-space:pre}
 .diagram{margin:26px 0 34px;background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:15px;box-shadow:var(--shadow);overflow:auto}.diagram svg{display:block;width:100%;min-width:650px;height:auto}.diagram figcaption{text-align:center;color:var(--muted);font-size:12px;margin-top:7px}.diagram rect{fill:var(--soft);stroke:var(--line)}.diagram .accent rect{fill:color-mix(in srgb,var(--brand) 12%,var(--paper));stroke:var(--brand)}.diagram .good rect{fill:color-mix(in srgb,var(--ok) 10%,var(--paper));stroke:var(--ok)}.diagram .danger rect{fill:color-mix(in srgb,var(--danger) 9%,var(--paper));stroke:var(--danger)}.diagram .warn rect{fill:color-mix(in srgb,var(--warm) 11%,var(--paper));stroke:var(--warm)}.diagram text{font-family:inherit;fill:var(--ink)}.diagram .dt{font-size:14px;font-weight:750}.diagram .ds{font-size:11px;fill:var(--muted);text-anchor:middle}.diagram .b .ds,.diagram .accent .ds,.diagram .good .ds,.diagram .danger .ds,.diagram .warn .ds{text-anchor:start}.diagram .arr{stroke:var(--muted);stroke-width:1.5;fill:none}.diagram marker path{fill:var(--muted)}.diagram .al,.diagram .tiny{font-size:9px;fill:var(--muted);text-anchor:middle}.diagram .site{fill:color-mix(in srgb,var(--brand) 10%,var(--paper));stroke:var(--brand)}.diagram .site-t{font-size:12px;text-anchor:middle}.diagram .sector{stroke:var(--brand);stroke-width:3}.diagram .ae.polp{fill:#e45c5c;stroke:none}.diagram .ae.polm{fill:#357bd8;stroke:none}.diagram .feed{fill:none;stroke:var(--muted);stroke-dasharray:4 3}.diagram .slot{font-size:12px;fill:#fff;text-anchor:middle;font-weight:700}.diagram .brace,.diagram .axis,.diagram .cap{fill:none;stroke:var(--muted)}.diagram .bar{fill:var(--brand);stroke:none}.diagram .bar.bad{fill:var(--danger)}.diagram .hist{fill:var(--brand);stroke:none}.diagram .yes{font-size:11px;fill:var(--ok);text-anchor:middle}
+.diagram .plot-panel{fill:color-mix(in srgb,var(--soft) 58%,var(--paper));stroke:var(--line)}.diagram .pattern-grid{fill:none;stroke:color-mix(in srgb,var(--muted) 38%,transparent);stroke-width:1}.diagram .pattern-axis{stroke:var(--line);stroke-width:1}.diagram .pattern-lobe{stroke-width:2.2}.diagram .pattern-lobe.horizontal{fill:color-mix(in srgb,var(--brand) 18%,transparent);stroke:var(--brand)}.diagram .pattern-lobe.element{fill:none;stroke:var(--muted);stroke-dasharray:6 4}.diagram .pattern-lobe.port{fill:color-mix(in srgb,var(--ok) 16%,transparent);stroke:var(--ok)}.diagram .pattern-tick{font-size:8px;fill:var(--muted);text-anchor:end}.diagram .pattern-note{font-size:10px;fill:var(--muted)}.diagram .hpbw{stroke:var(--warm);stroke-dasharray:4 3}.diagram .tilt-ray{stroke:var(--danger);stroke-width:1.5;stroke-dasharray:5 4}.diagram .legend{stroke-width:3}.diagram .legend.element{stroke:var(--muted);stroke-dasharray:6 4}.diagram .legend.port{stroke:var(--ok)}.diagram .physical-dot{fill:var(--ok);stroke:none}.diagram .index-cell.canonical{fill:color-mix(in srgb,var(--brand) 13%,var(--paper));stroke:var(--brand)}.diagram .index-cell.legacy{fill:color-mix(in srgb,var(--warm) 13%,var(--paper));stroke:var(--warm)}.diagram .index-text{font-size:12px;font-weight:700;text-anchor:middle}
 .kx[data-display="1"]{display:block;overflow:auto;text-align:center;padding:13px 4px;margin:18px 0}.kx math{font-size:1.12em}.source-row{color:var(--muted);font-size:12px;border-top:1px dashed var(--line);padding-top:12px}.src{font-family:"Cascadia Code",Consolas,monospace;font-size:11px}.muted{color:var(--muted)}
 details.api,details.preset{border:1px solid var(--line);background:var(--paper);border-radius:10px;margin:8px 0;overflow:hidden}details.api>summary,details.preset>summary{cursor:pointer;display:flex;gap:12px;align-items:flex-start;justify-content:space-between;padding:13px 15px;list-style:none}details.api>summary::-webkit-details-marker,details.preset>summary::-webkit-details-marker{display:none}details.api>summary:before,details.preset>summary:before{content:"+";color:var(--brand);font-weight:800}details[open]>summary:before{content:"−"}details.api>summary code{flex:none}details.api>summary span{color:var(--muted);font-size:12px;flex:1}details.api>div,details.preset>div{padding:0 16px 16px;border-top:1px solid var(--line)}details.preset>summary span{display:flex;flex-direction:column;gap:3px}details.preset>summary strong{font-size:14px}details.preset>summary small{color:var(--muted)}.module-card{border-top:3px solid var(--brand);padding-top:1px;margin-top:58px}.module-card>h2{margin-top:22px}.module-card>h2 code{font-size:.8em}.check-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;list-style:none;padding:0}.check-grid li{background:var(--paper);border:1px solid var(--line);border-radius:9px;padding:10px;font-size:13px}.check-grid li span{display:inline-grid;place-items:center;width:23px;height:23px;border-radius:50%;background:var(--soft);color:var(--brand);font-weight:800;margin-right:8px}.glossary>div{display:grid;grid-template-columns:185px 1fr;border-bottom:1px solid var(--line);padding:13px 0}.glossary dt{font-weight:800;color:var(--brand)}.glossary dd{margin:0;color:var(--muted)}
 .page-nav{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:70px;border-top:1px solid var(--line);padding-top:23px}.page-nav a{display:block;padding:14px;border:1px solid var(--line);border-radius:10px;background:var(--paper);text-decoration:none}.page-nav a.next{text-align:right}.page-nav small{display:block;color:var(--muted)}
@@ -2428,6 +2620,7 @@ def build() -> str:
     )
     return (
         '<!doctype html>\n<html lang="zh-CN" data-theme="light"><head><meta charset="utf-8">'
+        '<link rel="icon" href="data:,">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta name="description" content="SuperRAN 开发者文档：无线物理、链路算法、系统仿真、MCP、Skill、API 与验证。">'
         '<title>SuperRAN 开发者文档</title>' + kx.head_assets()

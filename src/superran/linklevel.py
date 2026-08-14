@@ -122,6 +122,7 @@ def compute_precoder(
     n_h: int | None = None,
     n_v: int | None = None,
     port_order: str | None = None,
+    vertical_index_order: str | None = None,
     forced_rank: int | None = None,
 ) -> Precoder:
     """计算预编码矩阵。
@@ -200,6 +201,7 @@ def compute_precoder(
             n_v=n_v,
             max_rank=min(max_rank, eff_rank),
             port_order=port_order,
+            vertical_index_order=vertical_index_order,
         )
         w = np.broadcast_to(r.precoder[None], (rb, *r.precoder.shape)).astype(np.complex64).copy()
         return Precoder(w=w, rank=r.rank, method=method, indices=list(r.indices))
@@ -754,6 +756,7 @@ def link_performance(
     n_h: int | None = None,
     n_v: int | None = None,
     port_order: str | None = None,
+    vertical_index_order: str | None = None,
     interference_model: InterferenceModel = "precoded",
     r_uu_source: RuuSource = "true",
     r_uu_samples: int = 8,
@@ -821,6 +824,7 @@ def link_performance(
         prec = compute_precoder(
             h_p, method=method, max_rank=max_rank, rank_threshold=rank_threshold,
             n_h=n_h, n_v=n_v, port_order=port_order,
+            vertical_index_order=vertical_index_order,
         )
     else:
         # Rank 必须按发送端可获得的 h_p 选择，再固定该权到 h_true 上评估。
@@ -836,6 +840,7 @@ def link_performance(
             h_p, method=method, max_rank=r_cap,
             rank_threshold=rank_threshold, n_h=n_h, n_v=n_v,
             port_order=port_order,
+            vertical_index_order=vertical_index_order,
             forced_rank=r_cap,
         )
         for requested_rank in range(1, full.rank + 1):
@@ -960,6 +965,7 @@ def monte_carlo(
     n_h: int | None = None,
     n_v: int | None = None,
     port_order: str | None = None,
+    vertical_index_order: str | None = None,
     operating_point_mode: str | None = None,
 ) -> MonteCarloResult:
     """在一批样本上跑蒙特卡洛，返回均值、置信区间与收敛判断。
@@ -989,6 +995,7 @@ def monte_carlo(
         kw: dict[str, Any] = {
             "method": method, "receiver": receiver, "max_rank": max_rank,
             "n_h": n_h, "n_v": n_v, "port_order": port_order,
+            "vertical_index_order": vertical_index_order,
             "power_constraint": power_constraint}
         if noise_powers is not None:
             kw["noise_power"] = float(noise_powers[i])
@@ -1057,6 +1064,7 @@ def compare_precoders(
     n_h: int | None = None,
     n_v: int | None = None,
     port_order: str | None = None,
+    vertical_index_order: str | None = None,
     operating_point_mode: str | None = None,
 ) -> dict[str, Any]:
     """同一批信道上横向对比多种预编码方案。
@@ -1074,6 +1082,7 @@ def compare_precoders(
             interferers=interferers,
             interference_covariances=interference_covariances,
             n_h=n_h, n_v=n_v, port_order=port_order,
+            vertical_index_order=vertical_index_order,
             operating_point_mode=operating_point_mode,
         )
         out[m] = r.as_dict()

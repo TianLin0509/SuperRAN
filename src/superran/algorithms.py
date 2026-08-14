@@ -45,24 +45,48 @@ class Algorithm:
 
 
 def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
+    from . import hardware as hw  # noqa: PLC0415
+
     n_bs = int(cfg.get("num_bs_tx_ant", 64) or 64)
     n_cell = int(cfg.get("num_sites", 1) or 1) * int(cfg.get("sectors_per_site", 1) or 1)
     est = str(cfg.get("channel_est_mode", "ls_linear"))
     multi = n_cell > 1
+    panel = list(cfg.get("bs_panel") or [])
+    profile = hw.company_profile_for_panel(panel)
+    if profile is None and not panel:
+        profile = {64: "64t", 256: "256t"}.get(n_bs)
+    mode = str(cfg.get("antenna_model_mode") or (
+        "effective_subarray" if profile is not None else "legacy_64"))
+    if mode == "legacy_64":
+        antenna_choice = f"legacy_64（{n_bs} 个独立阵元）"
+        antenna_why = (
+            "显式历史兼容/对照模式：每个数字端口被当成一个独立阵元。"
+            "它不代表已确认的公司 64T/256T 馈电结构。")
+    else:
+        m = 3 if profile == "64t" else 6 if profile == "256t" else int(
+            ((cfg.get("bs_antenna") or {}).get("fixed_vertical_subarray") or {}).get(
+                "elements_per_rf_port", 1))
+        n_ae = n_bs * m
+        antenna_choice = (
+            f"{mode}（1 驱 {m}，{n_bs} RF 端口 × {m} 阵子 = {n_ae}）")
+        antenna_why = (
+            f"该 AAU 是 {n_bs} 个 RF 端口、每端口固定驱动垂直相邻 {m} 个阵子。"
+            "64T 与 256T 统一采用 pol_h_v + top_to_bottom："
+            "先极化块、再水平列、垂直行最快，v=0 对应物理顶部。"
+            "水平间距 0.5λ、物理垂直阵子间距 0.67λ。")
 
     return [
         Algorithm(
             key="antenna_model",
             name="天线阵列模型",
             stage="信道生成",
-            choice=("effective_subarray（1 驱 3，64 RF 端口 × 3 阵子 = 192）"
-                    if n_bs == 64 else f"legacy_64（{n_bs} 个独立阵元，间距一律 0.5λ）"),
-            why="真实 AAU 是 8H×4V×2pol 共 64 个 RF 端口，每端口固定驱动垂直相邻 3 个阵子。"
-                "水平 0.5λ、垂直 0.67λ，RF 端口垂直相位中心 2.01λ > λ，垂直方向有栅瓣。",
-            caveat="**legacy 会把吞吐高估 27%、边缘用户高估 61%**（实测）。"
-                   "面板不是 8×4×2 时自动走 legacy，因为 1 驱 3 是这一款硬件的事实、不是通用规律。",
-            source="ChannelHub phy_sim/effective_array.py；实测对比见 CLAUDE.md",
-            alternatives=["legacy_64", "physical_reference（真跑 192 阵子，慢但可作参考）"],
+            choice=antenna_choice,
+            why=antenna_why,
+            caveat="端口顺序只改变数组坐标，不应改变同一物理信道的结果；迁移必须同时重排 H、W、F。"
+                   "历史 64T 样本缺少新布局字段时只能按 h_v_pol + bottom_to_top 读取，"
+                   "不能静默套用新默认。1 驱 N 是具体硬件事实，未知面板不得猜测。",
+            source="MSG-Platform phy_sim/effective_array.py；本项目 hardware.py",
+            alternatives=["legacy_64", "physical_reference（真跑物理阵子，慢但可作参考）"],
         ),
         Algorithm(
             key="channel_est",

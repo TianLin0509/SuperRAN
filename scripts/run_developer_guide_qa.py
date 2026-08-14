@@ -46,6 +46,10 @@ def main() -> None:
             page.goto(GUIDE.as_uri() + "#/antenna", wait_until="load")
             page.wait_for_selector('.doc-page[data-page="antenna"]:not([hidden])')
             formula_count = page.locator('.doc-page[data-page="antenna"] .kx-ok').count()
+            antenna_shot = None
+            if name == "desktop":
+                antenna_shot = OUT / "antenna-desktop.png"
+                page.screenshot(path=str(antenna_shot), full_page=True)
 
             search = page.locator("#search")
             search.fill("NEBF 每天线")
@@ -94,6 +98,8 @@ def main() -> None:
                 "hero_within_viewport": hero_within_viewport,
                 "screenshot": str(shot),
             }
+            if antenna_shot is not None:
+                checks["antenna_screenshot"] = str(antenna_shot)
             checks["pass"] = bool(
                 visible_page_count == 1
                 and overflow <= 1

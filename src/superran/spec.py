@@ -229,7 +229,8 @@ def build_spec(
     if array.get("antenna_model_mode") == "legacy_64" and hw.is_company_panel(panel):
         notes.append(
             "**阵列走的是 legacy 独立阵元模型，不是本地 1 驱 3 硬件。**"
-            "实测这样报出的吞吐偏高约 27%、边缘用户偏高约 61%。"
+            "2026-07-31 旧内核消融曾测到吞吐 +27%、边缘用户 +61%；"
+            "该数字只作历史风险提示，当前版本必须重新成对实测。"
         )
     if cell_err:
         notes.append(f"站点位置画不出来：{cell_err}")
@@ -630,7 +631,8 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
     ("isd_m", "站间距 m", "number", (50, 6000, 10), "密集城区 150~200、宏站 500、农村 1732+"),
     ("num_ues", "每轮 UE 数", "number", (1, 500, 1), "样本数会自动对齐到它的整数倍"),
     ("num_interfering_ues", "每邻区干扰 UE", "number", (0, 32, 1), "主要影响测量域（SRS）"),
-    ("num_bs_tx_ant", "基站端口", "select", [4, 16, 32, 64, 256], "64 会自动用 1 驱 3 真实阵列"),
+    ("num_bs_tx_ant", "基站端口", "select", [4, 16, 32, 64, 256],
+     "64/256 会自动用 1 驱 3/1 驱 6 真实阵列，并统一 pol_h_v 端口顺序"),
     ("num_ue_rx_ant", "终端接收天线", "select", [2, 4], ""),
     ("carrier_freq_hz", "载波", "select",
      [700000000.0, 2100000000.0, 2600000000.0, 3500000000.0], "默认 n41 2.6 GHz"),

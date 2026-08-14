@@ -29,7 +29,7 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-CHANNELHUB = Path(r"C:\Vibe\AI\ChannelHub_main")
+CHANNELHUB = ROOT.parent / "MSG-Platform"
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(CHANNELHUB / "src"))
 

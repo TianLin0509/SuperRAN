@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CHANNELHUB = Path(r"C:\Vibe\AI\ChannelHub_main")
+DEFAULT_CHANNELHUB = ROOT.parent / "MSG-Platform"
 DEFAULT_DEPS = Path(r"C:\VibeData\Caches\channelhub-test-deps-20260810")
 DEFAULT_OUTPUT = ROOT / "artifacts" / "srs_pdp_robust_audit_20260810.json"
 
@@ -326,7 +326,8 @@ def run(channelhub_root: Path, deps_root: Path, output: Path) -> dict[str, Any]:
         and element_pattern["horizontal_hpbw_deg"] == 110.0
         and antenna_model["polarization_slant_angles_deg"] == [45.0, -45.0]
         and antenna_model["fixed_downtilt_deg"] == 6.0
-        and antenna_model["calibration_id"] == "company-64T-1to3-192ae-v1",
+        and antenna_model["calibration_id"]
+        == "company-64T-1to3-192ae-pol-h-v-top-down-v2-dt6deg",
         {"shape": e2e_summary["shape"], "element_pattern": element_pattern},
     )
     e2e = {

@@ -10,51 +10,71 @@ from typing import Any
 from .algo_defs import Family, Flow, Option
 
 
-def _antenna(n_bs: int) -> Family:
+def _antenna(cfg: dict[str, Any]) -> Family:
+    from . import hardware as hw  # noqa: PLC0415
+
+    n_bs = int(cfg.get("num_bs_tx_ant", 64) or 64)
+    panel = list(cfg.get("bs_panel") or [])
+    profile = hw.company_profile_for_panel(panel)
+    if profile is None and not panel:
+        profile = {64: "64t", 256: "256t"}.get(n_bs)
+    mode = str(cfg.get("antenna_model_mode") or (
+        "effective_subarray" if profile is not None else "legacy_64"))
+    m = 3 if profile == "64t" else 6 if profile == "256t" else int(
+        ((cfg.get("bs_antenna") or {}).get("fixed_vertical_subarray") or {}).get(
+            "elements_per_rf_port", 1))
+    n_ae = n_bs * m
+    if profile == "64t":
+        shape = "8H×4V×2pol"
+    elif profile == "256t":
+        shape = "16H×8V×2pol"
+    else:
+        shape = f"{n_bs} 端口"
     return Family(
         key="antenna_model",
         name="天线阵列模型",
         stage="信道生成",
-        current="effective_subarray" if n_bs == 64 else "legacy_64",
+        current=mode,
         config_key="num_bs_tx_ant",
-        intro="同样写「64T」，把它当 64 个独立阵元还是当 64 个 RF 端口各驱动 3 个阵子，"
-              "算出来的信道完全是两回事。",
-        formula=r"H_{eff} = F^H H_{phys}, \quad F \in \mathbb{C}^{192 \times 64}",
-        caveat="**legacy 会把吞吐高估 27%、边缘用户高估 61%**（实测）。"
-               "2026-07-31 之前生成的所有谱效与吞吐数字都偏乐观。"
-               "1 驱 3 是这一款 AAU 的硬件事实、不是通用规律，"
-               "所以只在面板是 8×4×2 时自动生效。",
+        intro=f"同样写「{n_bs}T」，把数字端口当独立阵元，还是按真实馈电投影，"
+              "得到的是两套不同物理模型。64T/256T 的新数据共享同一编号合同。",
+        formula=(rf"H_{{eff}} = F^H H_{{phys}}, \quad "
+                 rf"F \in \mathbb{{C}}^{{{n_ae} \times {n_bs}}}"),
+        caveat="端口换序本身必须是严格置换：H、W、F 一起换序后有效信道应逐数等价。"
+               "旧 64T 数据按 h_v_pol + bottom_to_top 显式兼容；"
+               "新数据和新模块只允许 pol_h_v + top_to_bottom。未知面板不得猜 1 驱 N。",
         source="ChannelHub phy_sim/effective_array.py",
         options=[
-            Option("effective_subarray", "effective_subarray（1 驱 3 真实阵列）",
+            Option("effective_subarray", f"effective_subarray（1 驱 {m} 真实阵列）",
                    formula=r"d_H = 0.5\lambda, \quad d_V = 0.67\lambda, \quad "
-                           r"d_{RF,V} = 3 \times 0.67\lambda = 2.01\lambda",
-                   summary="64 个 RF 端口，每端口固定驱动垂直相邻 3 个阵子，共 192 阵子",
-                   detail="真实 AAU 的样子：8H × 4V × 2pol = 64 个 RF 端口。"
-                          "RF 端口的垂直相位中心间距 2.01λ **大于一个波长**，"
-                          "所以垂直方向有栅瓣——这是 legacy 模型完全看不到的物理。",
-                   when="面板是 8×4×2 时自动启用（默认）",
+                           rf"d_{{RF,V}} = {m} \times 0.67\lambda",
+                   summary=(f"{n_bs} 个 RF 端口，每端口固定驱动垂直相邻 {m} 个阵子，"
+                            f"共 {n_ae} 阵子"),
+                   detail=(f"真实 AAU：{shape} = {n_bs} 个 RF 端口。"
+                           "64T/256T 都按 pol_h_v + top_to_bottom 展平，"
+                           "编号公式统一为 r=p·N_H·N_V+h·N_V+v。"),
+                   when="已确认的 8×4×2 64T 或 16×8×2 256T 面板自动启用",
                    cost="与 legacy 相同（用等效阵列快路径）"),
             Option("legacy_64", "legacy_64（独立阵元）",
                    formula=r"d_H = d_V = 0.5\lambda",
                    summary="把 64 个端口当 64 个独立阵元，间距一律半波长",
                    detail="ChannelHub 的历史默认。没有 1 驱 3 的耦合、没有栅瓣，"
                           "自由度被高估。",
-                   when="面板不是 8×4×2 时自动落回；或要对照历史结果",
+                   when="面板馈电结构未确认；或显式对照历史结果",
                    cost="最省"),
-            Option("physical_reference", "physical_reference（真跑 192 阵子）",
-                   summary="按 192 个物理阵子建模再用耦合矩阵投影回 64 端口",
-                   detail="慢路径的参考实现。实测与 effective_subarray 相对差 **4.8e−7**，"
-                          "说明快路径复现了参考路径——放心用快的。",
+            Option("physical_reference", f"physical_reference（真跑 {n_ae} 阵子）",
+                   summary=f"按 {n_ae} 个物理阵子建模再用耦合矩阵投影回 {n_bs} 端口",
+                   detail="慢路径参考实现；是否与快路径等价必须由当前版本的数值门验证，"
+                          "不能把历史测得误差当成永久承诺。",
                    when="要验证快路径没写错",
                    cost="慢很多，只用于校验"),
         ],
         flow=Flow(steps=[
-            ("按物理阵子建信道", "192 个阵子各自的 38.901 信道系数"),
-            ("组耦合矩阵 F", "每个 RF 端口固定驱动垂直相邻 3 个阵子，F 是 192×64 稀疏阵"),
-            ("投影到 RF 端口", "H_eff = F^H · H_phys，得到 64 端口的等效信道"),
-            ("检查栅瓣", "RF 端口垂直相位中心 2.01λ > λ，垂直方向必有栅瓣"),
-        ], branches=[(1, "面板不是 8×4×2", "落回 legacy_64，直接按 N 个独立阵元建")]),
+            ("按物理阵子建信道", f"{n_ae} 个阵子各自的 38.901 信道系数"),
+            ("组耦合矩阵 F", f"每个 RF 端口驱动垂直相邻 {m} 个阵子，F 是 {n_ae}×{n_bs} 稀疏阵"),
+            ("投影到 RF 端口", f"H_eff = F^H · H_phys，得到 {n_bs} 端口等效信道"),
+            ("锁定布局", "pol_h_v + top_to_bottom；旧布局只经显式置换进入"),
+        ], branches=[(1, "面板馈电结构未确认", "落回 legacy_64，不猜 1 驱 N")]),
     )
 
 
@@ -569,9 +589,8 @@ def _tx_sinr() -> Family:
 
 
 def extra_families(cfg: dict[str, Any]) -> list[Family]:
-    n_bs = int(cfg.get("num_bs_tx_ant", 64) or 64)
     return [
-        _antenna(n_bs),
+        _antenna(cfg),
         _rbg(),
         _precoder_su(),
         _csi_aging(),

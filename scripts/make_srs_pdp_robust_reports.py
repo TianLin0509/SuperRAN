@@ -211,7 +211,7 @@ SRS_BODY = r"""
 <li><a href="https://www.etsi.org/deliver/etsi_tr/138900_138999/138901/18.01.00_60/tr_138901v180100p.pdf">3GPP TR 38.901 V18.1.0</a>：§7.3 element pattern/slant polarization。</li>
 <li><a href="https://nvlabs.github.io/sionna/_modules/sionna/phy/ofdm/channel_estimation.html">Sionna 2.0.1 channel estimation source</a>：f/t/s LMMSE 与 err_var。</li>
 <li><a href="https://nvlabs.github.io/sionna/rt/api/antenna_pattern.html">Sionna RT antenna pattern API</a>：cross/TR38.901。</li></ul></div>
-<div class="card"><h3>本地源码</h3><div class="path">C:\Vibe\AI\ChannelHub_main\src\msg_embedding\data\sources\_interference_estimation.py<br>C:\Vibe\AI\ChannelHub_main\src\msg_embedding\data\sources\internal_sim.py<br>C:\Vibe\AI\ChannelHub_main\src\msg_embedding\phy_sim\effective_array.py<br>C:\Vibe\Wireless\superran\src\superran\generate.py<br>C:\Vibe\Wireless\superran\src\superran\channelhub.py<br>C:\Vibe\Wireless\superran\src\superran\system.py</div></div></div>
+<div class="card"><h3>本地源码</h3><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\data\sources\_interference_estimation.py<br>C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\data\sources\internal_sim.py<br>C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\phy_sim\effective_array.py<br>C:\Vibe\Wireless\SuperRAN\src\superran\generate.py<br>C:\Vibe\Wireless\SuperRAN\src\superran\channelhub.py<br>C:\Vibe\Wireless\SuperRAN\src\superran\system.py</div></div></div>
 <footer class="foot"><b>SuperRAN SRS channel trilateral audit</b><br>证据 JSON：artifacts/srs_pdp_robust_audit_20260810.json；生成 @@GENERATED@@。</footer></section>
 """
 
