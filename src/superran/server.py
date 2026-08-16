@@ -126,6 +126,52 @@ def _jsonable(obj: Any) -> Any:
     return obj
 
 
+#: 系统级仿真的 RBG 名义大小（RB）。38.214 §5.1.2.2.1 的 P 值之一，
+#: 与本项目 272 RB = 17×16 的载波配置对齐。
+_RB_PER_RBG = 16
+
+
+def _carrier_grid(config: dict[str, Any], *, num_rb: int) -> dict[str, Any]:
+    """由数据集算出系统级仿真该用的载波栅格与 numerology。
+
+    ``num_rb`` 来自信道张量本身（``h.shape[-3]``），不是配置里的声明值——
+    真正决定 TBS 与频域分配的是实际生成出来的那些 RB。
+
+    **剩余不足一个 RBG 的 RB 会被排除在仿真之外，并如实报出来。**
+    这不是偷懒：``mumimo.rbg_reduce`` 本来就只取每个完整 RBG 的代表 RB，
+    而 :class:`experience.TbsLookup` 假设所有 RBG 等长（它的文档里写着
+    "若未来允许任意 BWP 起点，必须把 RBG bitmap/各组实际 RB 数纳入索引"）。
+    在支持不等长 RBG 之前，**少算一点并说出来**远好于按 272 RB 硬算——
+    后者在 51 RB 的载波上把吞吐报高 4.3 倍。
+    """
+    rb_total = int(num_rb)
+    if rb_total < 1:
+        raise ValueError(f"信道里的 RB 数必须为正，收到 {num_rb}")
+    # 整带还不到一个名义 RBG（探测/窄带数据集）时，就把整带当成一个 RBG，
+    # 而不是硬凑 16 RB —— 否则 TBS 会按不存在的资源算。
+    rb_per_rbg = _RB_PER_RBG if rb_total >= _RB_PER_RBG else rb_total
+    num_rbg = max(1, rb_total // rb_per_rbg)
+    simulated_rb = num_rbg * rb_per_rbg
+    raw_scs = config.get("subcarrier_spacing", 30_000) or 30_000
+    try:
+        scs_khz = int(round(float(raw_scs) / 1000.0))
+    except (TypeError, ValueError):
+        scs_khz = 30
+    if scs_khz <= 0:
+        scs_khz = 30
+    return {
+        "num_rb_in_channel": rb_total,
+        "num_rbg": int(num_rbg),
+        "rb_per_rbg": int(rb_per_rbg),
+        "simulated_num_rb": int(simulated_rb),
+        "excluded_num_rb": int(rb_total - simulated_rb),
+        "scs_khz": int(scs_khz),
+        "tti_ms": 1.0 / (scs_khz / 15.0),
+        "source": "derived from dataset channel shape and subcarrier_spacing",
+        "rbg_size_basis": "38.214 §5.1.2.2.1 nominal RBG size P=16; equal-size RBGs only",
+    }
+
+
 # ---------------------------------------------------------------------------
 # 能力发现
 # ---------------------------------------------------------------------------
@@ -683,6 +729,7 @@ def _calibrate_sync(dataset_id: str) -> dict[str, Any]:
 async def sr_gate(
     dataset_id: str,
     stage: str = "channel",
+    expected_precoding_csi_source: str | None = None,
 ) -> dict[str, Any]:
     """评审门：拦住站不住的结论。
 
@@ -697,14 +744,27 @@ async def sr_gate(
             "error": f"stage={stage!r} 不支持",
             "hint": "门 2 与门 3 请用 sr_compare_arms，它需要两个方案的逐样本结果",
         }
-    return await anyio.to_thread.run_sync(functools.partial(_gate_sync, dataset_id))
+    return await anyio.to_thread.run_sync(
+        functools.partial(
+            _gate_sync,
+            dataset_id,
+            expected_precoding_csi_source=expected_precoding_csi_source,
+        )
+    )
 
 
-def _gate_sync(dataset_id: str) -> dict[str, Any]:
+def _gate_sync(
+    dataset_id: str,
+    *,
+    expected_precoding_csi_source: str | None = None,
+) -> dict[str, Any]:
     from . import gates as g
     from . import loader as ld
 
-    res = g.gate_channel(ld.load(dataset_id))
+    res = g.gate_channel(
+        ld.load(dataset_id),
+        expected_precoding_csi_source=expected_precoding_csi_source,
+    )
     out = res.as_dict()
     out["text"] = res.text()
     return _jsonable(out)
@@ -722,6 +782,7 @@ async def sr_compare_arms(
     receiver: str = "mmse",
     snr_db: float | None = None,
     max_samples: int = 500,
+    varies: list[str] | None = None,
 ) -> dict[str, Any]:
     """在**同一批信道**上跑两个方案，做配对比较，并连过门 2、门 3。
 
@@ -736,7 +797,10 @@ async def sr_compare_arms(
     4. **一句可直接写进报告的结论** —— 过不了门时它会明说结论不成立及原因。
 
     ``method_*``：``svd`` / ``svd_wideband`` / ``type1`` / ``dft`` / ``mrt`` / ``identity``。
-    ``csi_*``：``ideal`` 用理想信道预编码，``estimated`` 用估计信道。
+    ``csi_*``：``ideal`` 用理想信道；``estimated`` 用数据集主估计；
+    ``srs`` 用 gNB 的 UL SRS 估计；``csirs`` 用 UE 的 DL CSI-RS 估计。
+    SRS-vs-PMI 端到端方案比较应写 ``srs`` vs ``csirs``，并用
+    ``varies=["csi"]`` 明确这是方案链差异；只测码本量化则两臂都写 ``srs``。
     ``snr_db`` 不给时用数据集逐样本自身的 SINR（各用户真实工作点）。
     """
     return await anyio.to_thread.run_sync(
@@ -745,6 +809,7 @@ async def sr_compare_arms(
             dataset_id=dataset_id, method_a=method_a, method_b=method_b,
             name_a=name_a, name_b=name_b, csi_a=csi_a, csi_b=csi_b,
             receiver=receiver, snr_db=snr_db, max_samples=max_samples,
+            varies=varies,
         )
     )
 
@@ -752,13 +817,20 @@ async def sr_compare_arms(
 def _compare_arms_sync(
     *, dataset_id: str, method_a: str, method_b: str, name_a: str, name_b: str,
     csi_a: str, csi_b: str, receiver: str, snr_db: float | None, max_samples: int,
+    varies: list[str] | None = None,
 ) -> dict[str, Any]:
     from . import loader as ld
 
     ds = ld.load(dataset_id)
     res = ds.compare_arms(
-        {"name": name_a, "method": method_a, "csi": csi_a, "receiver": receiver},
-        {"name": name_b, "method": method_b, "csi": csi_b, "receiver": receiver},
+        {
+            "name": name_a, "method": method_a, "csi": csi_a,
+            "receiver": receiver, "varies": list(varies or []),
+        },
+        {
+            "name": name_b, "method": method_b, "csi": csi_b,
+            "receiver": receiver, "varies": list(varies or []),
+        },
         snr_db=snr_db, max_samples=max_samples,
     )
     out = res.as_dict()
@@ -1798,6 +1870,13 @@ def sr_system_sim(
     # SRS/CSI-RS 机会（默认 5 ms），不是连续 TTI——当成 TTI 会让所有时间相关的
     # 结论差 10 倍，见 CLAUDE.md「多时隙的快照间隔是 5 ms」。
     snap_ms = sysm.snapshot_interval_ms(ds.config)
+    # **载波栅格与 numerology 必须跟着数据集走。** 早先这里把 num_rbg 写死 17
+    # （= 100 MHz / 272 RB），scs_khz 更是从头到尾没设过（默认 30）。于是任何
+    # 20 MHz / 10 MHz / 15 kHz 的数据集都被当成 100 MHz@30 kHz 来算 TBS 与 TTI：
+    # 实测 51 RB 的信道上小区吞吐报 756 Mbps，按真实带宽只有 178 Mbps，**虚高 4.3 倍**，
+    # 而且不报错、不告警。snapshot_update_ms 一直是从 ds.config 算的——
+    # 同一份配置一半跟数据集走、一半写死，正是最难发现的那种不一致。
+    carrier = _carrier_grid(ds.config, num_rb=int(h.shape[2]))
     # 说明书页面上的开关是 select，回传的是 "on"/"off" 字符串；
     # 直接 bool() 的话 "off" 是**真值**，开关会失灵而且完全无声。
     def _flag(v: Any) -> bool:
@@ -1827,6 +1906,16 @@ def sr_system_sim(
         return {"error": (
             "RB 功控与 MU 同开时请使用 evaluation_mode='experience'；"
             "capacity 的 legacy 标量 MU 增益没有逐 RBG pair SINR，不能准确评估。")}
+    if power_cfg.enabled and carrier["excluded_num_rb"]:
+        # 功控 profile 是逐 RB 的，而 RBG 栅格只覆盖完整分组。让不足一组的尾部
+        # 悄悄落在仿真之外，等于用户设的那几个 RB 倍率根本没生效——宁可拦住。
+        return {"error": (
+            f"RB 功控需要载波 RB 数是 RBG 大小的整数倍：数据集是 "
+            f"{carrier['num_rb_in_channel']} RB，{carrier['rb_per_rbg']} RB 一组只能凑出 "
+            f"{carrier['num_rbg']} 组（{carrier['simulated_num_rb']} RB），"
+            f"尾部 {carrier['excluded_num_rb']} 个 RB 的功率倍率会失效。"
+            "请用 RB 数为 16 整数倍的数据集（如 272 RB / 100 MHz），"
+            "或关掉 rb_power_control_enabled。")}
 
     try:
         csi_cfg = sysm.ca.CsiConfig(
@@ -1868,8 +1957,8 @@ def sr_system_sim(
             evaluation_mode=mode, duration_s=float(duration_s),
             tdd_pattern=tdd_pattern, seed=seed, snapshot_update_ms=snap_ms,
             power_constraint=str(power_constraint), rb_power_control=power_cfg,
-            num_rbg=(int(h.shape[2]) // 16 if power_cfg.enabled else 17),
-            rb_per_rbg=16)
+            scs_khz=carrier["scs_khz"],
+            num_rbg=carrier["num_rbg"], rb_per_rbg=carrier["rb_per_rbg"])
         scheduler_cfg = sysm.SchedulerConfig(
             algorithm=scheduler, pf_window_tti=pf_window_tti,
             pf_accounting=pf_accounting,
@@ -1991,9 +2080,11 @@ def sr_system_sim(
     }
     out["mu_gain"] = mu_gain
     aging = sysm.ca.aging_summary(
-        csi_cfg, num_rbg=17, snapshot_ms=snap_ms,
+        csi_cfg, num_rbg=carrier["num_rbg"], snapshot_ms=snap_ms,
+        rb_per_rbg=carrier["rb_per_rbg"],
         speed_kmh=float(ds.config.get("ue_speed_kmh", 3.0) or 3.0))
     out["csi_aging"] = aging
+    out["carrier"] = carrier
     out["precoder"] = {
         "transmit_weight": str(precoder),
         "note": ("SVD 逐 RBG 特征波束" if precoder == "svd"
@@ -2021,6 +2112,20 @@ def sr_system_sim(
     # **让结论不成立的条件必须进 notes**，不能只躺在子字段里等人翻。
     notes = list(out.get("notes") or [])
     notes.extend(aging.get("warnings") or [])
+    notes.append(
+        f"载波栅格取自数据集：{carrier['num_rb_in_channel']} RB @ "
+        f"{carrier['scs_khz']} kHz（TTI {carrier['tti_ms']:g} ms），"
+        f"仿真 {carrier['num_rbg']} × {carrier['rb_per_rbg']} = "
+        f"{carrier['simulated_num_rb']} RB。")
+    if carrier["excluded_num_rb"]:
+        notes.append(
+            f"**载波尾部 {carrier['excluded_num_rb']} 个 RB 未参与仿真**："
+            f"{carrier['num_rb_in_channel']} 不是 RBG 大小 {carrier['rb_per_rbg']} 的整数倍，"
+            "而当前 TBS 反查假设所有 RBG 等长（38.214 允许首尾 RBG 更短，本项目尚未实现）。"
+            f"因此吞吐类 KPI 对应的是 {carrier['simulated_num_rb']} RB 而不是 "
+            f"{carrier['num_rb_in_channel']} RB，按带宽折算会**偏低约 "
+            f"{carrier['excluded_num_rb'] / carrier['num_rb_in_channel']:.1%}**。"
+            "要精确到整带宽，请生成 RB 数为 16 的整数倍的数据集。")
     if power_cfg.enabled:
         if not power_cfg.overrides:
             notes.append(

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pickle
 import sys
 import time
@@ -33,18 +34,30 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+# Windows shells launched outside a UTF-8 terminal can inherit cp1252.  Gate
+# statements are Chinese, so make the audit runner's machine-readable output
+# independent of the parent console code page.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+
 from superran import gates, load  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import rng as rg  # noqa: E402
 from superran import system as sy  # noqa: E402
 from superran.csi_aging import CsiConfig  # noqa: E402
 
-DATASET_ID = "ds_e8a577d8"
+DATASET_ID = os.environ.get("SUPERRAN_AUDIT_DATASET_ID", "ds_e8a577d8")
 MASTER_SEED = 20260809
 FORMAL_N = 16
 PILOT_N = 8
 FORMAL_LARGE_RATE_HZ = 8.0
 FORMAL_SMALL_RATE_HZ = 30.0
+FORMAL_TARGET_PRB_UTILIZATION = 0.50
+FORMAL_LOAD_TOLERANCE = 0.03
+FORMAL_CALIBRATION_SEED = 20260810
+FORMAL_CALIBRATION_REPLICATIONS = 8
 # 第一版 7 s / 3 s、现场步长在 replication 9 的稀疏 MU 模式只有 58/12
 # 个半窗样本，且暴露出固定接收基 bug。修正为逐用户 LMMSE 后，仍需要更长
 # 的统计窗来观察稀疏模式；协议在重跑正式 Gate 3 之前修订并冻结如下。
@@ -229,11 +242,13 @@ def run_one(tables: list[sy.UeLinkTable], replication: int, *,
             small_rate: float = FORMAL_SMALL_RATE_HZ,
             small_share: float = 0.5, accounting: str = "scheduled_tbs",
             warmup_speedup: float = 10.0, duration_s: float = 5.0,
-            warmup_s: float = 1.0, power: str = "ebf") -> sy.SystemResult:
+            warmup_s: float = 1.0, power: str = "ebf",
+            traffic_cfg: sy.TrafficConfig | None = None) -> sy.SystemResult:
     return sy.simulate(
         tables,
         sys_cfg=system_config(power=power, duration_s=duration_s),
-        traffic=traffic(large_rate, small_rate, small_share),
+        traffic=(traffic_cfg if traffic_cfg is not None
+                 else traffic(large_rate, small_rate, small_share)),
         sched=scheduler(
             mu_enabled=mu_enabled,
             accounting=accounting,
@@ -310,14 +325,23 @@ def run_pilot(ds: Any) -> dict[str, Any]:
     return out
 
 
-def arm_description(mu_enabled: bool) -> dict[str, Any]:
+def arm_description(
+    mu_enabled: bool,
+    *,
+    traffic_cfg: sy.TrafficConfig | None = None,
+) -> dict[str, Any]:
+    resolved_traffic = traffic_cfg or traffic()
     config = {
         "evaluation_mode": "experience", "duration_s": FORMAL_DURATION_S,
         "warmup_s": FORMAL_WARMUP_S,
         "tdd_pattern": "DDDSU", "snapshot_update_ms": 5.0,
         "num_rbg": 17, "rb_per_rbg": 16,
-        "traffic_model": "mixed", "large_arrival_rate_hz": FORMAL_LARGE_RATE_HZ,
+        "traffic_model": "mixed",
+        "large_arrival_rate_hz": FORMAL_LARGE_RATE_HZ,
         "small_arrival_rate_hz": FORMAL_SMALL_RATE_HZ,
+        "interarrival_scale": float(resolved_traffic.interarrival_scale),
+        "target_prb_utilization": FORMAL_TARGET_PRB_UTILIZATION,
+        "load_calibration_reference_arm": "SU_MU_adaptive_classic_PF",
         "scheduler": "classic_pf", "pf_window_tti": 100,
         "pf_accounting": "scheduled_tbs",
         "mu_enabled": bool(mu_enabled), "max_mu_users": 2, "mu_rank_per_user": 2,
@@ -343,7 +367,8 @@ def arm_description(mu_enabled: bool) -> dict[str, Any]:
 
 def _run_pair(tables: list[sy.UeLinkTable], replications: list[int], *,
               candidate_accounting: str = "scheduled_tbs",
-              baseline_accounting: str = "scheduled_tbs") -> tuple[
+              baseline_accounting: str = "scheduled_tbs",
+              traffic_cfg: sy.TrafficConfig | None = None) -> tuple[
                   list[sy.SystemResult], list[sy.SystemResult], list[rg.RngBook]]:
     candidate: list[sy.SystemResult] = []
     baseline: list[sy.SystemResult] = []
@@ -353,13 +378,67 @@ def _run_pair(tables: list[sy.UeLinkTable], replications: list[int], *,
         candidate.append(run_one(
             tables, rep, mu_enabled=True, accounting=candidate_accounting,
             warmup_speedup=FORMAL_WARMUP_SPEEDUP,
-            duration_s=FORMAL_DURATION_S, warmup_s=FORMAL_WARMUP_S))
+            duration_s=FORMAL_DURATION_S, warmup_s=FORMAL_WARMUP_S,
+            traffic_cfg=traffic_cfg))
         baseline.append(run_one(
             tables, rep, mu_enabled=False, accounting=baseline_accounting,
             warmup_speedup=FORMAL_WARMUP_SPEEDUP,
-            duration_s=FORMAL_DURATION_S, warmup_s=FORMAL_WARMUP_S))
+            duration_s=FORMAL_DURATION_S, warmup_s=FORMAL_WARMUP_S,
+            traffic_cfg=traffic_cfg))
         books.append(rg.RngBook(MASTER_SEED, rep))
     return candidate, baseline, books
+
+
+def calibrate_formal_traffic(
+    tables: list[sy.UeLinkTable], build: dict[str, Any]
+) -> tuple[sy.TrafficConfig, dict[str, Any]]:
+    """Calibrate once on the MU-adaptive reference arm, then freeze both arms.
+
+    Calibrating each A/B arm independently would change offered traffic and
+    destroy the paired comparison.  A seed disjoint from both the convergence
+    pilot and the formal CRN replications prevents load tuning on the outcome.
+    """
+    calibration = sy.calibrate_traffic_to_prb(
+        tables,
+        target_prb_utilization=FORMAL_TARGET_PRB_UTILIZATION,
+        axis="interarrival",
+        tolerance=FORMAL_LOAD_TOLERANCE,
+        max_iterations=6,
+        probe_replications=2,
+        formal_refinements=2,
+        num_replications=FORMAL_CALIBRATION_REPLICATIONS,
+        master_seed=FORMAL_CALIBRATION_SEED,
+        sys_cfg=system_config(duration_s=FORMAL_DURATION_S),
+        traffic=traffic(),
+        sched=scheduler(
+            mu_enabled=True,
+            warmup_speedup=FORMAL_WARMUP_SPEEDUP,
+        ),
+        kpi=sy.KpiConfig(warmup_s=FORMAL_WARMUP_S),
+    )
+    payload = {
+        "stage": "formal_load_calibration",
+        "dataset_id": DATASET_ID,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "reference_arm": "SU_MU_adaptive_classic_PF",
+        "freeze_rule": (
+            "calibrate on the reference arm once; use the identical resolved "
+            "TrafficConfig in both CRN comparison arms"
+        ),
+        "calibration_master_seed": FORMAL_CALIBRATION_SEED,
+        "comparison_master_seed": MASTER_SEED,
+        "build": build,
+        "calibration": calibration.as_dict(),
+    }
+    path = OUT_DIR / "experience_mu_50pct_load_calibration.json"
+    write_json(path, payload)
+    if calibration.status != "target_met":
+        raise RuntimeError(
+            "50% PRB 话务校准未进入预注册容差，正式 MU 门 2 已停止："
+            f"{calibration.as_dict()}"
+        )
+    print(f"LOAD_CALIBRATION={path.resolve()}", flush=True)
+    return calibration.calibrated_traffic, payload
 
 
 def run_formal(ds: Any) -> dict[str, Any]:
@@ -369,9 +448,11 @@ def run_formal(ds: Any) -> dict[str, Any]:
     if not gate1.passed:
         raise RuntimeError("门 1 未通过")
     tables, build = get_tables(ds, TableProfile())
+    formal_traffic, load_calibration = calibrate_formal_traffic(tables, build)
 
     pilot_reps = list(range(100, 100 + PILOT_N))
-    pilot_a, pilot_b, _ = _run_pair(tables, pilot_reps)
+    pilot_a, pilot_b, _ = _run_pair(
+        tables, pilot_reps, traffic_cfg=formal_traffic)
     pilot_convergence = [
         {
             "replication": rep,
@@ -398,7 +479,8 @@ def run_formal(ds: Any) -> dict[str, Any]:
     pilot_diff = (metric_values(pilot_a, "small_queue_wait_ms_p95")
                   - metric_values(pilot_b, "small_queue_wait_ms_p95"))
     pilot_std = float(np.std(pilot_diff, ddof=1)) if PILOT_N > 1 else 0.0
-    arm_a, arm_b = arm_description(True), arm_description(False)
+    arm_a = arm_description(True, traffic_cfg=formal_traffic)
+    arm_b = arm_description(False, traffic_cfg=formal_traffic)
     gate2 = gates.gate_comparison(
         arm_a, arm_b, pilot_std_diff=pilot_std, n_samples=FORMAL_N)
     print(gate2.text(), flush=True)
@@ -406,7 +488,8 @@ def run_formal(ds: Any) -> dict[str, Any]:
         raise RuntimeError("门 2 未通过")
 
     formal_reps = list(range(FORMAL_N))
-    runs_a, runs_b, books = _run_pair(tables, formal_reps)
+    runs_a, runs_b, books = _run_pair(
+        tables, formal_reps, traffic_cfg=formal_traffic)
     formal_health = [
         {
             "replication": rep,
@@ -488,6 +571,7 @@ def run_formal(ds: Any) -> dict[str, Any]:
                   "convergence": pilot_convergence},
         "gate1": gate1.as_dict(), "gate2": gate2.as_dict(),
         "gate3": gate3.as_dict(), "build": build,
+        "traffic_calibration": load_calibration,
         "arms": {"candidate": arm_a, "baseline": arm_b},
         "crn": {"master_seed": MASTER_SEED, "replications": formal_reps,
                 "event_mapping": "harq and scheduler tie-break indexed [TTI,UE]"},
@@ -820,10 +904,13 @@ def main() -> None:
             "pf_sentinel", "all"),
         default="pilot")
     args = parser.parse_args()
-    ds = load(DATASET_ID)
     stages = ("pilot", "stress", "power", "pmi", "reverse_pf",
               "pf_sentinel", "formal") \
         if args.stage == "all" else (args.stage,)
+    # The deterministic PF sentinel constructs its own synthetic link tables and
+    # must remain runnable even when no persisted ChannelDataset is available.
+    needs_dataset = any(stage != "pf_sentinel" for stage in stages)
+    ds = load(DATASET_ID) if needs_dataset else None
     functions = {
         "pilot": run_pilot, "formal": run_formal, "power": run_power,
         "pmi": run_pmi, "stress": run_stress, "reverse_pf": run_reverse_pf,

@@ -733,6 +733,8 @@ class SystemConfig:
         pattern = str(self.tdd_pattern).upper()
         if not pattern or any(slot not in "DSU" for slot in pattern):
             raise ValueError("tdd_pattern 只允许 D/S/U 且不能为空")
+        if not any(slot in "DS" for slot in pattern):
+            raise ValueError("下行系统仿真的 tdd_pattern 至少需要一个 D 或 S 时隙")
         if (not np.isfinite(self.snapshot_update_ms)
                 or float(self.snapshot_update_ms) <= 0):
             raise ValueError("snapshot_update_ms 必须是有限正数")
@@ -876,6 +878,10 @@ class UeLinkTable:
     se_gnb: np.ndarray | None = None       # [snapshot, rank]
     best_se_gnb: np.ndarray | None = None  # [snapshot]
     mcs_table: int = 3                     # experience_v2 当前只接受公司表 3
+    # 建表时用的目标 BLER。**主循环必须读它，不能自己写死 0.1**——
+    # 否则 build_link_tables(target_bler=...) 选出来的 rank 和主循环选出来的 MCS
+    # 是按两个不同判据来的，而这种不一致在结果里完全看不出来。
+    target_bler: float = 0.1
     power_constraint: str = "ebf"
     frequency_rows_per_rbg: int = 1
     serving_cell_index: int | None = None
@@ -1449,6 +1455,11 @@ def build_link_tables(
                             if csi is not None else float(snapshot_ms))
         report_every = max(1, int(np.ceil(
             report_period_ms / max(float(snapshot_ms), _EPS) - 1e-12)))
+        # 宽带 PMI 在一个 CSI 报告周期内**不变**：同一个 report_s 传进去的是同一个
+        # 数组，搜出来的权逐位相同。默认 20 ms 报告周期 / 5 ms 快照下，
+        # 4 次里有 3 次是重复搜索（码本列选择是建表里最贵的几步之一）。
+        # 按 report_s 记忆化，不改任何数值，只是不再算第二遍。
+        pmi_by_report: dict[int, np.ndarray] = {}
 
         for s, hs in enumerate(snaps):
             _g = _gs[s % len(_gs)]
@@ -1467,14 +1478,17 @@ def build_link_tables(
             _panel = [int(v) for v in bs_panel] if bs_panel is not None else []
             _nh = _panel[0] if len(_panel) == 3 else None
             _nv = _panel[1] if len(_panel) == 3 else None
-            w_pmi_s = _type1_precoder(
-                h_prec_seq[report_s],
-                max_rank,
-                n_h=_nh,
-                n_v=_nv,
-                port_order=port_order,
-                vertical_index_order=vertical_index_order,
-            )
+            w_pmi_s = pmi_by_report.get(report_s)
+            if w_pmi_s is None:
+                w_pmi_s = _type1_precoder(
+                    h_prec_seq[report_s],
+                    max_rank,
+                    n_h=_nh,
+                    n_v=_nv,
+                    port_order=port_order,
+                    vertical_index_order=vertical_index_order,
+                )
+                pmi_by_report[report_s] = w_pmi_s
 
             # 预编码用 h_prec、评估用当前快照。零时延时两者相同，
             # 结果与 mumimo.su_rank_adaptation **逐位相同**（test_csi_aging 第 1 节）。
@@ -1601,6 +1615,7 @@ def build_link_tables(
             cqi_index_per_snapshot=cqi_by_snapshot,
             csi_lag_snapshots=lag_used, se_gnb=se_gnb,
             best_se_gnb=se_gnb[np.arange(n_s), best], mcs_table=int(table),
+            target_bler=float(target_bler),
             power_constraint=str(power_constraint).lower(),
             frequency_rows_per_rbg=int(grp),
             serving_cell_index=(serving_cell_by_ue[i]
@@ -2266,6 +2281,8 @@ def simulate(
     kpi = kpi or KpiConfig()
     t0 = time.perf_counter()
 
+    from . import linkadapt as la  # noqa: PLC0415
+
     book = rng if rng is not None else rg.RngBook(master_seed=int(sys_cfg.seed))
     if sys_cfg.evaluation_mode not in ("capacity", "experience"):
         raise ValueError("evaluation_mode 只支持 capacity / experience")
@@ -2277,6 +2294,24 @@ def simulate(
         if table_power != cfg_power:
             raise ValueError(
                 f"UE {i} 链路表功率约束 {table_power} 与系统配置 {cfg_power} 不一致")
+    # **主循环选 MCS 用的表与目标 BLER，必须就是建表时那一套。** 各 UE 之间也得
+    # 一致——一个小区里不可能一半用表 1、一半用表 3。早先这里写死 table=3 /
+    # target_bler=0.1，经 MCP 走默认值恰好对得上，直接调 Python API 时就会出现
+    # "rank 按 A 判据选、MCS 按 B 判据选"，而这种错配没有任何症状。
+    _table_id = int(getattr(tables[0], "mcs_table", 3))
+    _target_bler = float(getattr(tables[0], "target_bler", 0.1))
+    _mismatch = [
+        i for i, table in enumerate(tables)
+        if int(getattr(table, "mcs_table", 3)) != _table_id
+        or float(getattr(table, "target_bler", 0.1)) != _target_bler
+    ]
+    if _mismatch:
+        raise ValueError(
+            f"链路表的 MCS 表 / 目标 BLER 在 UE 之间不一致（错配 UE={_mismatch}）；"
+            f"UE0 是 table={_table_id}、target_bler={_target_bler:g}")
+    if _table_id not in la.MCS_TABLES:
+        raise ValueError(f"未知 MCS 表 {_table_id}")
+    _mcs_table = la.MCS_TABLES[_table_id]
     if sys_cfg.rb_power_control.enabled:
         expected_power_fingerprint = pc.config_fingerprint(sys_cfg.rb_power_control)
         mismatched = [
@@ -2384,8 +2419,6 @@ def simulate(
     olla_db = np.zeros(n_ue)              # 每用户的 OLLA 偏置（dB）
     pattern = sys_cfg.tdd_pattern.upper() or "D"
 
-    from . import linkadapt as la  # noqa: PLC0415
-
     # **调度器只能用基站自己估的谱效。** 用真实谱效等于让它预知信道，
     # 它会自动绕开 CSI 老化最严重的用户，老化的代价就凭空消失了。
     # 零时延时 best_se_gnb 与 best_se 逐位相同，行为不变。
@@ -2438,12 +2471,10 @@ def simulate(
         # **SU 能一个 TTI 传完就不触发 MU**（用户 2026-08-02 的现场准则）——
         # 数据都发完了，配对没有意义，还白白引入用户间干扰。
         _top = cand[order[0]]
+        _top_rank = int(tables[_top].best_rank[snap])
+        _top_mcs = _mcs_table[int(tables[_top].mcs[snap, _top_rank - 1])]
         _su_bytes = int(la.transport_block_size(
-            re_per_tti, la.MCS_TABLES[3][int(tables[_top].mcs[
-                snap, int(tables[_top].best_rank[snap]) - 1])].rate,
-            la.MCS_TABLES[3][int(tables[_top].mcs[
-                snap, int(tables[_top].best_rank[snap]) - 1])].q_m,
-            layers=int(tables[_top].best_rank[snap])) // 8)
+            re_per_tti, _top_mcs.rate, _top_mcs.q_m, layers=_top_rank) // 8)
         _fits_in_su = tr.bytes_left(_top) <= _su_bytes
         use_mu = (sched.mu_enabled and mu_se_ratio > 1.0
                   and len(cand) >= 2 and not _fits_in_su)
@@ -2468,10 +2499,11 @@ def simulate(
             # 接收端按含干扰的 SINR 判误码。两者的差就是 OLLA 要收敛掉的东西。
             if tables[u].sinr_tx_db is not None and sched.olla_enabled:
                 _tx = float(tables[u].sinr_tx_db[snap, r - 1]) + olla_db[u]
-                m = la.select_mcs(_tx, table=3, target_bler=0.1).index
+                m = la.select_mcs(_tx, table=_table_id,
+                                  target_bler=_target_bler).index
             else:
                 m = int(tables[u].mcs[snap, r - 1])
-            mcs_obj = la.MCS_TABLES[3][m]
+            mcs_obj = _mcs_table[m]
             tbs_bits = la.transport_block_size(
                 re_per_tti, mcs_obj.rate, mcs_obj.q_m, layers=r)
             if use_mu:
@@ -2512,8 +2544,7 @@ def simulate(
                 continue
 
             sinr = float(tables[u].sinr_db[snap, r - 1])
-            bler = float(la.bler_curve(m, "newtx")["bler_at"](sinr)) \
-                if False else _bler_lookup(m, sinr)
+            bler = _bler_lookup(m, sinr)
             tx_first[u] += 1
             sched_cnt[u] += 1
             mcs_sum[u] += m
@@ -3239,7 +3270,7 @@ def calibrate_traffic_to_prb(
         formal_replication_ids=formal_replication_ids)
 
 
-_BLER_CACHE: dict[tuple[int, int, str], float] = {}
+_BLER_CACHE: dict[tuple[str, int, int, str], float] = {}
 _BLER_CACHE_STEP_DB = 0.05
 
 
@@ -3249,20 +3280,25 @@ def _bler_lookup(mcs: int, sinr_db: float, tx_mode: str = "newtx") -> float:
     公司曲线的原始横轴步长就是 0.05 dB。旧实现按 0.5 dB 缓存，在瀑布区会把
     工作点最多平移 0.25 dB，足以显著改变 ACK/NACK；缓存不能以牺牲源数据一个
     数量级的分辨率为代价。
+
+    **key 里带曲线数据的 SHA-256。** 当前只有一套公司曲线，所以不带也是对的；
+    但 ``MCS_TABLE_SOURCES`` 已经为第二套 profile 留了位置，届时一个进程级
+    全局字典会静默返回上一套的值——和"CDL 表被异常吞掉后继续用错表"是同一类事故。
     """
     # **nan 要在这里兜住。** int(round(nan*2)) 直接 ValueError，
     # 而 nan SINR 是能真到这儿的（被拒样本、全零信道、几何 SINR 缺失）。
     # 一个用户的一个快照能把整条系统级仿真挂掉，报的错还看不出是谁。
     if sinr_db != sinr_db:                      # nan
         return 1.0                              # 发不出去
+    from . import bler_curves as bc  # noqa: PLC0415
+
     clipped = min(max(float(sinr_db), -60.0), 60.0)
-    key = (int(mcs), int(round(clipped / _BLER_CACHE_STEP_DB)), tx_mode)
+    key = (bc.data.DATA_SHA256, int(mcs),
+           int(round(clipped / _BLER_CACHE_STEP_DB)), tx_mode)
     v = _BLER_CACHE.get(key)
     if v is None:
-        from . import bler_curves as bc  # noqa: PLC0415
-
         v = float(np.atleast_1d(
             bc.get_curve(int(mcs), tx_mode).evaluate(
-                key[1] * _BLER_CACHE_STEP_DB))[0])
+                key[2] * _BLER_CACHE_STEP_DB))[0])
         _BLER_CACHE[key] = float(min(max(v, 0.0), 1.0))
     return _BLER_CACHE[key]

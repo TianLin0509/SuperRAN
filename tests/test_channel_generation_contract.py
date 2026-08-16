@@ -12,13 +12,88 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from superran import channelhub as ch  # noqa: E402
-from superran import generate as gen  # noqa: E402
 from superran import (  # noqa: E402
+    gates,  # noqa: E402
     load,
     measure,
 )
+from superran import generate as gen  # noqa: E402
 from superran import physical as ph  # noqa: E402
 from superran import plan as pl  # noqa: E402
+
+
+def test_explicit_preset_beats_classifier_hint_and_user_override_beats_both() -> None:
+    draft, _ = pl.create_draft(
+        "比较 PMI 与 SVD 预编码",
+        preset="company_64t4r",
+    )
+    assert draft.params["link"] == "BOTH"
+
+    overridden, _ = pl.create_draft(
+        "比较 PMI 与 SVD 预编码",
+        preset="company_64t4r",
+        overrides={"link": "DL"},
+    )
+    assert overridden.params["link"] == "DL"
+
+
+def test_precoding_source_gate_rejects_csirs_when_srs_was_declared() -> None:
+    wrong = SimpleNamespace(precoding_csi_sources=np.array(["dl_csirs_estimate"]))
+    right = SimpleNamespace(
+        precoding_csi_sources=np.array(["ul_srs_estimate", "ul_srs_estimate"])
+    )
+    assert not gates._precoding_source_item(wrong, "ul_srs_estimate").passed
+    assert gates._precoding_source_item(right, "ul_srs_estimate").passed
+
+
+def test_paired_ul_srs_is_reciprocity_mapped_to_downlink_convention() -> None:
+    h_dl = np.array([[[[1 + 2j], [3 - 4j]]]], dtype=np.complex64)
+    sample = SimpleNamespace(
+        h_dl_true=h_dl,
+        h_ul_est=np.conj(h_dl),
+        h_dl_est=h_dl * 0.5,
+    )
+    truth, precoding_est, dl_est, source = ch.downlink_and_precoding_channels(sample)
+    np.testing.assert_array_equal(truth, h_dl)
+    np.testing.assert_array_equal(precoding_est, h_dl)
+    np.testing.assert_array_equal(dl_est, h_dl * 0.5)
+    assert source == "ul_srs_estimate"
+
+
+def test_comparison_csi_selector_keeps_srs_and_csirs_distinct() -> None:
+    srs = np.full((2, 1, 1, 1, 1), 1 + 2j, dtype=np.complex64)
+    csirs = np.full((2, 1, 1, 1, 1), 3 + 4j, dtype=np.complex64)
+    ds = SimpleNamespace(h_est=srs, h_dl_est=csirs)
+    np.testing.assert_array_equal(gates._precoding_csi_tensor(ds, "srs"), srs)
+    np.testing.assert_array_equal(gates._precoding_csi_tensor(ds, "csirs"), csirs)
+    assert gates._precoding_csi_tensor(ds, "ideal") is None
+    with pytest.raises(ValueError, match="禁止静默回退"):
+        gates._precoding_csi_tensor(SimpleNamespace(h_est=srs, h_dl_est=None), "csirs")
+
+
+def test_builtin_comparison_clusters_repeated_snapshots_by_ue_position() -> None:
+    h = np.ones((4, 1, 1, 1, 1), dtype=np.complex64)
+    ds = SimpleNamespace(
+        h_true=h,
+        h_est=h,
+        h_dl_est=h,
+        h_interferers=None,
+        ue_position=np.array(
+            [[10.0, 0.0, 1.5], [20.0, 0.0, 1.5],
+             [10.0, 0.0, 1.5], [20.0, 0.0, 1.5]]
+        ),
+        dataset_id="ds_cluster_test",
+        config={},
+    )
+    result = gates.compare_arms(
+        ds,
+        {"name": "A", "method": "identity", "csi": "srs"},
+        {"name": "B", "method": "identity", "csi": "srs"},
+        snr_db=10.0,
+    )
+    assert result.raw_observations == 4
+    assert result.paired.n == 2
+    assert result.as_dict()["inference_unit"]["clustered_by"] == "ue_position"
 
 
 def _fake_sample(*, h_est: np.ndarray | None, marker: float = 0.0) -> SimpleNamespace:
@@ -234,6 +309,7 @@ def test_end_to_end_company_channel_is_64_by_4_with_real_estimate() -> None:
     assert np.isfinite(dataset.h_true).all()
     assert np.isfinite(dataset.h_est).all()
     assert not np.array_equal(dataset.h_true, dataset.h_est)
+    assert float(dataset.estimation_error_nmse_db()[0]) < 0.0
     assert summary["ue_panel"] == [2, 1, 2]
     assert summary["ue_panel_derived"] is True
     assert dataset.channel_contract["h_est_missing_policy"].startswith("hard_error")

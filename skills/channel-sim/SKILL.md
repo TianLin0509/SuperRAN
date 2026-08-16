@@ -132,11 +132,28 @@ digraph channel_sim {
 1/2/3 的口径边界与 `sr_mcs_info` / `sr_bler_curve` / `sr_tdd_mcs`（TDD 的 CQI /
 BF Gain / OLLA）→ `references/link-adaptation.md`
 
+公司表 3 按“一次已调度 TTI 的整个 TB”查询 TBLER，不单报 CB；当前导入曲线尚缺
+reference TBS/resource/rank 轴，因此不能声称实际 TB-size 已参与查表，更不能再次做 CB→TB 合成。
+
 ## 第 5 段 · 系统级体验速率 —— `sr_system_sim`
 
 **链路级问"这个信道能跑多快"，系统级问"这个小区里的用户实际体验到多快"。**
 用户提到**体验速率、话务、调度 / PF、BLER、小区容量、边缘用户体验、拥塞、"现网能到
 多少"**时，链路级答不了，必须切到系统级。
+
+**先看 `sr_system_scene` 有没有现成场景，别手拍参数。** 信道侧一句预设名就够了，
+系统级却要填 `duration_s` / `traffic_model` / `arrival_rate_hz` / `neighbor_prb_util` /
+`csi_aging` / `srs_period_ms` 八九个——**每次跑都在拍，不同次之间参数不一致，
+结果没法横向比**。`sr_system_scene()` 不给名字就列全部，给了就返回 `generate` 段
+（喂 `sr_generate`）与 `system` 段（喂 `sr_system_sim`）。它比"一组默认值"多两样：
+`expect` 是**实测锚点**（`measured: false` 时不许有数值），`pair_with` 是**受控对照**
+（除 `pair_varies` 那一项外其余逐字相同）。成对场景仍要用同一批 replication 流跑。
+
+**载波栅格跟着数据集走，不是固定 100 MHz。** `sr_system_sim` 从信道张量取 RB 数、
+从 `subcarrier_spacing` 取 numerology，结果里的 `carrier` 段写明实际用了多少 RB 与
+多长 TTI。**RB 数不是 16 的整数倍时，尾部不足一组的 RB 不参与仿真**（TBS 反查目前
+假设所有 RBG 等长），`notes` 会说排除了几个 RB、吞吐因此偏低多少。要按整带宽下
+结论就用 RB 数为 16 整数倍的数据集（如 272 RB / 100 MHz）。
 
 **先选评估 profile；它们是两种模式，不是同一模式的两个精度参数：**
 
@@ -266,6 +283,6 @@ SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且�
 | 1 对齐目标 | `sr_list_datasets` `sr_missing_slots` `sr_plan` `sr_revise` `sr_lock_analysis` `sr_spec_sheet` `sr_await_config` | `asking.md` `spec-sheet.md` |
 | 2 生成数据 | `sr_list_presets` `sr_list_scenes` `sr_probe_scenario` `sr_compare_scenarios` `sr_generate` `sr_gate` `sr_validate` `sr_calibrate` `sr_describe_dataset` `sr_deliver` | `scenarios-and-interference.md`（含射线追踪）`default-hardware.md` `performance.md` |
 | 3 对比 · 链路级 | `sr_sample_size` `sr_link_performance` `sr_compare_arms` `sr_throughput` `sr_sweep_snr` `sr_mcs_info` `sr_bler_curve` `sr_tdd_mcs` | `gates-and-stats.md`（**18 项体检**明细、Wilcoxon、预注册、「声称与证据」表）`link-adaptation.md` |
-| 3 对比 · 系统级 | `sr_system_sim` | `system-sim.md` |
+| 3 对比 · 系统级 | `sr_system_scene` `sr_system_sim` | `system-sim.md` |
 | 3 对比 · 外部算法 | `sr_export_eval_template` `sr_compare_results` `sr_list_results` | `gates-and-stats.md` |
 | 干扰画像 | `sr_interference_report` `sr_design_interference` `sr_iot_convert` | `scenarios-and-interference.md` |

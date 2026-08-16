@@ -301,6 +301,58 @@ async def main() -> None:
             check(2.0 <= _el < 8.0, f"真的按 timeout_s 等（实测 {_el:.1f} 秒）")
             check(wait["bridge"]["enabled"] is True, "回传桥状态一并返回，便于排查")
 
+    print("\n" + "=" * 68 + "\n10  载波栅格必须由数据集推出来\n" + "=" * 68)
+    # 早先 sr_system_sim 在关掉 RB 功控时把 num_rbg 写死 17（=272 RB），
+    # scs_khz 更是从头到尾没设过。于是 20 MHz / 15 kHz 的数据集全被当成
+    # 100 MHz@30 kHz 算 TBS 与 TTI —— 实测 51 RB 上吞吐虚高 4.3 倍，
+    # 而 snapshot_update_ms 一直是从 ds.config 算的：同一份配置一半跟着
+    # 数据集走、一半写死，是最难发现的一类不一致。
+    from superran import server as _sv  # noqa: PLC0415
+
+    for _nrb, _scs, _rbg, _per, _drop, _tti in (
+        (272, 30_000, 17, 16, 0, 0.5),
+        (51, 30_000, 3, 16, 3, 0.5),
+        (106, 15_000, 6, 16, 10, 1.0),
+        (8, 30_000, 1, 8, 0, 0.5),
+    ):
+        _c = _sv._carrier_grid({"subcarrier_spacing": _scs}, num_rb=_nrb)
+        check(_c["num_rbg"] == _rbg and _c["rb_per_rbg"] == _per,
+              f"{_nrb} RB -> {_rbg}×{_per} RBG（实得 "
+              f"{_c['num_rbg']}×{_c['rb_per_rbg']}）")
+        check(_c["excluded_num_rb"] == _drop,
+              f"{_nrb} RB 排除 {_drop} 个尾部 RB（实得 {_c['excluded_num_rb']}）")
+        check(abs(_c["tti_ms"] - _tti) < 1e-12,
+              f"{_scs//1000} kHz -> TTI {_tti} ms（实得 {_c['tti_ms']}）")
+        check(_c["simulated_num_rb"] + _c["excluded_num_rb"] == _nrb,
+              "仿真 RB + 排除 RB 必须等于信道里的 RB 数")
+
+    print("\n" + "=" * 68 + "\n11  skill 的工具地图必须和代码对得上\n" + "=" * 68)
+    # SKILL.md 写着"34 个 sr_* 工具全在这张表里"。这句话曾经**同时**漏了
+    # sr_system_scene 又把明令不存在的 sr_compare_system_arms 算了进去，
+    # 两个错误互相抵消，总数正好还是 34 —— 只数总数看不出来，必须逐个比名字。
+    # 后果是实打实的：sr_system_scene 是用来免掉"每次手拍八九个系统级参数"的，
+    # 它不在表里，用 skill 的 agent 就永远发现不了。
+    import re as _re  # noqa: PLC0415
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    from superran import server as _srv  # noqa: PLC0415
+
+    _skill = _Path(__file__).resolve().parents[1] / "skills" / "channel-sim" / "SKILL.md"
+    if not _skill.exists():
+        check(False, f"找不到 SKILL.md：{_skill}")
+    else:
+        _text = _skill.read_text(encoding="utf-8")
+        _code_tools = {n for n in dir(_srv) if n.startswith("sr_")}
+        _map = _text.split("## 工具地图与参考文件")[-1]
+        _listed = set(_re.findall(r"`(sr_[a-z_0-9]+)`", _map))
+        check(not (_code_tools - _listed),
+              f"每个 sr_* 工具都在工具地图里（缺 {sorted(_code_tools - _listed)}）")
+        check(not (_listed - _code_tools),
+              f"工具地图里没有不存在的工具（多 {sorted(_listed - _code_tools)}）")
+        _claims = {int(m) for m in _re.findall(r"(\d+)\s*个\s*`?sr_\*", _text)}
+        check(_claims == {len(_code_tools)},
+              f"正文声称的工具数 {sorted(_claims)} 等于实际 {len(_code_tools)}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

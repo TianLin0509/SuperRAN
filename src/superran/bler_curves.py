@@ -2,8 +2,9 @@
 
 The first profile is the user-provided ``company_20b_256qam`` data set. The source
 script labels its horizontal axis ``Es/No``; the data owner confirmed that it denotes
-SINR for a classic MMSE receiver. This module preserves both the original label and
-the confirmed physical meaning.
+SINR for a classic MMSE receiver.  The company error event is one scheduled TTI's
+transport block, not a separately exposed code block.  This module preserves that
+semantic as metadata while also exposing that the imported points lack a TB-size axis.
 """
 from __future__ import annotations
 
@@ -92,6 +93,10 @@ class DemodCurve:
             "axis_original_label": data.SOURCE_AXIS_ORIGINAL_LABEL,
             "axis_interpretation": data.SOURCE_AXIS_USAGE,
             "receiver_model": data.RECEIVER_MODEL,
+            "error_event": data.ERROR_EVENT,
+            "company_lookup_inputs": list(data.COMPANY_LOOKUP_INPUTS),
+            "imported_curve_axes": list(data.IMPORTED_CURVE_AXES),
+            "tb_size_axis_status": data.TB_SIZE_AXIS_STATUS,
             "profile_scope": data.PROFILE_SCOPE,
             "start_db": self.start_db,
             "end_db": self.end_db,
@@ -196,9 +201,14 @@ def verify_curves(target_bler: float = 0.1) -> dict[str, Any]:
         "data_sha256": raw_hash,
         "hash_matches": raw_hash == data.DATA_SHA256,
         "issues": issues,
+        "error_event": data.ERROR_EVENT,
+        "company_lookup_inputs": list(data.COMPANY_LOOKUP_INPUTS),
+        "imported_curve_axes": list(data.IMPORTED_CURVE_AXES),
+        "tb_size_axis_status": data.TB_SIZE_AXIS_STATUS,
         "caveat": (
             "User-provided demodulation curves, not a 3GPP reference table. "
-            "The source label Es/No denotes post-MMSE SINR. Other link dimensions are "
-            "intentionally not parameterized."
+            "The source label Es/No denotes post-MMSE SINR. The company event is one "
+            "scheduled TTI/TB, but the imported curves do not parameterize the actual "
+            "scheduled TB size or other missing link dimensions."
         ),
     }

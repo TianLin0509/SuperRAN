@@ -404,6 +404,56 @@ check(_robust_r.sum_se > _base_r.sum_se + 0.2,
 check(_robust_r.rzf_regularization is not None
       and _robust_r.rzf_regularization["csi_error_loading"] > 0,
       "结果显式带回鲁棒加载分解，不能只给一个来路不明的 alpha")
+
+# ---------------------------------------------------------------------------
+sect("10  频域聚合：非整数倍 RB 与批量化的等价性")
+# 载波不是 RBG 大小整数倍时，rbg_reduce 只能给出**完整分组**的代表点。
+# 旧实现在 n_rb <= step 时原样返回，16 RB 的载波会被当成 16 个 RBG，
+# 与调用方的 num_rbg 对不上；频选路径只读第 0 行，其余 15 行凭空消失。
+for _nrb, _want in ((272, 17), (51, 3), (48, 3), (16, 1), (8, 1)):
+    _hh = np.zeros((_nrb, 4, 2), dtype=complex)
+    _got = mu.rbg_reduce(_hh, 16).shape[0]
+    check(_got == _want, f"{_nrb} RB -> {_want} 个完整 RBG（实得 {_got}）")
+check(mu.rbg_reduce(np.zeros((272, 4, 2), dtype=complex), 1).shape[0] == 272,
+      "rb_per_rbg=1 仍退回 RB 粒度")
+
+
+def _ref_rbg_sinr_db(s, step):
+    """逐组切片的参照实现——批量化只允许更快，不允许改数。"""
+    s = np.asarray(s, dtype=float)
+    if s.ndim == 1:
+        s = s[:, None]
+    n_rb = s.shape[0]
+    st = max(1, min(int(step), n_rb))
+    n = int(np.ceil(n_rb / st))
+    lin = np.stack([s[i * st:(i + 1) * st].mean(axis=0) for i in range(n)])
+    return np.mean(10.0 * np.log10(np.maximum(lin, 1e-12)), axis=1)
+
+
+_rng_agg = np.random.default_rng(4242)
+_agg_worst = 0.0
+for _nrb, _st in ((17, 1), (272, 16), (272, 1), (51, 16), (100, 16), (16, 16)):
+    _x = np.abs(_rng_agg.standard_normal((_nrb, 4))) + 0.01
+    _agg_worst = max(_agg_worst, float(np.max(np.abs(
+        mu.rbg_sinr_db(_x, rb_per_rbg=_st) - _ref_rbg_sinr_db(_x, _st)))))
+print(f"  rbg_sinr_db 与逐组切片参照的最大绝对差 {_agg_worst:.3e}")
+check(_agg_worst == 0.0, "rbg_sinr_db 的整除快路径与逐组切片逐位相同")
+
+# effective_user_channels / mu_precoder 改成堆叠 SVD/pinv 之后必须逐位不变。
+_rng_b = np.random.default_rng(20260815)
+_hb_list = [((_rng_b.standard_normal((17, 32, 4))
+              + 1j * _rng_b.standard_normal((17, 32, 4))) / np.sqrt(2))
+            for _ in range(2)]
+_he_b = mu.effective_user_channels([x[None] for x in _hb_list], streams_per_user=2)
+_ref_he = np.zeros_like(_he_b)
+for _u, _hx in enumerate(_hb_list):
+    for _f in range(_hx.shape[0]):
+        _, _sv, _vh = np.linalg.svd(_hx[_f].conj().T, full_matrices=False)
+        for _s in range(min(2, _vh.shape[0])):
+            _ref_he[_u, _s, _f] = _sv[_s] * _vh[_s]
+check(np.array_equal(_he_b, _ref_he),
+      "effective_user_channels 的堆叠 SVD 与逐 RB 循环逐位相同")
+
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:

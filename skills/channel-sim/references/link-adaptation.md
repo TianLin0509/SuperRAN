@@ -58,8 +58,14 @@
 **一条必须守住的边界**：表 1/2 的 MCS/CQI/TBS 按 38.214 精确算，QAM 约束
 容量精确求积，但 BLER 是**有限码长分析模型**。表 3 则是用户提供的 28 档 MCS +
 56 条 NewTx/ReTx 解调曲线（1824 点），**不是 3GPP 标准曲线**。数据所有者已确认：
-源标签 Es/No 就是经典 MMSE 接收机的 SINR；其他链路维度暂不参数化，
-曲线范围外只能保守钳位，不能外推。
+源标签 Es/No 就是经典 MMSE 接收机的 SINR；公司误块事件是一个已调度 TTI 中该用户
+的整个 TB，系统不单独暴露 CBLER。概念查询输入包含当次 TBS、post-MMSE SINR、MCS、
+NewTx/ReTx 与固定接收机 profile，每个 grant 只抽一次 TB ACK/NACK。物理编码内部即使
+存在多个 CB，也不能在公司曲线后再次做 CB→TB 合成。
+
+当前导入常量没有保存每档 reference TBS/resource/rank 映射，运行时也没有用当次 TBS
+选曲线。因此必须把结论写成“TTI/TB 事件单位已对齐，TB-size 轴尚未对齐”；其他信道、
+层数和译码器维度也未参数化。曲线范围外只能保守钳位，不能外推。
 
 - `sr_mcs_info(table=1/2, show_bler_anchors=true)` —— 看分析模型门限
 - `sr_mcs_info(table=3, show_bler_anchors=true)` —— 看用户曲线两套门限与哈希自检
@@ -68,7 +74,7 @@
 
 表 3 的 HARQ 首传用 NewTx、后续用 ReTx；只有一条 ReTx 曲线，因此多次重传会
 复用它并显式标成假设（`harq_model=newtx_then_retx_curve_reused`）。
-不要额外推断 TB/CB、块长、信道、层数或译码器的影响。
+不要从现有点集额外推断块长、信道、层数或译码器的影响，也不要把公司 TBLER 再按 CB 数放大。
 表 3 没有 CQI 曲线，CQI 仍走 38.214 Table 2 + 分析 BLER，由 `cqi_source` 明示。
 
 ## TDD 的 CQI、BF Gain 与 OLLA

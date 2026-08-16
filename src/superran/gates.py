@@ -375,7 +375,31 @@ def config_diff(cfg_a: dict, cfg_b: dict, *, ignore: frozenset = _IGNORE_KEYS) -
 # ---------------------------------------------------------------------------
 
 
-def gate_channel(ds: Any, *, snr_db: float = 20.0) -> GateResult:
+def _precoding_source_item(ds: Any, expected: str) -> GateItem:
+    """Build the experiment-specific CSI provenance gate item."""
+    raw = np.asarray(getattr(ds, "precoding_csi_sources", []), dtype=str).reshape(-1)
+    actual = sorted({str(value) for value in raw if str(value)})
+    passed = actual == [str(expected)]
+    return GateItem(
+        name="预编码 CSI 来源符合实验声明",
+        passed=passed,
+        detail=f"期望 {expected}；数据逐样本来源 {actual or ['<missing>']}",
+        severity="block",
+        fix=(
+            "修正 link/paired 生成配置并重新生成；不能把 dl_csirs_estimate "
+            "改名成 SRS 权"
+            if not passed
+            else ""
+        ),
+    )
+
+
+def gate_channel(
+    ds: Any,
+    *,
+    snr_db: float = 20.0,
+    expected_precoding_csi_source: str | None = None,
+) -> GateResult:
     """门 1 —— 这批信道能不能拿来下结论。
 
     把 ``validate.full_report`` 的硬性检查搬成门禁语言：error 级不通过的项
@@ -394,6 +418,11 @@ def gate_channel(ds: Any, *, snr_db: float = 20.0) -> GateResult:
         )
         for c in rep.checks
     ]
+    if expected_precoding_csi_source:
+        items.insert(
+            0,
+            _precoding_source_item(ds, expected_precoding_csi_source),
+        )
     return GateResult(
         gate="门 1 · 信道可信",
         items=items,
@@ -402,6 +431,7 @@ def gate_channel(ds: Any, *, snr_db: float = 20.0) -> GateResult:
             "n": int(getattr(ds, "n", 0)),
             "scenario": ds.config.get("scenario"),
             "channel_model": getattr(ds, "channel_model", None),
+            "expected_precoding_csi_source": expected_precoding_csi_source,
         },
     )
 
@@ -682,6 +712,14 @@ class ComparisonResult:
     metric_unit: str = "bit/s/Hz"
     # 预注册身份（外部结果才有）：primary / secondary / exploratory / unregistered
     identity: dict[str, Any] | None = None
+    # Raw fading observations can repeat the same UE position.  Statistical
+    # inference is performed on cluster means; retain both counts so an 80-row
+    # dataset cannot be misreported as 80 independent users.
+    raw_observations: int | None = None
+    cluster_ids: list[Any] | None = None
+    # 聚不了类时的原因。空字符串表示聚成功；``cluster_ids is None`` 且原因非空
+    # 时，推断是按逐样本做的——这个事实必须能被读出来，不能只体现为字段缺失。
+    cluster_fallback_reason: str = ""
 
     @property
     def passed(self) -> bool:
@@ -694,6 +732,19 @@ class ComparisonResult:
             "metric": self.metric,
             "metric_unit": self.metric_unit,
             "identity": self.identity,
+            "inference_unit": {
+                "raw_observations": int(
+                    self.raw_observations
+                    if self.raw_observations is not None
+                    else len(self.se_a)
+                ),
+                "independent_pairs": int(self.paired.n),
+                "clustered_by": (
+                    "ue_position" if self.cluster_ids is not None else "sample"
+                ),
+                "cluster_ids": self.cluster_ids,
+                "fallback_reason": self.cluster_fallback_reason or None,
+            },
             "paired": self.paired.as_dict(),
             "gate_comparison": self.gate2.as_dict(),
             "gate_conclusion": self.gate3.as_dict(),
@@ -883,6 +934,66 @@ def compare_results(
     )
 
 
+def _precoding_csi_tensor(ds: Any, csi: str) -> np.ndarray | None:
+    """Resolve one arm's physically named CSI source.
+
+    ``estimated`` remains the backwards-compatible dataset-primary estimate
+    (``ds.h_est``).  Paired/BOTH data can additionally distinguish the gNB's
+    reciprocity-mapped UL SRS estimate from the UE's DL CSI-RS estimate used to
+    select a PMI.  The latter must be explicit; falling back to SRS would turn
+    an operational SRS-vs-PMI comparison into a hidden codebook-only test.
+    """
+    token = str(csi or "ideal").strip().lower()
+    if token == "ideal":
+        return None
+    if token in {"estimated", "srs", "ul_srs", "ul_srs_estimate"}:
+        return np.asarray(ds.h_est)
+    if token in {"csirs", "csi-rs", "dl_csirs", "dl_csirs_estimate"}:
+        h_dl_est = getattr(ds, "h_dl_est", None)
+        if h_dl_est is None:
+            raise ValueError(
+                "csi='csirs' 需要 paired/BOTH 数据集中的 h_dl_est；"
+                "禁止静默回退到 SRS h_est"
+            )
+        return np.asarray(h_dl_est)
+    raise ValueError(
+        f"未知 CSI 来源 {csi!r}；可选 ideal / estimated / srs / csirs"
+    )
+
+
+def _position_clusters(
+    ds: Any, n: int, se_a: np.ndarray, se_b: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, list[Any] | None, str]:
+    """按 UE 位置把重复快照折成独立观测。返回 ``(a, b, cluster_ids, 失败原因)``。
+
+    配对检验要求的是独立的**对**。同一个 UE 位置上的多次衰落抽样是重复测量，
+    不是额外的独立用户——不折叠就等于把样本量凭空放大，区间偏窄、p 值偏小。
+
+    **失败原因要带出来。** ``Dataset.ue_position`` 是直接索引 NPZ 的
+    ``cached_property``，键缺失时抛的是 ``KeyError``；而
+    ``getattr(ds, "ue_position", None)`` **只兜 AttributeError**，
+    老数据集会在这里直接崩掉而不是回退。位置全 NaN（来源没给位置）时也聚不出东西。
+    这两种情况都退回逐样本推断，但必须让调用方看见。
+    """
+    try:
+        positions = ds.ue_position
+    except (KeyError, AttributeError, OSError, ValueError) as exc:
+        return se_a, se_b, None, f"数据集取不到 ue_position（{type(exc).__name__}）"
+    if positions is None:
+        return se_a, se_b, None, "数据集没有 ue_position"
+    pos = np.asarray(positions)[:n]
+    if pos.ndim != 2 or pos.shape[0] != n:
+        return se_a, se_b, None, f"ue_position 形状 {tuple(pos.shape)} 不是 [{n}, dims]"
+    if not np.all(np.isfinite(pos)):
+        return se_a, se_b, None, "ue_position 含非有限值（数据源没给位置）"
+    # np.asarray(list[tuple], dtype=object) 会是二维；这里显式做成"每个观测一个
+    # 对象"，才符合 paired_cluster_means 的标量 cluster 契约。
+    ids_1d = np.empty(n, dtype=object)
+    ids_1d[:] = [tuple(np.round(row.astype(float), 6).tolist()) for row in pos]
+    a, b, ids = paired_cluster_means(se_a, se_b, ids_1d)
+    return a, b, ids, ""
+
+
 def compare_arms(
     ds: Any,
     arm_a: dict[str, Any],
@@ -894,7 +1005,9 @@ def compare_arms(
     """在**同一批信道**上跑两个方案，做配对比较，并连过门 2、门 3。
 
     每个臂的键：``name``、``method``（预编码）、``receiver``、
-    ``csi``（``ideal`` 用 h_true 预编码，``estimated`` 用 h_est）。
+    ``csi``：``ideal`` 用 h_true；``estimated`` 用数据集主估计；
+    ``srs`` 用 gNB 侧互易映射后的 UL SRS 估计；``csirs`` 用 UE 侧 DL
+    CSI-RS 估计。后两者只有 paired/BOTH 数据才能做真实来源区分。
 
     因为两臂共用同一批信道实例，差值天然是配对的——共同的路损、撒点、
     衰落起伏被差分抵消掉，剩下的才是方案本身的差别。
@@ -902,7 +1015,6 @@ def compare_arms(
     from .linklevel import link_performance
 
     h_true = np.asarray(ds.h_true)
-    h_est = np.asarray(ds.h_est)
     n = min(int(h_true.shape[0]), int(max_samples))
     intf = ds.h_interferers
 
@@ -913,7 +1025,7 @@ def compare_arms(
     # 强行给一个统一的 snr_db 会把不同位置的用户拉到同一工作点，
     # 抹掉场景本身的差异，也让"边缘用户"这类结论无从谈起。
     def run(arm: dict[str, Any]) -> np.ndarray:
-        use_est = str(arm.get("csi", "ideal")) == "estimated"
+        csi_tensor = _precoding_csi_tensor(ds, str(arm.get("csi", "ideal")))
         out = np.empty(n, dtype=float)
         for i in range(n):
             hi = h_true[i]
@@ -934,13 +1046,16 @@ def compare_arms(
                 hi,
                 method=arm.get("method", "svd"),
                 receiver=arm.get("receiver", "mmse"),
-                h_for_precoding=(h_est[i] if use_est else None),
+                h_for_precoding=(csi_tensor[i] if csi_tensor is not None else None),
                 **op_kw,
             ).spectral_efficiency
         return out
 
     se_a, se_b = run(arm_a), run(arm_b)
-    paired = paired_compare(se_a, se_b)
+
+    paired_a, paired_b, cluster_ids, cluster_reason = _position_clusters(
+        ds, n, se_a, se_b)
+    paired = paired_compare(paired_a, paired_b)
 
     cfg = dict(ds.config)
     # 两臂 CSI 不同又没人声明时，多半是忘了；但如果调用方本来就在测 CSI 误差的
@@ -948,10 +1063,36 @@ def compare_arms(
     a2 = {**arm_a, "dataset_id": ds.dataset_id, "config": cfg}
     b2 = {**arm_b, "dataset_id": ds.dataset_id, "config": cfg}
     g2 = gate_comparison(a2, b2, pilot_std_diff=paired.std_diff, n_samples=paired.n)
+    if cluster_ids is not None:
+        g2.items.append(
+            GateItem(
+                "重复快照按 UE 位置聚类",
+                True,
+                f"{n} 条逐快照观测折叠为 {len(cluster_ids)} 个独立位置后做配对推断",
+                severity="info",
+            )
+        )
+    else:
+        # **没能聚类必须说出来。** 聚不了的后果是每条重复快照都被当成一个独立
+        # 样本，正好是把置信区间报窄、把 p 值报小的那个方向。沿用"查不到不能
+        # 当它对"（`rng.check_pairable` 没给 books 时返回 None 而不是 True）：
+        # 不拦截（这就是聚类上线前的历史行为），但绝不能装作验证过独立性。
+        g2.items.append(
+            GateItem(
+                "重复快照按 UE 位置聚类",
+                False,
+                f"没能按位置聚类（{cluster_reason}）；{n} 条观测**按独立样本**计入配对检验。"
+                "若同一 UE 位置有多个快照，区间会偏窄、p 值会偏小。",
+                severity="warn",
+                fix="用带 ue_position 的数据集重新生成，或自行按位置折叠后走 compare_results",
+            )
+        )
     g3 = gate_conclusion(paired)
 
     return ComparisonResult(
         arm_a=str(arm_a.get("name", "A")),
         arm_b=str(arm_b.get("name", "B")),
         se_a=se_a, se_b=se_b, paired=paired, gate2=g2, gate3=g3,
+        raw_observations=n, cluster_ids=cluster_ids,
+        cluster_fallback_reason=cluster_reason,
     )

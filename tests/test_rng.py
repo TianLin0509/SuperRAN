@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -459,6 +460,36 @@ check(_kpi_html.startswith("<!doctype html>")
       and '="nan"' not in _kpi_html.casefold()
       and "\ufffd" not in _kpi_html,
       "KPI 页含小区/用户双层键盘 tab、完整 0..17 柱图、用户 CDF 且 UTF-8 正常")
+# **柱子数对不代表图画对。** CSS 里的列数曾经写死 repeat(18,...)，是按 272 RB /
+# 17 RBG 定的；载波栅格改成跟数据集推导之后，20 MHz 小区只有 4 个桶，柱子被挤在
+# 左边五分之一、右边一大片空白——图没坏、数也没错，读者却会以为右边全是 0。
+# 只数柱子看不出来，必须把**列数**和**标题里的上界**一起钉住。
+_grid_cols = re.search(r'class="rbg-chart"[^>]*grid-template-columns:repeat\((\d+),',
+                       _kpi_html)
+check(_grid_cols is not None
+      and int(_grid_cols.group(1)) == _kpi_html.count('class="bar-col"'),
+      f"RBG 分布图的列数等于桶数（实得 {_grid_cols.group(1) if _grid_cols else 'None'}）")
+check("逐 TTI 0..17 RBG 占比分布" in _kpi_html,
+      "分布图标题里的上界由实际桶数算出")
+_narrow_html = kv.render_html({
+    "cell": {"tti_occupied_rbg_distribution": {
+        "num_rbg": 3, "bins": [
+            {"occupied_rbg": i, "tti_share": {"mean": 0.25, "n_rep": 2}}
+            for i in range(4)]}},
+    "users": [], "config": {"system": {"model_version": "experience_v2"}}},
+    dataset_id="ds_narrow")
+_narrow_cols = re.search(
+    r'class="rbg-chart"[^>]*grid-template-columns:repeat\((\d+),', _narrow_html)
+check(_narrow_cols is not None and int(_narrow_cols.group(1)) == 4
+      and "逐 TTI 0..3 RBG 占比分布" in _narrow_html,
+      "窄带载波（4 个桶）时列数与标题一起跟着变，不再固定 18/0..17")
+# 暗色下所有浅底块必须成对翻底色与字色，否则就是浅底浅字。
+check("@media(prefers-color-scheme:dark)" in _kpi_html
+      and all(f"--{name}:" in _kpi_html for name in
+              ("tint", "tint-ink", "warn", "warn-ink", "panel", "th"))
+      and "background:#fff8e7" not in _kpi_html
+      and "background:white" not in _kpi_html,
+      "KPI 页带暗色模式，且浅底块不再硬编码单边颜色")
 _selection = kv.select_kpis(
     _mixed_rep.as_dict(), kpi_focus=["MU", "PRB", "首包时延"])
 check(_selection["source"] == "llm_agent_explicit"

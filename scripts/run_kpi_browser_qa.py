@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -21,6 +22,98 @@ from superran import system as sy  # noqa: E402
 OUT = ROOT / "output" / "kpi-browser-qa.json"
 SIZE_CDF = ROOT / "presets" / "traffic" / "synthetic_packet_size.csv"
 INTERVAL_CDF = ROOT / "presets" / "traffic" / "synthetic_interarrival_ms.csv"
+
+
+def _browser_qa(html_path: str) -> dict:
+    """Exercise both KPI tabs in isolated Chromium at desktop/mobile widths."""
+    report: dict = {"viewports": {}, "errors": []}
+    target = Path(html_path).resolve().as_uri()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        for name, viewport in {
+            "desktop": {"width": 1440, "height": 900},
+            "mobile": {"width": 375, "height": 812},
+        }.items():
+            page = browser.new_page(viewport=viewport)
+            page.on(
+                "console",
+                lambda msg, n=name: report["errors"].append(
+                    f"{n}:console:{msg.type}:{msg.text}"
+                )
+                if msg.type == "error"
+                else None,
+            )
+            page.on(
+                "pageerror",
+                lambda exc, n=name: report["errors"].append(f"{n}:page:{exc}"),
+            )
+            page.goto(target, wait_until="load")
+            page.wait_for_selector(".scope-tabs")
+            page.wait_for_selector("#cell-panel", state="visible")
+
+            cell_checked = page.locator("#scope-cell").is_checked()
+            cell_visible = page.locator("#cell-panel").is_visible()
+            user_hidden_before = not page.locator("#user-panel").is_visible()
+            priority_visible = page.locator(".priority").is_visible()
+            tab_count = page.locator('.scope-tabs label[for^="scope-"]').count()
+            cell_text = page.locator("#cell-panel").inner_text()
+            overflow_before = page.evaluate(
+                "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+            )
+            cell_shot = ROOT / "artifacts" / "kpi" / f"kpi-browser-qa-{name}-cell.png"
+            page.screenshot(path=str(cell_shot), full_page=False)
+
+            page.locator('label[for="scope-user"]').click()
+            page.wait_for_function("document.querySelector('#scope-user').checked")
+            page.wait_for_selector("#user-panel", state="visible")
+            user_checked = page.locator("#scope-user").is_checked()
+            user_visible = page.locator("#user-panel").is_visible()
+            cell_hidden_after = not page.locator("#cell-panel").is_visible()
+            user_metric_panels = page.locator("#user-panel .metric-panel").count()
+            overflow_after = page.evaluate(
+                "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+            )
+            user_shot = ROOT / "artifacts" / "kpi" / f"kpi-browser-qa-{name}-user.png"
+            page.screenshot(path=str(user_shot), full_page=False)
+
+            checks = {
+                "cell_checked_initially": cell_checked,
+                "cell_visible_initially": cell_visible,
+                "user_hidden_initially": user_hidden_before,
+                "agent_priority_visible": priority_visible,
+                "scope_tab_count": tab_count,
+                "cell_has_prb_utilization": "本小区 PRB 利用率" in cell_text,
+                "cell_has_mu_share": "MU 配对占已用 PRB" in cell_text,
+                "user_checked_after_click": user_checked,
+                "user_visible_after_click": user_visible,
+                "cell_hidden_after_click": cell_hidden_after,
+                "user_metric_panels": user_metric_panels,
+                "horizontal_overflow_px": max(overflow_before, overflow_after),
+                "cell_screenshot": str(cell_shot),
+                "user_screenshot": str(user_shot),
+            }
+            checks["pass"] = bool(
+                cell_checked
+                and cell_visible
+                and user_hidden_before
+                and priority_visible
+                and tab_count == 2
+                and checks["cell_has_prb_utilization"]
+                and checks["cell_has_mu_share"]
+                and user_checked
+                and user_visible
+                and cell_hidden_after
+                and user_metric_panels > 0
+                and checks["horizontal_overflow_px"] <= 0
+            )
+            report["viewports"][name] = checks
+            page.close()
+        browser.close()
+    report["pass"] = bool(
+        not report["errors"]
+        and all(v["pass"] for v in report["viewports"].values())
+    )
+    return report
 
 
 def _synthetic_tables() -> list[sy.UeLinkTable]:
@@ -128,9 +221,11 @@ def main() -> None:
             "XR",
         ],
     )
+    browser_qa = _browser_qa(report["html_path"])
     manifest = {
         "report": report,
         "calibration": calibration.as_dict(),
+        "browser_qa": browser_qa,
         "headline": {
             key: result["cell"].get(key)
             for key in (
@@ -147,6 +242,8 @@ def main() -> None:
     )
     print(report["html_path"])
     print(OUT)
+    if not browser_qa["pass"]:
+        raise SystemExit("KPI browser QA failed; inspect output/kpi-browser-qa.json")
 
 
 if __name__ == "__main__":

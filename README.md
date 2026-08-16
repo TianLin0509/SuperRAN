@@ -462,7 +462,7 @@ python tests/test_channel_generation_contract.py
 python tests/test_developer_guide.py
 ```
 
-当前共 **17 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
+当前共 **18 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
 容易失真的手写“总项数”；以实际运行输出和开发者文档的自动盘点为准。
 
 ## 致谢

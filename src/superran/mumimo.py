@@ -125,8 +125,16 @@ def rbg_sinr_db(sinr_lin_per_rb: np.ndarray, *,
     n_rb = s.shape[0]
     step = max(1, min(int(rb_per_rbg), n_rb))
     n_rbg = int(np.ceil(n_rb / step))
-    rbg_lin = np.stack([
-        s[i * step:(i + 1) * step].mean(axis=0) for i in range(n_rbg)])
+    # 逐 RBG 切片 + mean 在 step=1（输入已是 RBG 粒度）时是纯开销：实测一次
+    # 12 UE 建表里光 ndarray.mean 就被调了 10 万次。整除时 reshape 一次算完，
+    # 元素与顺序完全一样；除不尽才退回按组切片。
+    if step == 1:
+        rbg_lin = s
+    elif n_rb % step == 0:
+        rbg_lin = s.reshape(n_rbg, step, s.shape[1]).mean(axis=1)
+    else:
+        rbg_lin = np.stack([
+            s[i * step:(i + 1) * step].mean(axis=0) for i in range(n_rbg)])
     return np.mean(10.0 * np.log10(np.maximum(rbg_lin, _EPS)), axis=1)
 
 
@@ -217,13 +225,17 @@ def effective_user_channels(
     out = np.zeros((len(hs), s_max, n_rb, n_bs), dtype=np.complex128)
     for u, h in enumerate(hs):
         hb = h[0] if h.ndim == 4 else h                  # [RB, BS, UE]
-        for f in range(n_rb):
-            dl = hb[f].conj().T                          # [UE, BS] 下行矩阵
-            uu, sv, vh = np.linalg.svd(dl, full_matrices=False)
-            for s in range(min(s_max, vh.shape[0])):
-                # np.linalg.svd 返回的 ``vh[s]`` 本身就是 v_s^H。旧代码又做一次
-                # conj，会在复信道上把发射方向翻成 v_s^T，范数不变却破坏 ZF。
-                out[u, s, f] = sv[s] * vh[s]             # σ_s · v_s^H
+        # **逐 RB 的 Python 循环换成堆叠 SVD。** numpy 的 svd 原生吃
+        # ``[..., M, N]``，内层循环在 C 里跑；矩阵只有 4×64 这种尺寸时，
+        # 原来的开销几乎全是 Python 调度（一次 8 UE 建表实测 45888 次 svd 调用）。
+        # 数值上是同一个 LAPACK 例程逐个矩阵地算，结果逐位相同。
+        dl = np.conj(np.transpose(hb, (0, 2, 1)))        # [RB, UE, BS] 下行矩阵
+        _, sv, vh = np.linalg.svd(dl, full_matrices=False)
+        # np.linalg.svd 返回的 ``vh[s]`` 本身就是 v_s^H。旧代码又做一次
+        # conj，会在复信道上把发射方向翻成 v_s^T，范数不变却破坏 ZF。
+        n_take = min(s_max, vh.shape[1])
+        out[u, :n_take] = np.transpose(
+            sv[:, :n_take, None] * vh[:, :n_take, :], (1, 0, 2))  # σ_s · v_s^H
     return out
 
 
@@ -490,27 +502,31 @@ def mu_precoder(
         alpha=alpha,
     )
 
-    w_out = np.zeros((n_rb, n_bs, n_str), dtype=np.complex128)
+    # **整个频域一次算完。** ``hs`` 是 [K,S,RB,BS]，把 (K,S) 压成流维、
+    # RB 提到最前，就能直接喂 numpy 的堆叠 ``pinv``——它对 ``[..., M, N]``
+    # 原生成批处理。逐 RB 的 Python 循环在 17 个 RBG × 上千次调用下开销
+    # 全在调度上（实测一次 8 UE 建表 22848 次 pinv）。流的排列顺序保持
+    # ``u * S + s``，与原来的 ``reshape(n_str, n_bs)`` 逐位一致。
+    h_all = np.transpose(hs, (2, 0, 1, 3)).reshape(n_rb, n_str, n_bs)
+    h_all_h = np.conj(np.transpose(h_all, (0, 2, 1)))    # [RB, BS, N_str]
+    if method == "mrt":
+        w_all = h_all_h
+    else:
+        a = h_all @ h_all_h                              # [RB, N_str, N_str]
+        reg = 0.0 if method == "zf" else reg_info.total_loading
+        w_all = h_all_h @ np.linalg.pinv(a + reg * np.eye(n_str))
+    # 逐列归一：W 只表示方向
+    col = np.linalg.norm(w_all, axis=1)                  # [RB, N_str]
+    w_out = np.ascontiguousarray(w_all / np.maximum(col, _EPS)[:, None, :])
     p_out = np.zeros((n_rb, n_str), dtype=np.float64)
-    for f in range(n_rb):
-        h_mat = hs[:, :, f, :].reshape(n_str, n_bs)      # [N_stream, BS]
-        if method == "mrt":
-            w = h_mat.conj().T
-        else:
-            a = h_mat @ h_mat.conj().T                   # [N_str, N_str]
-            reg = 0.0 if method == "zf" else reg_info.total_loading
-            w = h_mat.conj().T @ np.linalg.pinv(a + reg * np.eye(n_str))
-        # 逐列归一：W 只表示方向
-        col = np.linalg.norm(w, axis=0)
-        w = w / np.maximum(col, _EPS)
-        w_out[f] = w
-
-        if power_allocation == "waterfilling":
-            # 等效增益 |h_k w_k|^2；注水到 Σp = total_power
-            gain = np.abs(np.einsum("kb,bk->k", h_mat, w)) ** 2
-            p_out[f] = _waterfill(gain, noise_stream, float(total_power))
-        else:
-            p_out[f] = float(total_power) / n_str
+    if power_allocation == "waterfilling":
+        # 等效增益 |h_k w_k|^2；注水到 Σp = total_power。注水本身是逐 RB 的
+        # 二分求解，保持原样——它不是热点，也不该为了形式统一而改数值。
+        gains = np.abs(np.einsum("fkb,fbk->fk", h_all, w_out)) ** 2
+        for f in range(n_rb):
+            p_out[f] = _waterfill(gains[f], noise_stream, float(total_power))
+    else:
+        p_out[:] = float(total_power) / n_str
 
     # EBF 保留历史的“单位方向 + 显式逐流功率”表示。PEBF/NEBF 先在物理矩阵
     # Q=W diag(sqrt(p)) 上施加每天线约束，再唯一分解回同一 API：列范数平方是
@@ -802,33 +818,36 @@ def mu_link_performance_lmmse(
     sinr = np.zeros((n_k, n_rb, rank), dtype=float)
     leak_num = 0.0
     leak_den = 0.0
-    for f in range(n_rb):
-        for u in range(n_k):
-            h_dl = hv[u][f].conj().T                    # [UE_ant, BS_ant]
-            g = h_dl @ q[f]                              # [UE_ant, all streams]
-            own = np.arange(u * rank, (u + 1) * rank)
-            other = np.concatenate((np.arange(0, u * rank),
-                                    np.arange((u + 1) * rank, n_str)))
-            gd = g[:, own]
-            gi = g[:, other]
-            rn = float(noise_user[u]) * np.eye(h_dl.shape[0], dtype=complex)
-            if other.size:
-                rn = rn + gi @ gi.conj().T
-            # 并行 LMMSE 滤波器；由它的输出耦合矩阵同时计算逐流 SINR 和
-            # **检测后**他用户残留。不能用接收天线口的原始 Gi 能量冒充残留，
-            # 否则理想 CSI/ZF 中落在可抑制正交维的能量也会被算成干扰。
-            filt = np.linalg.pinv(rn + gd @ gd.conj().T) @ gd
-            coupling = filt.conj().T @ g                  # [own streams, all streams]
-            post_noise = float(noise_user[u]) * np.sum(
-                np.abs(filt) ** 2, axis=0)
-            post_power = np.abs(coupling) ** 2
-            for k, global_k in enumerate(own):
-                signal = float(post_power[k, global_k])
-                interference = float(np.sum(post_power[k]) - signal)
-                sinr[u, f, k] = signal / max(interference + post_noise[k], _EPS)
-            if other.size:
-                leak_num += float(np.sum(post_power[:, other]))
-            leak_den += float(np.sum(post_power) + np.sum(post_noise))
+    # 每个用户的接收链在频域上是同一套矩阵运算，只是矩阵不同——整段按 RB 堆叠
+    # 交给 numpy，Python 只留用户这一层循环。原来 [RB×UE] 双层循环里每格一次
+    # ``pinv``，在 17 RBG / 2 用户下就是 34 次小矩阵求逆，全是调度开销。
+    for u in range(n_k):
+        h_dl = np.conj(np.transpose(hv[u], (0, 2, 1)))   # [RB, UE_ant, BS_ant]
+        g = h_dl @ q                                      # [RB, UE_ant, all streams]
+        own = np.arange(u * rank, (u + 1) * rank)
+        other = np.concatenate((np.arange(0, u * rank),
+                                np.arange((u + 1) * rank, n_str)))
+        gd = g[:, :, own]
+        gi = g[:, :, other]
+        gd_h = np.conj(np.transpose(gd, (0, 2, 1)))
+        rn = (float(noise_user[u])
+              * np.eye(h_dl.shape[1], dtype=complex)[None, :, :])
+        if other.size:
+            rn = rn + gi @ np.conj(np.transpose(gi, (0, 2, 1)))
+        # 并行 LMMSE 滤波器；由它的输出耦合矩阵同时计算逐流 SINR 和
+        # **检测后**他用户残留。不能用接收天线口的原始 Gi 能量冒充残留，
+        # 否则理想 CSI/ZF 中落在可抑制正交维的能量也会被算成干扰。
+        filt = np.linalg.pinv(rn + gd @ gd_h) @ gd        # [RB, UE_ant, own]
+        coupling = np.conj(np.transpose(filt, (0, 2, 1))) @ g  # [RB, own, all]
+        post_noise = float(noise_user[u]) * np.sum(
+            np.abs(filt) ** 2, axis=1)                    # [RB, own]
+        post_power = np.abs(coupling) ** 2                # [RB, own, all]
+        signal = post_power[:, np.arange(rank), own]      # [RB, own]
+        interference = np.sum(post_power, axis=2) - signal
+        sinr[u] = signal / np.maximum(interference + post_noise, _EPS)
+        if other.size:
+            leak_num += float(np.sum(post_power[:, :, other]))
+        leak_den += float(np.sum(post_power) + np.sum(post_noise))
 
     se_stream = np.log2(1.0 + np.maximum(sinr, 0.0)).mean(axis=1)
     se_user = np.sum(se_stream, axis=1)
@@ -918,13 +937,21 @@ def rbg_reduce(h: np.ndarray, rb_per_rbg: int = RB_PER_RBG) -> np.ndarray:
     聚合方式是 RBG 内**取中间那个 RB**，不是平均：平均会把频选衰落
     抹平、人为抬高信道的条件数（奇异值分布变平），进而高估 rank。
     取代表点保留了真实的空间结构。
+
+    **不足一个 RBG 的整带也是一个 RBG。** 旧写法在 ``n_rb <= step`` 时原样返回，
+    于是 16 RB 的载波被当成 **16 个 RBG**——行数与调用方的 ``num_rbg`` 对不上，
+    频选路径只会去读第 0 行，其余 15 行凭空消失。现在一律按"每组一个代表点"处理，
+    组数是 ``max(1, n_rb // step)``；载波尾部不足一组的 RB 不参与仿真，
+    由 ``server._carrier_grid`` 统一算出来并如实报进 ``notes``。
     """
     hh = np.asarray(h)
     n_rb = hh.shape[0]
     step = max(1, int(rb_per_rbg))
-    if step <= 1 or n_rb <= step:
+    if step <= 1:
         return hh
     idx = np.arange(step // 2, n_rb, step)
+    if idx.size == 0:                      # 整带都不够半个 RBG：仍然算一个 RBG
+        idx = np.asarray([n_rb // 2], dtype=int)
     return hh[idx]
 
 

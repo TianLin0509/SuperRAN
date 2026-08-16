@@ -421,7 +421,18 @@ def downlink_and_precoding_channels(sample: Any) -> tuple[Any, Any, Any, str]:
                 "paired/BOTH 样本有 h_dl_true 但没有 h_ul_est；"
                 "无法用 SRS 估计设计下行预编码"
             )
-        return h_dl_true, h_ul_est, h_dl_est, "ul_srs_estimate"
+        # ChannelHub's canonical storage keeps both directions in
+        # [T,RB,BS,UE] axis order.  Physical TDD reciprocity is first formed as
+        # H_UL = conj(H_DL^T), then UL is transposed back to canonical axes;
+        # therefore canonical h_ul_est approximates conj(h_dl_true), not
+        # h_dl_true itself.  The gNB downlink precoder needs the latter
+        # convention, so map it back here.  Returning h_ul_est raw makes the
+        # complex correlation almost zero and produced +1.4 dB NMSE in the
+        # 64T4R Hello World even though the SRS estimator itself was behaving.
+        import numpy as np  # noqa: PLC0415
+
+        h_precoding_est = np.conj(np.asarray(h_ul_est))
+        return h_dl_true, h_precoding_est, h_dl_est, "ul_srs_estimate"
 
     h_true = getattr(sample, "h_serving_true", None)
     h_est = getattr(sample, "h_serving_est", None)

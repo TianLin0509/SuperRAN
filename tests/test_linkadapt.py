@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import sys
 import time
 from pathlib import Path
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.stdout.reconfigure(errors="replace")
 
 from superran import channelhub as ch  # noqa: E402
+from superran import experience as ex  # noqa: E402
 from superran import generate as gen  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import load  # noqa: E402
@@ -29,6 +31,39 @@ def check(cond: bool, label: str) -> None:
 
 def sect(t: str) -> None:
     print("\n" + "=" * 70 + f"\n{t}\n" + "=" * 70)
+
+
+def test_company_curve_contract_exposes_current_tbs_axis_gap() -> None:
+    contract = la.bc.verify_curves()
+    assert contract["consistent"]
+    assert "scheduled TTI transport block" in contract["error_event"]
+    assert "tb_size_bits" in contract["company_lookup_inputs"]
+    assert "tb_size_bits" not in contract["imported_curve_axes"]
+
+    # This equality is a deliberate negative contract for the current import: the
+    # event is one whole TTI/TB, but no source TBS axis is available to select a
+    # different curve.  Replace this assertion when the complete company table and
+    # its reference-TBS/resource metadata are imported.
+    lookup = ex.TbsLookup.build(17, 16)
+    short_tbs = lookup.tbs_bytes("D", 12, 2, 1)
+    long_tbs = lookup.tbs_bytes("D", 12, 2, 17)
+    assert (short_tbs, long_tbs) == (1_729, 29_722)
+    short_cb = la.code_blocks(short_tbs * 8, la.MCS_TABLE_3[12].rate)[0]
+    long_cb = la.code_blocks(long_tbs * 8, la.MCS_TABLE_3[12].rate)[0]
+    assert (short_cb, long_cb) == (2, 29)
+    assert list(inspect.signature(ex._bler_lookup).parameters) == ["mcs", "sinr_db"]
+
+    model = la.CurveBlerModel("newtx")
+    mcs = la.MCS_TABLE_3[12]
+    short_n_coded = 16 * 12 * 12 * mcs.q_m * 2
+    long_n_coded = 17 * short_n_coded
+    short_tb = model.bler(
+        14.0, mcs, n_coded_bits=short_n_coded, n_code_blocks=short_cb
+    )
+    long_tb = model.bler(
+        14.0, mcs, n_coded_bits=long_n_coded, n_code_blocks=long_cb
+    )
+    assert np.array_equal(short_tb, long_tb)
 
 
 def main() -> None:
@@ -164,6 +199,11 @@ def main() -> None:
     print(f"  {cv['n_mcs']} 个 MCS / {cv['n_curves']} 条曲线 / {cv['n_points']} 个点")
     check(cv["consistent"], "曲线哈希、覆盖、单调性和 10% 门限全部自洽")
     check(cv["hash_matches"], "曲线数据与导入时 SHA-256 一致")
+    check("scheduled TTI transport block" in cv["error_event"],
+          "公司误块事件明确是一调度 TTI 的 TB，不单列 CB")
+    check("tb_size_bits" in cv["company_lookup_inputs"] and
+          "tb_size_bits" not in cv["imported_curve_axes"],
+          "公司概念口径含 TB size，但当前导入曲线尚无 TB-size 查询轴")
     check(len(la.MCS_TABLE_3) == 28, "表 3 共 28 档，覆盖 MCS 0..27")
     check(max(m.q_m for m in la.MCS_TABLE_3) == 8, "表 3 含 256QAM")
 
@@ -180,6 +220,21 @@ def main() -> None:
           "MCS15 NewTx 10% BLER 门限为 14.042 dB")
     check(abs(c15r.required_sinr_db(0.1) - 7.7429) < 1e-3,
           "MCS15 ReTx 10% BLER 门限为 7.743 dB")
+    c15_contract = c15n.as_dict(include_points=False)
+    check(c15_contract["error_event"] == cv["error_event"] and
+          c15_contract["tb_size_axis_status"] == cv["tb_size_axis_status"],
+          "单曲线查询携带同一 TTI/TB 与 TB-size 缺口合同")
+    current_model = la.CurveBlerModel("newtx")
+    mcs12 = la.MCS_TABLE_3[12]
+    short_n_coded = 16 * 12 * 12 * mcs12.q_m * 2
+    short_tb_bler = current_model.bler(
+        14.0, mcs12, n_coded_bits=short_n_coded, n_code_blocks=2
+    )
+    long_tb_bler = current_model.bler(
+        14.0, mcs12, n_coded_bits=17 * short_n_coded, n_code_blocks=29
+    )
+    check(np.array_equal(short_tb_bler, long_tb_bler),
+          "反例锁定：当前公司曲线尚不随当次 coded bits/TBS/CB 数变化")
     check(float(c15n.evaluate(0.0)[0]) == 1.0 and
           abs(float(c15n.evaluate(30.0)[0]) - c15n.bler_points[-1]) < 1e-12,
           "曲线范围外保守钳位，不伪造外推尾部")
@@ -360,6 +415,13 @@ def main() -> None:
     check(gen._resolve_workers("auto", 200, heavy) > 4, "重配置自动多进程")
     check(gen._resolve_workers("auto", 2, heavy) <= 2, "进程数不超过样本数")
     check(gen._resolve_workers(1, 200, heavy) == 1, "显式 workers=1 强制串行")
+    heavy_20ue = dict(heavy, num_ues=20)
+    check(gen._requested_worker_count("auto", 20, heavy_20ue) > 1,
+          "重配置原始工作量启发式会请求并行")
+    check(gen._resolve_workers("auto", 20, heavy_20ue) == 1,
+          "20 样本/20 UE 只启一个 worker，避免重复构造 20 个 UE batch")
+    check(gen._resolve_workers(20, 80, heavy_20ue) == 4,
+          "80 样本/20 UE 的显式并行度收口到四个 UE batch")
 
     # -----------------------------------------------------------------------
     sect("10  并行生成与串行等价")
@@ -406,6 +468,41 @@ def main() -> None:
     print(f"  {st.text().splitlines()[0]}")
     check(st.n == 12, "整批吞吐统计可用")
     check(st.mean_mbps > 0, "吞吐为正")
+
+    # -----------------------------------------------------------------------
+    sect("12  门限查表必须与逐档求解逐点等价")
+    # select_mcs / select_cqi 的默认路径改成缓存门限表（逐档求 BLER 实测
+    # 0.8 ms/次，查表 2 µs）。**加速只有在能证明等价时才成立**，所以这里在
+    # 密网格上逐点比对，并单独测门限点本身（二分解落在边界上时最容易分叉）。
+    _grid = np.concatenate([np.arange(-30.0, 45.0, 0.01),
+                            [float("nan"), float("inf"), float("-inf")]])
+    for _tbl in (1, 2, 3):
+        _slow = la.CurveBlerModel("newtx") if _tbl == 3 else la.BlerModel()
+        _bad = [float(s) for s in _grid
+                if la.select_mcs(float(s), table=_tbl, target_bler=0.1).index
+                != la.select_mcs(float(s), table=_tbl, target_bler=0.1,
+                                 model=_slow).index]
+        check(not _bad,
+              f"select_mcs 表 {_tbl}：{_grid.size} 点（含 nan/±inf）逐点一致")
+        _thr, _ = la._mcs_thresholds(_tbl, 0.1, 20000, 1)
+        _bad_thr = [t for t in _thr
+                    if la.select_mcs(t, table=_tbl).index
+                    != la.select_mcs(t, table=_tbl, model=_slow).index]
+        check(not _bad_thr, f"select_mcs 表 {_tbl}：{len(_thr)} 个门限点也一致")
+    _slow_cqi = la.BlerModel()
+    for _tbl in (1, 2):
+        _bad = [float(s) for s in _grid
+                if la.select_cqi(float(s), table=_tbl, target_bler=0.1)
+                != la.select_cqi(float(s), table=_tbl, target_bler=0.1,
+                                 model=_slow_cqi)]
+        check(not _bad, f"select_cqi 表 {_tbl}：{_grid.size} 点逐点一致")
+    # 自定义 model 必须绕过快路径，否则"换个 BLER 后端"会静默无效。
+    class _AlwaysBad:
+        def bler(self, s, m, n, c=1):
+            return np.asarray([1.0])
+
+    check(la.select_mcs(40.0, table=3, model=_AlwaysBad()).index == 0,
+          "传入自定义 model 时不走缓存门限，仍按该 model 判决")
 
     # -----------------------------------------------------------------------
     print("\n" + "=" * 70)

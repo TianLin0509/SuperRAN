@@ -153,6 +153,30 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
 **这条规则有过真实事故：** 同一批信道、同一套配置只改种子，`cell_experienced_mbps`
 的变异系数实测 11.4%，而上一轮把这 11.4% 的噪声报成了「+14% 提升」。
 
+## 载波栅格与 numerology（没有对应参数，全由数据集推出）
+
+`sr_system_sim` **不接受**带宽/RBG 数/子载波间隔参数——它们全部从数据集推：
+RB 数取信道张量的频域维，numerology 取 `subcarrier_spacing`。返回里的
+`carrier` 段把推导结果摊开，用来交叉核对：
+
+| 字段 | 含义 |
+|---|---|
+| `num_rb_in_channel` | 信道里真实的 RB 数 |
+| `num_rbg` × `rb_per_rbg` | 实际参与仿真的 RBG 栅格（名义 RBG 大小 P=16） |
+| `simulated_num_rb` / `excluded_num_rb` | 参与仿真的 RB 数 / 被排除的尾部 RB 数 |
+| `scs_khz` / `tti_ms` | numerology 与 TTI 长度 |
+
+**RB 数不是 16 的整数倍时，尾部不足一组的 RB 不参与仿真。** 当前 TBS 反查假设
+所有 RBG 等长（38.214 允许首尾 RBG 更短，本项目未实现），所以宁可少算一点并在
+`notes` 里说清排除了几个 RB、吞吐因此偏低多少。要按整带宽下结论就用 RB 数为 16
+整数倍的数据集（如 272 RB / 100 MHz）。**开 RB 功控时这种载波直接硬失败**——
+功控 profile 是逐 RB 的，尾部那几个 RB 的倍率会静默失效。
+
+历史坑：这里曾经把 `num_rbg` 写死 17（= 272 RB）、`scs_khz` 从来不设（默认 30），
+而同一个函数里的快照间隔一直是从 `subcarrier_spacing` 算的。**一半跟数据集走、
+一半写死**，不报错也不告警——实测 51 RB 的数据集上小区吞吐报 756 Mbps，
+按真实带宽只有 133 Mbps。
+
 ## 话务 `traffic_model`
 
 | 取值 | 是什么 | 什么时候用 |
@@ -325,6 +349,12 @@ SINR[u,r] = q[s(u),r] * S[u]
 RBG 时，有效 SINR 仍沿用项目既有的 dB 算术平均，尚未用链路级 BLER 曲线标定
 EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率折算，而非多小区
 联合 TTI 调度。
+
+公司 BLER 事件按一次已调度 TTI 中该用户的整个 TB 计：grant 确定 TBS、MCS 和资源后，
+以 post-MMSE SINR 查询一次 TBLER，并只抽一次 ACK/NACK；CB 不作为系统层独立事件。
+但当前 `company_20b_256qam` 导入常量没有 reference TBS/resource/rank 轴，体验运行时仍是
+`_bler_lookup(mcs, sinr)`。所以当前只能说“TB 事件单位正确、实际 TB-size 尚未参与选曲线”，
+不能因为调度器已经计算 TBS 就声称 BLER 已具有块长依赖。
 
 ## CSI 老化 `csi_aging` / `srs_period_ms` / `srs_hopping`
 

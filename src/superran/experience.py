@@ -650,7 +650,7 @@ class ExperienceTraffic:
         return int(sum(q.queued_bytes for q in self.queues))
 
 
-_BLER_CACHE: dict[tuple[int, int], float] = {}
+_BLER_CACHE: dict[tuple[str, int, int], float] = {}
 _BLER_CACHE_STEP_DB = 0.05
 
 # Frequency-aware allocation can ask for an MCS hundreds of thousands of times.
@@ -684,16 +684,23 @@ def _select_mcs_10pct(sinr_db: float) -> int:
 
 
 def _bler_lookup(mcs: int, sinr_db: float) -> float:
-    if not np.isfinite(sinr_db):
+    value = float(sinr_db)
+    # NaN / -Inf 表示链路不可用；+Inf 则应落到公司曲线的高 SINR 尾部。
+    # 旧写法把所有非有限值都返回 1.0，导致理想无噪声反例反而 100% NACK，
+    # 并且与 legacy 系统路径的边界语义不一致。
+    if np.isnan(value) or value == float("-inf"):
         return 1.0
-    clipped = float(np.clip(sinr_db, -60.0, 60.0))
-    key = (int(mcs), int(round(clipped / _BLER_CACHE_STEP_DB)))
-    if key not in _BLER_CACHE:
-        from . import bler_curves as bc  # noqa: PLC0415
+    from . import bler_curves as bc  # noqa: PLC0415
 
+    clipped = float(np.clip(value, -60.0, 60.0))
+    # key 带曲线数据指纹：换一套 BLER profile 时旧值必须失效，
+    # 否则进程级全局缓存会静默把上一套的数字接着用下去。
+    key = (bc.data.DATA_SHA256, int(mcs),
+           int(round(clipped / _BLER_CACHE_STEP_DB)))
+    if key not in _BLER_CACHE:
         value = float(np.atleast_1d(
-            bc.get_curve(key[0], "newtx").evaluate(
-                key[1] * _BLER_CACHE_STEP_DB))[0])
+            bc.get_curve(key[1], "newtx").evaluate(
+                key[2] * _BLER_CACHE_STEP_DB))[0])
         _BLER_CACHE[key] = float(np.clip(value, 0.0, 1.0))
     return _BLER_CACHE[key]
 
@@ -1200,6 +1207,8 @@ def simulate_experience(
                     "已启用 MU，但链路表没有完整 pair 数据；"
                     "请用 build_link_tables(..., mu_enabled=True) 预计算")
     lookup = TbsLookup.build(sys_cfg.num_rbg, sys_cfg.rb_per_rbg, s_slot_fraction)
+    frequency_aware = bool(getattr(
+        getattr(sys_cfg, "rb_power_control", None), "enabled", False))
     tr = ExperienceTraffic(traffic_cfg, n_ue, sys_cfg.tti_ms,
                            book.generator("traffic"))
     # **CRN 必须绑定到同一个事件，而不是“第几个被调度者”。** 若顺序消费一条
@@ -1379,8 +1388,6 @@ def simulate_experience(
             tr.has_data(u) and tables[u].outage is not None
             and bool(tables[u].outage[snap]) for u in range(n_ue))
         cursor = tti % int(sys_cfg.num_rbg)
-        frequency_aware = bool(getattr(
-            getattr(sys_cfg, "rb_power_control", None), "enabled", False))
         su_plan = _build_su_plan(
             ordered_users, queue_bytes=queue_bytes, lookup=lookup, slot=slot,
             num_rbg=int(sys_cfg.num_rbg), rank_of=rank_of, mcs_of=mcs_of,
@@ -2134,7 +2141,14 @@ def simulate_experience(
     }
 
     notes: list[str] = [
-        "experience_v2 使用**宽带 SINR/MCS**做误码与调度，不包含逐 RBG 频选增益。",
+        (
+            "experience_v2 已开启 RB 功控：按实际 grant bitmap 聚合逐 RBG "
+            "SINR、重选 MCS 并判误码；当前有效 SINR 是 RBG dB 算术平均，尚未用"
+            "标定过的 EESM/MIESM。"
+            if frequency_aware else
+            "experience_v2 在 RB 功控关闭时使用**宽带 SINR/MCS**做误码与调度，"
+            "不包含逐 RBG 频选增益。"
+        ),
         "TBS 量化算法走 38.214 §5.1.3.2，但 MCS 是公司 20B profile；D 时隙按"
         "每 RB 12 个数据符号、S 时隙按 0.7 倍 N_RE，未展开 DMRS/PTRS/CORESET。",
         "HARQ 软合并未建模；NACK payload 留在 DRB 队列，下一次按 NewTx 重试。",

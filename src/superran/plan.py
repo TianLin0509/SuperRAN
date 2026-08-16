@@ -256,7 +256,15 @@ def create_draft(
         preset_name = "single_cell_64t4r"
 
     params: dict[str, Any] = dict(presets.get(preset_name, {}).get("config", {}))
-    params.update(profile.config_hints)
+    if preset is None:
+        # 自动选骨架时，任务分类器可以把通用 preset 收敛到该任务需要的
+        # 方向/测量量。用户显式点名 preset 时则相反：preset 是已经作出的
+        # 配置选择，classifier hint 只能补缺，不能把 company_64t4r 的 BOTH
+        # 悄悄改成 DL，导致“上行 SRS 估计”实际变成下行 CSI-RS 估计。
+        params.update(profile.config_hints)
+    else:
+        for key, value in profile.config_hints.items():
+            params.setdefault(key, value)
 
     # preset 若已给具体天线数，就按它反推标签，不要让默认标签把 preset 冲掉
     inferred = antenna_label(params)

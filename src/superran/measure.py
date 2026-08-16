@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -27,9 +28,10 @@ _EPS = 1e-30
 class PDPResult:
     """时延功率谱。与 bridge 的 pdp_crop 不同：不归一化、带真实时延轴。"""
 
-    power: np.ndarray  # [n_taps] 线性功率（未归一化）
+    # 默认 [n_taps]；per_antenna=True 时为 [n_taps, n_bs]。
+    power: np.ndarray  # 线性功率（未归一化）
     delays_s: np.ndarray  # [n_taps] 对应时延，秒
-    power_db: np.ndarray  # [n_taps] dB
+    power_db: np.ndarray  # 与 power 同 shape，dB
     rms_delay_spread_s: float
     mean_delay_s: float
     delay_resolution_s: float
@@ -330,12 +332,21 @@ def srs_features(h: np.ndarray, spacing_lambda: float = 0.5) -> SRSFeatures:
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=32)
 def type_i_codebook(n1: int, o1: int, n2: int, o2: int, *, dual_pol: bool = True) -> np.ndarray:
     """38.214 Type-I 单面板结构中的过采样 DFT/双极化**列集合**。
 
     水平/垂直各自的过采样 DFT 矢量做 Kronecker 积，双极化再拼 4 个 QPSK 同相因子。
     数学与 ChannelHub bridge 的实现一致，便于交叉验证。它不是完整的多层 PMI
     矩阵集合；多层路径由 :func:`pmi_type_i` 增量选列，是明确的工程近似。
+
+    **只吃 5 个标量、与信道无关，所以缓存。** 每次 :func:`pmi_type_i` 都重建一遍
+    的旧写法在 256T（16H×8V、O=4、码本 256×8192）上实测 **89.3 ms/次**，
+    而它是逐 UE 逐快照调用的——21 UE × 40 快照就是 75 s 纯浪费。
+    64T（8H×4V）也有 17.6 ms/次。
+
+    返回的是**共享的只读数组**：调用方要改就必须先复制，否则会当场报错而不是
+    悄悄污染别人的码本。现有调用方（`pmi_type_i` 的列选择与端口置换）都只读。
     """
     def _dft(n: int, o: int) -> np.ndarray:
         k = np.arange(n * o)
@@ -355,6 +366,7 @@ def type_i_codebook(n1: int, o1: int, n2: int, o2: int, *, dual_pol: bool = True
             spatial[:, i1 * (n2 * o2) + i2] = vec / nrm if nrm > 1e-10 else vec
 
     if not dual_pol:
+        spatial.flags.writeable = False
         return spatial
 
     co_phases = np.exp(1j * np.pi * np.arange(4) / 2)
@@ -363,6 +375,7 @@ def type_i_codebook(n1: int, o1: int, n2: int, o2: int, *, dual_pol: bool = True
         v = spatial[:, b]
         for p, phi in enumerate(co_phases):
             cb[:, b * 4 + p] = np.concatenate([v, phi * v]) / np.sqrt(2)
+    cb.flags.writeable = False
     return cb
 
 

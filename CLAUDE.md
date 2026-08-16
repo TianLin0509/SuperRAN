@@ -36,7 +36,7 @@ python tests/test_channel_generation_contract.py # ChannelHub 生成合同与最
 python tests/test_developer_guide.py         # 开发者文档覆盖、离线结构与漂移检查
 ```
 
-当前共 **17 个可执行测试文件**。不要手写“总检查项”——循环内检查数会随配置展开，
+当前共 **18 个可执行测试文件**。不要手写“总检查项”——循环内检查数会随配置展开，
 静态 `check()` 调用点也不等于运行时检查数；以实际运行输出和开发者文档自动盘点为准。
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
@@ -241,8 +241,17 @@ MCS 查表都不含随机），所以 n 次重复只重跑 TTI 主循环。代�
 表 3 使用用户提供的 `company_20b_256qam`：28 档 MCS、56 条 NewTx/ReTx 曲线、
 1824 个点。原始数据在 `bler_data_20b.py`，查询/哈希/单调性/插值在
 `bler_curves.py`。它比分析模型更贴近该接收机配置，但**仍不是 3GPP 标准曲线**。
-数据所有者确认：源标签 `Es/No` 就是经典 MMSE 接收机的 SINR；TB/CB、块长、
-信道模型、MIMO 层数和译码器细节暂不参数化。曲线范围外只能保守钳位，不能外推。
+数据所有者确认：源标签 `Es/No` 就是经典 MMSE 接收机的 SINR；公司误块事件是
+**一个已调度 TTI 中该用户的整个 TB**，系统不单独查询或统计 CBLER。公司概念查询输入
+包含该次 TBS、post-MMSE SINR、MCS、NewTx/ReTx 与固定接收机 profile，一次 grant
+只形成一次 TB ACK/NACK；物理编码内部即使分成多个 CB，也不能在表 3 路径上再次套
+CB→TB 合成。
+
+当前导入常量只保存 MCS、NewTx/ReTx 码率和 SINR→BLER 点，没有保存每档 reference
+TBS/resource/rank 映射；`CurveBlerModel` 也尚未按 `n_coded_bits` 选曲线。因此准确边界是
+**TTI/TB 事件单位已对齐，但 TB-size 轴尚未对齐**。信道模型、MIMO 层数和译码器细节同样
+未参数化。曲线范围外只能保守钳位，不能外推；拿到源表完整 TBS/profile metadata 前，
+不得声称当前 BLER 已随实际块长变化。
 
 表 3 的 HARQ：首传用 NewTx；失败后用 ReTx。源数据每档只有一条 ReTx 曲线，
 多次重传会复用它，结果必须保留 `harq_model=newtx_then_retx_curve_reused`。
@@ -647,6 +656,33 @@ SVD + 矩阵求逆，十万 TTI 跑不完。返回值带逐快照比值与离散
 实测在 10 用户 / 64 端口下 **MU/SU 比值 < 1**（密集城区 0.755、城区宏站 0.917），
 自适应因此全程选 SU。这不是 bug：SU 无干扰且能到 rank4，
 MU 硬顶 rank2 且每人只分 1/K 功率，自由度富余时 SU 本来就该赢。
+
+### 载波栅格与 numerology 必须整套跟数据集走，不能只跟一半
+
+`sr_system_sim` 早先把 `num_rbg` 写死 17（= 272 RB / 100 MHz），`scs_khz` 更是
+从头到尾没设过（默认 30）。而同一个函数里的 `snapshot_update_ms` **一直**是从
+`ds.config["subcarrier_spacing"]` 算出来的——**同一份配置一半跟数据集走、一半写死，
+是最难发现的那种不一致**：它不报错、不告警，`notes` 里也没有任何线索。
+
+后果按带宽平方级放大：实测 51 RB（20 MHz@30 kHz）的信道上小区吞吐报
+**756.3 Mbps**，按真实带宽只有 **133.5 Mbps**。`presets.yaml` 里
+`single_cell_4t4r`、`large_isd_1732m`（都是 20 MHz）、`large_isd_5km`
+（10 MHz + **15 kHz**）全部落在这条路径上；15 kHz 那个还多吃一层——TTI 被当成
+0.5 ms 而不是 1 ms，一秒里的调度机会翻倍，所有 ms 口径的时延 KPI 一起偏。
+
+现在由 `server._carrier_grid(ds.config, num_rb=h.shape[2])` 统一推导，结果里带
+`carrier` 段（`num_rb_in_channel` / `num_rbg` / `rb_per_rbg` / `simulated_num_rb` /
+`excluded_num_rb` / `scs_khz` / `tti_ms`）供交叉核对。
+
+**RB 数不是 16 的整数倍时，尾部不足一组的 RB 不参与仿真**——`rbg_reduce` 本来就
+只取完整分组的代表 RB，而 `TbsLookup` 假设所有 RBG 等长（38.214 允许首尾 RBG 更短，
+本项目未实现）。少算一点并在 `notes` 里说出来，远好于按 272 RB 硬算；开 RB 功控时
+直接硬失败，因为那几个 RB 的功率倍率会静默失效。
+
+顺带两条同源的：`rbg_reduce` 在 `n_rb <= rb_per_rbg` 时曾原样返回，16 RB 的载波
+会被当成 **16 个 RBG**；KPI 页的 RBG 分布图 CSS 里 `repeat(18,...)` 也是按 17 RBG
+写死的，窄带载波下柱子会挤在左边五分之一。**"跟着 272 RB 写死"的地方不止一处，
+改这类东西要全文搜 17 / 18 / 272。**
 
 ### 多时隙的快照间隔是 5 ms，不是一个 TTI
 

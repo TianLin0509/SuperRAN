@@ -408,6 +408,13 @@ check(abs(expm._bler_lookup(15, _x_bler) - _want_bler) < 1e-12,
       "experience_v2 BLER 缓存保持公司曲线 0.05 dB 分辨率")
 check(abs(_coarse_bler - _want_bler) > 0.05,
       "反向哨兵：旧 0.5 dB 量化在瀑布区确会造成显著概率偏差")
+check(expm._bler_lookup(15, float("nan")) == 1.0
+      and expm._bler_lookup(15, float("-inf")) == 1.0,
+      "experience_v2 把 NaN/-Inf SINR 判为不可发送")
+check(abs(expm._bler_lookup(15, float("inf"))
+          - sysm._bler_lookup(15, float("inf"))) < 1e-12
+      and expm._bler_lookup(15, float("inf")) < 1.0,
+      "experience_v2 的 +Inf SINR 与 legacy 一致钳到公司曲线高 SINR 尾部")
 
 # --- bug B：S 时隙的 RE 与 dl_ratio 必须用同一个系数 ---
 check(abs(sysm.S_SLOT_DL_FRACTION - 0.7) < 1e-9, "S 时隙折合系数 0.7")
@@ -938,6 +945,9 @@ _expect_value_error(
     lambda: sysm.SystemConfig(tdd_pattern="DDDX"),
     "tdd_pattern", "TDD pattern 拒绝 D/S/U 之外的字符")
 _expect_value_error(
+    lambda: sysm.SystemConfig(tdd_pattern="UUU"),
+    "至少需要一个 D 或 S", "下行仿真拒绝没有任何下行机会的 TDD pattern")
+_expect_value_error(
     lambda: sysm.SystemConfig(seed=-1),
     "seed", "系统随机种子拒绝负数")
 _expect_value_error(
@@ -1207,6 +1217,36 @@ with tempfile.TemporaryDirectory() as _tmp:
                                    packet_size_scale=True),
         "packet_size_scale 必须是有限正数",
         "布尔值不能冒充全局话务缩放标量")
+
+# ---------------------------------------------------------------------------
+sect("15  载波栅格与 MCS 表口径必须跟着链路表走")
+# 主循环早先写死 table=3 / target_bler=0.1。经 MCP 走默认值恰好对得上，
+# 直接调 Python API 时就会出现"rank 按 A 判据选、MCS 按 B 判据选"，
+# 而这种错配在结果里没有任何症状——只能靠入口断言拦。
+_rng15 = np.random.default_rng(1508)
+_h15 = [((_rng15.standard_normal((4, 51, 4, 4))
+          + 1j * _rng15.standard_normal((4, 51, 4, 4))) / np.sqrt(2))
+        for _ in range(3)]
+_t15 = sysm.build_link_tables(_h15, [18.0] * 3, num_ues=3, max_rank=2,
+                              table=3, target_bler=0.1, rb_per_rbg=16)
+check(abs(_t15[0].target_bler - 0.1) < 1e-12,
+      "target_bler 随链路表带出，主循环不必自己猜")
+check(int(_t15[0].mcs_table) == 3, "mcs_table 随链路表带出")
+# 51 RB 只能凑出 3 个完整 RBG；链路表的逐 RBG 维度必须与之一致。
+check(_t15[0].sinr_rbg_db is not None and _t15[0].sinr_rbg_db.shape[2] == 3,
+      f"51 RB -> 3 个 RBG（实得 {_t15[0].sinr_rbg_db.shape[2]}）")
+_cfg15 = sysm.SystemConfig(evaluation_mode="capacity", duration_s=0.1,
+                           num_rbg=3, rb_per_rbg=16, scs_khz=30)
+_ok15 = sysm.simulate(_t15, sys_cfg=_cfg15,
+                      traffic=sysm.TrafficConfig(model="full_buffer"))
+check(_ok15.cell["cell_served_mbps"] > 0, "与带宽一致的配置能正常跑完")
+_t15[1].mcs_table = 1
+_expect_value_error(
+    lambda: sysm.simulate(_t15, sys_cfg=_cfg15,
+                          traffic=sysm.TrafficConfig(model="full_buffer")),
+    "MCS 表 / 目标 BLER 在 UE 之间不一致",
+    "各 UE 的 MCS 表不一致时必须硬失败，不能一半用表 1 一半用表 3")
+_t15[1].mcs_table = 3
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)

@@ -299,6 +299,23 @@ def _card(cell: dict[str, Any], spec: KpiSpec) -> str:
     )
 
 
+def distribution_title(cell: dict[str, Any]) -> str:
+    """按实际载波给出分布图标题。
+
+    标题早先写死"0..17"，那是 100 MHz / 272 RB 的桶数。载波栅格改成跟着数据集走
+    之后，20 MHz 的小区只有 0..3 个 RBG，写死的标题会直接说错。
+    """
+    dist = cell.get("tti_occupied_rbg_distribution")
+    top = None
+    if isinstance(dist, dict):
+        bins = dist.get("bins")
+        if isinstance(bins, list) and bins:
+            top = len(bins) - 1
+        elif isinstance(dist.get("num_rbg"), (int, float)):
+            top = int(dist["num_rbg"])
+    return f"逐 TTI 0..{top} RBG 占比分布" if top is not None else "逐 TTI RBG 占比分布"
+
+
 def _distribution(cell: dict[str, Any]) -> str:
     dist = cell.get("tti_occupied_rbg_distribution")
     if not isinstance(dist, dict) or not isinstance(dist.get("bins"), list):
@@ -325,10 +342,15 @@ def _distribution(cell: dict[str, Any]) -> str:
             + f'<div class="bar" style="height:{height:.1f}px"></div>'
             + f"<b>{occupied}</b></div>"
         )
+    # **列数必须跟着桶数走。** CSS 里写死 repeat(18,...) 是按 272 RB / 17 RBG 定的；
+    # 载波栅格改成跟数据集推导之后，20 MHz 小区只有 4 个桶，柱子会被挤在左边
+    # 五分之一处、右边一大片空白——图没坏，但读者会以为右边的桶全是 0。
     return (
-        '<div class="rbg-chart" role="img" aria-label="逐 TTI 占用 RBG 分布">'
+        f'<div class="rbg-chart" role="img" aria-label="逐 TTI 占用 RBG 分布" '
+        f'style="grid-template-columns:repeat({len(rows)},minmax(24px,1fr))">'
         + "".join(bars) + "</div>"
-        + '<p class="axis">横轴：测量窗每个可用 DL TTI 的占用 RBG 数；'
+        + '<p class="axis">横轴：测量窗每个可用 DL TTI 的占用 RBG 数（共 '
+        + f"{len(rows)} 个桶，0..{len(rows) - 1}）；"
         "纵轴：TTI 占比。0 桶明确包含 idle TTI。</p>"
     )
 
@@ -642,15 +664,26 @@ def render_html(result: dict[str, Any], *, dataset_id: str = "",
         _metric_panel(users, spec, colours) for spec in user_more)
     css = """
 :root{--ink:#162437;--muted:#65758b;--bg:#f3f6fa;--card:#fff;--line:#dce4ee;
---blue:#1769aa;--cyan:#39a7c7;--green:#209567;--amber:#c88916;--red:#c84e4e}
+--blue:#1769aa;--cyan:#39a7c7;--green:#209567;--amber:#c88916;--red:#c84e4e;
+/* 浅底块一律成对定义底色与字色。只翻底色不翻字色，暗色下就是浅底浅字。 */
+--panel:#fff;--tab:#e7edf4;--tint:#eaf6f7;--tint-ink:#12333c;
+--warn:#fff8e7;--warn-ink:#5a3d00;--th:#eef3f8;--svg-bg:#fbfcfe;
+--grid:#e5eaf0;--whisker:#172536}
+@media(prefers-color-scheme:dark){:root{
+--ink:#e9edf3;--muted:#a3b0c0;--bg:#14181d;--card:#1e242b;--line:#333c47;
+--blue:#59aee8;--cyan:#4cc0dd;--green:#4cc98d;--amber:#e2ac4a;--red:#e87b7b;
+--panel:#1e242b;--tab:#272f38;--tint:#0f2833;--tint-ink:#a9e2f0;
+--warn:#2e2410;--warn-ink:#f3d79a;--th:#222932;--svg-bg:#181e24;
+--grid:#2c353f;--whisker:#c9d4e0}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
 font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif}.wrap{max-width:1460px;margin:auto;padding:28px}
 header{background:linear-gradient(125deg,#0c3e67,#087f91);color:white;padding:30px;border-radius:18px}
-h1{margin:0 0 8px;font-size:30px}.meta{opacity:.84;margin:0}.priority{background:#eaf6f7;border-left:5px solid var(--cyan);padding:14px 18px;margin:20px 0;border-radius:8px}.priority ul{margin-bottom:4px}
-.scope-tabs>input{position:absolute;opacity:0;width:1px;height:1px}.scope-tabs>label{display:inline-block;padding:12px 24px;background:#e7edf4;border:1px solid var(--line);cursor:pointer;font-weight:750;font-size:16px}.scope-tabs>input:checked+label{background:white;color:var(--blue);border-bottom-color:white}.scope-tabs>input:focus-visible+label{outline:3px solid var(--cyan);outline-offset:2px}.scope-panels>section{display:none;background:white;border:1px solid var(--line);padding:24px;border-radius:0 14px 14px 14px}#scope-cell:checked~.scope-panels>#cell-panel,#scope-user:checked~.scope-panels>#user-panel{display:block}
+h1{margin:0 0 8px;font-size:30px}.meta{opacity:.84;margin:0}.priority{background:var(--tint);color:var(--tint-ink);border-left:5px solid var(--cyan);padding:14px 18px;margin:20px 0;border-radius:8px}.priority ul{margin-bottom:4px}
+.scope-tabs>input{position:absolute;opacity:0;width:1px;height:1px}.scope-tabs>label{display:inline-block;padding:12px 24px;background:var(--tab);color:var(--ink);border:1px solid var(--line);cursor:pointer;font-weight:750;font-size:16px}.scope-tabs>input:checked+label{background:var(--panel);color:var(--blue);border-bottom-color:var(--panel)}.scope-tabs>input:focus-visible+label{outline:3px solid var(--cyan);outline-offset:2px}.scope-panels>section{display:none;background:var(--panel);border:1px solid var(--line);padding:24px;border-radius:0 14px 14px 14px}#scope-cell:checked~.scope-panels>#cell-panel,#scope-user:checked~.scope-panels>#user-panel{display:block}
 .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.kpi{border:1px solid var(--line);border-radius:12px;padding:16px;min-height:138px}.kpi .label,.kpi .ci,.kpi .key{display:block}.kpi .label{font-weight:700}.kpi strong{font-size:27px;display:inline-block;margin:13px 4px 7px 0}.kpi .unit,.kpi .ci,.kpi .key,.axis,.metric-key{color:var(--muted)}.kpi .key,.metric-key{font-family:Consolas,monospace;font-size:11px;margin-top:8px}
-details{border:1px solid var(--line);border-radius:10px;padding:13px;margin:15px 0}summary{font-weight:750;cursor:pointer}h2{margin-top:28px}.rbg-chart{height:290px;display:grid;grid-template-columns:repeat(18,minmax(24px,1fr));align-items:end;gap:7px;border-bottom:2px solid var(--ink);padding:26px 8px 0;margin-top:18px;overflow-x:auto}.bar-col{text-align:center;min-width:25px}.bar{background:linear-gradient(#39a7c7,#1769aa);border-radius:5px 5px 0 0}.bar-value{font-size:10px;color:var(--muted);display:block;white-space:nowrap}.bar-col b{font-size:12px}.gauge{margin:8px 0 24px}.track{height:22px;background:#e7edf4;border-radius:11px;position:relative;margin:36px 0 10px}.fill{height:100%;border-radius:11px;background:linear-gradient(90deg,var(--green),var(--amber),var(--red))}.mark{position:absolute;top:-26px;font-size:12px;color:var(--muted);transform:translateX(-50%)}.m10{left:10%}.m30{left:30%}.m50{left:50%}.needle{position:absolute;top:-7px;width:3px;height:36px;background:var(--ink);transform:translateX(-1px)}
-.callout{padding:14px 16px;border-left:4px solid var(--amber);background:#fff8e7;margin:14px 0}.legend{display:flex;gap:14px;flex-wrap:wrap;margin:12px 0}.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px}.scope-panels,.scope-panels>section,.metric-panel,.plot-grid,.plot-grid>*{min-width:0}.metric-panel{border:1px solid var(--line);border-radius:14px;padding:18px;margin:18px 0}.metric-panel h3{margin:0}.metric-panel h4{margin:8px 0}.plot-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.svg-scroll,.table-scroll{width:100%;max-width:100%;min-width:0;overflow:auto}.user-svg{min-width:640px;background:#fbfcfe;border:1px solid var(--line);border-radius:8px}.user-svg text{font-size:11px;fill:var(--muted)}.axisline{stroke:var(--ink);stroke-width:1.5}.gridline{stroke:#e5eaf0;stroke-width:1}.whisker{stroke:#172536;stroke-width:1.5}.cdfline{fill:none;stroke:var(--blue);stroke-width:2.5}.axislabel{font-weight:700;fill:var(--ink)!important}table{border-collapse:collapse;min-width:100%;font-size:13px}th,td{border:1px solid var(--line);padding:8px 10px;text-align:right;white-space:nowrap}th{background:#eef3f8;text-align:left;position:sticky;top:0}dl{display:grid;grid-template-columns:220px 1fr;gap:7px}dt{font-weight:650}dd{margin:0;color:var(--muted)}li{margin:8px 0;line-height:1.5}.empty{padding:28px;color:var(--muted)}
+details{border:1px solid var(--line);border-radius:10px;padding:13px;margin:15px 0}summary{font-weight:750;cursor:pointer}h2{margin-top:28px}.rbg-chart{height:290px;display:grid;grid-template-columns:repeat(18,minmax(24px,1fr));align-items:end;gap:7px;border-bottom:2px solid var(--ink);padding:26px 8px 0;margin-top:18px;overflow-x:auto}
+/* 载波栅格由数据集推出，桶数不再恒为 18；实际列数由内联 style 覆盖。 */.bar-col{text-align:center;min-width:25px}.bar{background:linear-gradient(#39a7c7,#1769aa);border-radius:5px 5px 0 0}.bar-value{font-size:10px;color:var(--muted);display:block;white-space:nowrap}.bar-col b{font-size:12px}.gauge{margin:8px 0 24px}.track{height:22px;background:var(--tab);border-radius:11px;position:relative;margin:36px 0 10px}.fill{height:100%;border-radius:11px;background:linear-gradient(90deg,var(--green),var(--amber),var(--red))}.mark{position:absolute;top:-26px;font-size:12px;color:var(--muted);transform:translateX(-50%)}.m10{left:10%}.m30{left:30%}.m50{left:50%}.needle{position:absolute;top:-7px;width:3px;height:36px;background:var(--ink);transform:translateX(-1px)}
+.callout{padding:14px 16px;border-left:4px solid var(--amber);background:var(--warn);color:var(--warn-ink);margin:14px 0}.legend{display:flex;gap:14px;flex-wrap:wrap;margin:12px 0}.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px}.scope-panels,.scope-panels>section,.metric-panel,.plot-grid,.plot-grid>*{min-width:0}.metric-panel{border:1px solid var(--line);border-radius:14px;padding:18px;margin:18px 0}.metric-panel h3{margin:0}.metric-panel h4{margin:8px 0}.plot-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.svg-scroll,.table-scroll{width:100%;max-width:100%;min-width:0;overflow:auto}.user-svg{min-width:640px;background:var(--svg-bg);border:1px solid var(--line);border-radius:8px}.user-svg text{font-size:11px;fill:var(--muted)}.axisline{stroke:var(--ink);stroke-width:1.5}.gridline{stroke:var(--grid);stroke-width:1}.whisker{stroke:var(--whisker);stroke-width:1.5}.cdfline{fill:none;stroke:var(--blue);stroke-width:2.5}.axislabel{font-weight:700;fill:var(--ink)!important}table{border-collapse:collapse;min-width:100%;font-size:13px}th,td{border:1px solid var(--line);padding:8px 10px;text-align:right;white-space:nowrap}th{background:var(--th);text-align:left;position:sticky;top:0}dl{display:grid;grid-template-columns:220px 1fr;gap:7px}dt{font-weight:650}dd{margin:0;color:var(--muted)}li{margin:8px 0;line-height:1.5}.empty{padding:28px;color:var(--muted)}
 @media(max-width:1050px){.grid{grid-template-columns:repeat(2,1fr)}.plot-grid{grid-template-columns:1fr}}
 @media(max-width:560px){.wrap{padding:10px}.grid{grid-template-columns:1fr}header{padding:22px}h1{font-size:24px}.scope-panels>section{padding:13px}.scope-tabs>label{padding:10px 16px}.priority{padding:12px}.user-svg{min-width:600px}}
 """
@@ -662,7 +695,7 @@ details{border:1px solid var(--line);border-radius:10px;padding:13px;margin:15px
 <div class="scope-tabs"><input id="scope-cell" name="scope" type="radio" checked><label for="scope-cell">小区级</label><input id="scope-user" name="scope" type="radio"><label for="scope-user">用户级</label><div class="scope-panels">
 <section id="cell-panel"><div class="callout"><strong>不要混淆：</strong>neighbor_prb_util 是邻区干扰输入；serving_cell_prb_utilization 是本小区正式仿真的实测结果。10%/30%/50% 只能通过话务校准接近。</div><h2>优先 KPI</h2><div class="grid">{''.join(_card(cell,spec) for spec in cell_primary)}</div>
 <details><summary>更多小区 KPI（{len(cell_more)}）</summary><div class="grid">{''.join(_card(cell,spec) for spec in cell_more)}</div></details>
-<details{resource_open}><summary>资源占用与 MU 画像</summary>{_load_gauge(cell)}<h3>逐 TTI 0..17 RBG 占比分布</h3>{_distribution(cell)}</details>
+<details{resource_open}><summary>资源占用与 MU 画像</summary>{_load_gauge(cell)}<h3>{_esc(distribution_title(cell))}</h3>{_distribution(cell)}</details>
 <details{traffic_open}><summary>话务 profile 与 CDF 输入</summary>{_traffic_profiles(result)}</details>
 {_calibration(result)}
 <details><summary>KPI 定义与统计口径</summary>{definition_html or '<p class="empty">无定义元数据。</p>'}</details>

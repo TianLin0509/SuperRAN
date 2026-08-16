@@ -3,8 +3,15 @@
 Only the NewTx/ReTx curves directly mapped by MCS 0..27 are retained here.
 Additional code-rate curves present in the source script are intentionally omitted.
 The source script labels the horizontal axis ``Es/No``; the data owner confirmed that
-this quantity is SINR for a classic MMSE receiver. TB/CB granularity, block length,
-channel model, MIMO layers, and decoder details are intentionally not parameterized.
+this quantity is SINR for a classic MMSE receiver.
+
+The company abstraction treats one scheduled TTI's transport block as one BLER event;
+it does not expose code-block errors separately.  Conceptually the operating point
+includes that TTI's TB size, SINR, selected MCS and transmission kind.  The imported
+curve payload, however, preserves only MCS, NewTx/ReTx code rate and the SINR axis: it
+does not carry a machine-readable reference-TB-size/resource/rank mapping.  Current
+callers therefore reuse the same MCS curve across scheduled TB sizes and must report
+that as a model limitation instead of inventing a CB-to-TB conversion.
 
 This is not a 3GPP standard table and has not been independently checked against a
 public reference. Never label these points as 3GPP reference BLER curves.
@@ -17,9 +24,23 @@ SOURCE_AXIS_NAME = "SINR"
 SOURCE_AXIS_ORIGINAL_LABEL = "Es/No"
 SOURCE_AXIS_USAGE = "post-MMSE SINR (dB); the source label Es/No denotes SINR"
 RECEIVER_MODEL = "classic MMSE"
+ERROR_EVENT = "one scheduled TTI transport block (TB); CB is not exposed separately"
+COMPANY_LOOKUP_INPUTS = (
+    "tb_size_bits",
+    "post_mmse_sinr_db",
+    "mcs",
+    "tx_mode",
+    "receiver_profile",
+)
+IMPORTED_CURVE_AXES = ("mcs", "tx_mode", "post_mmse_sinr_db")
+TB_SIZE_AXIS_STATUS = (
+    "confirmed company semantic, but the reference TB-size/resource mapping is not "
+    "preserved in this imported curve payload"
+)
 PROFILE_SCOPE = (
-    "TB/CB granularity, block length, channel model, MIMO layers, and decoder details "
-    "are intentionally not parameterized"
+    "One scheduled TTI/TB is one BLER trial and CB is not modeled separately. "
+    "The imported curves do not parameterize actual scheduled TB size, resource "
+    "allocation, channel model, MIMO layers, or decoder details."
 )
 DATA_SHA256 = "12fd4f3de4f1c47678331f7ebcbbd65013434dbb4d909e904210c4bca17e3d4e"
 

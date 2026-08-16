@@ -202,27 +202,52 @@ def _align_to_ues(n: int, num_ues: int) -> int:
     return max(((n + num_ues - 1) // num_ues) * num_ues, num_ues)
 
 
-def _resolve_workers(workers: int | str, num_samples: int, cfg: dict[str, Any]) -> int:
-    """决定用几个进程。
-
-    ``"auto"`` 时按**粗略串行工作量**决定。20-ray CDL 落地后旧的 24 ms
-    单样本标定已失效；当前热态锚点从 0.158 s 到 7.48 s/样本不等。这个估计
-    只用于决定是否值得支付 Windows spawn/import 成本，不是向用户承诺的 ETA。
-    """
+def _requested_worker_count(
+    workers: int | str,
+    num_samples: int,
+    cfg: dict[str, Any],
+) -> int:
+    """Resolve the CPU-work estimate before ChannelHub batch constraints."""
     if isinstance(workers, int) and workers != 0:
         n = workers
     else:
         est_total_s = estimate_seconds(cfg, num_samples)
-        # 每个子进程要重新 import numpy/scipy/ChannelHub，实测约 4 秒。
-        # 所以只在总工作量够大时才并行，且保证**每个 worker 至少有
-        # _MIN_WORK_S 的活**，否则启动成本吃掉收益（实测每 worker 只分到
-        # 6 秒活时，10 进程只有 1.34 倍加速）。
         if est_total_s < _PARALLEL_MIN_TOTAL_S:
             return 1
         n = max(2, int(est_total_s // _MIN_WORK_S))
     if n <= 1:
         return 1
     return max(1, min(int(n), num_samples, (os.cpu_count() or 4)))
+
+
+def _worker_batch_cap(num_samples: int, cfg: dict[str, Any]) -> int:
+    """Cap workers so a ChannelHub UE batch is not repeated per tiny chunk.
+
+    ChannelHub constructs samples in batches whose size is aligned to
+    ``num_ues``.  Giving 20 one-sample chunks to a 20-UE scenario therefore
+    makes every child process construct a 20-sample batch and discard 19
+    samples.  The numerical stream stays correct, but work and memory can grow
+    by almost 20x.  At most one worker per (possibly partial) UE batch avoids
+    that amplification while retaining exact global ``sample_index`` slicing.
+    """
+    n = max(int(num_samples), 1)
+    n_ues = max(int(cfg.get("num_ues", 1) or 1), 1)
+    return max(1, min(n, (n + n_ues - 1) // n_ues))
+
+
+def _resolve_workers(workers: int | str, num_samples: int, cfg: dict[str, Any]) -> int:
+    """决定实际使用几个进程。
+
+    ``"auto"`` 时按**粗略串行工作量**决定。20-ray CDL 落地后旧的 24 ms
+    单样本标定已失效；当前热态锚点从 0.158 s 到 7.48 s/样本不等。这个估计
+    只用于决定是否值得支付 Windows spawn/import 成本，不是向用户承诺的 ETA。
+    """
+    # 每个子进程要重新 import numpy/scipy/ChannelHub，实测约 4 秒。
+    # 所以先按总工作量决定并行度，再按 UE 批次上限收口。第二层很重要：
+    # 否则“20 样本 / 20 UE / 20 workers”会在 20 个进程里各构造一整个
+    # 20-UE batch，变成接近 400 个样本的内部工作量。
+    requested = _requested_worker_count(workers, num_samples, cfg)
+    return min(requested, _worker_batch_cap(num_samples, cfg))
 
 
 # 并行的两个门槛：总活少于这个数就不值得起进程；每个 worker 至少要分到这么多活。
@@ -544,7 +569,10 @@ def _collect(
     unique_sources = sorted(set(precoding_csi_sources))
     contract.update({
         "h_true_role": "downlink physical evaluation channel",
-        "h_est_role": "gNB precoding CSI; UL SRS estimate for paired/BOTH data",
+        "h_est_role": (
+            "gNB precoding CSI; canonical UL SRS estimate is "
+            "reciprocity-mapped back to the DL complex convention for paired/BOTH data"
+        ),
         "h_dl_est_role": (
             "UE-side CSI-RS estimate retained separately; not used as SRS precoding CSI"
             if len(h_dl_est) == accepted else "not available in legacy/single data"
@@ -683,8 +711,14 @@ def generate(
     ask = _align_to_ues(ask, n_ues)
     cfg_run = dict(cfg)
     cfg_run["num_samples"] = ask
+    requested_workers = _requested_worker_count(workers, num_samples, cfg)
     n_workers = _resolve_workers(workers, num_samples, cfg)
-    requested_workers = n_workers
+    worker_cap_reason = None
+    if n_workers < requested_workers:
+        worker_cap_reason = (
+            f"ChannelHub 按 num_ues={n_ues} 成批构造样本；为避免每个小分块重复"
+            f"整批计算，workers 从 {requested_workers} 收口到 {n_workers}"
+        )
 
     _dbg(f"进入迭代 ask={ask} n_ues={n_ues} workers={n_workers} source={source_name}")
 
@@ -883,6 +917,7 @@ def generate(
         "parallel": {
             "requested_workers": int(requested_workers),
             "workers": int(n_workers),
+            "cap_reason": worker_cap_reason,
             "seed_layout": (
                 f"seed={int(cfg.get('seed', 0) or 0)},"
                 f"sample_index={int(cfg.get('sample_index_offset', 0) or 0)}.."

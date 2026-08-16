@@ -59,6 +59,7 @@ RBG 0 → 8 → 16 → 7 → … → 1 → 9；奇数 ``N_b=17`` 的步长 8 来
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -196,6 +197,40 @@ class CsiConfig:
 # ---------------------------------------------------------------------------
 # 跳频序列
 # ---------------------------------------------------------------------------
+@lru_cache(maxsize=64)
+def _standard_hop_order(num_rbg: int, rb_per_rbg: int,
+                        hop_factor: int) -> np.ndarray:
+    """调 ChannelHub 的 38.211 §6.4.1.4.3 跳频树，失败就抛。
+
+    **只缓存成功路径。** 把兜底也缓存进来的话，一次瞬时的依赖缺失会被永久钉死，
+    之后即使 ChannelHub 可用了也照样走恒等扫描——那正是这个模块最想避免的
+    "静默换算法"。
+    """
+    from .channelhub import _ensure_path  # noqa: PLC0415
+
+    _ensure_path()
+    from msg_embedding.ref_signals.srs import (  # noqa: PLC0415
+        SRSResourceConfig,
+        srs_hopping_cycle_length,
+        srs_rb_indices,
+    )
+
+    cfg = SRSResourceConfig(
+        C_SRS=SRS_C_SRS_FULL_BAND, B_SRS=SRS_B_SRS_ONE_RBG,
+        K_TC=2, n_RRC=0, b_hop=0, n_SRS_ID=0, T_SRS=1, T_offset=0,
+    )
+    cycle = int(srs_hopping_cycle_length(cfg))
+    if cycle != hop_factor:
+        raise ValueError(f"标准表给出 {cycle} 跳，配置要 {hop_factor} 跳")
+    total_rb = num_rbg * rb_per_rbg
+    # T_SRS=1 时 n_SRS 恰好等于 slot 序号（srs.py:453），所以直接传 j
+    order = np.array(
+        [int(srs_rb_indices(cfg, j, 0, total_rb)[0]) // rb_per_rbg
+         for j in range(cycle)], dtype=int)
+    order.flags.writeable = False
+    return order
+
+
 def hop_order(num_rbg: int, *, rb_per_rbg: int = 16,
               hop_factor: int = DEFAULT_HOP_FACTOR) -> tuple[np.ndarray, str]:
     """第 j 次 SRS 机会探的是哪个 RBG。返回 ``(order, source)``。
@@ -207,6 +242,9 @@ def hop_order(num_rbg: int, *, rb_per_rbg: int = 16,
     **取不到时退回恒等扫描并如实标注 source**，不静默假装用了标准实现。
     兜底恒等扫描与 C_SRS=63 的标准镜像顺序不同；测试既断言标准顺序，也直接断言
     ``source`` 以 ``channelhub:`` 开头，避免依赖缺失时悄悄换算法。
+
+    结果只取决于三个整数，所以标准路径带缓存：实测未缓存时 **329 µs/次**，
+    而 :func:`rbg_lag_snapshots` 是逐 UE 逐快照调用它的。返回的 order 是共享只读数组。
     """
     for name, value in (("num_rbg", num_rbg), ("rb_per_rbg", rb_per_rbg),
                         ("hop_factor", hop_factor)):
@@ -214,27 +252,7 @@ def hop_order(num_rbg: int, *, rb_per_rbg: int = 16,
                 or not isinstance(value, (int, np.integer)) or int(value) < 1):
             raise ValueError(f"{name} 必须是至少为 1 的整数")
     try:
-        from .channelhub import _ensure_path  # noqa: PLC0415
-
-        _ensure_path()
-        from msg_embedding.ref_signals.srs import (  # noqa: PLC0415
-            SRSResourceConfig,
-            srs_hopping_cycle_length,
-            srs_rb_indices,
-        )
-
-        cfg = SRSResourceConfig(
-            C_SRS=SRS_C_SRS_FULL_BAND, B_SRS=SRS_B_SRS_ONE_RBG,
-            K_TC=2, n_RRC=0, b_hop=0, n_SRS_ID=0, T_SRS=1, T_offset=0,
-        )
-        cycle = int(srs_hopping_cycle_length(cfg))
-        if cycle != hop_factor:
-            raise ValueError(f"标准表给出 {cycle} 跳，配置要 {hop_factor} 跳")
-        total_rb = num_rbg * rb_per_rbg
-        # T_SRS=1 时 n_SRS 恰好等于 slot 序号（srs.py:453），所以直接传 j
-        order = np.array(
-            [int(srs_rb_indices(cfg, j, 0, total_rb)[0]) // rb_per_rbg
-             for j in range(cycle)], dtype=int)
+        order = _standard_hop_order(int(num_rbg), int(rb_per_rbg), int(hop_factor))
         return order, "channelhub:38.211-6.4.1.4.3"
     except Exception as exc:  # noqa: BLE001
         return (np.arange(hop_factor) % max(1, num_rbg),

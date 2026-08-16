@@ -370,10 +370,46 @@ res = ds.compare_arms(
     max_samples=30,
 )
 print(res.text())
-check(res.paired.n == min(ds.n, 30), "配对样本数正确")
+expected_independent_positions = min(int(ds.config["num_ues"]), ds.n, 30)
+check(res.paired.n == expected_independent_positions, "配对样本数按独立 UE 位置聚类")
+check(res.paired.n < min(ds.n, 30), "重复快照不会冒充独立统计样本")
 check(res.paired.mean_a > res.paired.mean_b, "SVD 优于 DFT 单波束")
 check(res.gate2.passed, "公平性门通过")
 check("结论" in res.statement(), "给出可直接引用的结论句")
+_inf = res.as_dict()["inference_unit"]
+check(_inf["clustered_by"] == "ue_position"
+      and _inf["raw_observations"] == min(ds.n, 30)
+      and _inf["independent_pairs"] == res.paired.n
+      and _inf["fallback_reason"] is None,
+      "推断单位（原始观测 / 独立对 / 聚类依据）随结果一起报出")
+
+# --- 聚不了类时必须出声，不能静默按逐样本推断 ---------------------------------
+# 聚类失败的方向是**把区间报窄、把 p 值报小**，正好是危险的那一侧。
+# 另外 Dataset.ue_position 是直接索引 NPZ 的 cached_property，缺键时抛 KeyError，
+# 而 getattr(..., None) 只兜 AttributeError——老数据集会直接崩在这里。
+_se_a = np.arange(6, dtype=float) + 1.0
+_se_b = _se_a * 0.9
+
+
+class _NoPosDs:
+    @property
+    def ue_position(self):
+        raise KeyError("ue_position")
+
+
+for _mode, _obj, _needle in (
+    ("缺键", _NoPosDs(), "取不到"),
+    ("全 NaN", type("_D", (), {"ue_position": np.full((6, 3), np.nan)})(), "非有限"),
+    ("形状不对", type("_D", (), {"ue_position": np.zeros(6)})(), "形状"),
+):
+    _a, _b, _ids, _why = g._position_clusters(_obj, 6, _se_a, _se_b)
+    check(_ids is None and _needle in _why and np.array_equal(_a, _se_a),
+          f"{_mode}时退回逐样本推断并给出原因（{_why}）")
+
+_fallback_item = g.GateItem(
+    "重复快照按 UE 位置聚类", False, "x", severity="warn")
+check(_fallback_item.severity != "block",
+      "聚类失败只告警不拦截——这是聚类上线前的历史行为，但不能装作验证过独立性")
 
 # 过不了门时必须明说结论不成立
 tie = ds.compare_arms(
