@@ -60,6 +60,7 @@ from typing import Any
 import numpy as np
 
 from . import bridge as br
+from . import carrier as carrier_grid
 from . import katex as _kx
 from .paths import artifacts_root
 
@@ -197,7 +198,7 @@ def build_spec(
     array = hw.array_summary(cfg, applied)
 
     n_rb = int(cfg.get("num_rb") or _rb_from_bandwidth(cfg))
-    scs = float(cfg.get("subcarrier_spacing", 30000) or 30000)
+    scs = carrier_grid.scs_khz_from_config(cfg) * 1000.0
     n_sites_cfg = int(cfg.get("num_sites", 1) or 1)
     sectors = int(cfg.get("sectors_per_site", 1) or 1)
     cells, cell_err = _site_positions(cfg)
@@ -216,9 +217,11 @@ def build_spec(
         (shown if k in _KEY_LABELS else others).append(row)
     shown.sort(key=lambda r: list(_KEY_LABELS).index(r["key"]))
 
-    # RBG 划分：38.214 Table 5.1.2.2.1-1 Configuration 2 在 145~275 PRB 时 P=16
-    rbg_size = 16 if n_rb >= 145 else (8 if n_rb >= 73 else 4)
-    n_rbg = math.ceil(n_rb / rbg_size)
+    # 与系统仿真共用同一个 38.214 Type-0 栅格解析器，避免说明书画 4 组、
+    # 调度器实际跑 5 组。Configuration 1/2 与首尾 partial RBG 都保留。
+    grid = carrier_grid.CarrierGrid.from_config(cfg, num_rb=n_rb)
+    rbg_size = grid.nominal_rb_per_rbg
+    n_rbg = grid.num_rbg
 
     notes: list[str] = []
     if n_sites_real != n_sites_cfg:
@@ -269,6 +272,9 @@ def build_spec(
             "num_rb": n_rb,
             "rbg_size": rbg_size,
             "num_rbg": n_rbg,
+            "rbg_prb_sizes": list(grid.rbg_prb_sizes),
+            "rbg_boundaries": [list(pair) for pair in grid.boundaries],
+            "rbg_size_config": grid.rbg_size_config,
             "occupied_hz": n_rb * 12 * scs,
         },
         "time": {
@@ -637,8 +643,8 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
     ("carrier_freq_hz", "载波", "select",
      [700000000.0, 2100000000.0, 2600000000.0, 3500000000.0], "默认 n41 2.6 GHz"),
     ("bandwidth_hz", "带宽", "select",
-     [10000000.0, 20000000.0, 100000000.0], ""),
-    ("num_rb", "RB 数", "number", (12, 275, 1), "默认 272 = 17 RBG x 16"),
+     [10000000.0, 20000000.0, 100000000.0],
+     "用于信道/链路级生成；当前 TDD 系统仿真只接受 100 MHz、272 RB"),
     ("scenario", "传播场景", "select",
      ["UMa_NLOS", "UMa_LOS", "UMi_NLOS", "UMi_LOS", "InF"], ""),
     ("channel_model", "信道剖面", "select",
@@ -666,6 +672,13 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
     ("pf_accounting", "PF 平均量口径", "select",
      ["auto", "scheduled_tbs", "acked_goodput", "legacy_fullband"],
      "auto：experience 用 scheduled TBS；ACK goodput 是研究口径，不是默认"),
+    ("target_bler", "目标 IBLER", "number", (0.01, 0.5, 0.01),
+     "MCS 选择与 SU/MU OLLA 共用；默认 0.10"),
+    ("olla_step_up_db", "SU-OLLA ACK 步长 dB", "number", (0.001, 1.0, 0.001),
+     "默认 0.01；进入 KPI 窗口后按该基础步长更新"),
+    ("olla_step_down_db", "SU-OLLA NACK 步长 dB", "auto_number",
+     (0.001, 2.0, 0.001),
+     "留空=按 target BLER 自动反解；10% 且 up=0.01 时为 0.09"),
     ("qos_avg_rate_exponent", "QoS-PF 平均速率指数 α", "number", (0.0, 4.0, 0.1),
      "默认 1；分母 R_avg^α"),
     ("qos_instant_rate_exponent", "QoS-PF 瞬时速率指数 β", "number", (0.0, 4.0, 0.1),
@@ -687,8 +700,9 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "SUS 配对上限；默认 0.7，越低越严格"),
     ("mu_olla_step_up_db", "MU-OLLA ACK 步长 dB", "number", (0.001, 1.0, 0.001),
      "用户级、非 pair-specific；与 down 步长共同决定目标 BLER"),
-    ("mu_olla_step_down_db", "MU-OLLA NACK 步长 dB", "number", (0.001, 2.0, 0.001),
-     "默认 0.09，与 up=0.01 对应 10% 目标 BLER"),
+    ("mu_olla_step_down_db", "MU-OLLA NACK 步长 dB", "auto_number",
+     (0.001, 2.0, 0.001),
+     "留空=按 target BLER 自动反解；10% 且 up=0.01 时为 0.09"),
     ("precoder", "实际发射权", "select", ["svd", "type1"],
      "SVD 或 Type-I-style 工程码本基线；两者都只使用基站可见 CSI"),
     ("power_constraint", "发射功率约束", "select", ["ebf", "pebf", "nebf"],
@@ -734,6 +748,9 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "small_pdb_ms": 20.0,
     "large_pdb_ms": 300.0,
     "pf_accounting": "auto",
+    "target_bler": 0.1,
+    "olla_step_up_db": 0.01,
+    "olla_step_down_db": None,
     "qos_avg_rate_exponent": 1.0,
     "qos_instant_rate_exponent": 1.0,
     "qos_delay_exponent": 0.0,
@@ -744,7 +761,7 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "mu_csi_error_variance": 0.0,
     "mu_corr_threshold": 0.7,
     "mu_olla_step_up_db": 0.01,
-    "mu_olla_step_down_db": 0.09,
+    "mu_olla_step_down_db": None,
     "precoder": "svd",
     "power_constraint": "ebf",
     "rb_power_control_enabled": "off",
@@ -760,6 +777,8 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "olla_speedup": 1.0,
     "olla_warmup_speedup": 1.0,
 }
+
+
 
 
 def editable_keys() -> frozenset[str]:
@@ -791,7 +810,7 @@ def _interactive(spec: dict[str, Any], *, apply_url: str = "",
                 continue
         else:
             cur = cfg.get(key, _SIM_DEFAULTS.get(key))
-            if cur is None:
+            if cur is None and kind != "auto_number":
                 continue
         init[key] = cur
         hint_html = f'<div class="ch">{_bold(hint)}</div>' if hint else ""
@@ -809,6 +828,11 @@ def _interactive(spec: dict[str, Any], *, apply_url: str = "",
                 cur, ensure_ascii=False, separators=(",", ":"))
             ctl = (f'<input type="text" data-k="{key}" value="{_esc(text_value)}" '
                    'spellcheck="false" autocomplete="off">')
+        elif kind == "auto_number":
+            lo, hi, step = spec_v
+            value = "" if cur is None else _esc(cur)
+            ctl = (f'<input type="number" data-k="{key}" data-auto="1" value="{value}" '
+                   f'min="{lo}" max="{hi}" step="{step}" placeholder="自动">')
         else:
             lo, hi, step = spec_v
             ctl = (f'<input type="number" data-k="{key}" value="{_esc(cur)}" '
@@ -829,6 +853,9 @@ def _interactive(spec: dict[str, Any], *, apply_url: str = "",
 <p class="lead">改完点<b>应用到仿真</b>，改动直接回到 agent——不用复制、不用切窗口。
 只会带上<b>改动过</b>的项，没动的不进 payload。
 <span class="src">（这份 HTML 从文件直接打开时没有回传通道，会自动退回复制粘贴。）</span></p>
+<p class="src"><b>TDD 系统格栅已冻结：</b>100 MHz @ 30 kHz，272 RB = 17 RBG × 16 RB。
+RB 数与 RBG 配置不在这里开放修改；若用其他带宽生成链路级数据，
+<code>sr_system_sim</code> 会明确拒绝，不会自动猜一套新格栅。</p>
 <div class="ctls">{"".join(rows)}</div>
 <div class="hero" id="prev"></div>
 <div class="pvbar">
@@ -843,6 +870,7 @@ const ST={json.dumps(state, ensure_ascii=False)};
 const cur=Object.assign({{}},ST.init);
 const NL=String.fromCharCode(10);
 const F=(k,v)=>{{
+  if(v===null)return '自动（按 target BLER 反解）';
   if(k==='carrier_freq_hz')return (v/1e9)+' GHz';
   if(k==='bandwidth_hz')return (v/1e6)+' MHz';
   return String(v);
@@ -927,14 +955,17 @@ function sync(){{
 document.querySelectorAll('.ctls [data-k]').forEach(el=>{{
   el.addEventListener('input',()=>{{
     const k=el.dataset.k,v=el.value;
-    cur[k]=(el.tagName==='SELECT'&&typeof ST.init[k]==='string')?v:
-           (isNaN(+v)||v==='')?v:+v;
+    cur[k]=v===''?(el.dataset.auto==='1'?null:ST.init[k]):
+           (el.tagName==='SELECT'&&typeof ST.init[k]==='string')?v:
+           isNaN(+v)?v:+v;
     sync();
   }});
 }});
 document.getElementById('rs').onclick=()=>{{
   Object.assign(cur,ST.init);
-  document.querySelectorAll('.ctls [data-k]').forEach(el=>{{el.value=ST.init[el.dataset.k];}});
+  document.querySelectorAll('.ctls [data-k]').forEach(el=>{{
+    const v=ST.init[el.dataset.k];el.value=v===null?'':v;
+  }});
   sync();document.getElementById('msg').textContent='';
 }};
 document.getElementById('cp').onclick=()=>{{
@@ -1151,23 +1182,26 @@ def _svg_freq(spec: dict[str, Any]) -> str:
     """频域：RB 按 RBG 分组。"""
     f = spec["frequency"]
     n_rb, size, n_rbg = f["num_rb"], f["rbg_size"], f["num_rbg"]
+    sizes = [int(value) for value in f.get("rbg_prb_sizes", [size] * n_rbg)]
     W, bh, pad = 900, 26, 4
     per = (W - 2 * pad) / max(n_rb, 1)
     out = [f'<svg viewBox="0 0 {W} 92" width="100%" role="img" aria-label="频域 RB 布局">']
     out.append('<style>.lb{font:11px ui-monospace,Consolas,monospace;fill:#6e6e73}'
                '.rb{fill:#0071e3;opacity:.75}.rb2{fill:#5a3ec8;opacity:.75}</style>')
-    for g in range(n_rbg):
-        lo = g * size
-        n_in = min(size, n_rb - lo)
+    lo = 0
+    for g, n_in in enumerate(sizes):
         x = pad + lo * per
         out.append(f'<rect class="{"rb" if g % 2 == 0 else "rb2"}" x="{x:.2f}" y="26" '
                    f'width="{max(n_in * per - 1, 0.5):.2f}" height="{bh}" rx="2"/>')
         if n_rbg <= 24:
             out.append(f'<text class="lb" x="{x + n_in * per / 2:.1f}" y="20" '
                        f'text-anchor="middle">{g}</text>')
+        lo += n_in
+    partial = [f"RBG{i}={value}RB" for i, value in enumerate(sizes) if value != size]
     out.append(f'<text class="lb" x="{pad}" y="70">'
-               f'{n_rb} RB = {n_rbg} RBG x {size} RB'
-               f'{"（末组 " + str(n_rb - (n_rbg - 1) * size) + " RB）" if n_rb % size else ""}'
+               f'{n_rb} RB = {n_rbg} RBG，名义 P={size} RB（Configuration '
+               f'{f.get("rbg_size_config", 2)}）'
+               f'{"；partial: " + ", ".join(partial) if partial else ""}'
                f' · 每 RB 12 个子载波 x {f["scs_hz"]/1e3:g} kHz = '
                f'{f["occupied_hz"]/1e6:.2f} MHz 占用</text>')
     out.append(f'<text class="lb" x="{pad}" y="86">'

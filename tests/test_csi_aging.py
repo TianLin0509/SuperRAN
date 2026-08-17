@@ -105,7 +105,7 @@ check(np.allclose(got, want, rtol=1e-5), "rank1 MMSE SINR = sigma1^2 * P / sigma
 section("2  38.211 跳频序列")
 # ---------------------------------------------------------------------------
 order, source = ca.hop_order(17, rb_per_rbg=16, hop_factor=17)
-check(source.startswith("channelhub:"), f"跳频序列来自 ChannelHub 的标准实现（{source}）")
+check(source.startswith("superran:"), f"跳频序列由 SuperRAN 自有合同提供（{source}）")
 check(len(order) == 17, f"cycle = 17（C_SRS=63 / B_SRS=1 的 N1）实测 {len(order)}")
 check(sorted(order.tolist()) == list(range(17)), "17 跳恰好覆盖 17 个 RBG，不重不漏")
 expected_order = [0, 8, 16, 7, 15, 6, 14, 5, 13, 4, 12, 3, 11, 2, 10, 1, 9]
@@ -308,6 +308,8 @@ for _kwargs, _label in (
 
 for _call, _label in (
     (lambda: ca.hop_order(0), "零 RBG"),
+    (lambda: ca.hop_order(8, rb_per_rbg=16, hop_factor=8),
+     "非 100 MHz / 17-hop profile"),
     (lambda: ca.rbg_lag_snapshots(ca.CsiConfig(), 17, snapshot_ms=0.0,
                                   snapshot_index=0), "零 snapshot interval"),
     (lambda: ca.rbg_lag_snapshots(ca.CsiConfig(), 17, snapshot_ms=5.0,
@@ -321,7 +323,7 @@ for _call, _label in (
 
 summ = ca.aging_summary(ca.CsiConfig(srs_period_ms=10.0, hopping=True),
                         num_rbg=17, snapshot_ms=5.0, speed_kmh=30.0)
-check(summ["hop_order_source"].startswith("channelhub:"), "摘要里标注了跳频序列来源")
+check(summ["hop_order_source"].startswith("superran:"), "摘要里标注了跳频序列来源")
 check(summ["coherence_time_ms"] is not None and summ["coherence_time_ms"] < 10,
       f"30 km/h 相干时间 {summ['coherence_time_ms']} ms（应当 < 10）")
 check(len(summ["warnings"]) > 0, "平均 CSI 陈旧时长远大于相干时间时给出告警")
@@ -381,15 +383,26 @@ for _p, _want in ((0.10, 0.09), (0.20, 0.04), (0.05, 0.19), (0.50, 0.01)):
 for _sd in (0.04, 0.09, 0.19):
     _p = 0.01 / (0.01 + _sd)
     check(abs(sy.olla_step_down_for(_p, 0.01) - _sd) < 1e-9, f"s_down={_sd} 往返自洽")
-check(abs(sy.SchedulerConfig().as_dict()["olla_target_bler"] - 0.1) < 1e-9,
-      "默认步长 +0.01/-0.09 给出稳态 IBLER 10.0%（-0.1 只有 9.09%）")
-check(abs(sy.SchedulerConfig().as_dict()["mu_olla_target_bler"] - 0.1) < 1e-9,
-      "MU 独立 OLLA 的默认稳态 IBLER 目标也显式上报为 10.0%")
+_auto_olla = sy.SchedulerConfig()
+check(_auto_olla.as_dict()["olla_target_bler"] is None,
+      "用户不填 down 步长时保持自动态，不在 target 未知时偷填 10%")
+_resolved_olla = _auto_olla.resolved_for_target(0.1)
+check(abs(_resolved_olla.as_dict()["olla_target_bler"] - 0.1) < 1e-9,
+      "target BLER=10% 时自动反解 +0.01/-0.09")
+check(abs(_resolved_olla.as_dict()["mu_olla_target_bler"] - 0.1) < 1e-9,
+      "MU 独立 OLLA 同样默认按 target BLER 反解")
+_explicit_olla = sy.SchedulerConfig(
+    olla_step_down_db=0.2, mu_olla_step_down_db=0.3
+).resolved_for_target(0.1)
+check(_explicit_olla.olla_step_down_db == 0.2
+      and _explicit_olla.mu_olla_step_down_db == 0.3,
+      "用户显式填的 SU/MU OLLA down 步长不被 target BLER 覆盖")
 # 等比放大不改变稳态——这是 olla_speedup 的全部依据
-_a = sy.SchedulerConfig(olla_speedup=1.0).as_dict()["olla_target_bler"]
-_b = sy.SchedulerConfig(olla_speedup=25.0).as_dict()["olla_target_bler"]
+_a = sy.SchedulerConfig(olla_speedup=1.0).resolved_for_target(0.1).as_dict()["olla_target_bler"]
+_b = sy.SchedulerConfig(olla_speedup=25.0).resolved_for_target(0.1).as_dict()["olla_target_bler"]
 check(_a == _b, f"等比放大 25 倍后稳态 IBLER 不变（{_a} vs {_b}）")
-check(abs(sy.SchedulerConfig(olla_speedup=25.0).step_down - 0.09 * 25) < 1e-9,
+check(abs(sy.SchedulerConfig(olla_speedup=25.0).resolved_for_target(0.1).step_down
+          - 0.09 * 25) < 1e-9,
       "放大系数确实作用在生效步长上")
 for _bad in (0.0, 1.0, -0.1):
     try:

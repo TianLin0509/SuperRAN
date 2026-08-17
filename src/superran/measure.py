@@ -332,7 +332,9 @@ def srs_features(h: np.ndarray, spacing_lambda: float = 0.5) -> SRSFeatures:
 # ---------------------------------------------------------------------------
 
 
-@lru_cache(maxsize=32)
+# 256T Type-I 码本单份约 32 MiB；32 项理论上可把进程顶到约 1 GiB。
+# 常用几何只有 64T/256T 及少量消融，4 项可保住热点又把上界压到约 128 MiB。
+@lru_cache(maxsize=4)
 def type_i_codebook(n1: int, o1: int, n2: int, o2: int, *, dual_pol: bool = True) -> np.ndarray:
     """38.214 Type-I 单面板结构中的过采样 DFT/双极化**列集合**。
 

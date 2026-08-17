@@ -379,11 +379,27 @@ def _precoding_source_item(ds: Any, expected: str) -> GateItem:
     """Build the experiment-specific CSI provenance gate item."""
     raw = np.asarray(getattr(ds, "precoding_csi_sources", []), dtype=str).reshape(-1)
     actual = sorted({str(value) for value in raw if str(value)})
-    passed = actual == [str(expected)]
+    expected_count: int | None = None
+    try:
+        expected_count = int(ds.n)
+    except (AttributeError, TypeError, ValueError):
+        try:
+            expected_count = int(np.asarray(ds.h_est).shape[0])
+        except (AttributeError, IndexError, TypeError, ValueError):
+            pass
+    complete = expected_count is None or raw.size == expected_count
+    passed = bool(
+        complete and raw.size > 0 and np.all(raw == str(expected))
+    )
+    count_note = (
+        f"；标签数 {raw.size}/{expected_count}"
+        if expected_count is not None else f"；标签数 {raw.size}"
+    )
     return GateItem(
         name="预编码 CSI 来源符合实验声明",
         passed=passed,
-        detail=f"期望 {expected}；数据逐样本来源 {actual or ['<missing>']}",
+        detail=(f"期望 {expected}；数据逐样本来源 "
+                f"{actual or ['<missing>']}{count_note}"),
         severity="block",
         fix=(
             "修正 link/paired 生成配置并重新生成；不能把 dl_csirs_estimate "
@@ -717,6 +733,7 @@ class ComparisonResult:
     # dataset cannot be misreported as 80 independent users.
     raw_observations: int | None = None
     cluster_ids: list[Any] | None = None
+    clustered_by: str | None = None
     # 聚不了类时的原因。空字符串表示聚成功；``cluster_ids is None`` 且原因非空
     # 时，推断是按逐样本做的——这个事实必须能被读出来，不能只体现为字段缺失。
     cluster_fallback_reason: str = ""
@@ -740,7 +757,8 @@ class ComparisonResult:
                 ),
                 "independent_pairs": int(self.paired.n),
                 "clustered_by": (
-                    "ue_position" if self.cluster_ids is not None else "sample"
+                    (self.clustered_by or "ue_position")
+                    if self.cluster_ids is not None else "sample"
                 ),
                 "cluster_ids": self.cluster_ids,
                 "fallback_reason": self.cluster_fallback_reason or None,
@@ -946,8 +964,28 @@ def _precoding_csi_tensor(ds: Any, csi: str) -> np.ndarray | None:
     token = str(csi or "ideal").strip().lower()
     if token == "ideal":
         return None
-    if token in {"estimated", "srs", "ul_srs", "ul_srs_estimate"}:
+    if token == "estimated":
         return np.asarray(ds.h_est)
+    if token in {"srs", "ul_srs", "ul_srs_estimate"}:
+        estimate = np.asarray(ds.h_est)
+        raw = np.asarray(
+            getattr(ds, "precoding_csi_sources", []), dtype=str
+        ).reshape(-1)
+        actual = sorted({str(value) for value in raw if str(value)})
+        if (
+            estimate.ndim < 1
+            or raw.size != estimate.shape[0]
+            or raw.size == 0
+            or not np.all(raw == "ul_srs_estimate")
+        ):
+            raise ValueError(
+                "csi='srs' 要求 h_est 的逐样本来源全部是 ul_srs_estimate；"
+                f"本数据集标记为 {actual or ['<missing>']}，"
+                f"标签数 {raw.size}/{estimate.shape[0] if estimate.ndim else 0}。"
+                "禁止把 DL CSI-RS/未知来源的 h_est 当成 SRS 权；请用 link='BOTH' "
+                "重新生成，或只把该臂声明为 csi='estimated'。"
+            )
+        return estimate
     if token in {"csirs", "csi-rs", "dl_csirs", "dl_csirs_estimate"}:
         h_dl_est = getattr(ds, "h_dl_est", None)
         if h_dl_est is None:
@@ -961,10 +999,20 @@ def _precoding_csi_tensor(ds: Any, csi: str) -> np.ndarray | None:
     )
 
 
+def _same_partition(ids_x: np.ndarray, ids_y: np.ndarray) -> bool:
+    """两个聚类是否给出同一个划分（允许簇标签不同名）。"""
+    n = int(len(ids_x))
+    for i in range(n):
+        for j in range(i + 1, n):
+            if (ids_x[i] == ids_x[j]) != (ids_y[i] == ids_y[j]):
+                return False
+    return True
+
+
 def _position_clusters(
     ds: Any, n: int, se_a: np.ndarray, se_b: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, list[Any] | None, str]:
-    """按 UE 位置把重复快照折成独立观测。返回 ``(a, b, cluster_ids, 失败原因)``。
+) -> tuple[np.ndarray, np.ndarray, list[Any] | None, str, str | None, str]:
+    """按稳定 UE 身份把重复快照折成独立观测。
 
     配对检验要求的是独立的**对**。同一个 UE 位置上的多次衰落抽样是重复测量，
     不是额外的独立用户——不折叠就等于把样本量凭空放大，区间偏窄、p 值偏小。
@@ -974,24 +1022,81 @@ def _position_clusters(
     ``getattr(ds, "ue_position", None)`` **只兜 AttributeError**，
     老数据集会在这里直接崩掉而不是回退。位置全 NaN（来源没给位置）时也聚不出东西。
     这两种情况都退回逐样本推断，但必须让调用方看见。
+
+    返回的最后一项是结构化状态（调用方据此定严重度，不靠文案子串）：
+    ``clustered``（成功）、``mobility_missing_id``（移动数据缺身份，block）、
+    ``partition_mismatch``（ue_id 与位置划分矛盾，block）、``unavailable``（warn）。
     """
+    # stable UE identity wins over position.  A moving UE changes coordinates every
+    # snapshot; clustering by coordinates would turn one trajectory into many fake
+    # independent users and make CI/p-values overconfident.
+    try:
+        raw_ids = np.asarray(ds.scalar("ue_id"))[:n]
+    except (KeyError, AttributeError, OSError, TypeError, ValueError):
+        raw_ids = np.asarray([])
+    if raw_ids.ndim == 1 and raw_ids.size == n:
+        try:
+            numeric = raw_ids.astype(float)
+        except (TypeError, ValueError):
+            numeric = np.asarray([])
+        if (numeric.size == n and np.all(np.isfinite(numeric))
+                and np.allclose(numeric, np.round(numeric), rtol=0.0, atol=1e-9)):
+            ids = np.asarray([int(value) for value in numeric], dtype=object)
+            # 静态数据上 ue_id 聚类必须与位置聚类给出同一个划分：生成端的 id
+            # 是按"源迭代器轮转"假设合成的，位置是从数据本身读出的独立锚点。
+            # 两者不一致说明身份合同已被破坏（如拒绝采样后 id 与样本序错位），
+            # 拿着错身份继续算独立观测数就是循环论证。
+            cfg0 = dict(getattr(ds, "config", {}) or {})
+            if str(cfg0.get("mobility_mode", "static")).strip().lower() == "static":
+                try:
+                    pos = np.asarray(ds.ue_position)[:n]
+                    pos_ok = bool(
+                        pos.ndim == 2 and pos.shape[0] == n
+                        and np.all(np.isfinite(pos)))
+                except (KeyError, AttributeError, OSError, ValueError):
+                    pos_ok = False
+                if pos_ok:
+                    pos_ids = np.empty(n, dtype=object)
+                    pos_ids[:] = [
+                        tuple(np.round(row.astype(float), 6).tolist())
+                        for row in pos
+                    ]
+                    if not _same_partition(ids, pos_ids):
+                        return (
+                            se_a, se_b, None,
+                            "ue_id 聚类与 ue_position 聚类给出不同划分；"
+                            "身份合同不可信（常见于拒绝采样后 id 与样本序错位）",
+                            None, "partition_mismatch",
+                        )
+            a, b, kept = paired_cluster_means(se_a, se_b, ids)
+            return a, b, kept, "", "ue_id", "clustered"
+
+    cfg = dict(getattr(ds, "config", {}) or {})
+    mobility = str(cfg.get("mobility_mode", "static")).strip().lower()
+    if mobility != "static":
+        return (
+            se_a, se_b, None,
+            "移动数据缺少逐样本稳定 ue_id；位置会随时间变化，不能拿坐标代替身份",
+            None, "mobility_missing_id",
+        )
+
     try:
         positions = ds.ue_position
     except (KeyError, AttributeError, OSError, ValueError) as exc:
-        return se_a, se_b, None, f"数据集取不到 ue_position（{type(exc).__name__}）"
+        return se_a, se_b, None, f"数据集取不到 ue_position（{type(exc).__name__}）", None, "unavailable"
     if positions is None:
-        return se_a, se_b, None, "数据集没有 ue_position"
+        return se_a, se_b, None, "数据集没有 ue_position", None, "unavailable"
     pos = np.asarray(positions)[:n]
     if pos.ndim != 2 or pos.shape[0] != n:
-        return se_a, se_b, None, f"ue_position 形状 {tuple(pos.shape)} 不是 [{n}, dims]"
+        return se_a, se_b, None, f"ue_position 形状 {tuple(pos.shape)} 不是 [{n}, dims]", None, "unavailable"
     if not np.all(np.isfinite(pos)):
-        return se_a, se_b, None, "ue_position 含非有限值（数据源没给位置）"
+        return se_a, se_b, None, "ue_position 含非有限值（数据源没给位置）", None, "unavailable"
     # np.asarray(list[tuple], dtype=object) 会是二维；这里显式做成"每个观测一个
     # 对象"，才符合 paired_cluster_means 的标量 cluster 契约。
     ids_1d = np.empty(n, dtype=object)
     ids_1d[:] = [tuple(np.round(row.astype(float), 6).tolist()) for row in pos]
     a, b, ids = paired_cluster_means(se_a, se_b, ids_1d)
-    return a, b, ids, ""
+    return a, b, ids, "", "ue_position", "clustered"
 
 
 def compare_arms(
@@ -1053,8 +1158,8 @@ def compare_arms(
 
     se_a, se_b = run(arm_a), run(arm_b)
 
-    paired_a, paired_b, cluster_ids, cluster_reason = _position_clusters(
-        ds, n, se_a, se_b)
+    paired_a, paired_b, cluster_ids, cluster_reason, clustered_by, cluster_status = (
+        _position_clusters(ds, n, se_a, se_b))
     paired = paired_compare(paired_a, paired_b)
 
     cfg = dict(ds.config)
@@ -1066,9 +1171,10 @@ def compare_arms(
     if cluster_ids is not None:
         g2.items.append(
             GateItem(
-                "重复快照按 UE 位置聚类",
+                "重复快照按稳定 UE 身份聚类",
                 True,
-                f"{n} 条逐快照观测折叠为 {len(cluster_ids)} 个独立位置后做配对推断",
+                f"{n} 条逐快照观测按 {clustered_by} 折叠为 "
+                f"{len(cluster_ids)} 个独立 UE 后做配对推断",
                 severity="info",
             )
         )
@@ -1083,8 +1189,19 @@ def compare_arms(
                 False,
                 f"没能按位置聚类（{cluster_reason}）；{n} 条观测**按独立样本**计入配对检验。"
                 "若同一 UE 位置有多个快照，区间会偏窄、p 值会偏小。",
-                severity="warn",
-                fix="用带 ue_position 的数据集重新生成，或自行按位置折叠后走 compare_results",
+                severity=(
+                    "block"
+                    if cluster_status in ("mobility_missing_id", "partition_mismatch")
+                    else "warn"),
+                fix=(
+                    "重新生成并保留逐样本 ue_id；移动轨迹不能用位置坐标充当独立身份"
+                    if cluster_status == "mobility_missing_id"
+                    else (
+                        "按 ue_id 归并样本或关闭筛选重新生成；ue_id 与位置划分必须一致"
+                        if cluster_status == "partition_mismatch"
+                        else "用带 ue_position 的数据集重新生成，或自行按位置折叠后走 compare_results"
+                    )
+                ),
             )
         )
     g3 = gate_conclusion(paired)
@@ -1094,5 +1211,6 @@ def compare_arms(
         arm_b=str(arm_b.get("name", "B")),
         se_a=se_a, se_b=se_b, paired=paired, gate2=g2, gate3=g3,
         raw_observations=n, cluster_ids=cluster_ids,
+        clustered_by=clustered_by,
         cluster_fallback_reason=cluster_reason,
     )

@@ -19,6 +19,8 @@ from typing import Any
 
 import numpy as np
 
+from . import carrier as _carrier
+
 _EPS = 1e-30
 _C = 299_792_458.0
 
@@ -430,7 +432,7 @@ def check_delay_spread_vs_profile(ds: Any, *, tol_ratio: float = 0.35) -> Check:
         sample_nom = np.full(n, float(tau_nom_ns), dtype=float)
 
     cfg = ds.config
-    scs = float(cfg.get("subcarrier_spacing", 30000) or 30000)
+    scs = _carrier.scs_khz_from_config(cfg) * 1000.0
     rb = int(ds.summary.get("shape", {}).get("RB", 0) or 0)
     max_tau_ns = 1e9 / (12.0 * scs)
     res_ns = max_tau_ns / max(rb, 1)

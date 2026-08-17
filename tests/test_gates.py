@@ -371,13 +371,13 @@ res = ds.compare_arms(
 )
 print(res.text())
 expected_independent_positions = min(int(ds.config["num_ues"]), ds.n, 30)
-check(res.paired.n == expected_independent_positions, "配对样本数按独立 UE 位置聚类")
+check(res.paired.n == expected_independent_positions, "配对样本数按稳定 UE 身份聚类")
 check(res.paired.n < min(ds.n, 30), "重复快照不会冒充独立统计样本")
 check(res.paired.mean_a > res.paired.mean_b, "SVD 优于 DFT 单波束")
 check(res.gate2.passed, "公平性门通过")
 check("结论" in res.statement(), "给出可直接引用的结论句")
 _inf = res.as_dict()["inference_unit"]
-check(_inf["clustered_by"] == "ue_position"
+check(_inf["clustered_by"] == "ue_id"
       and _inf["raw_observations"] == min(ds.n, 30)
       and _inf["independent_pairs"] == res.paired.n
       and _inf["fallback_reason"] is None,
@@ -402,9 +402,27 @@ for _mode, _obj, _needle in (
     ("全 NaN", type("_D", (), {"ue_position": np.full((6, 3), np.nan)})(), "非有限"),
     ("形状不对", type("_D", (), {"ue_position": np.zeros(6)})(), "形状"),
 ):
-    _a, _b, _ids, _why = g._position_clusters(_obj, 6, _se_a, _se_b)
-    check(_ids is None and _needle in _why and np.array_equal(_a, _se_a),
+    _a, _b, _ids, _why, _by, _st = g._position_clusters(_obj, 6, _se_a, _se_b)
+    check(_ids is None and _by is None and _st == "unavailable"
+          and _needle in _why and np.array_equal(_a, _se_a),
           f"{_mode}时退回逐样本推断并给出原因（{_why}）")
+
+# ue_id 与位置给出不同划分时必须拦：生成端 id 按"迭代器轮转"假设合成，
+# 位置是数据本身的独立锚点；两者矛盾说明身份合同已破坏（如拒绝采样错位），
+# 拿着错身份继续就是循环论证。
+class _MismatchDs:
+    config = {"mobility_mode": "static"}
+    ue_position = np.array([[0.0, 0.0, 0.0]] * 3 + [[100.0, 0.0, 0.0]] * 3)
+
+    def scalar(self, name):
+        assert name == "ue_id"
+        return np.array([0.0, 0.0, 1.0, 0.0, 1.0, 1.0])
+
+
+_a, _b, _ids, _why, _by, _st = g._position_clusters(_MismatchDs(), 6, _se_a, _se_b)
+check(_ids is None and _by is None and _st == "partition_mismatch"
+      and "不同划分" in _why,
+      f"ue_id 与位置划分矛盾时拒绝循环论证（{_why}）")
 
 _fallback_item = g.GateItem(
     "重复快照按 UE 位置聚类", False, "x", severity="warn")

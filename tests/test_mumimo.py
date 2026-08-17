@@ -407,13 +407,13 @@ check(_robust_r.rzf_regularization is not None
 
 # ---------------------------------------------------------------------------
 sect("10  频域聚合：非整数倍 RB 与批量化的等价性")
-# 载波不是 RBG 大小整数倍时，rbg_reduce 只能给出**完整分组**的代表点。
-# 旧实现在 n_rb <= step 时原样返回，16 RB 的载波会被当成 16 个 RBG，
-# 与调用方的 num_rbg 对不上；频选路径只读第 0 行，其余 15 行凭空消失。
-for _nrb, _want in ((272, 17), (51, 3), (48, 3), (16, 1), (8, 1)):
+# 载波不是 RBG 大小整数倍时，最后不足 16 RB 的尾组也必须保留。
+# 旧实现在 n_rb <= step 时原样返回，16 RB 的载波会被当成 16 个 RBG；
+# 另一版又只保留完整分组，让 51 RB 的最后 3 RB 凭空消失。
+for _nrb, _want in ((272, 17), (51, 4), (48, 3), (16, 1), (8, 1)):
     _hh = np.zeros((_nrb, 4, 2), dtype=complex)
     _got = mu.rbg_reduce(_hh, 16).shape[0]
-    check(_got == _want, f"{_nrb} RB -> {_want} 个完整 RBG（实得 {_got}）")
+    check(_got == _want, f"{_nrb} RB -> {_want} 个含尾组的 RBG（实得 {_got}）")
 check(mu.rbg_reduce(np.zeros((272, 4, 2), dtype=complex), 1).shape[0] == 272,
       "rb_per_rbg=1 仍退回 RB 粒度")
 

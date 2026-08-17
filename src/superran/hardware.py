@@ -91,6 +91,23 @@ COMPANY_RB_PER_RBG = 16
 COMPANY_NUM_RB = COMPANY_NUM_RBG * COMPANY_RB_PER_RBG   # 272
 COMPANY_SC_PER_RB = 12            # 只作记录，仿真到 RB 为止
 NR_TABLE_NUM_RB_100M_30K = 273    # 38.104 标准表值，与上面的 272 口径不同
+# 系统/体验层的 TDD 资源格栅是项目合同，不是页面参数。
+# 链路级仍可生成 10/20 MHz 等数据用于算法实验；但这些数据
+# 不能直接送入当前的 TDD 系统仿真并冒充公司 100 MHz 基线。
+SUPERRAN_TDD_CARRIER_PROFILE_ID = "superran-tdd-100m-30khz-272rb-17x16-v1"
+
+# 当前唯一受支持的 SRS hopping 产品合同。参数来自 38.211
+# Table 6.4.1.4.3-1 的 C_SRS=63 行；SuperRAN 只承载公司 100 MHz
+# 载波上 B_SRS=1、b_hop=0、n_RRC=0 这一档。未来扩展其他带宽时必须
+# 新增独立 profile，而不是复用这条 17-hop 顺序。
+COMPANY_SRS_C_SRS = 63
+COMPANY_SRS_B_SRS = 1
+COMPANY_SRS_B_HOP = 0
+COMPANY_SRS_N_RRC = 0
+COMPANY_SRS_17_HOP_ORDER_RBG = (
+    0, 8, 16, 7, 15, 6, 14, 5, 13, 4, 12, 3, 11, 2, 10, 1, 9,
+)
+SUPERRAN_SRS_HOPPING_PROFILE_ID = "superran-srs-c63-b1-17hop-v1"
 
 # --- 收发 -----------------------------------------------------------------
 

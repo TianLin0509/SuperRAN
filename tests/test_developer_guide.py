@@ -139,8 +139,10 @@ def test_every_chapter_has_two_reading_depths_and_every_formula_is_explained() -
 
     assert len(pages) == meta["logical_pages"] == meta["detailed_pages"] == 38
     assert meta["annotated_formulas"] == 78
-    assert meta["detailed_module_coverage"] == 40
     assert meta["detailed_module_exemptions"] == 3
+    assert meta["detailed_module_coverage"] == (
+        meta["modules"] - meta["detailed_module_exemptions"]
+    )
     assert text.count('class="detail-content"') == len(pages)
 
     for page in pages:

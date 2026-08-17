@@ -2304,7 +2304,9 @@ def srs_page() -> Page:
 <p>上行 SRS 时 UE 有 4 个发射端口，gNB 有 64 个接收端口。每个 UE 端口使用可分离的
 参考信号资源，gNB 在每个接收端口上解扩四路，因此得到 64×4 的上行端口信道估计。
 TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定；不是“凭空把 4×64 复制一份”。
-这是应实现的物理矩阵模型，不等于当前调用链已经完成。</p>
+当前 SuperRAN 把两个方向都存成 <code>[time,rb,bs_port,ue_port]</code>，因此
+<code>h_precoding_est=conj(h_ul_est)</code>。该约定由 SuperRAN 自己版本化；数据源若带
+<code>w_dl</code> 也会被忽略，发射权统一由本地 EBF/PEBF/NEBF 重算。</p>
 """ + F_SRS_RX + F_LS
     body += callout(
         "danger", "当前观测边界：仍不是物理多端口 Y=HX",
@@ -2319,11 +2321,13 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
 短长度走规范短序列；支持 comb、循环移位、group/sequence hopping 和频域 hopping。
 “SRS 周期”指发送周期；某个 RBG 距离最近一次有效 SRS 的时间应叫
 <strong>CSI 陈旧时长/lag</strong>，不叫“SRS 年龄”。</p>
-<p>频域资源完整实现 38.211 Table 6.4.1.4.3-1 的 64 行；<code>n_RRC</code>
-（freqDomainPosition）与 <code>n_shift</code>（freqDomainShift）分开建模，奇/偶
-<code>N_b</code> 的 <code>F_b(n_SRS)</code> 均按规范原式计算。默认公司预设使用
+<p>当前系统老化模型只支持 38.211 Table 6.4.1.4.3-1 中的公司基线：
+<code>C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0</code>。它在 SuperRAN 内固化为
+<code>0,8,16,7,...,1,9</code> 的 17-hop 镜像序列，不依赖外部 helper，也不提供
+恒等扫描兜底。默认公司预设使用
 <code>T_SRS=20 slot</code>；在 30 kHz SCS 下 1 slot=0.5 ms，故发送周期为 10 ms，
-17 跳的完整宽带采集窗为 170 ms。可对照
+17 跳的完整宽带采集窗为 170 ms。非 272 RB / 17×16 配置直接报错，
+后续获得新带宽的明确资源参数后再扩展。可对照
 <a href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138211/18.07.00_60/ts_138211v180700p.pdf" target="_blank" rel="noreferrer">ETSI TS 138 211 V18.7.0 §6.4.1.4.3</a>。</p>
 <h2>LS、LMMSE 与方向性</h2>
 """ + F_LS + F_LMMSE
@@ -2358,7 +2362,7 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
         [
             ("srs_period_ms", "10 ms", "UE 发 SRS 的周期；hopping 时每次只覆盖一部分带宽"),
             ("ChannelHub srs_periodicity", "20 slot", "30 kHz SCS 下等于 10 ms；不要把 slot 数直接写成 ms"),
-            ("srs hopping", "on；17-hop", "C_SRS=63/B_SRS=1/b_hop=0 下每次 16 RB，轮转扫 17 RBG"),
+            ("srs hopping", "on；固定 17-hop", "只支持 100 MHz / 272 RB；C_SRS=63/B_SRS=1/b_hop=0 每次 16 RB"),
             ("csi_processing_delay_ms", "2 ms", "估计到权值可用于调度的处理延迟"),
             ("csi_report_period_ms", "20 ms", "宽带 PMI/CQI 何时更新并保持；不是 5 ms 快照"),
             ("snapshot_ms", "由链路表配置", "物理信道采样间隔，只用于把毫秒 lag 离散成快照索引"),
@@ -2572,8 +2576,9 @@ def csi_page() -> Page:
     )
     body += """
 <p>默认 17 跳时，平均陈旧时长是 <code>Hhop·TSRS/2 + Dproc = 87 ms</code>；这是时间轮转的全带
-平均，不意味着某几个 RBG 永远更旧。<code>rbg_csi_staleness_ms()</code> 用 ChannelHub 的 38.211
-跳频次序得到每个时刻每个 RBG 的 staleness，连续时延换 snapshot lag 时必须向上取整，防止偷用尚未完成处理的 CSI。</p>
+平均，不意味着某几个 RBG 永远更旧。<code>rbg_csi_staleness_ms()</code> 用 SuperRAN 本地版本化的
+38.211 C_SRS=63/B_SRS=1 17-hop 次序得到每个时刻每个 RBG 的 staleness；当前不支持其他带宽，
+也没有外部 helper 或 identity fallback。连续时延换 snapshot lag 时必须向上取整，防止偷用尚未完成处理的 CSI。</p>
 <h2>报告到达后只能因果保持</h2>
 """ + F_CSI_REPORT_HOLD
     body += """
@@ -3049,23 +3054,33 @@ SU OLLA 调整。</p>
 <h2>OLLA 如何闭环</h2>
 """ + F_OLLA
     body += """
-<p>项目基线 ACK 上调 +0.01 dB、NACK 下调 −0.09 dB，因此理想稳态目标 BLER 为
-0.01/(0.01+0.09)=10%。warmup 可用同一比例的加速因子加快收敛；测量窗和预热窗分别记录，
-不能把加速后的短期轨迹冒充现场时间常数。SU OLLA 与 MU OLLA 都是用户级数组，后者不区分
-具体配对关系。</p>
+<p>用户默认只设目标 BLER。给定 ACK 上调步长 <code>s_up</code> 后，系统用
+<code>s_down=s_up(1-p)/p</code> 反解 NACK 下调步长；例如 <code>p=10%</code>、
+<code>s_up=0.01 dB</code> 得 <code>s_down=0.09 dB</code>。用户若显式填入 down 步长，
+系统不覆盖，但结果会标成 <code>explicit_user_override</code>，与默认的
+<code>auto_from_target_bler</code> 区分。warmup 可用同一比例的加速因子加快收敛；
+测量窗和预热窗分别记录。SU OLLA 与 MU OLLA 都是用户级数组，
+后者不区分具体配对关系。</p>
+<h2>体验路径当前只使用公司 MCS Table 3</h2>
+<p><code>experience_v2</code> 只接受 <code>company_20b_256qam / table=3</code>。
+传入 Table 1/2 会硬失败，因为仅放开 MCS 索引却没有同套 BLER、TBS/profile
+元数据，会把两个物理口径拼在一起。<code>TbsLookup.build(..., mcs_table=...)</code>
+和链路表仍显式保留 table/profile 接口；未来要扩展时按完整 profile 插件增加，
+不需要改调度主循环。</p>
 <h2>TBS 为什么不能用除法反推 RBG</h2>
 """ + F_TBS + F_RBG_SEARCH
     body += """
 <div class="toy"><div><b>实算：MCS 12 / rank 2 / D slot</b>
 <p>1 RBG = 1,729 B；若线性外推，17×1,729 = 29,393 B；38.214 量化后的真实 17 RBG
 = 29,722 B，偏 +1.119%。</p></div><div><b>会怎样错</b><p>payload=29,394 B 时，除法会认为“17 个也不够”或在其他边界少给一个；
-<code>searchsorted</code> 在严格递增表上准确返回 17 且可装下。</p></div></div>
+<code>searchsorted(side='left')</code> 在单调不减表上准确返回第一个够用的 17 且可装下。</p></div></div>
 """
     body += callout(
         "good", "表合同",
         "<p><code>TbsLookup</code> 建 2×28×4×17 = 3,808 个 int64（D/S 两类 slot）。"
-        "初始化时全扫并要求每行严格递增；一旦 38.214 实现或 RE 模型使序列持平/下降，"
-        "构造当场失败，而不是让 searchsorted 静默给错资源。</p>",
+        "初始化时全扫并要求每行单调不减；量化平台（相邻前缀 TBS 相同）合法，"
+        "只有资源增加却让 TBS 下降才当场失败。<code>searchsorted(side='left')</code> "
+        "会在平台上返回第一个够用的前缀。</p>",
     )
     body += """
 <h2>BLER 与 HARQ 边界</h2>
@@ -3270,6 +3285,37 @@ def modes_page() -> Page:
 def experience_page() -> Page:
     body = phases_svg() + mu_decision_svg()
     body += """
+<h2>系统层的载波是固定合同，不是调参项</h2>
+<p>当前 TDD 系统/体验仿真统一使用 <code>100 MHz @ 30 kHz</code>，
+<code>272 RB = 17 RBG × 16 RB</code>。38.104 标准表对应 273 RB；SuperRAN 在信道
+生成前就有意去掉最后 1 RB，让系统层永远是完整的 17 个 16-RB 组。
+<code>CarrierGrid.company_tdd()</code> 同时核对张量宽度、带宽标签、SCS 与 BWP 起点；
+任一不一致都硬失败，不会把 20 MHz 数据猜成一套 7-RBG 系统口径。</p>
+<p>通用 <code>CarrierGrid.from_config()</code> 和 Type-0 首尾 partial-RBG 工具仍保留，
+但只用于链路级、旧数据诊断和数学单测；它们不在 TDD 系统页面上暴露。</p>
+"""
+    body += table(
+        ["层级", "RBG 分组", "执行规则"],
+        [
+            ("TDD 系统/体验", "16×17（17 RBG）", "唯一对外口径；不接受其他 RB/RBG 形状"),
+            ("链路级通用工具", "可表示 51/106/273 等 Type-0 边界", "不等于已支持对应系统仿真"),
+            ("标准 100 MHz 对照", "273 RB", "第 273 RB 在生成前丢弃，不进入资源利用率分母"),
+        ],
+    )
+    body += callout(
+        "warn", "为什么仍保留通用 Type-0 工具",
+        "<p>它们用来检查导入数据、验证 TBS 单调性和阻止尾 PRB 被静默丢失；"
+        "保留数学能力不等于把它变成产品功能。对外入口只调固定 profile，"
+        "页面不再显示 <code>num_rb</code> 或 <code>rbg_size_config</code> 控件。</p>",
+    )
+    body += callout(
+        "warn", "TBS 只需单调不减，不要求严格递增",
+        "<p>38.214 的 TBS 量化会让相邻 RBG 前缀偶尔得到相同字节数。"
+        "<code>searchsorted(side='left')</code> 在平台上仍会返回第一个够用的前缀；"
+        "只有 TBS 随资源增加反而下降，才应硬失败。用全带 TBS 除以 17 或按名义 P "
+        "估算都会在量化边界或部分尾组上少给/多给资源。</p>",
+    )
+    body += """
 <h2>一个 DL TTI 的完整顺序</h2>
 """
     body += steps((
@@ -3322,7 +3368,7 @@ MCS12/rank2 的 TBS=1,729 B：新 R̄=0.99×1,000+0.01×1,729=<strong>1,007.29 B
         "<p>当前决策 D1 先使用经典 PF。QoS-PF 作为参数化扩展保留，但默认 α=β=1、γ=0、"
         "priority weighting=none，必须逐分配退化为经典 PF；现场 EPF 定义未冻结前不冒充标准算法。</p>",
     )
-    body += "<p class=source-row>排序/计划/记账：" + source_ref("src/superran/experience.py", "potential[i] = lookup.tbs_bytes") + " · " + source_ref("src/superran/experience.py", 'accounting == "scheduled_tbs"') + "</p>"
+    body += "<p class=source-row>载波栅格：" + source_ref("src/superran/carrier.py", "class CarrierGrid") + " · 排序/计划/记账：" + source_ref("src/superran/experience.py", "potential[i] = lookup.tbs_bytes") + " · " + source_ref("src/superran/experience.py", 'accounting == "scheduled_tbs"') + "</p>"
     return Page(
         "experience", "体验模式调度与 PF 记账", "系统仿真", "EXPERIENCE_V2",
         "逐 TTI 的 PF、SU/MU plan、按需 RBG 和 R_avg 正确记账。", body,
@@ -3994,7 +4040,9 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         ("Sionna RT 时变", "Receiver.velocity 未设置且 Paths.cfr 默认 1 Hz 采样，多个 symbol 实为静态重复；频率网格还从 0 单边展开", "写完整 UE 速度，CFR 采样率=1/平均 OFDM symbol 周期，RB 频率以载波中心对称", "真实 Munich RT symbol 演进反例"),
         ("Probe SRS 资源", "全带显式 C_SRS=63 覆盖 272 RB，直接塞进 24-RB probe 后越界", "probe-only 重新选最宽合法标准资源并报告 63→7；正式生成仍对显式非法配置硬失败", "company_64t4r probe 回归"),
         ("系统时间轴", "14 symbol 被误当 14 个 TTI 落盘", "14 symbol 先完成估计，再取中间 symbol 为 1 slot snapshot；禁复数平均", "64×4 E2E"),
-        ("UL→DL 互易映射", "ChannelHub 的 canonical UL 返回值已恢复成 [BS,UE] 布局，数值为 conj(H_DL)；适配层又直接把它当下行预编码 CSI，等于少做一次共轭", "SuperRAN 显式存 h_precoding_est=conj(h_ul_est)，保持 H_UL=H_DL^H 与下行权设计语义同时成立", "零校准误差复数逐位哨兵"),
+        ("TDD 系统载波", "通用 Type-0 工具被直接暴露给系统入口，使 51/106/273 RB 也会自动变成新的系统口径", "对外冻结 100 MHz@30 kHz、272 RB=17×16；张量宽度与标签任一不符就硬失败；通用工具仅保留为内部数学能力", "fixed-profile 合同 + UI 无 num_rb/rbg_size_config 控件"),
+        ("UL→DL 互易映射", "若跟随外部 helper/w_dl 的轴序与共轭约定，数据源演进可悄悄改变发射权", "SuperRAN 版本化 [time,rb,bs,ue] 合同，h_precoding_est=conj(h_ul_est)；新数据忽略 source w_dl，权值由本地 EBF/PEBF/NEBF 重算", "复数逐位哨兵 + 轴形状反例 + source-w_dl 忽略测试"),
+        ("SRS 17-hop 所有权", "老化模型运行时调外部 srs_rb_indices，依赖失败时还可退回恒等扫描", "SuperRAN 固化 C_SRS=63/B_SRS=1/b_hop=0 的 0,8,16,...,1,9 序列；只接受 17×16，无外部 helper、无 fallback", "17 跳不重不漏 + 非标 profile 硬失败"),
         ("PF 平均速率", "按需 1 RBG 用户若用全带 best_se 记账会被约 17×过罚", "默认用实际 scheduled TBS credit，ACK bytes 只作独立 KPI", "确定性反控：小包均值等待 +0.9525 ms、P95 +9.5 ms；真实 mixed 差异为 0 并被 Gate 3 拦截"),
         ("比较样本独立性", "80 个 snapshot 被直接当 80 个独立统计样本，但实际只有 10 个 UE 位置；实现修正后，test_gates 的旧断言仍期待 raw n=30", "内置 compare_arms 先按 UE position 聚类；回归改为期待 10 个独立位置，并反向断言 n 必须小于 30 个快照", "Hello World 80→10；Gate E2E 30→10；主实验 CI 跨零、Wilcoxon p=0.846"),
         ("并行 worker 上限", "请求 worker 数超过 UE batch 数时会产生空块/额外 spawn，并让并行摘要看起来像真的使用了全部 worker", "worker 数钳到实际 UE batch 数并写 parallel.cap_reason，不改变样本、seed 或排序", "worker cap 合同测试"),

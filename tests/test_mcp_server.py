@@ -301,30 +301,34 @@ async def main() -> None:
             check(2.0 <= _el < 8.0, f"真的按 timeout_s 等（实测 {_el:.1f} 秒）")
             check(wait["bridge"]["enabled"] is True, "回传桥状态一并返回，便于排查")
 
-    print("\n" + "=" * 68 + "\n10  载波栅格必须由数据集推出来\n" + "=" * 68)
-    # 早先 sr_system_sim 在关掉 RB 功控时把 num_rbg 写死 17（=272 RB），
-    # scs_khz 更是从头到尾没设过。于是 20 MHz / 15 kHz 的数据集全被当成
-    # 100 MHz@30 kHz 算 TBS 与 TTI —— 实测 51 RB 上吞吐虚高 4.3 倍，
-    # 而 snapshot_update_ms 一直是从 ds.config 算的：同一份配置一半跟着
-    # 数据集走、一半写死，是最难发现的一类不一致。
+    print("\n" + "=" * 68 + "\n10  TDD 系统载波固定为 272 RB / 17×16\n" + "=" * 68)
+    # 链路级仍可生成其他带宽，但当前 sr_system_sim 是公司 100 MHz
+    # TDD 产品 profile：张量必须真的是 272 RB，标签也必须是
+    # 100 MHz / 30 kHz。错配时硬失败，不猜一个新 RBG 口径。
     from superran import server as _sv  # noqa: PLC0415
 
-    for _nrb, _scs, _rbg, _per, _drop, _tti in (
-        (272, 30_000, 17, 16, 0, 0.5),
-        (51, 30_000, 3, 16, 3, 0.5),
-        (106, 15_000, 6, 16, 10, 1.0),
-        (8, 30_000, 1, 8, 0, 0.5),
+    _c = _sv._carrier_grid(
+        {"bandwidth_hz": 100_000_000.0, "subcarrier_spacing": 30_000},
+        num_rb=272,
+    )
+    check(_c["num_rbg"] == 17 and _c["rbg_prb_sizes"] == [16] * 17,
+          "100 MHz TDD 固定为 17 RBG × 16 RB")
+    check(_c["user_configurable"] is False,
+          "TDD 载波 profile 不对用户开放修改")
+    check(_c["standard_num_rb"] == 273
+          and _c["standard_tail_rb_omitted_before_generation"] == 1,
+          "明确记录标准 273 RB → 项目简化 272 RB")
+    for _cfg, _nrb in (
+        ({"bandwidth_hz": 20_000_000.0, "subcarrier_spacing": 30_000}, 272),
+        ({"bandwidth_hz": 100_000_000.0, "subcarrier_spacing": 15_000}, 272),
+        ({"bandwidth_hz": 100_000_000.0, "subcarrier_spacing": 30_000}, 51),
+        ({"bandwidth_hz": 100_000_000.0, "subcarrier_spacing": "bad"}, 272),
     ):
-        _c = _sv._carrier_grid({"subcarrier_spacing": _scs}, num_rb=_nrb)
-        check(_c["num_rbg"] == _rbg and _c["rb_per_rbg"] == _per,
-              f"{_nrb} RB -> {_rbg}×{_per} RBG（实得 "
-              f"{_c['num_rbg']}×{_c['rb_per_rbg']}）")
-        check(_c["excluded_num_rb"] == _drop,
-              f"{_nrb} RB 排除 {_drop} 个尾部 RB（实得 {_c['excluded_num_rb']}）")
-        check(abs(_c["tti_ms"] - _tti) < 1e-12,
-              f"{_scs//1000} kHz -> TTI {_tti} ms（实得 {_c['tti_ms']}）")
-        check(_c["simulated_num_rb"] + _c["excluded_num_rb"] == _nrb,
-              "仿真 RB + 排除 RB 必须等于信道里的 RB 数")
+        try:
+            _sv._carrier_grid(_cfg, num_rb=_nrb)
+            check(False, f"非固定 TDD 格栅应当被拒绝：{_cfg}, {_nrb} RB")
+        except ValueError:
+            check(True, f"非固定 TDD 格栅硬失败：{_cfg}, {_nrb} RB")
 
     print("\n" + "=" * 68 + "\n11  skill 的工具地图必须和代码对得上\n" + "=" * 68)
     # SKILL.md 写着"34 个 sr_* 工具全在这张表里"。这句话曾经**同时**漏了

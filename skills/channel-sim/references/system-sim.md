@@ -22,8 +22,10 @@ sr_system_sim(
     load_calibration_tolerance=0.02, load_calibration_max_iterations=6,
     load_calibration_replications=2, load_calibration_formal_refinements=2,
     scheduler="pf", pf_window_tti=100, pf_accounting="auto",
+    target_bler=0.1, olla_step_up_db=0.01, olla_step_down_db=None,
     qos_avg_rate_exponent=1.0, qos_instant_rate_exponent=1.0,
     qos_delay_exponent=0.0, qos_priority_weighting="none", mu_enabled=False,
+    mu_olla_step_up_db=0.01, mu_olla_step_down_db=None,
     trim="tail", small_burst_policy="fractional_slot", tdd_pattern="DDDSU",
     neighbor_prb_util=0.3, neighbor_load_jitter=0.05,
     csi_aging=True, srs_period_ms=10.0, srs_hopping=True,
@@ -153,24 +155,25 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
 **这条规则有过真实事故：** 同一批信道、同一套配置只改种子，`cell_experienced_mbps`
 的变异系数实测 11.4%，而上一轮把这 11.4% 的噪声报成了「+14% 提升」。
 
-## 载波栅格与 numerology（没有对应参数，全由数据集推出）
+## 载波栅格与 numerology（固定产品合同，不是用户参数）
 
-`sr_system_sim` **不接受**带宽/RBG 数/子载波间隔参数——它们全部从数据集推：
-RB 数取信道张量的频域维，numerology 取 `subcarrier_spacing`。返回里的
-`carrier` 段把推导结果摊开，用来交叉核对：
+`sr_system_sim` **不接受**带宽/RBG 数/子载波间隔参数，因为当前 TDD 系统口径已经
+冻结为 100 MHz @ 30 kHz、272 RB = 17 RBG × 16 RB。38.104 的标准表值是 273 RB；
+SuperRAN 在系统级信道生成前明确舍去 1 RB。张量宽度必须真是 272，配置中的带宽、
+SCS、BWP 起点与 RBG configuration 若存在也必须匹配；任何错配立即失败，不自动生成
+一套窄带系统口径。返回 `carrier` 段供交叉核对：
 
 | 字段 | 含义 |
 |---|---|
 | `num_rb_in_channel` | 信道里真实的 RB 数 |
-| `num_rbg` × `rb_per_rbg` | 实际参与仿真的 RBG 栅格（名义 RBG 大小 P=16） |
-| `simulated_num_rb` / `excluded_num_rb` | 参与仿真的 RB 数 / 被排除的尾部 RB 数 |
+| `num_rbg` × `rb_per_rbg` | 固定 17 × 16 |
+| `standard_num_rb` / `standard_tail_rb_omitted_before_generation` | 标准 273 与生成前明确舍去的 1 RB |
 | `scs_khz` / `tti_ms` | numerology 与 TTI 长度 |
+| `profile_id` / `user_configurable` | 版本化产品合同；后者固定为 false |
 
-**RB 数不是 16 的整数倍时，尾部不足一组的 RB 不参与仿真。** 当前 TBS 反查假设
-所有 RBG 等长（38.214 允许首尾 RBG 更短，本项目未实现），所以宁可少算一点并在
-`notes` 里说清排除了几个 RB、吞吐因此偏低多少。要按整带宽下结论就用 RB 数为 16
-整数倍的数据集（如 272 RB / 100 MHz）。**开 RB 功控时这种载波直接硬失败**——
-功控 profile 是逐 RB 的，尾部那几个 RB 的倍率会静默失效。
+`CarrierGrid.from_config()` 等通用 Type-0 工具仍服务链路级、导入诊断和数学回归；
+保留这些内部能力不代表 `sr_system_sim` 已支持 51/106/273 RB。未来扩带宽时需要新增
+版本化 profile、SRS 资源、TBS/功率/KPI 分母的整套合同，不能只放开一个输入框。
 
 历史坑：这里曾经把 `num_rbg` 写死 17（= 272 RB）、`scs_khz` 从来不设（默认 30），
 而同一个函数里的快照间隔一直是从 `subcarrier_spacing` 算的。**一半跟数据集走、
@@ -365,6 +368,8 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 - `srs_hopping` 默认开，对应 38.211 Table 6.4.1.4.3-1 的 `C_SRS=63` / `B_SRS=1`：
   `m_SRS=(272,16,8,4)`、`N=(1,17,2,2)`，每跳 16 RB 正好一个 RBG，
   按 `0,8,16,7,15,6,14,5,13,4,12,3,11,2,10,1,9` **17 跳**扫完 272 RB
+- 这是当前唯一 hopping profile；`b_hop=0/n_RRC=0` 与顺序由 SuperRAN 本地版本化，
+  非 272 RB 或其他跳频参数硬失败，不调用外部 helper、不做 identity fallback
 - **跳频是老化的主导项**：10 ms 周期下全带扫一遍要 170 ms，某个 RBG 的年龄在
   0~160 ms 之间轮转（平均 80 ms），而 2.6 GHz、30 km/h 的相干时间只有约 3 ms。
   实测 MU/SU 比值 0.816 → 0.449（−45%），SU 谱效 −27%
@@ -391,8 +396,10 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 **基站按陈旧 CSI 选 rank 和调度**（`best_se_gnb`），不是按真实 SINR——
 拿真实 SINR 挑 rank 等于让基站预知信道，老化损失会被凭空抹掉一大半。
 
-OLLA 步长默认 ACK **+0.01**、NACK **−0.09**，稳态 BLER = `up/(up+down)` = 正好 10%。
-（现网口头常说的 −0.1 对应的是 9.09%。）
+OLLA 默认只要求用户给 `target_bler`。ACK 步长默认 **+0.01 dB**，NACK 步长为
+`None` 时按 `down=up*(1-target)/target` 自动反解；目标 10% 时才得到 **−0.09 dB**。
+用户显式填写 SU/MU down 步长时保留该值并在结果标为 override；SU 与 MU 各自反解、
+状态仍按用户独立维护。（现网口头常说的 −0.1 对应 9.09%。）
 **稳态与步长绝对值无关**，所以 `olla_speedup` 等比放大只改收敛速度与稳态抖动：
 实测 k=1 时 8 秒内 IBLER 还停在 0.394、k=20 收敛到 0.100，而体验速率
 142.3 → 142.5 几乎不动。短仿真里基线常常压不动一档 MCS，可临时设 10；
@@ -402,6 +409,10 @@ OLLA 步长默认 ACK **+0.01**、NACK **−0.09**，稳态 BLER = `up/(up+down)
 系统性偏置（`select_mcs` 取「满足目标的最高档」，天然偏激进半档），不是噪声。
 
 `avg_mcs` 报的是 **OLLA 之后**的 MCS，即实际调度下去的档位。
+
+`experience_v2` 目前只接受公司 `company_20b_256qam / MCS table 3`，Table 1/2
+传入后硬失败。代码保留显式 `mcs_table/profile` 边界与带数据指纹的 BLER cache key，
+但必须等下一套 MCS、TBLER/TBS 元数据完整接入后才允许扩展。
 
 ## MU `mu_enabled`
 

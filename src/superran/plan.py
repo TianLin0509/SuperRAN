@@ -228,6 +228,60 @@ def _draft_path(draft_id: str) -> Path:
     return drafts_dir() / f"{draft_id}.json"
 
 
+_CARRIER_GEOMETRY_KEYS = frozenset({
+    "bandwidth_hz", "subcarrier_spacing", "num_rb", "bwp_start_rb",
+    "rbg_size_config",
+})
+_NUM_RB_DERIVATION_KEYS = frozenset({"bandwidth_hz", "subcarrier_spacing"})
+_SRS_BANDWIDTH_KEYS = (
+    "srs_c_srs", "srs_b_srs", "srs_b_hop", "srs_n_rrc",
+)
+
+
+def _apply_dependent_overrides(
+    params: dict[str, Any], overrides: dict[str, Any]
+) -> list[str]:
+    """应用 override，并清掉已经失效的载波/SRS 派生量。
+
+    典型陷阱是从 100 MHz 公司 preset 起步，只改 ``bandwidth_hz=20e6``，
+    却把 preset 里的 ``num_rb=272`` 一起带过去。ChannelHub 会忠实生成 272 RB，
+    所以带宽字段看着是 20 MHz，实际系统仍按 100 MHz 跑，而且不会报错。
+
+    同一轮显式给出的值视为用户有意自定义，不替用户删除。
+    """
+    updates = dict(overrides)
+    changed_geometry = {
+        key for key in _CARRIER_GEOMETRY_KEYS
+        if key in updates and params.get(key) != updates[key]
+    }
+    notes: list[str] = []
+    changed_num_rb_inputs = changed_geometry & _NUM_RB_DERIVATION_KEYS
+    if changed_num_rb_inputs and "num_rb" not in updates and "num_rb" in params:
+        old = params.pop("num_rb")
+        notes.append(
+            f"自动清除 num_rb={old!r}：带宽/SCS 已改，重新按标准表推导"
+        )
+    if changed_geometry:
+        for key in _SRS_BANDWIDTH_KEYS:
+            if key not in updates and key in params:
+                old = params.pop(key)
+                notes.append(
+                    f"自动清除 {key}={old!r}：载波几何已改，交给 SRS 资源选择器重算"
+                )
+    if "subcarrier_spacing" in changed_geometry:
+        for key, label in (
+            ("srs_periodicity", "SRS"),
+            ("csirs_periodicity", "CSI-RS"),
+        ):
+            if key in params and key not in updates:
+                notes.append(
+                    f"保留 {key}={params[key]!r} 个 slot：{label} 周期的 slot 数未改，"
+                    "但 SCS 改变后对应的毫秒数会变化；如需保持物理周期请显式覆盖"
+                )
+    params.update(updates)
+    return notes
+
+
 def save_draft(d: Draft) -> None:
     p = _draft_path(d.draft_id)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -284,8 +338,10 @@ def create_draft(
 
     user_set: list[str] = []
     if overrides:
-        params.update(overrides)
+        dependency_notes = _apply_dependent_overrides(params, overrides)
         user_set = sorted(overrides)
+    else:
+        dependency_notes = []
 
     d = Draft(
         draft_id="d_" + uuid.uuid4().hex[:8],
@@ -295,7 +351,7 @@ def create_draft(
         preset=preset_name,
         params=params,
         user_set=user_set,
-        history=[f"由意图创建，场景骨架 {preset_name}"],
+        history=[f"由意图创建，场景骨架 {preset_name}", *dependency_notes],
     )
     save_draft(d)
     return d, profile
@@ -315,13 +371,16 @@ def revise_draft(
     profile = next((p for p in dec.TASK_PROFILES if p.task == d.task), dec.TASK_PROFILES[-1])
 
     changes: list[str] = []
-    for k, v in (overrides or {}).items():
-        old = d.params.get(k)
+    raw_overrides = dict(overrides or {})
+    before = dict(d.params)
+    dependency_notes = _apply_dependent_overrides(d.params, raw_overrides)
+    for k, v in raw_overrides.items():
+        old = before.get(k)
         if old != v:
             changes.append(f"{k}: {old!r} → {v!r}")
-        d.params[k] = v
         if k not in d.user_set:
             d.user_set.append(k)
+    changes.extend(dependency_notes)
 
     for k, v in (design or {}).items():
         if v:

@@ -1,9 +1,9 @@
 """Randomized cross-configuration property stress for experience_v2.
 
-This is not an effect-size experiment.  It deliberately varies power, CSI,
-numerology, TDD and traffic while asserting invariants that must hold in every
-run.  Results are written as an audit artifact; no directional benefit claim is
-derived from these cases.
+This is not an effect-size experiment.  It keeps the product carrier fixed at
+100 MHz / 30 kHz / 272 RB / 17x16, then varies power, CSI, TDD and traffic while
+asserting invariants that must hold in every run.  Results are written as an
+audit artifact; no directional benefit claim is derived from these cases.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from superran import csi_aging as ca  # noqa: E402
+from superran import hardware as hw  # noqa: E402
 from superran import rng as rg  # noqa: E402
 from superran import system as sy  # noqa: E402
 
@@ -27,7 +28,13 @@ OUT = ROOT / "artifacts" / "results" / "experience_randomized_property_stress.js
 N_CASES = 18
 
 
-def _channels(seed: int, *, n_ue: int = 6, n_snap: int = 8) -> tuple[
+def _channels(
+    seed: int,
+    *,
+    n_ue: int = 6,
+    n_snap: int = 8,
+    n_rb: int = 272,
+) -> tuple[
     list[np.ndarray], list[np.ndarray], list[float], list[float]
 ]:
     random = np.random.default_rng(seed)
@@ -38,8 +45,8 @@ def _channels(seed: int, *, n_ue: int = 6, n_snap: int = 8) -> tuple[
     for ue in range(n_ue):
         gain = 10.0 ** (random.uniform(-5.0, 3.0) / 20.0)
         h = gain * (
-            random.standard_normal((n_snap, 17, 8, 2))
-            + 1j * random.standard_normal((n_snap, 17, 8, 2))
+            random.standard_normal((n_snap, n_rb, 8, 2))
+            + 1j * random.standard_normal((n_snap, n_rb, 8, 2))
         ) / np.sqrt(2.0)
         error_scale = 0.01 + 0.03 * ((seed + ue) % 4)
         e = error_scale * (
@@ -58,7 +65,10 @@ def _finite(value: Any) -> bool:
 
 def _run_case(case_id: int) -> dict[str, Any]:
     mode = ("ebf", "pebf", "nebf")[case_id % 3]
-    scs = (15, 30, 60)[(case_id // 3) % 3]
+    # 产品级 TDD 系统合同固定为 100 MHz @ 30 kHz。这里仍随机化话务、
+    # 功率约束、TDD pattern、CSI 与 MU，但不再把 15/60 kHz 的通用库能力
+    # 冒充当前 sr_system_sim 支持的产品场景。
+    scs = 30
     tdd = ("DDDD", "DDDSU", "DSU")[(case_id // 6) % 3]
     report_ms = (5.0, 20.0, 80.0)[case_id % 3]
     srs_ms = (5.0, 10.0, 20.0, 40.0)[case_id % 4]
@@ -84,7 +94,10 @@ def _run_case(case_id: int) -> dict[str, Any]:
         load_jitter_rng=book.generator("neighbor_load"),
         max_rank=2,
         num_snapshots=8,
-        rb_per_rbg=1,
+        # Stress the production company carrier rather than the former
+        # 17-bin surrogate.  Hopping is only validated for 272 RB = 17 x 16;
+        # using rb_per_rbg=1 here would silently reinterpret bins as RBs.
+        rb_per_rbg=16,
         csi=csi,
         snapshot_ms=5.0,
         precoder=precoder,
@@ -221,6 +234,7 @@ def main() -> None:
         "cases": rows,
         "summary": {
             "cases": len(rows),
+            "carrier_profile_id": hw.SUPERRAN_TDD_CARRIER_PROFILE_ID,
             "checks_per_case": len(rows[0]["checks"]),
             "checks_passed": sum(
                 int(passed) for row in rows for passed in row["checks"].values()

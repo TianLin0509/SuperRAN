@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from . import carrier as _carrier
 from . import measure
 from .paths import dataset_dir
 
@@ -175,7 +176,12 @@ class Dataset:
 
     @cached_property
     def w_dl(self) -> np.ndarray | None:
-        """下行预编码矩阵 [N, RB, BS_ant, rank]。"""
+        """历史数据中的外部下行权，仅供诊断旧文件。
+
+        新数据不再写入 ``w_dl``。SuperRAN 的下行权必须从归一化后
+        的 ``h_est`` 和本地 EBF/PEBF/NEBF 功率约束重算，不能把该
+        属性用作系统仿真的发射权。
+        """
         return self._npz["w_dl"] if "w_dl" in self._npz.files else None
 
     @cached_property
@@ -251,7 +257,7 @@ class Dataset:
 
         index 为 None 时返回全部样本的列表；给定 index 只算那一个。
         """
-        scs = float(self.config.get("subcarrier_spacing", 30000) or 30000)
+        scs = _carrier.scs_khz_from_config(self.config) * 1000.0
         if index is not None:
             return measure.power_delay_profile(
                 self.h_true[index], subcarrier_spacing_hz=scs, per_antenna=per_antenna

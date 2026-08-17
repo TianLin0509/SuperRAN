@@ -149,11 +149,11 @@ reference TBS/resource/rank 轴，因此不能声称实际 TB-size 已参与查�
 `expect` 是**实测锚点**（`measured: false` 时不许有数值），`pair_with` 是**受控对照**
 （除 `pair_varies` 那一项外其余逐字相同）。成对场景仍要用同一批 replication 流跑。
 
-**载波栅格跟着数据集走，不是固定 100 MHz。** `sr_system_sim` 从信道张量取 RB 数、
-从 `subcarrier_spacing` 取 numerology，结果里的 `carrier` 段写明实际用了多少 RB 与
-多长 TTI。**RB 数不是 16 的整数倍时，尾部不足一组的 RB 不参与仿真**（TBS 反查目前
-假设所有 RBG 等长），`notes` 会说排除了几个 RB、吞吐因此偏低多少。要按整带宽下
-结论就用 RB 数为 16 整数倍的数据集（如 272 RB / 100 MHz）。
+**TDD 系统栅格是固定产品合同。** `sr_system_sim` 只接受 100 MHz @ 30 kHz、
+272 RB = 17 RBG × 16 RB；标准表的 273 RB 在生成前明确舍去 1 RB，不在系统入口
+临时截尾。信道张量宽度或带宽/SCS 标签任一不符都硬失败，UI 不开放 `num_rb`、
+`rbg_size_config` 或 BWP 起点。通用 Type-0 边界只供链路级和导入诊断，不能冒充
+当前系统仿真已支持其他带宽。
 
 **先选评估 profile；它们是两种模式，不是同一模式的两个精度参数：**
 
@@ -165,6 +165,14 @@ reference TBS/resource/rank 轴，因此不能声称实际 TB-size 已参与查�
   没有需求的尾料留空；PF 平均速率按**实际 scheduled TBS**更新。NACK 字节留在 FIFO
   队列等待下一次 NewTx，当前不模拟 HARQ 软合并/进程时序。推荐 `traffic_model="mixed"`
   让大小文件 UE 同场竞争；全大包会退化成全带，全小包没有大包体验可比较。
+
+`experience_v2` 当前只接受公司 `company_20b_256qam / MCS table 3`。Table 1/2
+即使存在于链路级工具，也不能混入体验路径，因为它们没有同一套公司 TBLER/TBS profile；
+实现保留显式 profile/table 接口，新增曲线与元数据齐全后再扩展。
+
+OLLA 通常只配置 `target_bler`。SU/MU 各自的 ACK 步长默认 +0.01 dB，NACK 步长留空时按
+`down = up × (1-target)/target` 自动反解；例如目标 10% 得 0.09 dB。只有用户明确填写
+`olla_step_down_db` / `mu_olla_step_down_db` 时才覆盖自动值，结果必须标注来源。
 
 两种 profile 的 KPI 名即使相似也不可直接拼在一张趋势图里；结果必须连同
 `model_version`、`pf_accounting` 和物理近似一起保存。
@@ -213,6 +221,9 @@ SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且�
 `experience_v2` 当前支持两用户、每用户 rank2 的数据受限 SU/MU 自适应；开 MU 时必须有
 完整 pair 链路表，缺失会硬报错，不再按 1.0 静默降级。队列积压就调低到达率，burst 太少
 就加长 `duration_s`。
+SRS hopping 也不是通用旋钮：当前只有 272 RB 上的
+`C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0` 17-hop profile，顺序由 SuperRAN 本地合同给出；
+其他带宽或跳频参数直接拒绝，不调用外部 helper，也不退回恒等扫描。
 全部参数逐项说明 → `references/system-sim.md`
 
 **系统级 A/B 必须用公共随机数（CRN），并且同样受 `<HARD-GATE>` 约束。**

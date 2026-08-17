@@ -33,6 +33,7 @@ except ImportError:  # mcp 1.x
 
     MCP_MAJOR = 1
 
+from . import carrier as carrier_grid
 from . import channelhub as ch
 from . import decisions as dec
 from . import deliver as dlv
@@ -126,49 +127,68 @@ def _jsonable(obj: Any) -> Any:
     return obj
 
 
-#: 系统级仿真的 RBG 名义大小（RB）。38.214 §5.1.2.2.1 的 P 值之一，
-#: 与本项目 272 RB = 17×16 的载波配置对齐。
-_RB_PER_RBG = 16
-
-
 def _carrier_grid(config: dict[str, Any], *, num_rb: int) -> dict[str, Any]:
-    """由数据集算出系统级仿真该用的载波栅格与 numerology。
+    """校验数据集是否符合 SuperRAN 固定 TDD 系统载波。
 
     ``num_rb`` 来自信道张量本身（``h.shape[-3]``），不是配置里的声明值——
-    真正决定 TBS 与频域分配的是实际生成出来的那些 RB。
-
-    **剩余不足一个 RBG 的 RB 会被排除在仿真之外，并如实报出来。**
-    这不是偷懒：``mumimo.rbg_reduce`` 本来就只取每个完整 RBG 的代表 RB，
-    而 :class:`experience.TbsLookup` 假设所有 RBG 等长（它的文档里写着
-    "若未来允许任意 BWP 起点，必须把 RBG bitmap/各组实际 RB 数纳入索引"）。
-    在支持不等长 RBG 之前，**少算一点并说出来**远好于按 272 RB 硬算——
-    后者在 51 RB 的载波上把吞吐报高 4.3 倍。
+    用它抓住“配置写 100 MHz，张量却不是 272 RB”这类静默错配。
+当前产品口径固定为 100 MHz @ 30 kHz、272 RB = 17 RBG × 16 RB；
+链路级可以生成其他带宽，但不能送入这个 TDD 系统入口。
     """
-    rb_total = int(num_rb)
-    if rb_total < 1:
-        raise ValueError(f"信道里的 RB 数必须为正，收到 {num_rb}")
-    # 整带还不到一个名义 RBG（探测/窄带数据集）时，就把整带当成一个 RBG，
-    # 而不是硬凑 16 RB —— 否则 TBS 会按不存在的资源算。
-    rb_per_rbg = _RB_PER_RBG if rb_total >= _RB_PER_RBG else rb_total
-    num_rbg = max(1, rb_total // rb_per_rbg)
-    simulated_rb = num_rbg * rb_per_rbg
-    raw_scs = config.get("subcarrier_spacing", 30_000) or 30_000
-    try:
-        scs_khz = int(round(float(raw_scs) / 1000.0))
-    except (TypeError, ValueError):
-        scs_khz = 30
-    if scs_khz <= 0:
-        scs_khz = 30
+    return carrier_grid.CarrierGrid.company_tdd(config, num_rb=num_rb).as_dict()
+
+
+def _system_adaptation_contract(
+    *,
+    mode: str,
+    target_bler: float,
+    olla_step_up_db: float,
+    olla_step_down_db: float | None,
+    resolved_su_down: float,
+    mu_olla_step_up_db: float,
+    mu_olla_step_down_db: float | None,
+    resolved_mu_down: float,
+) -> dict[str, Any]:
+    """Build auditable OLLA/MCS metadata for ``sr_system_sim`` only."""
+    from . import system as sysm  # noqa: PLC0415
+
     return {
-        "num_rb_in_channel": rb_total,
-        "num_rbg": int(num_rbg),
-        "rb_per_rbg": int(rb_per_rbg),
-        "simulated_num_rb": int(simulated_rb),
-        "excluded_num_rb": int(rb_total - simulated_rb),
-        "scs_khz": int(scs_khz),
-        "tti_ms": 1.0 / (scs_khz / 15.0),
-        "source": "derived from dataset channel shape and subcarrier_spacing",
-        "rbg_size_basis": "38.214 §5.1.2.2.1 nominal RBG size P=16; equal-size RBGs only",
+        "olla_configuration": {
+            "target_bler": float(target_bler),
+            "su": {
+                "step_up_db": float(olla_step_up_db),
+                "step_down_db": float(resolved_su_down),
+                "step_down_source": (
+                    "auto_from_target_bler"
+                    if olla_step_down_db is None else "explicit_user_override"
+                ),
+            },
+            "mu": {
+                "step_up_db": float(mu_olla_step_up_db),
+                "step_down_db": float(resolved_mu_down),
+                "step_down_source": (
+                    "auto_from_target_bler"
+                    if mu_olla_step_down_db is None else "explicit_user_override"
+                ),
+            },
+            "formula": "step_down = step_up * (1 - target_bler) / target_bler",
+        },
+
+        "mcs_profile": {
+            # 与 build_link_tables 的默认值同源，不在这里抄第二份——
+            # 抄了就会漂，漂了这段元数据就在静默说谎。
+            "table": int(inspect.signature(
+                sysm.build_link_tables).parameters["table"].default),
+            "profile": "company_20b_256qam",
+            "scope": (
+                "experience_v2 fixed company table"
+                if mode == "experience" else "capacity legacy table"
+            ),
+            "extensibility": (
+                "table/profile remains an explicit internal contract; unsupported "
+                "tables hard-fail until their BLER/TBS metadata is implemented"
+            ),
+        },
     }
 
 
@@ -1409,13 +1429,16 @@ def sr_probe_scenario(
         if preset not in presets:
             return {"error": f"未知预设 {preset!r}", "available": sorted(presets)}
         cfg = dict(presets[preset]["config"])
+    dep_notes: list[str] = []
     if config:
-        cfg.update(config)
+        dep_notes = pl._apply_dependent_overrides(cfg, config)
     if not cfg:
         return {"error": "preset 与 config 至少给一个。"}
 
     out = sc.probe(cfg, num_samples=num_samples)
     out["preset"] = preset
+    if dep_notes:
+        out["dependent_override_notes"] = dep_notes
     return _jsonable(out)
 
 
@@ -1438,20 +1461,26 @@ def sr_compare_scenarios(
     all_presets = pl.load_presets()
     named: dict[str, dict[str, Any]] = {}
     unknown = []
+    dep_notes: list[str] = []
     for name in presets:
         if name not in all_presets:
             unknown.append(name)
             continue
         cfg = dict(all_presets[name]["config"])
         if overrides:
-            cfg.update(overrides)
+            dep_notes.extend(
+                f"{name}: {note}"
+                for note in pl._apply_dependent_overrides(cfg, overrides))
         named[name] = cfg
     if unknown:
         return {"error": f"未知预设：{unknown}", "available": sorted(all_presets)}
     if not named:
         return {"error": "presets 不能为空。"}
 
-    return _jsonable(sc.compare_probes(named, num_samples=num_samples))
+    out = _jsonable(sc.compare_probes(named, num_samples=num_samples))
+    if dep_notes:
+        out["dependent_override_notes"] = dep_notes
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1541,8 +1570,9 @@ def sr_spec_sheet(
         if preset not in presets:
             return {"error": f"未知预设 {preset!r}", "available": sorted(presets)}
         cfg = dict(presets[preset]["config"])
+    dep_notes: list[str] = []
     if config:
-        cfg.update(config)
+        dep_notes = pl._apply_dependent_overrides(cfg, config)
         user_set = sorted(set(user_set) | set(config))
     if not cfg:
         return {"error": "需要 draft_id / dataset_id / preset / config 其中之一。"}
@@ -1552,6 +1582,8 @@ def sr_spec_sheet(
         title=title or "仿真说明书", ue_xy=ue_xy, highlight=highlight,
         open_browser=open_browser,
     )
+    if dep_notes:
+        out["dependent_override_notes"] = dep_notes
     if out.get("writeback") == "post":
         out["hint"] = (
             "把 url 发给用户让他自己点开（别替他弹窗），转述 headline 和 notes，"
@@ -1648,6 +1680,9 @@ def sr_system_sim(
     scheduler: str = "pf",
     pf_window_tti: int = 100,
     pf_accounting: str = "auto",
+    target_bler: float = 0.1,
+    olla_step_up_db: float = 0.01,
+    olla_step_down_db: float | None = None,
     qos_avg_rate_exponent: float = 1.0,
     qos_instant_rate_exponent: float = 1.0,
     qos_delay_exponent: float = 0.0,
@@ -1657,7 +1692,7 @@ def sr_system_sim(
     mu_csi_error_variance: float = 0.0,
     mu_corr_threshold: float = 0.7,
     mu_olla_step_up_db: float = 0.01,
-    mu_olla_step_down_db: float = 0.09,
+    mu_olla_step_down_db: float | None = None,
     trim: str = "tail",
     small_burst_policy: str = "fractional_slot",
     tdd_pattern: str = "DDDSU",
@@ -1748,6 +1783,9 @@ def sr_system_sim(
         正式 ``num_replications`` 反馈校正几轮；默认 2，完整轨迹会返回。
     pf_accounting : ``auto`` 会在 legacy_v1 使用历史 best_se，在 experience_v2
         使用实际 scheduled TBS。``acked_goodput`` 只供研究，不是默认 PF 口径。
+    target_bler : MCS 选择与 SU/MU OLLA 共用的目标 IBLER。未显式给 down 步长时，
+        按 ``s_down=s_up*(1-target)/target`` 自动反解，防止链路表按 20% 选 MCS、
+        主循环却仍按 10% OLLA 记账。
     qos_* : ``qos_pf`` 的显式参数化形式
         ``w(priority) * R_inst^beta / R_avg^alpha * delay^gamma``。默认
         alpha=beta=1、gamma=0、w=1，严格退化成经典 PF；它不是未确认定义的 EPF。
@@ -1756,7 +1794,7 @@ def sr_system_sim(
     mu_enabled : 是否允许 MU 配对。默认关，先看清 SU 基线。
     mu_corr_threshold : MU SUS 配对的归一化相关性上限，默认 0.7。
     mu_olla_step_up_db / mu_olla_step_down_db : MU 专属用户级 OLLA 步长；
-        默认 +0.01/−0.09 dB，对应 10% 目标 BLER，不按配对关系拆状态。
+        down 省略时按 target_bler 反解；状态按用户维护，不按配对关系拆分。
     neighbor_prb_util : **邻区 PRB 利用率**，默认 0.3。ChannelHub 的几何 SINR
         是按所有邻区都在发算的（等于 100%），真实网络 5G 典型是 10%/30%/50%。
         按 full buffer 算会把干扰放大到不真实的程度。1.0 退化成原行为。
@@ -1777,8 +1815,8 @@ def sr_system_sim(
         快照间隔、SRS 周期是三个不同量；38.331 按 slot 配置，并未规定 PMI 固定 5 ms。
     warmup_s : 预启动时长，默认 1 s。PF/OLLA/SRS 继续演进，体验与 BLER/资源 KPI
         从该时刻后才统计；5 s 仿真默认统计后 4 s。
-    olla_speedup : OLLA 两个步长的**等比**放大系数，默认 1.0；本项目基础步长
-        +0.01/−0.09 精确对应 10% 稳态 BLER（现网口头 +0.01/−0.1 对应 9.09%）。
+    olla_speedup : OLLA 两个步长的**等比**放大系数，默认 1.0；目标为 10% 且
+        up=0.01 时，自动反解的基础 down=0.09（现网口头 +0.01/−0.1 对应 9.09%）。
         稳态 BLER = up/(up+down) 与它无关，放大只加快收敛、加大稳态抖动。
         短仿真里基线常常压不动一档 MCS，可临时设 10；**出正式结论设回 1.0**。
         非 1.0 时结果里会带一条显式告警。
@@ -1862,6 +1900,22 @@ def sr_system_sim(
     # UE 位置上；不按 UE 合并的话小区里会多出好几倍的人，
     # 每用户谱效被摊薄（实测 40 样本/10 UE 时从 0.32 掉到 0.08）。
     n_ue = int(ds.config.get("num_ues") or 0) or None
+    # 样本→UE 的轮转布局必须与落盘的 ue_id 一致。SINR 拒绝采样等路径会破坏
+    # 它（ue_id 按 attempted_index 合成，接受后的序号不再轮转），继续按
+    # 轮转分组会把不同 UE 混进同一"用户"、把同一 UE 拆成多个——静默无报错。
+    if n_ue is not None:
+        try:
+            _ue_ids = np.asarray(ds.scalar("ue_id")).ravel().astype(int)
+        except Exception:  # noqa: BLE001
+            _ue_ids = None
+        if _ue_ids is not None and _ue_ids.size == int(h.shape[0]):
+            _rotation = np.arange(int(h.shape[0])) % int(n_ue)
+            if not np.array_equal(_ue_ids, _rotation):
+                return {"error": (
+                    "数据集的 ue_id 与样本轮转布局不一致（常见于 SINR 拒绝采样："
+                    "ue_id 按 attempted_index 合成，接受后序号不再轮转）。"
+                    "按轮转分组会静默混 UE；请关闭筛选重新生成，"
+                    "或先按 ue_id 归并样本。")}
     try:
         sir = [float(x) for x in np.asarray(ds.scalar("sir_dB"))]
     except Exception:  # noqa: BLE001
@@ -1869,14 +1923,17 @@ def sr_system_sim(
     # **快照间隔由配置算出来，不能拍脑袋。** ChannelHub 的多时隙输出是连续的
     # SRS/CSI-RS 机会（默认 5 ms），不是连续 TTI——当成 TTI 会让所有时间相关的
     # 结论差 10 倍，见 CLAUDE.md「多时隙的快照间隔是 5 ms」。
-    snap_ms = sysm.snapshot_interval_ms(ds.config)
-    # **载波栅格与 numerology 必须跟着数据集走。** 早先这里把 num_rbg 写死 17
-    # （= 100 MHz / 272 RB），scs_khz 更是从头到尾没设过（默认 30）。于是任何
-    # 20 MHz / 10 MHz / 15 kHz 的数据集都被当成 100 MHz@30 kHz 来算 TBS 与 TTI：
-    # 实测 51 RB 的信道上小区吞吐报 756 Mbps，按真实带宽只有 178 Mbps，**虚高 4.3 倍**，
-    # 而且不报错、不告警。snapshot_update_ms 一直是从 ds.config 算的——
-    # 同一份配置一半跟数据集走、一半写死，正是最难发现的那种不一致。
-    carrier = _carrier_grid(ds.config, num_rb=int(h.shape[2]))
+    try:
+        snap_ms = sysm.snapshot_interval_ms(ds.config)
+    except (TypeError, ValueError) as exc:
+        return {"error": f"快照间隔解析失败（旧数据集字段可能不规范）：{exc}"}
+    # **TDD 系统载波是产品合同，不是调参项。** 信道张量必须实际为
+    # 272 RB，配置标签也必须是 100 MHz / 30 kHz。不符时拒绝运行，既不把
+    # 51 RB 假当 272 RB，也不在系统层临时发明 7-RBG 口径。
+    try:
+        carrier = _carrier_grid(ds.config, num_rb=int(h.shape[2]))
+    except ValueError as exc:
+        return {"error": f"TDD 系统载波不符合固定口径：{exc}"}
     # 说明书页面上的开关是 select，回传的是 "on"/"off" 字符串；
     # 直接 bool() 的话 "off" 是**真值**，开关会失灵而且完全无声。
     def _flag(v: Any) -> bool:
@@ -1906,17 +1963,6 @@ def sr_system_sim(
         return {"error": (
             "RB 功控与 MU 同开时请使用 evaluation_mode='experience'；"
             "capacity 的 legacy 标量 MU 增益没有逐 RBG pair SINR，不能准确评估。")}
-    if power_cfg.enabled and carrier["excluded_num_rb"]:
-        # 功控 profile 是逐 RB 的，而 RBG 栅格只覆盖完整分组。让不足一组的尾部
-        # 悄悄落在仿真之外，等于用户设的那几个 RB 倍率根本没生效——宁可拦住。
-        return {"error": (
-            f"RB 功控需要载波 RB 数是 RBG 大小的整数倍：数据集是 "
-            f"{carrier['num_rb_in_channel']} RB，{carrier['rb_per_rbg']} RB 一组只能凑出 "
-            f"{carrier['num_rbg']} 组（{carrier['simulated_num_rb']} RB），"
-            f"尾部 {carrier['excluded_num_rb']} 个 RB 的功率倍率会失效。"
-            "请用 RB 数为 16 整数倍的数据集（如 272 RB / 100 MHz），"
-            "或关掉 rb_power_control_enabled。")}
-
     try:
         csi_cfg = sysm.ca.CsiConfig(
             enabled=_flag(csi_aging), srs_period_ms=float(srs_period_ms),
@@ -1926,6 +1972,22 @@ def sr_system_sim(
             periodic_trace_history=(mode == "experience" and float(warmup_s) > 0))
     except ValueError as exc:
         return {"error": str(exc)}
+    # **h_est 的物理来源必须与 SRS 语义一致。** 系统仿真把 h_est 当基站侧
+    # SRS 预编码 CSI（CSI 老化模型的物理语义就是"SRS 探到的信道"）。
+    # 比较门已对 csi='srs' 硬校验 provenance，这条更常用的主链路同等对待：
+    # 来源不是 ul_srs_estimate 时，开老化硬失败、不开老化显式告警进 notes。
+    _pre_notes: list[str] = []
+    _csi_src = [str(x) for x in ds.precoding_csi_sources]
+    if _csi_src and any(x != "ul_srs_estimate" for x in _csi_src):
+        _src_kinds = sorted(set(_csi_src))
+        _src_msg = (
+            f"数据集的预编码 CSI 来源是 {_src_kinds}，不是 ul_srs_estimate；"
+            "系统仿真把 h_est 当 SRS 用，来源不符时结果在物理上不可解释。")
+        if csi_cfg.enabled:
+            return {"error": _src_msg + (
+                " CSI 老化已开启，禁止继续；请用 SRS 来源的数据集重新生成，"
+                "或明确关闭 csi_aging（结果会带来源告警）。")}
+        _pre_notes.append("**预编码 CSI 来源不符**：" + _src_msg)
     # **邻区负载抖动走它自己的随机流**，不是 `seed + 909`。
     # `master + 常数` 正是 NumPy 并行随机数文档点名的反模式（"UNSAFE! Do not do
     # this!"）：换一次 master 就可能和别的流撞上，而撞上之后两条流是**逐位相同**
@@ -1937,6 +1999,14 @@ def sr_system_sim(
     except ValueError as exc:
         return {"error": str(exc)}
     try:
+        resolved_su_down = (
+            sysm.olla_step_down_for(float(target_bler), float(olla_step_up_db))
+            if olla_step_down_db is None else float(olla_step_down_db)
+        )
+        resolved_mu_down = (
+            sysm.olla_step_down_for(float(target_bler), float(mu_olla_step_up_db))
+            if mu_olla_step_down_db is None else float(mu_olla_step_down_db)
+        )
         profile_cfg = tuple(
             sysm.TrafficClassConfig.from_dict(item)
             for item in (traffic_profiles or []))
@@ -1958,10 +2028,13 @@ def sr_system_sim(
             tdd_pattern=tdd_pattern, seed=seed, snapshot_update_ms=snap_ms,
             power_constraint=str(power_constraint), rb_power_control=power_cfg,
             scs_khz=carrier["scs_khz"],
-            num_rbg=carrier["num_rbg"], rb_per_rbg=carrier["rb_per_rbg"])
+            num_rbg=carrier["num_rbg"], rb_per_rbg=carrier["rb_per_rbg"],
+            rbg_prb_sizes=tuple(int(x) for x in carrier["rbg_prb_sizes"]))
         scheduler_cfg = sysm.SchedulerConfig(
             algorithm=scheduler, pf_window_tti=pf_window_tti,
             pf_accounting=pf_accounting,
+            olla_step_up_db=float(olla_step_up_db),
+            olla_step_down_db=resolved_su_down,
             qos_avg_rate_exponent=float(qos_avg_rate_exponent),
             qos_instant_rate_exponent=float(qos_instant_rate_exponent),
             qos_delay_exponent=float(qos_delay_exponent),
@@ -1971,7 +2044,7 @@ def sr_system_sim(
             mu_csi_error_variance=float(mu_csi_error_variance),
             mu_corr_threshold=float(mu_corr_threshold),
             mu_olla_step_up_db=float(mu_olla_step_up_db),
-            mu_olla_step_down_db=float(mu_olla_step_down_db),
+            mu_olla_step_down_db=resolved_mu_down,
             olla_speedup=float(olla_speedup),
             olla_warmup_speedup=float(olla_warmup_speedup))
         kpi_cfg = sysm.KpiConfig(
@@ -1987,7 +2060,11 @@ def sr_system_sim(
         tables = sysm.build_link_tables(
             h_users, [float(x) for x in sinr], num_ues=n_ue, geo_sir_db=sir,
             h_for_precoding_users=h_est_users,
+            target_bler=float(target_bler),
             neighbor_load=float(neighbor_prb_util), csi=csi_cfg, snapshot_ms=snap_ms,
+            rb_per_rbg=carrier["rb_per_rbg"],
+            rbg_boundaries=tuple(
+                (int(pair[0]), int(pair[1])) for pair in carrier["rbg_boundaries"]),
             load_jitter_rng=(load_rng if float(neighbor_load_jitter) > 0 else None),
             neighbor_load_jitter=float(neighbor_load_jitter),
             precoder=str(precoder), power_constraint=str(power_constraint),
@@ -2005,6 +2082,9 @@ def sr_system_sim(
         h_for_precoding_users=h_est_users,
         geo_sir_db=sir, neighbor_load=float(neighbor_prb_util),
         neighbor_load_jitter=float(neighbor_load_jitter),
+        rb_per_rbg=carrier["rb_per_rbg"],
+        rbg_boundaries=tuple(
+            (int(pair[0]), int(pair[1])) for pair in carrier["rbg_boundaries"]),
         load_jitter_rng=(mu_load_rng if float(neighbor_load_jitter) > 0 else None),
         csi=csi_cfg, snapshot_ms=snap_ms,
         power_constraint=str(power_constraint), mu_precoder=str(mu_precoder),
@@ -2048,6 +2128,16 @@ def sr_system_sim(
     except ValueError as exc:
         return {"error": str(exc)}
     out = res.as_dict()
+    out.update(_system_adaptation_contract(
+        mode=mode,
+        target_bler=float(target_bler),
+        olla_step_up_db=float(olla_step_up_db),
+        olla_step_down_db=olla_step_down_db,
+        resolved_su_down=resolved_su_down,
+        mu_olla_step_up_db=float(mu_olla_step_up_db),
+        mu_olla_step_down_db=mu_olla_step_down_db,
+        resolved_mu_down=resolved_mu_down,
+    ))
     if calibration is not None:
         out["traffic_calibration"] = calibration.as_dict()
     out["dataset_id"] = dataset_id
@@ -2110,22 +2200,19 @@ def sr_system_sim(
     }
 
     # **让结论不成立的条件必须进 notes**，不能只躺在子字段里等人翻。
-    notes = list(out.get("notes") or [])
+    notes = _pre_notes + list(out.get("notes") or [])
     notes.extend(aging.get("warnings") or [])
     notes.append(
-        f"载波栅格取自数据集：{carrier['num_rb_in_channel']} RB @ "
-        f"{carrier['scs_khz']} kHz（TTI {carrier['tti_ms']:g} ms），"
-        f"仿真 {carrier['num_rbg']} × {carrier['rb_per_rbg']} = "
-        f"{carrier['simulated_num_rb']} RB。")
-    if carrier["excluded_num_rb"]:
+        f"TDD 载波使用固定 profile {carrier['profile_id']}："
+        f"{carrier['num_rb_in_channel']} RB @ {carrier['scs_khz']} kHz "
+        f"（TTI {carrier['tti_ms']:g} ms），{carrier['num_rbg']} 个 RBG × "
+        f"{carrier['rb_per_rbg']} RB。标准表的 273 RB 在信道生成前按项目"
+        "口径简化为 272，该格栅不向用户开放修改。")
+    if carrier["partial_rbg_indices"]:
         notes.append(
-            f"**载波尾部 {carrier['excluded_num_rb']} 个 RB 未参与仿真**："
-            f"{carrier['num_rb_in_channel']} 不是 RBG 大小 {carrier['rb_per_rbg']} 的整数倍，"
-            "而当前 TBS 反查假设所有 RBG 等长（38.214 允许首尾 RBG 更短，本项目尚未实现）。"
-            f"因此吞吐类 KPI 对应的是 {carrier['simulated_num_rb']} RB 而不是 "
-            f"{carrier['num_rb_in_channel']} RB，按带宽折算会**偏低约 "
-            f"{carrier['excluded_num_rb'] / carrier['num_rb_in_channel']:.1%}**。"
-            "要精确到整带宽，请生成 RB 数为 16 的整数倍的数据集。")
+            "载波含 partial RBG（索引 "
+            f"{carrier['partial_rbg_indices']}）。TBS、RB 功控和 PRB 利用率已按每组"
+            "真实 PRB 数记账；RBG 占用直方图仍以组数为横轴。")
     if power_cfg.enabled:
         if not power_cfg.overrides:
             notes.append(

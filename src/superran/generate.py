@@ -34,7 +34,7 @@ _SCALAR_META_FIELDS = (
     "pathloss_dB", "distance_3d_m", "is_los", "los_probability",
     "rx_power_serving_dbm", "doppler_hz", "sample_tau_rms_ns",
     "noise_power_dbm", "antenna_gain_serving_db", "tau_rms_ns",
-    "rician_k_db", "num_taps", "serving_pci", "ue_id",
+    "rician_k_db", "num_taps", "serving_pci", "ue_id", "ue_id_source",
     "tx_power_dbm", "ue_tx_power_dbm", "noise_figure_db",
     "serving_cell_index", "dl_signal_power_mw", "dl_thermal_noise_power_mw",
     "dl_power_decomposition_version",
@@ -85,6 +85,59 @@ def _as_float(v: Any) -> float:
         return float("nan")
 
 
+def _stable_ue_identity(
+    source_name: str,
+    cfg: dict[str, Any],
+    meta: dict[str, Any],
+    *,
+    attempted_index: int,
+) -> tuple[Any, str]:
+    """Return a stable per-trajectory UE id and its provenance.
+
+    ChannelHub's current first-party sources do not put ``ue_id`` into every
+    sample.  Inferring identity from ``ue_position`` is valid only for static
+    users: one moving UE has a different coordinate at every snapshot and
+    would be counted as many independent users by the statistical gates.
+
+    The synthesis below mirrors the source iterators rather than guessing from
+    coordinates:
+
+    * ``internal_sim`` static samples cycle ``global_index % num_ues``;
+    * ``internal_sim`` mobility is one continuous serving-UE trajectory;
+    * ``sionna_rt`` currently generates one serving position/trajectory per
+      dataset, in both static and mobility modes.
+
+    Unknown/external sources are never assigned an invented identity.  Their
+    missing id remains visible so mobility inference is blocked safely.
+    """
+    raw = meta.get("ue_id")
+    if raw is not None:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return raw, "invalid_source_meta"
+        if np.isfinite(value) and value >= 0 and value.is_integer():
+            return int(value), "source_meta"
+        return raw, "invalid_source_meta"
+
+    source = str(source_name).strip().lower()
+    if source == "internal_sim":
+        mobility = str(cfg.get("mobility_mode", "static")).strip().lower()
+        speed = _as_float(cfg.get("ue_speed_kmh", 0.0))
+        if mobility == "static":
+            n_ues = max(int(cfg.get("num_ues", 1) or 1), 1)
+            offset = int(cfg.get("sample_index_offset", 0) or 0)
+            return (offset + int(attempted_index)) % n_ues, "internal_sim_global_index"
+        if not np.isfinite(speed) or speed <= 0.0:
+            # 声明了移动模式但速度不可信：不发明身份。统计门对"移动数据缺
+            # ue_id"是 block，放行假独立 id 正是那条门想防的事故。
+            return None, "unavailable_mobility_speed"
+        return 0, "internal_sim_single_trajectory"
+    if source == "sionna_rt":
+        return 0, "sionna_rt_single_trajectory"
+    return None, "unavailable"
+
+
 def _slot_snapshot(h: Any, *, time_axis: int = 0) -> np.ndarray:
     """Reduce ChannelHub's intra-slot OFDM-symbol grid to one slot snapshot.
 
@@ -126,10 +179,17 @@ def _rb_from_bandwidth(cfg: dict[str, Any]) -> int:
     wants a synthetic grid can provide ``num_rb`` explicitly instead of getting
     a silent approximation.
     """
+    from .carrier import scs_khz_from_config  # noqa: PLC0415
     from .physical import nr_rb_count  # noqa: PLC0415
 
-    bw = float(cfg.get("bandwidth_hz", 100e6) or 100e6)
-    scs = float(cfg.get("subcarrier_spacing", 30000) or 30000)
+    raw_bw = cfg["bandwidth_hz"] if "bandwidth_hz" in cfg else 100e6
+    try:
+        bw = float(raw_bw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"bandwidth_hz 必须是 Hz 数值，收到 {raw_bw!r}") from exc
+    if not np.isfinite(bw) or bw <= 0:
+        raise ValueError(f"bandwidth_hz 必须是有限正数，收到 {raw_bw!r}")
+    scs = float(scs_khz_from_config(cfg) * 1000)
     return nr_rb_count(bw, scs)
 
 
@@ -277,7 +337,8 @@ def estimate_seconds(cfg: dict[str, Any], num_samples: int) -> float:
     ants = int(cfg.get("num_bs_tx_ant", 64) or 64)
     rb = int(cfg.get("num_rb") or _rb_from_bandwidth(cfg))
 
-    # 160 ms is the rounded warm marginal anchor.  The exponents retain the
+    # observed sub-linear antenna/RB scaling: the 64T/273-RB estimate (old
+    # calibration; current product grid is 272 RB) is
     # observed sub-linear antenna/RB scaling: the 64T/273-RB estimate is
     # 1.24 s versus the recorded 1.074 s (16% high).
     seconds_per_sample = 0.160 * (ants / 32.0) ** 0.9 * (rb / 51.0) ** 0.85
@@ -426,7 +487,7 @@ def _collect(
     precoding_csi_sources: list[str] = []
     h_intf: list[np.ndarray] = []
     positions: list[np.ndarray] = []
-    w_dl: list[np.ndarray] = []
+    source_precoder_fields_ignored = 0
     scalars: dict[str, list[float]] = {
         k: [] for k in (*_SCALAR_SAMPLE_FIELDS, *_HOOKED_SAMPLE_FIELDS)
     }
@@ -496,9 +557,12 @@ def _collect(
             np.asarray(pos, dtype=np.float64) if pos is not None else np.full(3, np.nan)
         )
 
-        w = getattr(sample, "w_dl", None)
-        if w is not None:
-            w_dl.append(np.asarray(w, dtype=np.complex64))
+        # ``w_dl`` 是信道源的派生权，其轴序、共轭与功率约束可随
+        # 外部实现漂移。SuperRAN 只导入原始/估计信道，之后用自己的
+        # beamforming + power-constraint 模块重算发射权；这个字段即使
+        # 存在也不再落盘。
+        if getattr(sample, "w_dl", None) is not None:
+            source_precoder_fields_ignored += 1
 
         for k in _SCALAR_SAMPLE_FIELDS:
             scalars[k].append(_as_float(getattr(sample, k, None)))
@@ -506,7 +570,15 @@ def _collect(
         # 因此仍紧跟 sample 处理，避免旧路径串样本。
         scalars["ul_sir_geo_dB"].append(intf_mod.take_ul_geometry_sir(sample))
 
-        meta = sample.meta if isinstance(sample.meta, dict) else {}
+        meta = dict(sample.meta) if isinstance(sample.meta, dict) else {}
+        ue_id, ue_id_source = _stable_ue_identity(
+            source_name,
+            cfg_run,
+            meta,
+            attempted_index=attempted - 1,
+        )
+        meta["ue_id"] = ue_id
+        meta["ue_id_source"] = ue_id_source
         if not first_meta:
             first_meta = {
                 k: v for k, v in meta.items()
@@ -532,6 +604,7 @@ def _collect(
     stats = {
         "accepted": accepted, "attempted": attempted, "rejected": rejected,
         "observed_sinr": observed_sinr,
+        "source_precoder_fields_ignored": source_precoder_fields_ignored,
     }
     if accepted == 0:
         return {}, first_meta, stats
@@ -546,8 +619,6 @@ def _collect(
         payload["h_dl_est"] = np.stack(h_dl_est)
     if len(h_intf) == accepted and h_intf and all(a.shape == h_intf[0].shape for a in h_intf):
         payload["h_interferers"] = np.stack(h_intf)
-    if w_dl and all(a.shape == w_dl[0].shape for a in w_dl):
-        payload["w_dl"] = np.stack(w_dl)
     for k, vals in scalars.items():
         payload[f"scalar__{k}"] = np.asarray(vals, dtype=np.float64)
     for k, vals in metas.items():
@@ -578,6 +649,17 @@ def _collect(
             if len(h_dl_est) == accepted else "not available in legacy/single data"
         ),
         "precoding_csi_sources": unique_sources,
+        "reciprocity_contract_version": ch.SUPERRAN_RECIPROCITY_CONTRACT,
+        "canonical_channel_axes": list(ch.SUPERRAN_CANONICAL_CHANNEL_AXES),
+        "ul_to_dl_precoding_map": "h_precoding_est = conjugate(h_ul_est)",
+        "precoder_ownership": (
+            "SuperRAN recomputes every transmit weight from normalized h_est; "
+            "source-provided w_dl is ignored and never written to new datasets"
+        ),
+        "ue_identity": (
+            "stable source metadata when available; otherwise synthesized from "
+            "the documented first-party iterator contract, never from a moving coordinate"
+        ),
         "ofdm_to_slot_reduction": (
             "middle-symbol snapshot; no complex averaging; all OFDM symbols "
             "were retained through channel estimation before reduction"

@@ -32,10 +32,11 @@
 某个 RBG 的 CSI 陈旧时长在 0 ~ 160 ms 之间轮转，**平均 80 ms**。
 2.6 GHz、30 km/h 的相干时间只有约 6 ms——CSI 早就过期了。
 
-跳频序列直接调 ChannelHub 的 ``srs_rb_indices``（它实现了 38.211 §6.4.1.4.3
-的完整跳频树），不自己写。C_SRS=63 / B_SRS=1 的 17 跳顺序是
+当前只支持上述一个公司口径，因此 SuperRAN 直接固化并版本化
+C_SRS=63 / B_SRS=1 / b_hop=0 的 17 跳顺序：
 RBG 0 → 8 → 16 → 7 → … → 1 → 9；奇数 ``N_b=17`` 的步长 8 来自标准的
-``floor(N_b/2)`` 镜像跳频公式，并非顺序扫描。
+``floor(N_b/2)`` 镜像跳频公式，并非顺序扫描。它不依赖外部库的
+helper；未来增加其他带宽时再实现完整通用资源映射。
 
 ## 老化怎么进 SINR
 
@@ -98,8 +99,6 @@ CSI_REPORT_PERIOD_CHOICES: tuple[float, ...] = (5.0, 10.0, 20.0, 40.0, 80.0)
 SRS_C_SRS_FULL_BAND = 63
 SRS_B_SRS_ONE_RBG = 1
 DEFAULT_HOP_FACTOR = 17
-
-
 @dataclass
 class CsiConfig:
     """CSI 时延链的配置。
@@ -194,39 +193,57 @@ class CsiConfig:
         }
 
 
+def validate_hopping_grid(
+    cfg: CsiConfig,
+    rbg_prb_sizes: tuple[int, ...] | list[int],
+) -> None:
+    """拦住尚未建立资源映射的非公司栅格 SRS 跳频老化。
+
+    当前生产模型把 38.211 的 ``C_SRS=63/B_SRS=1`` 映射为 17 次、每次
+    16 PRB。对 51/106/273 RB 直接套同一 ``hop_factor=17`` 并不代表标准
+    SRS 资源：有些 PRB 永远未测，有些 RBG 又被错误复用。过去还会在查表失败
+    时退回恒等扫描，结果看似正常却没有物理含义，因此这里选择硬失败。
+    """
+    if not cfg.enabled or not cfg.hopping:
+        return
+    raw_sizes = tuple(rbg_prb_sizes)
+    if any(
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, np.integer))
+        or int(value) < 1
+        for value in raw_sizes
+    ):
+        raise ValueError("SRS 跳频的 rbg_prb_sizes 必须全部是正整数")
+    sizes = tuple(int(value) for value in raw_sizes)
+    if sizes != (16,) * 17 or int(cfg.hop_factor) != 17:
+        raise ValueError(
+            "SRS 跳频老化当前只验证了公司 272 PRB = 17×16 配置"
+            "（C_SRS=63, B_SRS=1, b_hop=0）。本载波 RBG 大小为 "
+            f"{list(sizes)}，禁止静默套用 17-hop/恒等扫描。"
+            "请关闭 srs_hopping（显式的全带 SRS 工程上界），或补充该载波的 "
+            "C_SRS/B_SRS/b_hop/n_RRC 资源配置后再仿真。"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 跳频序列
 # ---------------------------------------------------------------------------
 @lru_cache(maxsize=64)
 def _standard_hop_order(num_rbg: int, rb_per_rbg: int,
                         hop_factor: int) -> np.ndarray:
-    """调 ChannelHub 的 38.211 §6.4.1.4.3 跳频树，失败就抛。
+    """返回 SuperRAN 已验证的 100 MHz / 17-hop 序列。
 
-    **只缓存成功路径。** 把兜底也缓存进来的话，一次瞬时的依赖缺失会被永久钉死，
-    之后即使 ChannelHub 可用了也照样走恒等扫描——那正是这个模块最想避免的
-    "静默换算法"。
+    当前不提供通用跳频树：参数不是 17×16 就硬失败，不从外部
+    helper 动态取结果，也不退回恒等扫描。
     """
-    from .channelhub import _ensure_path  # noqa: PLC0415
+    if (num_rbg, rb_per_rbg, hop_factor) != (17, 16, 17):
+        raise ValueError(
+            "SRS hopping 当前只支持 100 MHz、272 RB、17 RBG × 16 RB "
+            "的 17-hop profile"
+        )
+    from . import hardware as hw  # noqa: PLC0415
 
-    _ensure_path()
-    from msg_embedding.ref_signals.srs import (  # noqa: PLC0415
-        SRSResourceConfig,
-        srs_hopping_cycle_length,
-        srs_rb_indices,
-    )
-
-    cfg = SRSResourceConfig(
-        C_SRS=SRS_C_SRS_FULL_BAND, B_SRS=SRS_B_SRS_ONE_RBG,
-        K_TC=2, n_RRC=0, b_hop=0, n_SRS_ID=0, T_SRS=1, T_offset=0,
-    )
-    cycle = int(srs_hopping_cycle_length(cfg))
-    if cycle != hop_factor:
-        raise ValueError(f"标准表给出 {cycle} 跳，配置要 {hop_factor} 跳")
-    total_rb = num_rbg * rb_per_rbg
-    # T_SRS=1 时 n_SRS 恰好等于 slot 序号（srs.py:453），所以直接传 j
-    order = np.array(
-        [int(srs_rb_indices(cfg, j, 0, total_rb)[0]) // rb_per_rbg
-         for j in range(cycle)], dtype=int)
+    order = np.asarray(hw.COMPANY_SRS_17_HOP_ORDER_RBG, dtype=int)
     order.flags.writeable = False
     return order
 
@@ -235,28 +252,18 @@ def hop_order(num_rbg: int, *, rb_per_rbg: int = 16,
               hop_factor: int = DEFAULT_HOP_FACTOR) -> tuple[np.ndarray, str]:
     """第 j 次 SRS 机会探的是哪个 RBG。返回 ``(order, source)``。
 
-    走 ChannelHub 的 ``srs_rb_indices``——它实现了 38.211 §6.4.1.4.3 的完整
-    跳频树（``F_b`` 递推、``n_RRC`` 偏置、奇偶 ``N_b`` 的镜像规则）。
-    自己重写一遍只会引入分歧。
-
-    **取不到时退回恒等扫描并如实标注 source**，不静默假装用了标准实现。
-    兜底恒等扫描与 C_SRS=63 的标准镜像顺序不同；测试既断言标准顺序，也直接断言
-    ``source`` 以 ``channelhub:`` 开头，避免依赖缺失时悄悄换算法。
-
-    结果只取决于三个整数，所以标准路径带缓存：实测未缓存时 **329 µs/次**，
-    而 :func:`rbg_lag_snapshots` 是逐 UE 逐快照调用它的。返回的 order 是共享只读数组。
+    结果是 SuperRAN 自己固化的 C_SRS=63 / B_SRS=1 / b_hop=0
+    公司 profile；只接受 17×16 参数。返回的 order 是共享只读数组。
     """
     for name, value in (("num_rbg", num_rbg), ("rb_per_rbg", rb_per_rbg),
                         ("hop_factor", hop_factor)):
         if (isinstance(value, (bool, np.bool_))
                 or not isinstance(value, (int, np.integer)) or int(value) < 1):
             raise ValueError(f"{name} 必须是至少为 1 的整数")
-    try:
-        order = _standard_hop_order(int(num_rbg), int(rb_per_rbg), int(hop_factor))
-        return order, "channelhub:38.211-6.4.1.4.3"
-    except Exception as exc:  # noqa: BLE001
-        return (np.arange(hop_factor) % max(1, num_rbg),
-                f"fallback:identity-sweep（{type(exc).__name__}: {exc}）")
+    order = _standard_hop_order(int(num_rbg), int(rb_per_rbg), int(hop_factor))
+    from . import hardware as hw  # noqa: PLC0415
+
+    return order, f"superran:{hw.SUPERRAN_SRS_HOPPING_PROFILE_ID}"
 
 
 def rbg_csi_staleness_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
@@ -415,6 +422,7 @@ def rank_adaptation_aged(h_prec: np.ndarray, h_eval: np.ndarray, *,
                          table: int = 3, target_bler: float = 0.1,
                          total_power: float = 1.0,
                          rb_per_rbg: int = 1,
+                         rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
                          w_override: np.ndarray | None = None,
                          power_constraint: bf.PowerConstraint | str = "ebf") -> AgedRankChoice:
     """预编码用 ``h_prec``、评估用 ``h_eval`` 的 rank 自适应。
@@ -466,7 +474,8 @@ def rank_adaptation_aged(h_prec: np.ndarray, h_eval: np.ndarray, *,
         true_stream_sinr = mmse_stream_sinr(
             he, w, power_per_stream=p_per, noise_power=noise_power)
         true_rbg_sinr = mu.rbg_sinr_db(
-            true_stream_sinr, rb_per_rbg=rb_per_rbg)
+            true_stream_sinr, rb_per_rbg=rb_per_rbg,
+            rbg_boundaries=rbg_boundaries)
         s_true = float(np.mean(true_rbg_sinr))
         se_t, mcs_t = mu.se_from_sinr(s_true, r, table=table, target_bler=target_bler)
         cands.append({"rank": r, "sinr_db": round(s_true, 2), "mcs": mcs_t.index,
@@ -476,7 +485,8 @@ def rank_adaptation_aged(h_prec: np.ndarray, h_eval: np.ndarray, *,
         gnb_stream_sinr = mmse_stream_sinr(
             hp, w, power_per_stream=p_per, noise_power=noise_power)
         gnb_rbg_sinr = mu.rbg_sinr_db(
-            gnb_stream_sinr, rb_per_rbg=rb_per_rbg)
+            gnb_stream_sinr, rb_per_rbg=rb_per_rbg,
+            rbg_boundaries=rbg_boundaries)
         s_gnb = float(np.mean(gnb_rbg_sinr))
         se_g, mcs_g = mu.se_from_sinr(s_gnb, r, table=table, target_bler=target_bler)
         gnb.append({"rank": r, "sinr_db": round(s_gnb, 2), "mcs": mcs_g.index,
@@ -533,15 +543,22 @@ def aging_summary(cfg: CsiConfig, *, num_rbg: int = 17, snapshot_ms: float = 5.0
                   speed_kmh: float = 3.0, carrier_hz: float = 2.6e9,
                   rb_per_rbg: int = 16) -> dict[str, Any]:
     """把这套配置下的老化画像算出来，供说明书与结果摘要引用。"""
-    order, source = hop_order(num_rbg, rb_per_rbg=rb_per_rbg,
-                              hop_factor=cfg.hop_factor)
+    if cfg.hopping:
+        order, source = hop_order(num_rbg, rb_per_rbg=rb_per_rbg,
+                                  hop_factor=cfg.hop_factor)
+    else:
+        # 不跳频时没有"扫描顺序"这个概念，不拿 17-hop 校验去撞窄带诊断。
+        order, source = list(range(int(num_rbg))), "not_applicable_non_hopping"
+
     stale_ms = rbg_csi_staleness_ms(
         cfg, num_rbg, 0.0, rb_per_rbg=rb_per_rbg) if cfg.enabled \
         else np.zeros(num_rbg)
     lags = rbg_lag_snapshots(cfg, num_rbg, snapshot_ms=snapshot_ms,
                              snapshot_index=0, rb_per_rbg=rb_per_rbg)
     t_c = coherence_time_ms(speed_kmh, carrier_hz)
-    mean_staleness = cfg.mean_csi_staleness_ms if cfg.enabled else 0.0
+    # 配置公式只在完整 17-hop 稳态上等于真实均值；窄带诊断、不同 phase 或
+    # 不跳频时应报告本次实际算出的向量，避免 3-RBG 示例仍写成 82 ms。
+    mean_staleness = float(np.mean(stale_ms)) if cfg.enabled and len(stale_ms) else 0.0
     warn: list[str] = []
     if cfg.enabled and max(lags) == 0:
         warn.append(

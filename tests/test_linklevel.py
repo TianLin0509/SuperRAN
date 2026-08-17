@@ -199,11 +199,18 @@ print(f"  DDDSU: 周期 {tdd.get('period_slots')} 时隙 / {tdd.get('periodicity
 check(tdd.get("period_slots") == 5, "TDD 周期正确")
 check(len(ph.list_tdd_patterns()) >= 5, "至少 5 种 TDD 配比")
 
-srs = ph.srs_config(273, b_srs=1, b_hop=0)
+srs = ph.srs_config(272, b_srs=1, b_hop=0)
 print(f"  SRS b_srs=1: 跳频周期 {srs['hopping_cycle_length']}，"
       f"每跳 {srs['rb_per_hop']} RB，覆盖 {srs['coverage_ratio']:.0%}")
 check(srs["hopping_enabled"], "b_hop < b_srs 时跳频启用")
-check(srs["hopping_cycle_length"] > 1, "跳频周期大于 1")
+check(srs["hopping_cycle_length"] == 17, "当前只支持 100 MHz 的 17-hop profile")
+check(srs["hop_order_rbg"] == [0, 8, 16, 7, 15, 6, 14, 5, 13, 4, 12, 3, 11, 2, 10, 1, 9],
+      "17-hop 顺序由 SuperRAN 本地合同固定")
+try:
+    ph.srs_config(273, b_srs=1, b_hop=0)
+    check(False, "非 272-RB 跳频必须硬失败")
+except ValueError:
+    check(True, "非 272-RB 跳频硬失败")
 check(not ph.srs_config(273, b_srs=0)["hopping_enabled"], "b_srs=0 时不跳频")
 
 zc = ph.zadoff_chu(25, 139)

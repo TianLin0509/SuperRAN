@@ -40,10 +40,16 @@ def test_explicit_preset_beats_classifier_hint_and_user_override_beats_both() ->
 def test_precoding_source_gate_rejects_csirs_when_srs_was_declared() -> None:
     wrong = SimpleNamespace(precoding_csi_sources=np.array(["dl_csirs_estimate"]))
     right = SimpleNamespace(
-        precoding_csi_sources=np.array(["ul_srs_estimate", "ul_srs_estimate"])
+        h_est=np.ones((2, 1, 1, 1, 1)),
+        precoding_csi_sources=np.array(["ul_srs_estimate", "ul_srs_estimate"]),
+    )
+    incomplete = SimpleNamespace(
+        h_est=np.ones((2, 1, 1, 1, 1)),
+        precoding_csi_sources=np.array(["ul_srs_estimate"]),
     )
     assert not gates._precoding_source_item(wrong, "ul_srs_estimate").passed
     assert gates._precoding_source_item(right, "ul_srs_estimate").passed
+    assert not gates._precoding_source_item(incomplete, "ul_srs_estimate").passed
 
 
 def test_paired_ul_srs_is_reciprocity_mapped_to_downlink_convention() -> None:
@@ -58,17 +64,45 @@ def test_paired_ul_srs_is_reciprocity_mapped_to_downlink_convention() -> None:
     np.testing.assert_array_equal(precoding_est, h_dl)
     np.testing.assert_array_equal(dl_est, h_dl * 0.5)
     assert source == "ul_srs_estimate"
+    assert ch.SUPERRAN_RECIPROCITY_CONTRACT.startswith("superran-tdd-")
+
+
+def test_reciprocity_contract_rejects_axis_shape_mismatch() -> None:
+    with pytest.raises(RuntimeError, match="同一 canonical 轴"):
+        ch.ul_estimate_to_dl_precoding_csi(
+            np.ones((1, 2, 4, 2), dtype=np.complex64),
+            expected_shape=(1, 2, 8, 2),
+        )
 
 
 def test_comparison_csi_selector_keeps_srs_and_csirs_distinct() -> None:
     srs = np.full((2, 1, 1, 1, 1), 1 + 2j, dtype=np.complex64)
     csirs = np.full((2, 1, 1, 1, 1), 3 + 4j, dtype=np.complex64)
-    ds = SimpleNamespace(h_est=srs, h_dl_est=csirs)
+    ds = SimpleNamespace(
+        h_est=srs, h_dl_est=csirs,
+        precoding_csi_sources=np.array(["ul_srs_estimate"] * 2),
+    )
     np.testing.assert_array_equal(gates._precoding_csi_tensor(ds, "srs"), srs)
     np.testing.assert_array_equal(gates._precoding_csi_tensor(ds, "csirs"), csirs)
     assert gates._precoding_csi_tensor(ds, "ideal") is None
     with pytest.raises(ValueError, match="禁止静默回退"):
         gates._precoding_csi_tensor(SimpleNamespace(h_est=srs, h_dl_est=None), "csirs")
+    with pytest.raises(ValueError, match="禁止把 DL CSI-RS"):
+        gates._precoding_csi_tensor(
+            SimpleNamespace(
+                h_est=srs,
+                precoding_csi_sources=np.array(["dl_csirs_estimate"] * 2),
+            ),
+            "srs",
+        )
+    with pytest.raises(ValueError, match="标签数 1/2"):
+        gates._precoding_csi_tensor(
+            SimpleNamespace(
+                h_est=srs,
+                precoding_csi_sources=np.array(["ul_srs_estimate"]),
+            ),
+            "srs",
+        )
 
 
 def test_builtin_comparison_clusters_repeated_snapshots_by_ue_position() -> None:
@@ -84,6 +118,7 @@ def test_builtin_comparison_clusters_repeated_snapshots_by_ue_position() -> None
         ),
         dataset_id="ds_cluster_test",
         config={},
+        precoding_csi_sources=np.array(["ul_srs_estimate"] * 4),
     )
     result = gates.compare_arms(
         ds,
@@ -96,7 +131,67 @@ def test_builtin_comparison_clusters_repeated_snapshots_by_ue_position() -> None
     assert result.as_dict()["inference_unit"]["clustered_by"] == "ue_position"
 
 
-def _fake_sample(*, h_est: np.ndarray | None, marker: float = 0.0) -> SimpleNamespace:
+def test_mobile_comparison_clusters_by_stable_ue_id_not_position() -> None:
+    h = np.ones((4, 1, 1, 1, 1), dtype=np.complex64)
+
+    class MobileDataset(SimpleNamespace):
+        def scalar(self, name: str) -> np.ndarray:
+            if name == "ue_id":
+                return np.array([0, 1, 0, 1])
+            raise KeyError(name)
+
+    ds = MobileDataset(
+        h_true=h,
+        h_est=h,
+        h_dl_est=h,
+        h_interferers=None,
+        ue_position=np.array(
+            [[0.0, 0.0, 1.5], [10.0, 0.0, 1.5],
+             [1.0, 0.0, 1.5], [11.0, 0.0, 1.5]]
+        ),
+        dataset_id="ds_mobile_cluster_test",
+        config={"mobility_mode": "linear"},
+        precoding_csi_sources=np.array(["ul_srs_estimate"] * 4),
+    )
+    result = gates.compare_arms(
+        ds,
+        {"name": "A", "method": "identity", "csi": "srs"},
+        {"name": "B", "method": "identity", "csi": "srs"},
+        snr_db=10.0,
+    )
+    assert result.raw_observations == 4
+    assert result.paired.n == 2
+    assert result.as_dict()["inference_unit"]["clustered_by"] == "ue_id"
+
+
+def test_mobile_comparison_without_ue_id_is_blocked() -> None:
+    h = np.ones((2, 1, 1, 1, 1), dtype=np.complex64)
+    ds = SimpleNamespace(
+        h_true=h,
+        h_est=h,
+        h_dl_est=h,
+        h_interferers=None,
+        ue_position=np.array([[0.0, 0.0, 1.5], [1.0, 0.0, 1.5]]),
+        dataset_id="ds_mobile_no_id",
+        config={"mobility_mode": "linear"},
+        precoding_csi_sources=np.array(["ul_srs_estimate"] * 2),
+    )
+    result = gates.compare_arms(
+        ds,
+        {"name": "A", "method": "identity", "csi": "srs"},
+        {"name": "B", "method": "identity", "csi": "srs"},
+        snr_db=10.0,
+    )
+    assert not result.gate2.passed
+    assert any(item.severity == "block" for item in result.gate2.items)
+
+
+def _fake_sample(
+    *,
+    h_est: np.ndarray | None,
+    marker: float = 0.0,
+    w_dl: np.ndarray | None = None,
+) -> SimpleNamespace:
     h_true = np.full((1, 4, 2, 1), 1.0 + 1.0j, dtype=np.complex64)
     vectors = {
         "pathloss_all_db": [100.0 + marker, 110.0 + marker],
@@ -118,7 +213,7 @@ def _fake_sample(*, h_est: np.ndarray | None, marker: float = 0.0) -> SimpleName
         h_ul_true=None,
         h_ul_est=None,
         h_interferers=None,
-        w_dl=None,
+        w_dl=w_dl,
         ue_position=np.array([10.0, 20.0, 1.5]),
         sinr_dB=5.0,
         snr_dB=8.0,
@@ -176,6 +271,99 @@ def test_collect_preserves_every_per_cell_vector(monkeypatch: pytest.MonkeyPatch
     assert np.array_equal(payload["meta__serving_cell_index"], np.array([0.0, 0.0]))
     assert first_meta["channel_contract"]["ofdm_to_slot_reduction"].startswith(
         "middle-symbol snapshot"
+    )
+
+
+def test_collect_ignores_source_precoder_and_records_superran_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h_est = np.full((1, 4, 2, 1), 0.9 + 0.8j, dtype=np.complex64)
+    source_weight = np.ones((4, 2, 1), dtype=np.complex64)
+    sample = _fake_sample(h_est=h_est, w_dl=source_weight)
+    monkeypatch.setattr(gen.ch, "iter_samples", lambda *_args, **_kw: iter([sample]))
+    payload, first_meta, stats = gen._collect(
+        "fake", {"num_samples": 1}, want=1,
+        lo=-np.inf, hi=np.inf, filtering=False,
+    )
+    assert "w_dl" not in payload
+    assert stats["source_precoder_fields_ignored"] == 1
+    contract = first_meta["channel_contract"]
+    assert contract["reciprocity_contract_version"] == ch.SUPERRAN_RECIPROCITY_CONTRACT
+    assert contract["canonical_channel_axes"] == [
+        "time", "rb", "bs_port", "ue_port",
+    ]
+    assert "source-provided w_dl is ignored" in contract["precoder_ownership"]
+
+
+def test_collect_synthesizes_stable_ue_id_from_first_party_iterator_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h_est = np.full((1, 4, 2, 1), 0.9 + 0.8j, dtype=np.complex64)
+    samples = [_fake_sample(h_est=h_est, marker=float(i)) for i in range(4)]
+    monkeypatch.setattr(gen.ch, "iter_samples", lambda *_args, **_kw: iter(samples))
+    payload, _first_meta, _stats = gen._collect(
+        "internal_sim",
+        {
+            "num_samples": 4,
+            "num_ues": 2,
+            "sample_index_offset": 3,
+            "mobility_mode": "static",
+        },
+        want=4,
+        lo=-np.inf,
+        hi=np.inf,
+        filtering=False,
+    )
+    np.testing.assert_array_equal(payload["meta__ue_id"], [1.0, 0.0, 1.0, 0.0])
+    np.testing.assert_array_equal(
+        payload["metastr__ue_id_source"],
+        ["internal_sim_global_index"] * 4,
+    )
+
+
+def test_collect_labels_one_mobile_trajectory_as_one_ue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h_est = np.full((1, 4, 2, 1), 0.9 + 0.8j, dtype=np.complex64)
+    samples = [_fake_sample(h_est=h_est, marker=float(i)) for i in range(3)]
+    monkeypatch.setattr(gen.ch, "iter_samples", lambda *_args, **_kw: iter(samples))
+    payload, _first_meta, _stats = gen._collect(
+        "internal_sim",
+        {"num_samples": 3, "mobility_mode": "linear", "ue_speed_kmh": 120.0},
+        want=3,
+        lo=-np.inf,
+        hi=np.inf,
+        filtering=False,
+    )
+    np.testing.assert_array_equal(payload["meta__ue_id"], [0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(
+        payload["metastr__ue_id_source"],
+        ["internal_sim_single_trajectory"] * 3,
+    )
+
+
+def test_collect_refuses_to_invent_identity_for_mobile_with_untrustworthy_speed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # mobility_mode 非 static 但速度为 0：旧行为按静态轮转合成假独立 id，
+    # 统计门拿到合法 id 就不再 block——正是移动数据聚类门要防的事故。
+    # 现在不发明身份：ue_id 全部缺失（metastr 落 "None"），交给 gates block。
+    h_est = np.full((1, 4, 2, 1), 0.9 + 0.8j, dtype=np.complex64)
+    samples = [_fake_sample(h_est=h_est, marker=float(i)) for i in range(3)]
+    monkeypatch.setattr(gen.ch, "iter_samples", lambda *_args, **_kw: iter(samples))
+    payload, _first_meta, _stats = gen._collect(
+        "internal_sim",
+        {"num_samples": 3, "mobility_mode": "linear", "ue_speed_kmh": 0.0},
+        want=3,
+        lo=-np.inf,
+        hi=np.inf,
+        filtering=False,
+    )
+    assert "meta__ue_id" not in payload
+    np.testing.assert_array_equal(payload["metastr__ue_id"], ["None"] * 3)
+    np.testing.assert_array_equal(
+        payload["metastr__ue_id_source"],
+        ["unavailable_mobility_speed"] * 3,
     )
 
 
@@ -367,6 +555,8 @@ def test_static_internal_sim_parallel_is_worker_count_invariant() -> None:
     np.testing.assert_array_equal(parallel.h_true, serial.h_true)
     np.testing.assert_array_equal(parallel.h_est, serial.h_est)
     np.testing.assert_array_equal(parallel.sinr_dB, serial.sinr_dB)
+    np.testing.assert_array_equal(parallel.scalar("ue_id"), serial.scalar("ue_id"))
+    np.testing.assert_array_equal(serial.scalar("ue_id"), [0.0, 1.0, 0.0, 1.0])
 
 
 def test_parallel_semantics_gate_rejects_stateful_or_unindexed_sources() -> None:
@@ -381,3 +571,32 @@ def test_parallel_semantics_gate_rejects_stateful_or_unindexed_sources() -> None
     assert gen._parallel_exactness_blocker(
         "internal_sim", {"mobility_mode": "static"}, filtering=True
     ) is not None
+
+
+def test_reciprocity_end_to_end_receive_gain() -> None:
+    """端到端互易增益：上游 SRS 约定 (h_ul = conj(h_dl)) 经 SuperRAN 版本化
+    映射还原后，本地 SVD 打到真实信道上的谱效必须接近理想 CSI——
+    共轭约定若在链路级整体反了，纯映射断言一个都抓不住，只有这条能抓。"""
+    from superran import linklevel as lv
+
+    rng = np.random.default_rng(20260817)
+    h_dl = ((rng.standard_normal((2, 8, 8, 4))
+             + 1j * rng.standard_normal((2, 8, 8, 4))) / np.sqrt(2))
+    noise = ((rng.standard_normal(h_dl.shape)
+              + 1j * rng.standard_normal(h_dl.shape)) / np.sqrt(2)) * 0.02
+    h_ul_est = np.conj(h_dl) + noise  # 上游导出的 SRS 估计（合同轴）
+    mapped = ch.ul_estimate_to_dl_precoding_csi(h_ul_est)
+
+    ideal = lv.link_performance(h_dl, snr_db=20.0, method="svd")
+    correct = lv.link_performance(h_dl, snr_db=20.0, method="svd",
+                                  h_for_precoding=mapped)
+    # 错误约定：不做共轭还原，直接拿 SRS 估计当下行 CSI（漏 conj）
+    wrong = lv.link_performance(h_dl, snr_db=20.0, method="svd",
+                                h_for_precoding=h_ul_est)
+
+    assert correct.spectral_efficiency > wrong.spectral_efficiency, (
+        f"正确共轭约定 {correct.spectral_efficiency:.3f} 必须优于错误约定 "
+        f"{wrong.spectral_efficiency:.3f}")
+    assert correct.spectral_efficiency > 0.9 * ideal.spectral_efficiency, (
+        f"估计噪声预算内应接近理想：{correct.spectral_efficiency:.3f} vs "
+        f"理想 {ideal.spectral_efficiency:.3f}")

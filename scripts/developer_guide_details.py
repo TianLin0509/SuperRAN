@@ -309,12 +309,12 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
         promise="详细推导 64×4 SRS 接收矩阵的维度与估计流程，区分序列、估计算法、周期和处理时延，并解释 LS 不会自动抹掉干扰方向性、LMMSE 又真正多用了什么信息。",
         principles=(
             "上行 SRS 时，UE 的 4 个发射端口在已知资源元素上发送参考序列，基站 64 个 RF 端口分别接收。因此每个频点的上行信道是 <code>H_UL∈C^(64×4)</code>：行对应基站接收端口，列对应 UE 发射端口。若把所有端口的已知导频写成 X，接收矩阵为 <code>Y=H_UL X+I+N</code>；用导频伪逆去扩频后得到 64×4 的估计。TDD 互易用于把这个上行信息映射为下行预编码 CSI，但形状转置、RF 校准和处理时延必须显式处理。",
-            "NR SRS 的基序列来自低 PAPR 序列族，长度条件满足时使用 Zadoff–Chu 构造，并叠加循环移位、comb、跳频和端口映射；因此“当前是不是 ZC”不能只看一个根序列函数。<code>srs_sequence</code> 调用 ChannelHub 的 SRS 基序列入口，<code>zadoff_chu</code> 另保留为可直接验证相关性的物理工具。配置输出要同时记录 C_SRS、B_SRS、comb、周期与实际 RB 索引。",
+            "NR SRS 的基序列来自低 PAPR 序列族，长度条件满足时使用 Zadoff–Chu 构造，并叠加循环移位、comb、跳频和端口映射；因此“当前是不是 ZC”不能只看一个根序列函数。<code>srs_sequence</code> 目前仍经信道源适配器调用 SRS 基序列入口，<code>zadoff_chu</code> 另保留为可直接验证相关性的物理工具；100 MHz 的 C_SRS=63/B_SRS=1 资源与 17-hop 顺序则由 SuperRAN 本地合同承载。配置输出要同时记录 profile、comb、周期与实际 RB 索引。",
             "LS 在导频点只做 <code>Y X†</code>，不知道信道的频域/时域协方差；它不会把干扰变成无方向。干扰原本经过 64 根接收端口形成的空间向量仍在 Y 中，LS 只是把与目标序列相关的那部分投影进估计。若其他用户序列不正交，污染也保留其方向性。LMMSE 在 LS 之上再用 <code>R_tp(R_pp+R_v)^−1</code> 融合先验相关与噪声/干扰协方差，从而在统计匹配时降低均方误差。",
             "SRS 周期描述 UE 多久发一次导频；处理时延描述收到导频后多久可供调度使用；channel snapshot 周期描述物理信道多久更新。所谓 CSI lag 是这三者和当前 TTI 的组合量，不应把它命名成“SRS 年龄”。报告应写清 SRS 周期、最后一次可用报告时刻与等效 CSI 时延。",
         ),
         implementation=(
-            ("生成资源与序列", "<code>srs_config</code> 解析带宽、comb、跳频、端口和周期，<code>srs_sequence</code> 生成已知基序列；配置错误在进入信道前失败。"),
+            ("生成资源与序列", "<code>srs_config</code> 对 hopping 只接受 272 RB/C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0，并返回本地版本化 17-hop 日历；<code>srs_sequence</code> 生成已知基序列，未支持的跳频配置在进入信道前失败。"),
             ("形成接收观测", "每个 SRS RE 上用 UL 64×4 信道、四端口序列、同频干扰和热噪声形成 Y，保留端口轴而不是先做标量合并。"),
             ("估计与插值", "LS 先在导频点去扩频，再做实虚部分开的频域插值；LMMSE 复用 ChannelHub 的 pilot-to-full-RB 协方差插值，先验由 delay spread、SCS 和 SNR 决定。"),
             ("应用时序", "系统层按 SRS 周期选最后一份已经完成处理的估计，禁止读未来 snapshot；估计来源和 lag 进入链路表元数据。"),
@@ -440,12 +440,12 @@ DETAIL_SPECS.update({
         principles=(
             "CQI 是接收侧基于过去测量形成的量化反馈，BF gain 是基站基于当前可见 CSI 预测的波束增益，OLLA 是由历史 ACK/NACK 学到的系统性偏置。这三项相加得到 SU 发送侧 MCS 输入。传输之后，真实 H、真实干扰和实际 Q 给出接收侧 SINR，BLER 曲线把它变成错误概率；抽样 ACK/NACK 再更新 OLLA。发送侧不能直接读取这一时刻真值来改 MCS，否则闭环失去因果性。",
             "MU 不是在 SU MCS 上只减一个固定余量。它至少增加残留相关性损失、同 RBG 总功率在并发 rank 间平分的损失以及用户级 MU OLLA。MU OLLA 对每个用户维护，但不按配对对象再分状态：A 与 B 配对失败、A 与 C 配对失败，都会更新 A 的同一份 MU 偏置。SU 与 MU 状态分开，避免一种传输的误差污染另一种。",
-            "TBS 经过 38.214 离散量化和码块对齐，只近似随 RBG 线性。即使 17 个 RBG 的 TBS 比单 RBG×17 高 1%，用除法反推也可能少给一个 RBG，使当前包无法完成。正确实现为每个 slot/MCS/rank 预生成 1..17 RBG 查表，并在严格单调行上用 <code>searchsorted(side='left')</code> 找第一个够用值。",
+            "TBS 经过 38.214 离散量化和码块对齐，只近似随 RBG 线性。即使 17 个 RBG 的 TBS 比单 RBG×17 高 1%，用除法反推也可能少给一个 RBG，使当前包无法完成。正确实现为每个 slot/MCS/rank 预生成各 RBG 前缀查表，验证单调不减，并用 <code>searchsorted(side='left')</code> 找第一个够用值。量化平台合法，资源增加却令 TBS 下降才是硬错误。",
             "BLER 与 HARQ 的边界要写清。当前体验仿真可以在 NACK 时把业务字节保留/退回队首并由下一次 grant 重试，但不等同于完整 NR HARQ 进程：软合并、RV、并行 process、时序和调度优先级若未建模，就不能用 HARQ 吞吐曲线解释结果。",
         ),
         implementation=(
             ("形成发送侧预测", "链路表保存 CQI/基础门限与 BF gain；每个 TTI 加当前用户 SU OLLA 得到 SU MCS。MU 候选再加 CorrLoss、powerLoss 和 MU OLLA。"),
-            ("查询真实 TBS", "TbsLookup 对 slot 类型、MCS table 3、rank 与 1..17 RBG 建表，构建时验证每一行严格递增。"),
+            ("查询真实 TBS", "TbsLookup 对 slot 类型、MCS table 3、rank 与 RBG 前缀建表，构建时验证每一行单调不减。"),
             ("执行真实传输", "按实际分配 RBG 查 TB bytes，用真值 SINR 查 BLER 曲线并从独立 BLER 随机流抽 ACK/NACK。"),
             ("闭环更新", "ACK/NACK 只更新对应用户、对应 SU/MU 状态；PF credit 按配置使用 scheduled_tbs 或 acked_goodput，绝不回到全带估计。"),
         ),
@@ -457,7 +457,7 @@ DETAIL_SPECS.update({
         checks=(
             ("因果信息", "MCS 只读过去/当前可用 CQI、BF 预测和 OLLA，实际 ACK 前不接触真值结果。"),
             ("双 OLLA", "SU/MU 各有用户级状态、更新事件和 BLER 收敛统计；关闭 MU 时 SU 基线不漂移。"),
-            ("TBS 单调", "所有支持的 slot×MCS×rank 表行在 1..17 RBG 上严格递增，searchsorted 边界有穷举测试。"),
+            ("TBS 单调", "所有支持的 slot×MCS×rank 表行单调不减，平台取第一个够用前缀，下降则硬失败；边界有穷举测试。"),
             ("字节处理", "ACK/NACK 后 queue、inflight、acked、padding 守恒；当前 HARQ 近似在报告中显式标注。"),
         ),
         pitfalls=(
@@ -535,15 +535,16 @@ DETAIL_SPECS.update({
         promise="逐事件解释一个 DL TTI 中到达、报告、PF、SU/MU 规划、RBG 分配、BLER、队列、OLLA、PF 平均量与 KPI 的先后关系，并把用户追问的 RU/R̄ 维护口径钉成不变量。",
         principles=(
             "体验仿真是离散事件状态机，顺序会改变结果。当前 TTI 的业务先进入 FIFO，调度候选由有数据且非 outage 用户组成；基站只读取此时已经可用的 CSI/反馈。PF 先排序，SU/MU planner 再按队列和 TBS 查表构造方案。选定 grant 后才用真值 SINR抽 BLER、改变队列、更新 OLLA 和 PF 平均量。把 ACK/NACK 提前用于当次 MCS 就会读未来。",
-            "经典 PF 的 RU 即代码中的 <code>r_avg[u]</code>，是每用户指数平均服务 credit。每个 TTI 的权重 <code>a=1/pf_window_tti</code>；所有用户旧值先按 (1−a) 衰减，获 grant 的用户再加 a×credit。默认 <code>scheduled_tbs</code> 用本次实际 n_rbg/MCS/rank 的 TB bytes，无论 ACK 与否都代表占用的调度机会；<code>acked_goodput</code> 可改为 ACK 字节。未调度用户 credit=0。",
+            "经典 PF 的 RU 即代码中的 <code>r_avg[u]</code>，是每用户指数平均服务 credit。每个 D/S 下行调度机会的权重 <code>a=1/pf_window_tti</code>；所有用户旧值先按 (1−a) 衰减，获 grant 的用户再加 a×credit。U/G 时隙没有下行资源机会，因此不更新。默认 <code>scheduled_tbs</code> 用本次实际 n_rbg/MCS/rank 的 TB bytes，无论 ACK 与否都代表占用的调度机会；<code>acked_goodput</code> 可改为 ACK 字节。未调度用户 credit=0。",
             "这正是按需 RBG 的硬不变量：只拿 1 个 RBG 的用户不能按 17 RBG 或 <code>best_se[snap]</code> 更新。否则 R̄瞬间抬高约 17 倍，下一 TTI PF metric 被压低，小包用户会被系统性饿死。<code>legacy_fullband</code> 只用于反向验证/兼容，不得成为 experience_v2 的默认口径。",
-            "资源分配使用真实 RBG index 集合，不只存一个数量。正常情况下以轮转 cursor 减少总从低频开始的偏差；启用逐 RB 功控时 planner 还需评估频率相关 TBS/SINR。大包 required_rbg 被钳到 17，自然占满带；多个小包依 PF 顺序消耗剩余 RBG，业务传完后尾料留空。",
+            "资源分配使用真实 RBG index 集合，不只存一个数量。CarrierGrid 按 38.214 Type-0 与 BWP 对齐生成首尾部分组，并把每组真实 PRB 数一路传给 TBS、SINR、功控、MU 和 KPI。正常情况下以轮转 cursor 减少总从低频开始的偏差；大包 required_rbg 被钳到全带组数，自然占满带；多个小包依 PF 顺序消耗剩余 RBG，业务传完后尾料留空。",
         ),
         implementation=(
             ("到达与候选", "TrafficRuntime 在 TTI 边界生成包对象并进入每 UE FIFO；outage 用户保留队列但不进入本 TTI 候选。"),
             ("PF 排序", "按当前 rank/MCS 的满带潜在 TBS 除 r_avg；RR/max-CI/QoS-PF 走各自显式分支，tie-break 使用独立 scheduler 随机流。"),
+            ("载波与反查", "CarrierGrid 生成连续完整的 RBG 边界；TbsLookup 按真实 PRB 前缀建表，只要求单调不减，并用 searchsorted(left) 找第一个够用位置。"),
             ("方案与传输", "SU/MU planner 用 required_rbg 和 queue-capped useful bytes；执行选中 grant，记录 rbg_indices、TBS、payload、padding、真实 SINR、BLER 与 ACK。"),
-            ("双闭环更新", "传输结果更新 FIFO/首调度时间、SU或MU OLLA；inst[u] 累加本次 PF credit，TTI 末统一更新 r_avg 并累加测量期 KPI。"),
+            ("双闭环更新", "传输结果更新 FIFO/首调度时间、SU或MU OLLA；inst[u] 累加本次 PF credit，D/S 调度机会末统一更新 r_avg 并累加测量期 KPI。"),
         ),
         example_title="1 RBG 小包为何不能按全带更新 RU",
         example=(
@@ -553,7 +554,7 @@ DETAIL_SPECS.update({
         checks=(
             ("时序因果", "trace 中 MCS/metric 的输入状态来自传输前，ACK 后状态只影响下一 TTI。"),
             ("PF 记账", "每个 allocation 的 pf_credit、actual TBS 与 r_avg_before 可复算 TTI 末更新；1 RBG 不出现 17 RBG credit。"),
-            ("资源集合", "同一 TTI SU grant 不重叠；MU 仅在明确 pair 内共享；used_indices 与 0..17 histogram 一致。"),
+            ("资源集合", "RBG 边界连续覆盖全部 PRB，首尾部分组不丢失；同一 TTI SU grant 不重叠，MU 仅在明确 pair 内共享，used_indices 与占用直方图一致。"),
             ("字节守恒", "arrived=ACK+queued+inflight+dropped，padding 单独统计，NACK 后业务仍可追踪。"),
         ),
         pitfalls=(
@@ -561,7 +562,7 @@ DETAIL_SPECS.update({
             "每个小包虽只扣 1 RBG，却按满带 credit 更新 PF，造成看不见的长期饥饿。",
             "方案比较使用真实队列，但执行阶段重新计算另一套 MCS/RBG，trace 与结果不一致。",
         ),
-        source_paths=("src/superran/experience.py", "src/superran/system.py", "tests/test_system.py"),
+        source_paths=("src/superran/carrier.py", "src/superran/experience.py", "src/superran/system.py", "tests/test_carrier.py", "tests/test_system.py"),
     ),
     "traffic": DetailSpec(
         promise="从两个经验 CDF 生成包对象，解释包大小缩放与包间隔缩放如何分别改变负载形态，并给出从目标 30%/50% PRB 利用率反校准话务而不污染正式统计的方法。",
@@ -1039,7 +1040,7 @@ DETAIL_SPECS.update({
             "系统可见 PMI 由候选码本、报告时刻和因果保持共同定义。当前 Type-I-style 搜索使用宽带协方差和端口置换，是工程可反馈方向基线；它没有完整 38.214 多层/子带/restriction 枚举。SVD 是连续方向上界。两者都必须在 stale h_prec 上设计，再到当前 h_true 上经过同一个接收机评价，才能把码本量化、反馈周期和信道老化分开。",
         ),
         implementation=(
-            ("建立跳频日历", "<code>hop_order()</code> 优先调用 ChannelHub 的 38.211 资源映射，返回顺序和 provenance；依赖缺失时虽有 identity fallback，但 source 会显式暴露，标准回归不允许静默接受 fallback。"),
+            ("建立跳频日历", "<code>hop_order()</code> 从 SuperRAN 单一真源读取 C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0 的 17-hop 顺序并返回版本化 provenance；只接受 17×16，没有外部 helper 与 identity fallback。"),
             ("计算逐 RBG staleness", "<code>rbg_csi_staleness_ms()</code> 找最近一次覆盖并加入 processing delay；<code>rbg_lag_snapshots()</code> 向上取整到物理 trace 网格，确保处理尚未完成的快照不会被使用。"),
             ("生成估计与预编码视角", "<code>stale_channel()</code> 从有限历史选择 h_prec；仿真开头可选择 clamp 或显式 periodic prehistory，不能用负索引绕到未来 trace。"),
             ("提交 PMI/CQI 报告", "系统只在 report instant 更新状态，保存每个 snapshot 的 <code>csi_report_source_snapshot</code>；CQI expanding mean 只读取到当前时刻的报告，不用全轨迹均值回填。"),
@@ -1054,7 +1055,7 @@ DETAIL_SPECS.update({
             ("零时延退化", "h_prec=h_true 时，aged rank/SINR 与原实现逐位一致。"),
             ("未来隔离", "任意修改 snapshot s 之后的 H，不能改变 s 时刻的 PMI、CQI、BF gain 或 source snapshot。"),
             ("周期分离", "默认报告周期 20 ms 时不会每个 5 ms snapshot 更新；显式设 5 ms 后才逐快照更新。"),
-            ("跳频来源", "公司默认场景返回 channelhub:38.211 provenance 与 17 跳标准顺序，而不是 fallback。"),
+            ("跳频来源", "公司默认场景返回 superran:superran-srs-c63-b1-17hop-v1 provenance 与 17 跳顺序；非 272-RB profile 必须硬失败。"),
             ("端口合同", "64T/256T 的 Type-I codebook 按 pol-h-v/top-to-bottom 置换后，可直接作用于真实 H。"),
         ),
         pitfalls=(
@@ -1739,7 +1740,7 @@ FORMULA_SPECS: dict[str, FormulaSpec] = {
     ),
     "F_RBG_SEARCH": FormulaSpec(
         "按队列字节反查“恰够”的 RBG 数",
-        "在固定 slot、MCS 和 rank 下，预先计算 1..17 RBG 的严格递增 TBS 行；searchsorted 找到第一个不小于队列需求的位置。它遵循真实离散 TBS，不会因线性除法误差少分一个 RBG。",
+        "在固定 slot、MCS 和 rank 下，预先计算各 RBG 前缀的单调不减 TBS 行；searchsorted(side='left') 找到第一个不小于队列需求的位置。量化平台合法，它仍会选择最早位置；资源增加却令 TBS 下降才阻断。",
         (("n<sub>u</sub>*", "用户 u 本次传完当前需求所需的最小 RBG 数。"),
          ("n", "候选 RBG 数，当前系统范围 1..17。"),
          ("TBS(s,m<sub>u</sub>,r<sub>u</sub>,n)", "slot 类型 s、用户 MCS m_u、rank r_u 和 n 个 RBG 对应的真实 TBS。"),
@@ -1769,7 +1770,7 @@ FORMULA_SPECS: dict[str, FormulaSpec] = {
     ),
     "F_RAVG": FormulaSpec(
         "PF 历史平均量的指数更新",
-        "每个 TTI 先让旧平均衰减，再加入本 TTI 实际 credit。未调度用户的 credit 为零，所以平均量自然下降；只分到一个 RBG 的用户绝不能按 17 RBG 记账。",
+        "每个 D/S 下行调度机会先让旧平均衰减，再加入本次实际 credit；U/G 时隙不更新。未调度用户的 credit 为零，所以平均量自然下降；只分到一个 RBG 的用户绝不能按 17 RBG 记账。",
         (("R̄<sub>u</sub>(t)", "更新前用户 u 的历史平均 PF 服务量。"),
          ("R̄<sub>u</sub>(t+1)", "更新后、供下一 TTI 排序使用的平均量。"),
          ("R<sub>u</sub><sup>credit</sup>(t)", "本 TTI 实际记账值：默认 scheduled TBS，也可配置 ACK goodput。"),

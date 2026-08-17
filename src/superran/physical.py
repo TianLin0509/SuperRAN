@@ -1,15 +1,16 @@
 """物理层工具箱：3GPP 标准序列、帧结构、波束与估计基线。
 
-这些都是 ChannelHub 里已按 38.211/38.213/38.214 实现好的模块，
-以前只能自己重写一遍。暴露出来主要有两个用途：
+这里既有 SuperRAN 自己冻结的产品合同，也有仍经数据源适配器调用的通用
+链路级工具。暴露出来主要有两个用途：
 
 * **当基线** —— LS/MMSE 估计、SVD 预编码、DFT 码本、SSB 波束扫描，
   都是"你的方法要跟什么比"的现成答案。
 * **做导频层课题** —— SRS 跳频、序列相关性、导频污染这类研究，
   需要真实的序列而不是随机数。
 
-本模块只做转发和参数整理，算法本身仍在 ChannelHub 内，
-保证与它生成信道时用的是同一套实现。
+100 MHz / 272 RB / 17-hop SRS 资源映射由 SuperRAN 本地版本化；其他
+参考序列和通用物理工具目前仍经 ChannelHub 数据源适配器调用。两类来源会在
+返回值或文档中显式标注，不能把后者说成整仓零依赖。
 """
 from __future__ import annotations
 
@@ -121,13 +122,82 @@ def srs_config(
 ) -> dict[str, Any]:
     """SRS 资源配置与跳频参数（38.211 §6.4.1.4）。
 
-    ``c_srs`` 不给时按 RB 数自动选（Table 6.4.1.4.3-1）。
+    跳频当前只支持公司 100 MHz profile：272 RB、C_SRS=63、B_SRS=1、
+    b_hop=0、n_RRC=0，每次 16 RB、17 跳覆盖全带。其他跳频组合直接拒绝，
+    避免看似成功却套用了未验证的资源映射。非跳频配置仍保留为链路级工具。
     返回里的 ``hopping_cycle_length`` 是跳完整个带宽所需的 SRS 发送次数——
     信道老化分析要用它换算总的获取时延：
     ``获取时延 = 跳频周期 × SRS周期 × 时隙长度``。
 
     注意跳频只在 ``b_hop < b_srs`` 时启用；``b_hop ≥ b_srs`` 表示不跳频。
     """
+    _hopping = int(b_hop) < int(b_srs)
+    if _hopping:
+        from . import hardware as hw  # noqa: PLC0415
+
+        for name, value in (
+            ("num_rb", num_rb), ("c_srs", c_srs), ("b_srs", b_srs),
+            ("b_hop", b_hop), ("n_rrc", n_rrc), ("comb", comb),
+            ("periodicity", periodicity), ("offset", offset),
+            ("n_ports", n_ports),
+        ):
+            if value is None and name == "c_srs":
+                continue
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                value, (int, np.integer)
+            ):
+                raise ValueError(f"{name} 必须是整数")
+        if int(comb) not in (2, 4):
+            raise ValueError("comb 只支持 2 / 4")
+        if int(periodicity) < 1 or int(offset) < 0 or int(n_ports) < 1:
+            raise ValueError("periodicity/n_ports 必须为正整数，offset 必须为非负整数")
+        actual = {
+            "num_rb": int(num_rb),
+            "c_srs": hw.COMPANY_SRS_C_SRS if c_srs is None else int(c_srs),
+            "b_srs": int(b_srs),
+            "b_hop": int(b_hop),
+            "n_rrc": int(n_rrc),
+        }
+        expected = {
+            "num_rb": hw.COMPANY_NUM_RB,
+            "c_srs": hw.COMPANY_SRS_C_SRS,
+            "b_srs": hw.COMPANY_SRS_B_SRS,
+            "b_hop": hw.COMPANY_SRS_B_HOP,
+            "n_rrc": hw.COMPANY_SRS_N_RRC,
+        }
+        if actual != expected:
+            raise ValueError(
+                "SRS 跳频当前只支持 SuperRAN 100 MHz / 272 RB / "
+                "C_SRS=63 / B_SRS=1 / b_hop=0 / n_RRC=0 的 17-hop profile；"
+                f"实得 {actual}"
+            )
+        order = list(hw.COMPANY_SRS_17_HOP_ORDER_RBG)
+        return {
+            "profile_id": hw.SUPERRAN_SRS_HOPPING_PROFILE_ID,
+            "source": "SuperRAN-owned fixed 38.211 profile",
+            "num_rb": hw.COMPANY_NUM_RB,
+            "c_srs": hw.COMPANY_SRS_C_SRS,
+            "b_srs": hw.COMPANY_SRS_B_SRS,
+            "b_hop": hw.COMPANY_SRS_B_HOP,
+            "n_rrc": hw.COMPANY_SRS_N_RRC,
+            "comb": int(comb),
+            "periodicity_slots": int(periodicity),
+            "offset_slots": int(offset),
+            "n_ports": int(n_ports),
+            "hopping_enabled": True,
+            "hopping_cycle_length": len(order),
+            "hop_order_rbg": order,
+            "rb_per_hop": hw.COMPANY_RB_PER_RBG,
+            "coverage_ratio": round(
+                hw.COMPANY_RB_PER_RBG / hw.COMPANY_NUM_RB, 3
+            ),
+            "first_hop_rb_range": [0, hw.COMPANY_RB_PER_RBG - 1],
+            "note": (
+                "固定 17-hop 轮转；一次测 16 RB，17 次 SRS 机会覆盖 272 RB。"
+                "获取时延需计入 hopping_cycle_length × periodicity × 时隙长度。"
+            ),
+        }
+
     _ensure_path()
     from msg_embedding.ref_signals.srs import (  # noqa: PLC0415
         SRSResourceConfig,
@@ -136,7 +206,6 @@ def srs_config(
         srs_rb_indices,
     )
 
-    _hopping = int(b_hop) < int(b_srs)
     c = (
         int(auto_select_c_srs(
             int(num_rb),

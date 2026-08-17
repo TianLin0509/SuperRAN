@@ -27,6 +27,7 @@ from typing import Any, Literal
 import numpy as np
 
 from . import beamforming as bf
+from . import carrier as carrier_grid
 
 _EPS = 1e-30
 
@@ -111,7 +112,9 @@ def robust_rzf_regularization(
 # 0 · 单码字谱效：SINR → MCS → rank × 谱效
 # ---------------------------------------------------------------------------
 def rbg_sinr_db(sinr_lin_per_rb: np.ndarray, *,
-                rb_per_rbg: int = RB_PER_RBG) -> np.ndarray:
+                rb_per_rbg: int = RB_PER_RBG,
+                rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
+                ) -> np.ndarray:
     """把逐 RB/流 SINR 压成逐 RBG SINR（dB）。
 
     RBG 内先在线性域平均 RB，再在 dB 域平均各流；返回 ``[RBG]``。
@@ -124,21 +127,27 @@ def rbg_sinr_db(sinr_lin_per_rb: np.ndarray, *,
         raise ValueError(f"sinr 应为非空 [RB,stream]，收到 {s.shape}")
     n_rb = s.shape[0]
     step = max(1, min(int(rb_per_rbg), n_rb))
-    n_rbg = int(np.ceil(n_rb / step))
+    bounds = (
+        carrier_grid.validate_boundaries(n_rb, rbg_boundaries)
+        if rbg_boundaries is not None
+        else carrier_grid.uniform_boundaries(n_rb, step)
+    )
+    n_rbg = len(bounds)
     # 逐 RBG 切片 + mean 在 step=1（输入已是 RBG 粒度）时是纯开销：实测一次
     # 12 UE 建表里光 ndarray.mean 就被调了 10 万次。整除时 reshape 一次算完，
     # 元素与顺序完全一样；除不尽才退回按组切片。
-    if step == 1:
+    if rbg_boundaries is None and step == 1:
         rbg_lin = s
-    elif n_rb % step == 0:
+    elif rbg_boundaries is None and n_rb % step == 0:
         rbg_lin = s.reshape(n_rbg, step, s.shape[1]).mean(axis=1)
     else:
         rbg_lin = np.stack([
-            s[i * step:(i + 1) * step].mean(axis=0) for i in range(n_rbg)])
+            s[start:stop].mean(axis=0) for start, stop in bounds])
     return np.mean(10.0 * np.log10(np.maximum(rbg_lin, _EPS)), axis=1)
 
 
-def user_sinr_db(sinr_lin_per_rb: np.ndarray, *, rb_per_rbg: int = RB_PER_RBG) -> float:
+def user_sinr_db(sinr_lin_per_rb: np.ndarray, *, rb_per_rbg: int = RB_PER_RBG,
+                 rbg_boundaries: tuple[tuple[int, int], ...] | None = None) -> float:
     """把 ``[RB, stream]`` 的线性 SINR 压成一个**用户级 SINR**（dB）。
 
     口径（用户 2026-08-02 定）::
@@ -158,7 +167,8 @@ def user_sinr_db(sinr_lin_per_rb: np.ndarray, *, rb_per_rbg: int = RB_PER_RBG) -
     """
     # RBG 与流两个维度都在 dB 域取算术平均（顺序无关）。
     return float(np.mean(rbg_sinr_db(
-        sinr_lin_per_rb, rb_per_rbg=rb_per_rbg)))
+        sinr_lin_per_rb, rb_per_rbg=rb_per_rbg,
+        rbg_boundaries=rbg_boundaries)))
 
 
 def se_from_sinr(sinr_db: float, rank: int, *, table: int = 3,
@@ -638,6 +648,7 @@ def mu_link_performance_from_effective(
     csi_label: str = "h_true",
     power_constraint: bf.PowerConstraint | str = "ebf",
     rb_per_rbg: int = RB_PER_RBG,
+    rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
 ) -> MuPerformance:
     """在等效信道上算逐用户 SINR。``h_eval`` 用于评估、``h_precode`` 用于算 W。
 
@@ -696,7 +707,9 @@ def mu_link_performance_from_effective(
     jain = (s ** 2 / (n_k * float(np.sum(se_user ** 2)))) if np.any(se_user > 0) else 0.0
 
     sinr_user_rbg_db = np.stack([
-        rbg_sinr_db(sinr[:, u * n_s:(u + 1) * n_s], rb_per_rbg=rb_per_rbg)
+        rbg_sinr_db(
+            sinr[:, u * n_s:(u + 1) * n_s], rb_per_rbg=rb_per_rbg,
+            rbg_boundaries=rbg_boundaries)
         for u in range(n_k)
     ])
     sinr_user_db = np.mean(sinr_user_rbg_db, axis=1)
@@ -747,6 +760,7 @@ def mu_link_performance_lmmse(
     csi_label: str = "h_est",
     power_constraint: bf.PowerConstraint | str = "ebf",
     rb_per_rbg: int = RB_PER_RBG,
+    rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
 ) -> MuPerformance:
     """保留每个 UE 的接收天线，以逐用户 LMMSE 检测计算 MU SINR。
 
@@ -855,7 +869,10 @@ def mu_link_performance_lmmse(
     jain = (total_se ** 2 / (n_k * float(np.sum(se_user ** 2)))) \
         if np.any(se_user > 0) else 0.0
     sinr_user_rbg_db = np.stack([
-        rbg_sinr_db(sinr[u], rb_per_rbg=rb_per_rbg) for u in range(n_k)])
+        rbg_sinr_db(
+            sinr[u], rb_per_rbg=rb_per_rbg,
+            rbg_boundaries=rbg_boundaries)
+        for u in range(n_k)])
     sinr_user_db = np.mean(sinr_user_rbg_db, axis=1)
     reg_diag = (
         robust_rzf_regularization(
@@ -924,7 +941,9 @@ class RankChoice:
                 "candidates": self.candidates}
 
 
-def rbg_reduce(h: np.ndarray, rb_per_rbg: int = RB_PER_RBG) -> np.ndarray:
+def rbg_reduce(h: np.ndarray, rb_per_rbg: int = RB_PER_RBG, *,
+               rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
+               ) -> np.ndarray:
     """把 ``[RB, BS, UE]`` 的信道按 RBG 聚合，返回 ``[RBG, BS, UE]``。
 
     **降到 RBG 粒度是安全的，因为 RB 级的分辨率没有任何算法在用。**
@@ -938,20 +957,22 @@ def rbg_reduce(h: np.ndarray, rb_per_rbg: int = RB_PER_RBG) -> np.ndarray:
     抹平、人为抬高信道的条件数（奇异值分布变平），进而高估 rank。
     取代表点保留了真实的空间结构。
 
-    **不足一个 RBG 的整带也是一个 RBG。** 旧写法在 ``n_rb <= step`` 时原样返回，
-    于是 16 RB 的载波被当成 **16 个 RBG**——行数与调用方的 ``num_rbg`` 对不上，
-    频选路径只会去读第 0 行，其余 15 行凭空消失。现在一律按"每组一个代表点"处理，
-    组数是 ``max(1, n_rb // step)``；载波尾部不足一组的 RB 不参与仿真，
-    由 ``server._carrier_grid`` 统一算出来并如实报进 ``notes``。
+    **不足名义 P 的首尾组仍是有效 RBG。** 边界显式给出时严格按边界取代表点；
+    旧的固定步长调用也会保留尾组，不再让频域资源凭空消失。
     """
     hh = np.asarray(h)
     n_rb = hh.shape[0]
     step = max(1, int(rb_per_rbg))
-    if step <= 1:
+    if rbg_boundaries is None and step <= 1:
         return hh
-    idx = np.arange(step // 2, n_rb, step)
-    if idx.size == 0:                      # 整带都不够半个 RBG：仍然算一个 RBG
-        idx = np.asarray([n_rb // 2], dtype=int)
+    bounds = (
+        carrier_grid.validate_boundaries(n_rb, rbg_boundaries)
+        if rbg_boundaries is not None
+        else carrier_grid.uniform_boundaries(n_rb, step)
+    )
+    idx = np.asarray(
+        [(start + stop - 1) // 2 for start, stop in bounds], dtype=int
+    )
     return hh[idx]
 
 
@@ -960,6 +981,7 @@ def su_rank_adaptation(h: np.ndarray, *, noise_power: float,
                        target_bler: float = 0.1,
                        total_power: float = 1.0,
                        rb_per_rbg: int = 1,
+                       rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
                        power_constraint: bf.PowerConstraint | str = "ebf") -> RankChoice:
     """单用户 rank 自适应：遍历 rank 1..max_rank，取谱效最高的那个。
 
@@ -984,9 +1006,29 @@ def su_rank_adaptation(h: np.ndarray, *, noise_power: float,
         raise ValueError(f"h 应为 [T,RB,BS,UE] 或 [RB,BS,UE]，收到 {hh.shape}")
     # 时间是独立性能样本，不能先平均复信道。把每个时隙的频域行串起来，
     # 等价于在共同 rank/MCS 下对全部时频资源做单码字聚合。
-    rows = [rbg_reduce(x, rb_per_rbg) if rb_per_rbg > 1 else x for x in hh]
+    rows = [
+        rbg_reduce(x, rb_per_rbg, rbg_boundaries=rbg_boundaries)
+        if rb_per_rbg > 1 else x
+        for x in hh
+    ]
     hb = np.concatenate(rows, axis=0)
     n_rb = hb.shape[0]
+    # Boundaries are defined inside one snapshot.  When several snapshots are
+    # concatenated for a common rank/MCS decision, repeat them with offsets;
+    # otherwise a partial tail from snapshot t could be grouped together with
+    # the first RBs of snapshot t+1.
+    aggregation_boundaries: tuple[tuple[int, int], ...] | None = None
+    if rb_per_rbg <= 1:
+        per_snapshot = (
+            carrier_grid.validate_boundaries(hh.shape[1], rbg_boundaries)
+            if rbg_boundaries is not None
+            else carrier_grid.uniform_boundaries(hh.shape[1], RB_PER_RBG)
+        )
+        aggregation_boundaries = tuple(
+            (t * hh.shape[1] + start, t * hh.shape[1] + stop)
+            for t in range(hh.shape[0])
+            for start, stop in per_snapshot
+        )
     r_max = max(1, min(int(max_rank), hb.shape[1], hb.shape[2]))
 
     # 逐 RB 的 SVD 一次算好给所有 rank 复用。EBF 仍走奇异值闭式以守住历史
@@ -1013,7 +1055,11 @@ def su_rank_adaptation(h: np.ndarray, *, noise_power: float,
                 sinr[f] = np.maximum(
                     1.0 / np.maximum(np.real(np.diag(inv)), _EPS) - 1.0, 0.0)
         # 已经降过粒度的话每行就是一个 RBG，不能再按 16 分组
-        s_db = user_sinr_db(sinr, rb_per_rbg=1 if rb_per_rbg > 1 else RB_PER_RBG)
+        s_db = user_sinr_db(
+            sinr,
+            rb_per_rbg=1 if rb_per_rbg > 1 else RB_PER_RBG,
+            rbg_boundaries=aggregation_boundaries,
+        )
         se, mcs = se_from_sinr(s_db, r, table=table, target_bler=target_bler)
         cands.append({"rank": r, "sinr_db": round(s_db, 2), "mcs": mcs.index,
                       "se": round(se, 4)})
@@ -1064,6 +1110,7 @@ def su_mu_adaptation(
     table: int = 3,
     target_bler: float = 0.1,
     power_constraint: bf.PowerConstraint | str = "ebf",
+    rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
 ) -> CellDecision:
     """SU / MU 自适应：同一个 TTI 里，两种发法哪个小区谱效高就用哪个。
 
@@ -1111,6 +1158,7 @@ def su_mu_adaptation(
                 h_users[u], noise_power=float(noise_user[u]),
                 max_rank=su_max_rank, table=table,
                 target_bler=target_bler,
+                rbg_boundaries=rbg_boundaries,
                 power_constraint=power_constraint)
         else:
             # SU 与 MU 必须拥有完全相同的 CSI 信息集：都只用 h_est 选权/rank，
@@ -1132,6 +1180,7 @@ def su_mu_adaptation(
                 hp_u, he_u, noise_power=float(noise_user[u]),
                 max_rank=su_max_rank, table=table,
                 target_bler=target_bler, rb_per_rbg=RB_PER_RBG,
+                rbg_boundaries=rbg_boundaries,
                 power_constraint=power_constraint)
             rc = RankChoice(
                 aged.rank, aged.sinr_db, aged.mcs, aged.se,
@@ -1155,7 +1204,8 @@ def su_mu_adaptation(
                                  rank=mu_rank, precoder=precoder, table=table,
                                  target_bler=target_bler,
                                  power_constraint=power_constraint,
-                                 csi_error_variance=csi_error_variance)
+                                 csi_error_variance=csi_error_variance,
+                                 rbg_boundaries=rbg_boundaries)
         if se <= mu_best_se and sel:          # 加了反而更差就不加
             continue
         sel, mu_best_se, mu_best_detail = trial, se, detail
@@ -1180,7 +1230,9 @@ def _mu_cell_se(h_eval: list[np.ndarray], h_prec: list[np.ndarray], users: list[
                 *, noise_power: float | np.ndarray, rank: int, precoder: MuPrecoder,
                 table: int, target_bler: float,
                 power_constraint: bf.PowerConstraint | str = "ebf",
-                csi_error_variance: float = 0.0) -> tuple[float, list[dict[str, Any]]]:
+                csi_error_variance: float = 0.0,
+                rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
+                ) -> tuple[float, list[dict[str, Any]]]:
     """给定配对集合，算这一个 TTI 的小区谱效（单码字口径）。"""
     n_k = len(users)
     n_bs = np.asarray(h_eval[users[0]]).shape[-2]
@@ -1206,7 +1258,8 @@ def _mu_cell_se(h_eval: list[np.ndarray], h_prec: list[np.ndarray], users: list[
         csi_error_variance=csi_error_variance,
         total_power=1.0, power_allocation="equal",
         users=[int(u) for u in users], csi_label="h_est",
-        power_constraint=power_constraint)
+        power_constraint=power_constraint,
+        rbg_boundaries=rbg_boundaries)
     total, detail = 0.0, []
     for i, u in enumerate(users):
         s_db = float(perf.sinr_per_user_db[i])

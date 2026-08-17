@@ -382,6 +382,46 @@ def describe(source_name: str, cfg: dict[str, Any]) -> dict[str, Any]:
 # 坑：link_pairing == "single" 时（默认），h_dl_* / h_ul_* 全是 None，
 # 数据实际在 h_serving_*。这类知识固化在这里，用户侧不必知道。
 
+# 这是 SuperRAN 自己的数据合同，不跟随任何外部源的 ``w_dl``
+# helper 演进。外部源只交付信道；预编码权由 SuperRAN 从归一化后
+# 的 h_est 重算。如果以后更改轴序或数值约定，必须升这个版本。
+SUPERRAN_RECIPROCITY_CONTRACT = "superran-tdd-bs-ue-canonical-v1"
+SUPERRAN_CANONICAL_CHANNEL_AXES = ("time", "rb", "bs_port", "ue_port")
+
+
+def ul_estimate_to_dl_precoding_csi(
+    h_ul_est: Any,
+    *,
+    expected_shape: tuple[int, ...] | None = None,
+) -> Any:
+    """Map canonical UL SRS estimate to SuperRAN's DL precoding convention.
+
+    Physical reciprocity uses ``H_UL = H_DL^H``.  SuperRAN stores both links
+    on ``[time, rb, bs_port, ue_port]`` axes, so transposing the physical UL
+    matrix back to those canonical axes leaves ``conj(H_DL)``.  Consequently
+    the DL-precoding view is exactly ``conj(h_ul_est)``.
+
+    This pure mapping is owned and versioned by SuperRAN.  Source-provided
+    precoders are deliberately irrelevant to it.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    arr = np.asarray(h_ul_est)
+    if arr.ndim != 4:
+        raise RuntimeError(
+            "SuperRAN TDD 互易合同要求 h_ul_est 为 "
+            "[time,rb,bs_port,ue_port] 四维张量；"
+            f"实得 {arr.shape}"
+        )
+    if expected_shape is not None and arr.shape != tuple(expected_shape):
+        raise RuntimeError(
+            "SuperRAN TDD 互易合同要求 UL 估计与 DL 真值使用"
+            f"同一 canonical 轴；实得 {arr.shape} vs {tuple(expected_shape)}"
+        )
+    if not np.isfinite(arr).all():
+        raise RuntimeError("h_ul_est 含 NaN 或 Inf，无法构造下行预编码 CSI")
+    return np.conj(arr)
+
 
 def serving_channel(sample: Any, *, estimated: bool = False) -> Any:
     """取服务小区信道 [T, RB, BS_ant, UE_ant]，自动处理 paired/single 差异。"""
@@ -408,7 +448,9 @@ def downlink_and_precoding_channels(sample: Any) -> tuple[Any, Any, Any, str]:
     * ``h_dl_est`` is the UE-side CSI-RS estimate, retained for diagnostics but
       **must not silently replace SRS** in the precoding path.
 
-    ChannelHub's paired contract stores all three explicitly.  Legacy/single
+    A paired source may store all three explicitly.  SuperRAN normalizes them
+    to its own versioned contract here; it never delegates the complex mapping
+    or the transmit weight to a source-provided ``w_dl`` helper.  Legacy/single
     samples only carry ``h_serving_*``; those remain supported and are labelled
     by direction instead of being misreported as SRS.
     """
@@ -421,17 +463,12 @@ def downlink_and_precoding_channels(sample: Any) -> tuple[Any, Any, Any, str]:
                 "paired/BOTH 样本有 h_dl_true 但没有 h_ul_est；"
                 "无法用 SRS 估计设计下行预编码"
             )
-        # ChannelHub's canonical storage keeps both directions in
-        # [T,RB,BS,UE] axis order.  Physical TDD reciprocity is first formed as
-        # H_UL = conj(H_DL^T), then UL is transposed back to canonical axes;
-        # therefore canonical h_ul_est approximates conj(h_dl_true), not
-        # h_dl_true itself.  The gNB downlink precoder needs the latter
-        # convention, so map it back here.  Returning h_ul_est raw makes the
-        # complex correlation almost zero and produced +1.4 dB NMSE in the
-        # 64T4R Hello World even though the SRS estimator itself was behaving.
-        import numpy as np  # noqa: PLC0415
-
-        h_precoding_est = np.conj(np.asarray(h_ul_est))
+        # 不信任数据源的 w_dl 或 helper；轴序、共轭和版本均由
+        # SuperRAN 的纯函数合同决定。
+        h_precoding_est = ul_estimate_to_dl_precoding_csi(
+            h_ul_est,
+            expected_shape=tuple(getattr(h_dl_true, "shape", ())),
+        )
         return h_dl_true, h_precoding_est, h_dl_est, "ul_srs_estimate"
 
     h_true = getattr(sample, "h_serving_true", None)

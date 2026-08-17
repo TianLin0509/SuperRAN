@@ -224,21 +224,35 @@ def test_frequency_grant_uses_its_actual_rbg_bitmap() -> None:
     assert both["true"] == pytest.approx(7.5)
 
 
-def test_fast_frequency_mcs_selector_is_exactly_legacy_equivalent() -> None:
-    thresholds = ex._MCS_10PCT_THRESHOLDS
+def test_experience_mcs_selector_uses_lookup_table_and_target() -> None:
+    lookup = ex.TbsLookup.build(17, 16, mcs_table=3, target_bler=0.1)
     values = np.concatenate((
         np.linspace(-30.0, 40.0, 701),
-        thresholds,
-        thresholds - 1e-12,
-        thresholds + 1e-12,
         np.array([np.nan, -np.inf, np.inf]),
     ))
     legacy = np.asarray([
         la.select_mcs(float(value), table=3, target_bler=0.1).index
         for value in values
     ], dtype=int)
-    fast = np.asarray([ex._select_mcs_10pct(float(value)) for value in values])
-    assert np.array_equal(fast, legacy)
+    selected = np.asarray([ex._select_mcs(float(value), lookup) for value in values])
+    assert np.array_equal(selected, legacy)
+
+
+def test_experience_mcs_selector_matches_legacy_at_threshold_boundaries() -> None:
+    # 边界探针（C2 回归）：门限 ±1e-12 处快路径必须与 select_mcs 逐位等价——
+    # linspace 网格扫不到 inclusive 边界行为，而缓存门限的边界语义一旦漂移，
+    # 系统仿真会在同一个 SINR 上悄悄换档。
+    lookup = ex.TbsLookup.build(17, 16, mcs_table=3, target_bler=0.1)
+    cached = la._mcs_thresholds(3, 0.1, 20000, 1)
+    assert cached is not None
+    thresholds, _inclusive = cached
+    thr = np.asarray(thresholds, dtype=float)
+    probe = np.concatenate((thr - 1e-12, thr, thr + 1e-12))
+    legacy = np.asarray([
+        la.select_mcs(float(v), table=3, target_bler=0.1).index for v in probe
+    ], dtype=int)
+    selected = np.asarray([ex._select_mcs(float(v), lookup) for v in probe])
+    assert np.array_equal(selected, legacy)
 
 
 def test_long_run_fractional_prb_ledger_uses_scale_aware_tolerance() -> None:

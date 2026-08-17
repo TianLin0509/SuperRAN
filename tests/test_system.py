@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.stdout.reconfigure(errors="replace")
 
 from superran import bler_curves as bc  # noqa: E402
+from superran import carrier as cgrid  # noqa: E402
 from superran import experience as expm  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import mumimo as mu  # noqa: E402
@@ -1227,16 +1228,23 @@ _rng15 = np.random.default_rng(1508)
 _h15 = [((_rng15.standard_normal((4, 51, 4, 4))
           + 1j * _rng15.standard_normal((4, 51, 4, 4))) / np.sqrt(2))
         for _ in range(3)]
-_t15 = sysm.build_link_tables(_h15, [18.0] * 3, num_ues=3, max_rank=2,
-                              table=3, target_bler=0.1, rb_per_rbg=16)
+_grid15 = cgrid.CarrierGrid.from_config(
+    {"subcarrier_spacing": 30_000}, num_rb=51)
+_t15 = sysm.build_link_tables(
+    _h15, [18.0] * 3, num_ues=3, max_rank=2,
+    table=3, target_bler=0.1, rb_per_rbg=_grid15.nominal_rb_per_rbg,
+    rbg_boundaries=_grid15.boundaries)
 check(abs(_t15[0].target_bler - 0.1) < 1e-12,
       "target_bler 随链路表带出，主循环不必自己猜")
 check(int(_t15[0].mcs_table) == 3, "mcs_table 随链路表带出")
-# 51 RB 只能凑出 3 个完整 RBG；链路表的逐 RBG 维度必须与之一致。
-check(_t15[0].sinr_rbg_db is not None and _t15[0].sinr_rbg_db.shape[2] == 3,
-      f"51 RB -> 3 个 RBG（实得 {_t15[0].sinr_rbg_db.shape[2]}）")
+# 38.214 Configuration 2: 51 RB 的 P=8，6 个整组 + 3 RB 尾组全部参与。
+check(_t15[0].sinr_rbg_db is not None and _t15[0].sinr_rbg_db.shape[2] == 7,
+      f"51 RB -> 7 个 RBG（实得 {_t15[0].sinr_rbg_db.shape[2]}）")
+check(_grid15.rbg_prb_sizes == (8, 8, 8, 8, 8, 8, 3),
+      f"51 RB 尾组 3 RB 不丢弃（实得 {_grid15.rbg_prb_sizes}）")
 _cfg15 = sysm.SystemConfig(evaluation_mode="capacity", duration_s=0.1,
-                           num_rbg=3, rb_per_rbg=16, scs_khz=30)
+                           num_rbg=7, rb_per_rbg=8, scs_khz=30,
+                           rbg_prb_sizes=_grid15.rbg_prb_sizes)
 _ok15 = sysm.simulate(_t15, sys_cfg=_cfg15,
                       traffic=sysm.TrafficConfig(model="full_buffer"))
 check(_ok15.cell["cell_served_mbps"] > 0, "与带宽一致的配置能正常跑完")
@@ -1247,8 +1255,33 @@ _expect_value_error(
     "MCS 表 / 目标 BLER 在 UE 之间不一致",
     "各 UE 的 MCS 表不一致时必须硬失败，不能一半用表 1 一半用表 3")
 _t15[1].mcs_table = 3
+_lookup10 = expm.TbsLookup.build(17, 16, target_bler=0.1)
+_lookup20 = expm.TbsLookup.build(17, 16, target_bler=0.2)
+check(expm._select_mcs(-2.78, _lookup10) == 0
+      and expm._select_mcs(-2.78, _lookup20) == 1,
+      "experience MCS 真正读取链路 target_bler：同一 SINR 下 10%→MCS0、20%→MCS1")
 
 # ---------------------------------------------------------------------------
+# --- N1 回归：simulate_experience 直调 + 默认 SchedulerConfig 不得崩溃 --------
+# 默认 olla_step_down_db=None 的合同是"留空 = 按链路表 target_bler 自动反解"。
+# 公开入口必须自己兑现，不能指望调用方先解析（旧版在参数校验处 float(None)
+# 直接 TypeError，HEAD 之外任何直调都踩）。
+_sys_cfg_exp = sysm.SystemConfig(evaluation_mode="experience", duration_s=0.1,
+                                 num_rbg=7, rb_per_rbg=8, scs_khz=30,
+                                 rbg_prb_sizes=_grid15.rbg_prb_sizes)
+_exp_run = expm.simulate_experience(
+    _t15, sys_cfg=_sys_cfg_exp, traffic_cfg=sysm.TrafficConfig(model="full_buffer"),
+    sched=sysm.SchedulerConfig(mu_enabled=False), kpi=sysm.KpiConfig(warmup_s=0.0),
+    book=rg.RngBook(0, 0))
+check(_exp_run is not None,
+      "simulate_experience 直调默认 SchedulerConfig 不再 float(None) 崩溃")
+_sched_src = sysm.SchedulerConfig().resolved_for_target(0.1).as_dict()
+check(_sched_src["olla_down_source"] == "auto_from_target_bler"
+      and sysm.SchedulerConfig(olla_step_down_db=0.09)
+      .resolved_for_target(0.1).as_dict()["olla_down_source"]
+      == "explicit_user_override",
+      "OLLA down 步长来源在 Python API 结果里可区分（自动反解 vs 显式覆盖）")
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

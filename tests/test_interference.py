@@ -981,10 +981,19 @@ for _k, _v in sp._SIM_DEFAULTS.items():
 for _k in ("neighbor_prb_util", "csi_aging", "srs_period_ms", "srs_hopping",
            "csi_report_period_ms", "warmup_s", "olla_speedup",
            "olla_warmup_speedup", "mu_enabled", "mu_precoder",
-           "mu_csi_error_variance", "precoder",
+           "mu_csi_error_variance", "target_bler", "olla_step_up_db",
+           "olla_step_down_db", "mu_olla_step_down_db", "precoder",
            "power_constraint", "rb_power_control_enabled",
            "rb_power_overrides"):
     check(f'data-k="{_k}"' in _ha, f"改配置页上有 {_k} 控件")
+check('data-k="rbg_size_config"' not in _ha and 'data-k="num_rb"' not in _ha,
+      "TDD 系统的 272 RB / 17×16 口径不暴露为页面可编辑参数")
+check(_ha.count('placeholder="自动"') >= 2,
+      "SU/MU OLLA down 步长默认留空，并在页面明确标成自动")
+check("v===''?(el.dataset.auto==='1'?null:ST.init[k])" in _ha,
+      "自动 OLLA 控件的空值回传 JSON null，普通数值字段清空则回退初值不发 override")
+check(_ha.count('data-auto="1"') >= 2,
+      "SU/MU OLLA down 控件带 data-auto 标记，空值映射 null 只作用于它们")
 
 # --- 对标量的逐步推导，供人工核对 ---
 _dv = _alg.derivations({})

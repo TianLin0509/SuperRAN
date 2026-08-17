@@ -2,8 +2,14 @@
 
 ## 项目定位
 
-复用 ChannelHub 的物理计算内核，通过 MCP 给任意 Agent 提供标准化的信道实例
-与物理测量量。**只借 ChannelHub 的算法，不借它的产品外壳。**
+SuperRAN 是独立维护、独立演进的 Agent 式无线仿真平台。信道轴序、
+TDD 互易、预编码、功率约束、RBG/TBS、链路自适应和 KPI 都以
+SuperRAN 本仓的合同为准，不等待、不跟随 MSG-Platform 的 helper 语义。
+
+当前原始信道生成仍保留一个惰性 ChannelHub/``msg_embedding`` 适配器，它只是
+可替换的数据源边界：外部输出必须先归一化和硬校验，源端 ``w_dl``
+不落盘也不参与仿真。算法与已有数据的分析路径不应需要该源代码。
+“新生成也完全不需要 msg_embedding”尚未完成，不得对外谎称整仓已零依赖。
 
 ## 环境
 
@@ -59,25 +65,29 @@ test_csi_aging + test_rng；
 （`katex.renderToString(..., {throwOnError:true})`）——MathML 解析器容忍的写法
 KaTeX 未必收，光看 Python 源码看不出来。
 
-## 与 ChannelHub 的边界
+## 与外部信道源的边界
 
-| ChannelHub 部分 | 怎么对待 |
+| 外部部分 | 怎么对待 |
 |---|---|
-| `src/msg_embedding/` 物理内核 | 复用，当普通库调用 |
+| `src/msg_embedding/` 原始信道生成 | 过渡期可插拔 source adapter；不是 SuperRAN 语义真源 |
 | `platform/backend`、`platform/frontend` | 不用 |
 | 任务队列 / 数据库 / 数据集管理 | 不用，直接落盘 |
 | `data/bridge.py` 特征桥接 | **绕开** |
+| source `w_dl` / 外部预编码 helper | **忽略**；只从本地归一化 `h_est` 重算 EBF/PEBF/NEBF |
 
 绕开 bridge 的原因：它的输出是为 MAE token 服务的——PDP 除以峰值归一化
 （`bridge.py:184`）、RSRP 截断到 [-160,-60]（`:195`）、SRS 只取前 4 个特征向量
 （`:262`）、PMI 乘了基于 CQI 的门控（`extractor.py:232`）。拿这些做通用仿真会
 得到看似正常但错误的结果。
 
-## 三条不可动摇的约定
+## 四条不可动摇的约定
 
 1. **不传数据**。MCP 只回句柄、摘要、取货代码。
 2. **给物理量**。不归一化、不截断、不门控。单位标在函数文档里。
 3. **生成与取货解耦**。测量量从信道现算，改主意重新 deliver，不重跑仿真。
+4. **TDD 系统格栅固定**。100 MHz @ 30 kHz，272 RB = 17 RBG × 16 RB；
+   273 是标准表对照值，不进入当前系统分母。其他带宽可用于链路级，
+   但 `sr_system_sim` 必须硬拒绝，页面不开放 `num_rb/rbg_size_config`。
 
 ## 踩过的坑（删之前先想清楚）
 
@@ -657,7 +667,7 @@ SVD + 矩阵求逆，十万 TTI 跑不完。返回值带逐快照比值与离散
 自适应因此全程选 SU。这不是 bug：SU 无干扰且能到 rank4，
 MU 硬顶 rank2 且每人只分 1/K 功率，自由度富余时 SU 本来就该赢。
 
-### 载波栅格与 numerology 必须整套跟数据集走，不能只跟一半
+### TDD 系统栅格是固定产品合同，不允许拿链路级带宽混跑
 
 `sr_system_sim` 早先把 `num_rbg` 写死 17（= 272 RB / 100 MHz），`scs_khz` 更是
 从头到尾没设过（默认 30）。而同一个函数里的 `snapshot_update_ms` **一直**是从
@@ -670,19 +680,22 @@ MU 硬顶 rank2 且每人只分 1/K 功率，自由度富余时 SU 本来就该�
 （10 MHz + **15 kHz**）全部落在这条路径上；15 kHz 那个还多吃一层——TTI 被当成
 0.5 ms 而不是 1 ms，一秒里的调度机会翻倍，所有 ms 口径的时延 KPI 一起偏。
 
-现在由 `server._carrier_grid(ds.config, num_rb=h.shape[2])` 统一推导，结果里带
-`carrier` 段（`num_rb_in_channel` / `num_rbg` / `rb_per_rbg` / `simulated_num_rb` /
-`excluded_num_rb` / `scs_khz` / `tti_ms`）供交叉核对。
+最终产品口径不是“动态适配任意数据集”，而是用户确认的固定合同：
+**100 MHz、30 kHz SCS、272 个仿真 RB、17 个 RBG、每 RBG 16 RB**。38.104
+表中的标准值仍是 273 RB；SuperRAN 在生成系统级信道之前就明确舍去 1 RB，不能把
+273 RB 张量读进来后再悄悄截尾。`num_rb`、`rbg_size_config` 和 BWP 起点均不向
+系统仿真 UI 开放。
 
-**RB 数不是 16 的整数倍时，尾部不足一组的 RB 不参与仿真**——`rbg_reduce` 本来就
-只取完整分组的代表 RB，而 `TbsLookup` 假设所有 RBG 等长（38.214 允许首尾 RBG 更短，
-本项目未实现）。少算一点并在 `notes` 里说出来，远好于按 272 RB 硬算；开 RB 功控时
-直接硬失败，因为那几个 RB 的功率倍率会静默失效。
+现在 `server._carrier_grid(ds.config, num_rb=h.shape[2])` 只做**合同校验**：信道轴必须
+实际等于 272，配置标签若存在则必须是 100 MHz / 30 kHz，BWP 从 0 开始且 RBG
+Configuration 必须对应 16 RB。任一项不符立即拒绝运行。结果中的 `carrier` 段会记录
+版本化 `profile_id`、`standard_num_rb=273`、`standard_tail_rb_omitted_before_generation=1`、17×16
+边界以及 `user_configurable=false`，让报告可以独立复核。
 
-顺带两条同源的：`rbg_reduce` 在 `n_rb <= rb_per_rbg` 时曾原样返回，16 RB 的载波
-会被当成 **16 个 RBG**；KPI 页的 RBG 分布图 CSS 里 `repeat(18,...)` 也是按 17 RBG
-写死的，窄带载波下柱子会挤在左边五分之一。**"跟着 272 RB 写死"的地方不止一处，
-改这类东西要全文搜 17 / 18 / 272。**
+`CarrierGrid.from_config()` 和通用 Type-0 边界函数仍保留，但只服务链路级、导入诊断和
+数学单测；它们不能进入当前 TDD 系统/体验仿真。早先发现的窄带 CSS、单 RBG reduce
+等通用 bug 仍保留回归测试，避免未来真的扩展其他带宽时复发，但这不等于当前产品已支持
+动态系统栅格。
 
 ### 多时隙的快照间隔是 5 ms，不是一个 TTI
 
@@ -766,7 +779,9 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 
 `(1−p)·δ_up = p·δ_down` ⟹ `p = δ_up/(δ_up+δ_down)` ⟹ `δ_down = δ_up·(1−p)/p`。
 目标 10%、`δ_up=0.01` 时**精确解是 0.09**；现网常说的 −0.1 给的是 9.09%。
-`system.olla_step_down_for()` 负责反解，默认值已按 10% 定为 −0.09。
+`system.olla_step_down_for()` 负责反解。默认配置只存目标 BLER 与 up 步长，down 保持
+`None`，进入仿真后才按链路表的目标值解析；只有目标恰为 10% 时结果才是 −0.09。
+用户显式给 down 时视为有意 override，必须保留并在结果中标来源。
 
 **稳态与步长的绝对值无关**（约分掉了），所以 `olla_speedup` 等比放大只改收敛
 速度与稳态抖动。实测 k=1 时 8 秒内 IBLER 还在 0.394、k=20 收敛到 0.100，
@@ -780,6 +795,35 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 
 顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 里 `m` 由
 `sinr_tx_db + olla_db[u]` 选出，`mcs_sum` 累加的就是它），即实际调度下去的档位。
+
+`simulate_experience` 作为公开入口**自己**也会兑现"留空=按目标反解"：
+它拿链路表的 `target_bler` 调 `resolved_for_target`，不再依赖调用方先解析
+（旧版在参数校验处 `float(None)` 直接 TypeError，test_system 有回归）。
+`resolved_for_target` 的产物在 `as_dict()` 里按方向分别标
+`auto_from_target_bler` / `explicit_user_override`，不再只报含混的"已解析"。
+
+### 系统仿真入口的两道硬校验（2026-08-17 第三轮审查）
+
+`sr_system_sim` 在 server 边界新增两道硬失败，都是"静默算错不如直接拒绝"：
+
+* **SRS provenance**：主链路把 `h_est` 当基站侧 SRS 预编码 CSI（CSI 老化的
+  物理语义），但此前不做任何来源校验，而比较门对 `csi='srs'` 已硬查
+  `precoding_csi_sources`。现在来源非全 `ul_srs_estimate` 时：开 CSI 老化
+  硬失败；不开老化则在结果 `notes` 首位带来源告警。旧数据集没有标签
+  （`legacy_unspecified`）在开老化时同样会被拒，需要重新生成。
+* **样本→UE 布局**：`group_samples_by_ue` 按接受序号轮转分组，而 SINR 拒绝
+  采样下 `ue_id` 按 attempted_index 合成，两者会错位——继续跑会把不同 UE
+  混进同一"用户"。现在 `ue_id` 与 `i % num_ues` 不一致时直接报错，
+  提示关筛选重生成或先按 ue_id 归并。
+
+配套变化：统计门 `_position_clusters` 在静态数据上要求 ue_id 聚类与
+`ue_position` 聚类给出**同一个划分**（独立锚点对账，防生成端假设自证），
+聚类失败原因改为结构化状态（`mobility_missing_id` / `partition_mismatch`
+block，其余 warn），不再靠文案子串定严重度；声明移动模式但速度不可信时
+生成端不再发明身份（`unavailable_mobility_speed`），交给移动数据 block。
+探测类工具（`sr_probe_scenario` / `sr_compare_scenarios` / `sr_spec_sheet`）
+的 preset+overrides 合并也走 `_apply_dependent_overrides`，改带宽不会再
+把 preset 的 `num_rb`/SRS 几何带进探测。
 
 ### 页面上的 select 回传的是字符串，bool() 会失灵
 

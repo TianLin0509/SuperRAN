@@ -30,6 +30,7 @@ from typing import Any, Literal
 import numpy as np
 
 from . import beamforming as bf
+from . import carrier as carrier_grid
 from . import csi_aging as ca
 from . import mumimo as mu
 from . import power_control as pc
@@ -407,8 +408,8 @@ class SchedulerConfig:
     # --- OLLA（外环链路自适应）---
     # 发送端按无干扰选 MCS，接收端吃着干扰误码，OLLA 把偏置压下来。
     # 步长按目标 BLER 不对称：ACK 加 up、NACK 减 down，
-    # 稳态时 BLER → up/(up+down)。现网口头值 +0.01/−0.1 对应约 9.1%；
-    # 本项目默认用 +0.01/−0.09，精确对应 10%。
+    # 稳态时 BLER → up/(up+down)。默认 down=None，进入仿真时从链路表
+    # target_bler 反解；用户显式给值则完整保留，供消融/特殊研究。
     # 步长放大能加快收敛但会在稳态附近抖得更厉害——要快收敛就临时调大，
     # 出正式结论用基线值。
     olla_enabled: bool = True
@@ -416,7 +417,7 @@ class SchedulerConfig:
     # 用户 2026-08-02 给的现网粗估是 +0.01/−0.1，但那对应稳态 9.09% 而不是 10%；
     # 2026-08-03 他自己也指出 NACK 应该是 −0.09 左右。按目标 10% 精确解就是 −0.09。
     olla_step_up_db: float = 0.01        # 现网基线（用户 2026-08-02）
-    olla_step_down_db: float = 0.09       # 稳态 BLER -> 0.01/(0.01+0.09) = 10.0%
+    olla_step_down_db: float | None = None
     olla_min_db: float = -20.0
     olla_max_db: float = 3.0
     # **加速收敛用的等比放大系数**（用户 2026-08-03 批准，条件是必须告知）。
@@ -440,7 +441,7 @@ class SchedulerConfig:
     mu_csi_error_variance: float = 0.0
     # MU 与 SU 分开维护 OLLA；步长可先复用同一基线，但状态绝不能共用。
     mu_olla_step_up_db: float = 0.01
-    mu_olla_step_down_db: float = 0.09
+    mu_olla_step_down_db: float | None = None
 
     def __post_init__(self) -> None:
         if self.algorithm not in ("pf", "qos_pf", "rr", "max_ci"):
@@ -465,14 +466,19 @@ class SchedulerConfig:
                 raise ValueError(f"{name} 必须是有限非负数")
         for name, value in (
             ("olla_step_up_db", self.olla_step_up_db),
-            ("olla_step_down_db", self.olla_step_down_db),
             ("mu_olla_step_up_db", self.mu_olla_step_up_db),
-            ("mu_olla_step_down_db", self.mu_olla_step_down_db),
             ("olla_speedup", self.olla_speedup),
             ("olla_warmup_speedup", self.olla_warmup_speedup),
         ):
             if not np.isfinite(value) or float(value) <= 0:
                 raise ValueError(f"{name} 必须是有限正数")
+        for name, value in (
+            ("olla_step_down_db", self.olla_step_down_db),
+            ("mu_olla_step_down_db", self.mu_olla_step_down_db),
+        ):
+            if value is not None and (
+                    not np.isfinite(value) or float(value) <= 0):
+                raise ValueError(f"{name} 必须为 null（自动）或有限正数")
         if (not np.isfinite(self.olla_min_db) or not np.isfinite(self.olla_max_db)
                 or float(self.olla_min_db) >= float(self.olla_max_db)):
             raise ValueError("olla_min_db / olla_max_db 必须有限且 min < max")
@@ -499,6 +505,8 @@ class SchedulerConfig:
 
     @property
     def step_down(self) -> float:
+        if self.olla_step_down_db is None:
+            raise RuntimeError("OLLA down 步长尚未按 target_bler 解析")
         return self.olla_step_down_db * max(float(self.olla_speedup), _EPS)
 
     @property
@@ -507,9 +515,46 @@ class SchedulerConfig:
 
     @property
     def mu_step_down(self) -> float:
+        if self.mu_olla_step_down_db is None:
+            raise RuntimeError("MU OLLA down 步长尚未按 target_bler 解析")
         return self.mu_olla_step_down_db * max(float(self.olla_speedup), _EPS)
 
+    def resolved_for_target(self, target_bler: float) -> SchedulerConfig:
+        """用目标 BLER 补齐自动步长，不覆盖用户显式值。"""
+        target = float(target_bler)
+        su_down = (
+            olla_step_down_for(target, float(self.olla_step_up_db))
+            if self.olla_step_down_db is None else float(self.olla_step_down_db)
+        )
+        mu_down = (
+            olla_step_down_for(target, float(self.mu_olla_step_up_db))
+            if self.mu_olla_step_down_db is None else float(self.mu_olla_step_down_db)
+        )
+        out = replace(
+            self,
+            olla_step_down_db=su_down,
+            mu_olla_step_down_db=mu_down,
+        )
+        # 标来源：本实例的 down 步长是"留空按目标自动反解"还是用户显式值——
+        # 显式 override 与自动反解在结果里必须可区分，不能只报"已解析"。
+        out._olla_down_auto = (  # noqa: SLF001
+            self.olla_step_down_db is None, self.mu_olla_step_down_db is None)
+        return out
+
     def as_dict(self) -> dict[str, Any]:
+        resolved = (
+            self.olla_step_down_db is not None
+            and self.mu_olla_step_down_db is not None
+        )
+        auto = getattr(self, "_olla_down_auto", None)
+
+        def _down_src(down: float | None, was_auto: bool | None) -> str:
+            # None（未解析）与反解产物都按目标自动推导；只有用户显式给值
+            # 且不是反解结果时才算 override。
+            if down is None or was_auto is True:
+                return "auto_from_target_bler"
+            return "explicit_user_override"
+
         d: dict[str, Any] = {
             "algorithm": self.algorithm, "pf_window_tti": self.pf_window_tti,
             "pf_accounting": self.pf_accounting,
@@ -524,21 +569,33 @@ class SchedulerConfig:
             "mu_csi_error_variance": self.mu_csi_error_variance,
             "olla_enabled": self.olla_enabled,
             "olla_baseline_steps_db": [self.olla_step_up_db, self.olla_step_down_db],
+            "olla_down_source": _down_src(
+                self.olla_step_down_db, None if auto is None else auto[0]),
             "olla_speedup": self.olla_speedup,
             "olla_warmup_speedup": self.olla_warmup_speedup,
-            "olla_effective_steps_db": [round(self.step_up, 6),
-                                        round(self.step_down, 6)],
+            "olla_effective_steps_db": (
+                [round(self.step_up, 6), round(self.step_down, 6)]
+                if resolved else [round(self.step_up, 6), None]
+            ),
             "mu_olla_baseline_steps_db": [self.mu_olla_step_up_db,
                                            self.mu_olla_step_down_db],
-            "mu_olla_effective_steps_db": [round(self.mu_step_up, 6),
-                                            round(self.mu_step_down, 6)],
-            "olla_target_bler": round(
-                self.olla_step_up_db / (self.olla_step_up_db
-                                        + self.olla_step_down_db), 3),
-            "mu_olla_target_bler": round(
-                self.mu_olla_step_up_db / (self.mu_olla_step_up_db
-                                           + self.mu_olla_step_down_db), 3)}
-        if self.olla_speedup != 1.0:
+            "mu_olla_down_source": _down_src(
+                self.mu_olla_step_down_db, None if auto is None else auto[1]),
+            "mu_olla_effective_steps_db": (
+                [round(self.mu_step_up, 6), round(self.mu_step_down, 6)]
+                if resolved else [round(self.mu_step_up, 6), None]
+            ),
+            "olla_target_bler": (
+                round(self.olla_step_up_db / (self.olla_step_up_db
+                                               + self.olla_step_down_db), 3)
+                if self.olla_step_down_db is not None else None
+            ),
+            "mu_olla_target_bler": (
+                round(self.mu_olla_step_up_db / (self.mu_olla_step_up_db
+                                                  + self.mu_olla_step_down_db), 3)
+                if self.mu_olla_step_down_db is not None else None
+            )}
+        if self.olla_speedup != 1.0 and resolved:
             d["olla_speedup_warning"] = (
                 f"**OLLA 步长已等比放大 {self.olla_speedup:g} 倍**"
                 f"（{self.olla_step_up_db:g}/{self.olla_step_down_db:g} → "
@@ -698,6 +755,9 @@ class SystemConfig:
     scs_khz: int = 30                    # 30 kHz → slot 0.5 ms
     num_rbg: int = 17
     rb_per_rbg: int = 16
+    # Type-0 首尾 RBG 可能不足名义 P。None 保持历史等长行为；显式 tuple
+    # 则是每组真实 PRB 数，TBS、功控和利用率全部以它为准。
+    rbg_prb_sizes: tuple[int, ...] | None = None
     tdd_pattern: str = "DDDSU"           # 只统计 D 时隙
     # **信道快照之间隔多久，由 ChannelHub 决定，不能拍脑袋。**
     # internal_sim.py:3252 把 UE 每个"时隙"推进
@@ -730,6 +790,27 @@ class SystemConfig:
             if (isinstance(value, (bool, np.bool_))
                     or not isinstance(value, (int, np.integer)) or int(value) < 1):
                 raise ValueError(f"{name} 必须是至少为 1 的整数")
+        if self.rbg_prb_sizes is None:
+            self.rbg_prb_sizes = tuple(
+                int(self.rb_per_rbg) for _ in range(int(self.num_rbg))
+            )
+        else:
+            try:
+                raw_sizes = tuple(self.rbg_prb_sizes)
+            except TypeError as exc:
+                raise ValueError("rbg_prb_sizes 必须是正整数数组") from exc
+            if any(
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                for value in raw_sizes
+            ):
+                raise ValueError("rbg_prb_sizes 每项都必须是正整数，不能是布尔值或小数")
+            sizes = tuple(int(value) for value in raw_sizes)
+            if len(sizes) != int(self.num_rbg) or any(value < 1 for value in sizes):
+                raise ValueError(
+                    "rbg_prb_sizes 长度必须等于 num_rbg，且每项至少为 1"
+                )
+            self.rbg_prb_sizes = sizes
         pattern = str(self.tdd_pattern).upper()
         if not pattern or any(slot not in "DSU" for slot in pattern):
             raise ValueError("tdd_pattern 只允许 D/S/U 且不能为空")
@@ -744,11 +825,11 @@ class SystemConfig:
             raise ValueError("rb_power_control 必须是 RbPowerControlConfig")
         if (self.rb_power_control.enabled
                 and int(self.rb_power_control.num_rb)
-                != int(self.num_rbg) * int(self.rb_per_rbg)):
+                != self.num_rb):
             raise ValueError(
                 "RB 功控 profile 长度与系统带宽不一致："
                 f"{self.rb_power_control.num_rb} vs "
-                f"{int(self.num_rbg) * int(self.rb_per_rbg)}")
+                f"{self.num_rb}")
         if (isinstance(self.seed, (bool, np.bool_))
                 or not isinstance(self.seed, (int, np.integer)) or int(self.seed) < 0):
             raise ValueError("seed 必须是非负整数")
@@ -760,6 +841,19 @@ class SystemConfig:
     @property
     def num_tti(self) -> int:
         return int(round(self.duration_s * 1000.0 / self.tti_ms))
+
+    @property
+    def num_rb(self) -> int:
+        return int(sum(self.rbg_prb_sizes or ()))
+
+    @property
+    def rbg_boundaries(self) -> tuple[tuple[int, int], ...]:
+        cursor = 0
+        out: list[tuple[int, int]] = []
+        for width in self.rbg_prb_sizes or ():
+            out.append((cursor, cursor + int(width)))
+            cursor += int(width)
+        return tuple(out)
 
     @property
     def dl_ratio(self) -> float:
@@ -774,7 +868,9 @@ class SystemConfig:
                 "duration_s": self.duration_s, "scs_khz": self.scs_khz,
                 "tti_ms": self.tti_ms, "num_tti": self.num_tti,
                 "num_rbg": self.num_rbg, "rb_per_rbg": self.rb_per_rbg,
-                "num_rb": self.num_rbg * self.rb_per_rbg,
+                "rbg_prb_sizes": list(self.rbg_prb_sizes or ()),
+                "rbg_boundaries": [list(pair) for pair in self.rbg_boundaries],
+                "num_rb": self.num_rb,
                 "tdd_pattern": self.tdd_pattern,
                 "dl_slot_ratio": round(self.dl_ratio, 4),
                 "snapshot_update_ms": self.snapshot_update_ms,
@@ -884,6 +980,7 @@ class UeLinkTable:
     target_bler: float = 0.1
     power_constraint: str = "ebf"
     frequency_rows_per_rbg: int = 1
+    frequency_rbg_boundaries: tuple[tuple[int, int], ...] | None = None
     serving_cell_index: int | None = None
     rb_power_control_fingerprint: str | None = None
     rb_power_coupling_diagnostics: dict[str, Any] | None = None
@@ -1055,10 +1152,16 @@ def snapshot_interval_ms(cfg: dict[str, Any]) -> float:
     默认 10 × 0.5 ms = 5 ms。**把它当成一个 TTI（0.5 ms）会让所有
     时间相关的结论差 10 倍**——CSI 老化、多普勒、移动性全部受影响。
     """
-    scs = float(cfg.get("subcarrier_spacing", 30_000) or 30_000)
-    slot_ms = 1.0 / (scs / 15_000.0)
-    per = max(int(cfg.get("srs_periodicity", 10) or 10),
-              int(cfg.get("csirs_periodicity", 10) or 10))
+    scs_khz = carrier_grid.scs_khz_from_config(cfg)
+    slot_ms = 15.0 / float(scs_khz)
+    periods: list[int] = []
+    for name in ("srs_periodicity", "csirs_periodicity"):
+        raw = cfg.get(name, 10)
+        if (isinstance(raw, (bool, np.bool_))
+                or not isinstance(raw, (int, np.integer)) or int(raw) < 1):
+            raise ValueError(f"{name} 必须是至少为 1 的 slot 整数")
+        periods.append(int(raw))
+    per = max(periods)
     return slot_ms * per
 
 
@@ -1092,6 +1195,7 @@ def build_link_tables(
     num_snapshots: int = 1,
     num_ues: int | None = None,
     rb_per_rbg: int = 16,
+    rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
     csi: ca.CsiConfig | None = None,
     snapshot_ms: float = 5.0,
     load_jitter_rng: np.random.Generator | None = None,
@@ -1158,6 +1262,24 @@ def build_link_tables(
         raise ValueError(
             "已开启 RB 功控，但没有逐小区 S/I/N 功率分解；不能用聚合 SINR 近似")
     h_eval_users = [np.asarray(x) for x in h_users]
+    if not h_eval_users:
+        raise ValueError("h_users 至少需要一个信道样本")
+    first_rb = int(h_eval_users[0].shape[-3])
+    for i, value in enumerate(h_eval_users):
+        if value.ndim not in (3, 4) or int(value.shape[-3]) != first_rb:
+            raise ValueError(
+                f"样本 {i} 的信道应为同 RB 数的 [RB,BS,UE]/[T,RB,BS,UE]，"
+                f"收到 {value.shape}"
+            )
+    resolved_boundaries = (
+        carrier_grid.validate_boundaries(first_rb, rbg_boundaries)
+        if rbg_boundaries is not None
+        else carrier_grid.uniform_boundaries(first_rb, rb_per_rbg)
+    )
+    if csi is not None:
+        ca.validate_hopping_grid(
+            csi, [stop - start for start, stop in resolved_boundaries]
+        )
     explicit_precoding_csi = h_for_precoding_users is not None
     if h_for_precoding_users is None:
         h_precoding_users = h_eval_users
@@ -1189,7 +1311,6 @@ def build_link_tables(
             raise ValueError(
                 "逐小区功率分解与信道样本数不一致："
                 f"{power_geometry.num_samples} vs {len(h_users)}")
-        first_rb = int(np.asarray(h_users[0]).shape[-3])
         if int(power_cfg.num_rb) != first_rb:
             raise ValueError(
                 f"RB 功控 profile 是 {power_cfg.num_rb} RB，但信道是 {first_rb} RB")
@@ -1297,11 +1418,10 @@ def build_link_tables(
                 scales_u.append(coupled.channel_power_scale)
                 iot_u.append(float(np.mean(coupled.iot_db)))
                 geo_lin = 10.0 ** (coupled.geometric_sinr_db / 10.0)
-                step = max(1, int(rb_per_rbg))
                 geo_rbg_db = np.asarray([
                     10.0 * np.log10(max(float(np.mean(
-                        geo_lin[start:start + step])), _EPS))
-                    for start in range(0, geo_lin.size, step)])
+                        geo_lin[start:stop])), _EPS))
+                    for start, stop in resolved_boundaries])
                 geo_u.append(float(np.mean(geo_rbg_db)))
                 base_i = max(coupled.baseline_denominator_mw - noise, _EPS)
                 anchor_u.append(float(10.0 * np.log10(
@@ -1398,17 +1518,24 @@ def build_link_tables(
             snaps_u = scaled_eval
             prec_snaps_u = scaled_prec
             grp = max(1, int(rb_per_rbg))
-            rows_per_rbg = grp
+            raw_frequency_rows = True
         elif rb_per_rbg > 1:
-            snaps_u = [mu.rbg_reduce(x, rb_per_rbg) for x in _2d]   # 每行 = 1 RBG
-            prec_snaps_u = [mu.rbg_reduce(x, rb_per_rbg) for x in _2d_prec]
-            grp, rows_per_rbg = 1, 1
+            snaps_u = [mu.rbg_reduce(
+                x, rb_per_rbg, rbg_boundaries=resolved_boundaries) for x in _2d]
+            prec_snaps_u = [mu.rbg_reduce(
+                x, rb_per_rbg, rbg_boundaries=resolved_boundaries) for x in _2d_prec]
+            grp = 1
+            raw_frequency_rows = False
         else:
             snaps_u = _2d                                           # 每行 = 1 RB
             prec_snaps_u = _2d_prec
-            grp, rows_per_rbg = mu.RB_PER_RBG, mu.RB_PER_RBG
+            grp = 1
+            raw_frequency_rows = True
         n_rows = snaps_u[0].shape[0]
-        n_rbg_eff = max(1, int(np.ceil(n_rows / rows_per_rbg)))
+        n_rbg_eff = len(resolved_boundaries)
+        aggregation_boundaries = (
+            resolved_boundaries if raw_frequency_rows else None
+        )
 
         # Type-I-style 是宽带权（同一快照内所有 RBG 共用一组列），但绝不能在
         # **整个仿真时域**上只搜一次。那会把未来快照放进当前 PMI，形成 oracle。
@@ -1443,7 +1570,11 @@ def build_link_tables(
                 lag_rbg = ca.rbg_lag_snapshots(
                     csi, n_rbg_eff, snapshot_ms=snapshot_ms,
                     snapshot_index=s, rb_per_rbg=rb_per_rbg)
-                lags = np.repeat(lag_rbg, rows_per_rbg)[:n_rows]
+                lags = (
+                    carrier_grid.expand_rbg_values(
+                        lag_rbg, resolved_boundaries, num_rows=n_rows)
+                    if raw_frequency_rows else np.asarray(lag_rbg, dtype=int)
+                )
                 h_prec_seq.append(ca.stale_channel(
                     prec_snaps_u, s, lags,
                     periodic_history=bool(csi.periodic_trace_history)))
@@ -1498,6 +1629,7 @@ def build_link_tables(
             rc = ca.rank_adaptation_aged(h_prec, snaps_u[s], noise_power=npow,
                                          max_rank=max_rank, table=table,
                                          target_bler=target_bler, rb_per_rbg=grp,
+                                         rbg_boundaries=aggregation_boundaries,
                                          w_override=_wov,
                                          power_constraint=power_constraint)
             for c in rc.candidates:
@@ -1528,18 +1660,27 @@ def build_link_tables(
                                            power_per_stream=p_per, noise_power=npow)
                 s_pmi = ca.mmse_stream_sinr(h_prec, w_pmi_model,
                                             power_per_stream=p_per, noise_power=npow)
-                g_tx = mu.user_sinr_db(s_tx, rb_per_rbg=grp)
-                g_pmi = mu.user_sinr_db(s_pmi, rb_per_rbg=grp)
+                g_tx = mu.user_sinr_db(
+                    s_tx, rb_per_rbg=grp,
+                    rbg_boundaries=aggregation_boundaries)
+                g_pmi = mu.user_sinr_db(
+                    s_pmi, rb_per_rbg=grp,
+                    rbg_boundaries=aggregation_boundaries)
                 bf_gain[s, r - 1] = g_tx - g_pmi
                 bf_gain_rbg[s, r - 1] = (
-                    mu.rbg_sinr_db(s_tx, rb_per_rbg=grp)
-                    - mu.rbg_sinr_db(s_pmi, rb_per_rbg=grp))
+                    mu.rbg_sinr_db(
+                        s_tx, rb_per_rbg=grp,
+                        rbg_boundaries=aggregation_boundaries)
+                    - mu.rbg_sinr_db(
+                        s_pmi, rb_per_rbg=grp,
+                        rbg_boundaries=aggregation_boundaries))
                 # CQI 是终端在**真实信道**上用 PMI 权测的，所以这里用当前快照
                 pmi_stream = ca.mmse_stream_sinr(
                     snaps_u[s], w_pmi_model,
                     power_per_stream=p_per, noise_power=npow)
                 pmi_sinr_rbg[s, r - 1] = mu.rbg_sinr_db(
-                    pmi_stream, rb_per_rbg=grp)
+                    pmi_stream, rb_per_rbg=grp,
+                    rbg_boundaries=aggregation_boundaries)
                 pmi_sinr[s, r - 1] = float(np.mean(pmi_sinr_rbg[s, r - 1]))
 
         # --- 发送侧 SINR = CQI 门限 + BF Gain（用户 2026-08-03 定的口径）---
@@ -1618,6 +1759,7 @@ def build_link_tables(
             target_bler=float(target_bler),
             power_constraint=str(power_constraint).lower(),
             frequency_rows_per_rbg=int(grp),
+            frequency_rbg_boundaries=aggregation_boundaries,
             serving_cell_index=(serving_cell_by_ue[i]
                                 if serving_cell_by_ue is not None else None),
             rb_power_control_fingerprint=pc.config_fingerprint(power_cfg),
@@ -1660,6 +1802,7 @@ def build_mu_pair_tables(
         raise ValueError("csi_error_variance 必须是有限非负数")
     n_snap = int(tables[0].sinr_db.shape[0])
     rows_per_rbg = int(tables[0].frequency_rows_per_rbg)
+    rbg_boundaries = tables[0].frequency_rbg_boundaries
     n_rbg = int(tables[0].sinr_rbg_db.shape[2]) \
         if tables[0].sinr_rbg_db is not None else 1
     for t in tables:
@@ -1672,6 +1815,8 @@ def build_mu_pair_tables(
             raise ValueError("MU 各 UE 的 snapshot 数必须一致")
         if int(t.frequency_rows_per_rbg) != rows_per_rbg:
             raise ValueError("MU 各 UE 的频域粒度必须一致")
+        if t.frequency_rbg_boundaries != rbg_boundaries:
+            raise ValueError("MU 各 UE 的 RBG 边界必须一致")
         if t.sinr_rbg_db is None or int(t.sinr_rbg_db.shape[2]) != n_rbg:
             raise ValueError("MU 建表缺少一致的逐 RBG SU SINR")
 
@@ -1685,6 +1830,7 @@ def build_mu_pair_tables(
                 table.h_prec_rbg[s], table.h_prec_rbg[s],
                 noise_power=float(table.noise_power_by_snapshot[s]),
                 max_rank=rank, rb_per_rbg=rows_per_rbg,
+                rbg_boundaries=rbg_boundaries,
                 power_constraint=power_constraint)
             su_pred[u, s] = float(rc.candidates[rank - 1]["sinr_db"])
             su_pred_rbg[u, s] = np.asarray(
@@ -1724,12 +1870,14 @@ def build_mu_pair_tables(
                     [ti.h_prec_rbg[s], tj.h_prec_rbg[s]],
                     noise_power=noise, streams_per_user=rank, precoder=precoder,
                     power_constraint=power_constraint, rb_per_rbg=rows_per_rbg,
+                    rbg_boundaries=rbg_boundaries,
                     csi_error_variance=float(csi_error_variance))
                 rp = mu.mu_link_performance_lmmse(
                     [ti.h_prec_rbg[s], tj.h_prec_rbg[s]],
                     [ti.h_prec_rbg[s], tj.h_prec_rbg[s]],
                     noise_power=noise, streams_per_user=rank, precoder=precoder,
                     power_constraint=power_constraint, rb_per_rbg=rows_per_rbg,
+                    rbg_boundaries=rbg_boundaries,
                     csi_error_variance=float(csi_error_variance))
                 true_sinr[s] = rt.sinr_per_user_db
                 pred_sinr[s] = rp.sinr_per_user_db
@@ -1794,6 +1942,7 @@ def measure_mu_gain(
     csi: ca.CsiConfig | None = None,
     snapshot_ms: float = 5.0,
     rb_per_rbg: int = 16,
+    rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
     power_constraint: str = "ebf",
     mu_precoder: str = "zf",
     mu_csi_error_variance: float = 0.0,
@@ -1848,6 +1997,24 @@ def measure_mu_gain(
 
     h_eval_users = [
         _time_major(x, label="h_users", index=i) for i, x in enumerate(h_users)]
+    if not h_eval_users:
+        raise ValueError("h_users 至少需要一个信道样本")
+    first_rb = int(h_eval_users[0].shape[1])
+    for i, value in enumerate(h_eval_users[1:], start=1):
+        if int(value.shape[1]) != first_rb:
+            raise ValueError(
+                f"MU 各 UE 必须使用同一 RB 栅格；UE0={first_rb} RB，"
+                f"UE{i}={int(value.shape[1])} RB"
+            )
+    resolved_boundaries = (
+        carrier_grid.validate_boundaries(first_rb, rbg_boundaries)
+        if rbg_boundaries is not None
+        else carrier_grid.uniform_boundaries(first_rb, rb_per_rbg)
+    )
+    if csi is not None:
+        ca.validate_hopping_grid(
+            csi, [stop - start for start, stop in resolved_boundaries]
+        )
     if len(geo_sinr_db) != len(h_eval_users):
         raise ValueError("geo_sinr_db 与 h_users 的样本数必须一致")
     sir_in = (list(geo_sir_db) if geo_sir_db is not None
@@ -1941,7 +2108,7 @@ def measure_mu_gain(
         [np.asarray(h)[t] for t in range(np.asarray(h).shape[0])]
         for h in h_precoding_users]
     n_rb = seq[0][0].shape[0] if seq and seq[0] else 1
-    n_rbg = max(1, int(np.ceil(n_rb / max(1, rb_per_rbg))))
+    n_rbg = len(resolved_boundaries)
     for t in range(n):
         snaps = [np.asarray(h)[t:t + 1] for h in h_users]
         npow = np.asarray([
@@ -1954,7 +2121,9 @@ def measure_mu_gain(
             assert csi is not None
             lag_rbg = ca.rbg_lag_snapshots(csi, n_rbg, snapshot_ms=snapshot_ms,
                                            snapshot_index=t, rb_per_rbg=rb_per_rbg)
-            lags = np.repeat(lag_rbg, max(1, rb_per_rbg))[:n_rb]
+            lags = carrier_grid.expand_rbg_values(
+                lag_rbg, resolved_boundaries, num_rows=n_rb
+            )
             # su_mu_adaptation 吃 [T,RB,BS,UE] 或 [RB,BS,UE]，补回一个时隙维
             prec = [ca.stale_channel(
                 s, t, lags,
@@ -1966,7 +2135,8 @@ def measure_mu_gain(
                                       max_mu_users=max_mu_users,
                                       precoder=mu_precoder,
                                       csi_error_variance=float(mu_csi_error_variance),
-                                      power_constraint=power_constraint)
+                                      power_constraint=power_constraint,
+                                      rbg_boundaries=resolved_boundaries)
         except (ValueError, np.linalg.LinAlgError) as exc:
             errors.append({
                 "snapshot": int(t),
@@ -2311,6 +2481,9 @@ def simulate(
             f"UE0 是 table={_table_id}、target_bler={_target_bler:g}")
     if _table_id not in la.MCS_TABLES:
         raise ValueError(f"未知 MCS 表 {_table_id}")
+    # 用户默认只设 target_bler；SU/MU down 步长都由它与各自 up
+    # 步长反解。显式 down 值是有意的研究 override，不会被覆盖。
+    sched = sched.resolved_for_target(_target_bler)
     _mcs_table = la.MCS_TABLES[_table_id]
     if sys_cfg.rb_power_control.enabled:
         expected_power_fingerprint = pc.config_fingerprint(sys_cfg.rb_power_control)
@@ -2389,7 +2562,7 @@ def simulate(
     tr = _Traffic(traffic, n_ue, sys_cfg.tti_ms, rng_traffic, small_bytes=_small_b,
                   num_rbg=sys_cfg.num_rbg)
 
-    n_rb = sys_cfg.num_rbg * sys_cfg.rb_per_rbg
+    n_rb = sys_cfg.num_rb
     # 每 TTI 可用 RE：RB × 12 子载波 × 12 个数据符号（扣 DM-RS 与控制开销）
     re_per_tti = n_rb * 12 * 12
     # **S 时隙不是满下行。** 主循环把 D 和 S 一视同仁地当整个下行 TTI 调度，

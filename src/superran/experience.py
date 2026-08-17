@@ -33,20 +33,28 @@ class TbsLookup:
 
     38.214 的 TBS 量化使 TBS 只近似线性，不能用 ``bytes / bytes_per_rbg``
     反推 RBG 数。``required_rbg`` 用 ``searchsorted`` 找到第一个够用的 TBS；
-    建表时同时验证每条序列严格递增，否则反查假设当场失败。
+    建表时验证每条序列单调不减。TBS 量化允许相邻前缀出现平台，平台并不破坏
+    ``searchsorted(side="left")`` 的“第一个够用”语义。
 
-    当前项目固定 272 RB = 17×16，首尾 RBG 与中间 RBG 等长。若未来允许任意
-    BWP 起点，必须把 RBG bitmap/各组实际 RB 数纳入索引，不能只按 ``n_rbg``。
+    ``values`` 保留从 RBG0 开始的前缀表，兼容等长载波与旧 API；实际 grant
+    会用 ``rbg_indices`` 把各组真实 PRB 数相加后查 TBS。这样 Configuration 2
+    下 51 RB 的 ``[8,8,8,8,8,8,3]`` 尾组既不会丢，也不会被错算成 8 PRB。
     """
 
     values: np.ndarray                 # int64 [2, 28, 4, num_rbg]，单位 byte
     num_rbg: int
     rb_per_rbg: int
     s_slot_fraction: float
+    rbg_prb_sizes: tuple[int, ...]
+    mcs_table: int = 3
+    target_bler: float = 0.1
 
     @classmethod
     def build(cls, num_rbg: int, rb_per_rbg: int,
-              s_slot_fraction: float = 0.7) -> TbsLookup:
+              s_slot_fraction: float = 0.7, *,
+              rbg_prb_sizes: Sequence[int] | None = None,
+              mcs_table: int = 3,
+              target_bler: float = 0.1) -> TbsLookup:
         for name, value in (("num_rbg", num_rbg), ("rb_per_rbg", rb_per_rbg)):
             if (isinstance(value, (bool, np.bool_))
                     or not isinstance(value, (int, np.integer)) or int(value) < 1):
@@ -56,27 +64,70 @@ class TbsLookup:
             raise ValueError("s_slot_fraction 必须是 (0,1] 内的有限数")
         n_rbg = int(num_rbg)
         rb = int(rb_per_rbg)
+        if rbg_prb_sizes is None:
+            sizes = tuple(rb for _ in range(n_rbg))
+        else:
+            try:
+                raw_sizes = tuple(rbg_prb_sizes)
+            except TypeError as exc:
+                raise ValueError("rbg_prb_sizes 必须是正整数数组") from exc
+            if any(
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                for value in raw_sizes
+            ):
+                raise ValueError(
+                    "rbg_prb_sizes 每项都必须是正整数，不能是布尔值或小数"
+                )
+            sizes = tuple(int(value) for value in raw_sizes)
+        if len(sizes) != n_rbg or any(value < 1 for value in sizes):
+            raise ValueError("rbg_prb_sizes 长度必须等于 num_rbg，且每项为正整数")
+        if (isinstance(mcs_table, (bool, np.bool_))
+                or not isinstance(mcs_table, (int, np.integer))):
+            raise ValueError("mcs_table 必须是整数")
+        if int(mcs_table) != 3:
+            raise ValueError("experience_v2 的 TBS/BLER 反查只支持 MCS table 3")
+        if not np.isfinite(target_bler) or not 0.0 < float(target_bler) < 1.0:
+            raise ValueError("target_bler 必须是 (0,1) 内的有限数")
         table = np.zeros((2, 28, 4, n_rbg), dtype=np.int64)
-        re_one = rb * 12 * 12
+        prefix_prb = np.cumsum(np.asarray(sizes, dtype=np.int64))
         for slot, frac in (("D", 1.0), ("S", float(s_slot_fraction))):
             si = _SLOT_INDEX[slot]
             for mcs in range(28):
-                obj = la.MCS_TABLES[3][mcs]
+                obj = la.MCS_TABLES[int(mcs_table)][mcs]
                 for rank in range(1, 5):
                     for n in range(1, n_rbg + 1):
-                        n_re = int(n * re_one * frac)
+                        n_re = int(int(prefix_prb[n - 1]) * 12 * 12 * frac)
                         table[si, mcs, rank - 1, n - 1] = (
                             la.transport_block_size(
                                 n_re, obj.rate, obj.q_m, layers=rank) // 8)
         diff = np.diff(table, axis=-1)
-        if diff.size and np.any(diff <= 0):
-            bad = np.argwhere(diff <= 0)[0]
+        if diff.size and np.any(diff < 0):
+            bad = np.argwhere(diff < 0)[0]
             slot = "D" if int(bad[0]) == 0 else "S"
             raise ValueError(
-                "TBS 表不再严格递增，searchsorted 反查不成立："
+                "TBS 表出现下降，searchsorted 反查不成立："
                 f"slot={slot}, mcs={int(bad[1])}, rank={int(bad[2]) + 1}, "
                 f"n_rbg={int(bad[3]) + 1}->{int(bad[3]) + 2}")
-        return cls(table, n_rbg, rb, float(s_slot_fraction))
+        return cls(
+            table, n_rbg, rb, float(s_slot_fraction), sizes,
+            int(mcs_table), float(target_bler)
+        )
+
+    def _tbs_for_prbs(self, slot: str, mcs: int, rank: int, num_prb: int) -> int:
+        # row() 同时完成 slot/MCS/rank 的输入校验。
+        self.row(slot, mcs, rank)
+        if (
+            isinstance(num_prb, (bool, np.bool_))
+            or not isinstance(num_prb, (int, np.integer))
+            or int(num_prb) < 1
+        ):
+            raise ValueError("num_prb 必须至少为 1")
+        frac = 1.0 if str(slot).upper() == "D" else self.s_slot_fraction
+        obj = la.MCS_TABLES[self.mcs_table][int(mcs)]
+        n_re = int(int(num_prb) * 12 * 12 * frac)
+        return int(la.transport_block_size(
+            n_re, obj.rate, obj.q_m, layers=int(rank)) // 8)
 
     def row(self, slot: str, mcs: int, rank: int) -> np.ndarray:
         try:
@@ -99,6 +150,28 @@ class TbsLookup:
         n = int(n_rbg)
         return int(self.row(slot, mcs, rank)[n - 1])
 
+    def tbs_bytes_for_indices(
+        self, slot: str, mcs: int, rank: int, indices: Sequence[int]
+    ) -> int:
+        if not indices:
+            raise ValueError("RBG grant 不能为空")
+        if any(
+            isinstance(index, (bool, np.bool_))
+            or not isinstance(index, (int, np.integer))
+            for index in indices
+        ):
+            raise ValueError("RBG index 必须是整数")
+        normalized = tuple(int(index) for index in indices)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("同一个 RBG 不能在一次 grant 中重复")
+        try:
+            num_prb = sum(self.rbg_prb_sizes[index] for index in normalized)
+        except IndexError as exc:
+            raise ValueError(f"RBG index 超出 0..{self.num_rbg - 1}") from exc
+        if any(index < 0 for index in normalized):
+            raise ValueError("RBG index 不能为负")
+        return self._tbs_for_prbs(slot, mcs, rank, num_prb)
+
     def required_rbg(self, slot: str, mcs: int, rank: int,
                      payload_bytes: int) -> tuple[int, bool]:
         """返回 ``(最小 RBG 数, 本 TTI 能否全部装下)``。"""
@@ -113,6 +186,36 @@ class TbsLookup:
             return self.num_rbg, bool(need <= int(row[-1]))
         return idx + 1, True
 
+    def required_rbg_for_indices(
+        self, slot: str, mcs: int, rank: int, payload_bytes: int,
+        ordered_indices: Sequence[int],
+    ) -> tuple[int, bool]:
+        """在给定连续分配顺序上找最少组数；每个前缀按真实 PRB 数算 TBS。"""
+        if (isinstance(payload_bytes, (bool, np.bool_))
+                or not isinstance(payload_bytes, (int, np.integer))
+                or int(payload_bytes) < 1):
+            raise ValueError("payload_bytes 必须是至少为 1 的整数")
+        if any(
+            isinstance(index, (bool, np.bool_))
+            or not isinstance(index, (int, np.integer))
+            for index in ordered_indices
+        ):
+            raise ValueError("RBG index 必须是整数")
+        order = tuple(int(index) for index in ordered_indices)
+        if not order:
+            raise ValueError("ordered_indices 不能为空")
+        row = np.asarray([
+            self.tbs_bytes_for_indices(slot, mcs, rank, order[:n])
+            for n in range(1, len(order) + 1)
+        ], dtype=np.int64)
+        # TBS 对 PRB 数单调不减，前缀累加必然不减——单调性由构造保证，
+        # 不再留一个永不触发的"下降检查"冒充防线。
+        need = int(payload_bytes)
+        idx = int(np.searchsorted(row, need, side="left"))
+        if idx >= len(order):
+            return len(order), bool(need <= int(row[-1]))
+        return idx + 1, True
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "shape": list(self.values.shape),
@@ -120,11 +223,24 @@ class TbsLookup:
             "unit": "byte",
             "axes": ["slot_class(D/S)", "mcs(0..27)", "rank(1..4)",
                      f"n_rbg(1..{self.num_rbg})"],
-            "strictly_increasing": True,
+            "strictly_increasing": bool(
+                self.values.shape[-1] <= 1
+                or np.all(np.diff(self.values, axis=-1) > 0)
+            ),
+            "non_decreasing": bool(
+                self.values.shape[-1] <= 1
+                or np.all(np.diff(self.values, axis=-1) >= 0)
+            ),
             "inverse": "numpy.searchsorted(side='left')",
             "rb_per_rbg": self.rb_per_rbg,
+            "rbg_prb_sizes": list(self.rbg_prb_sizes),
             "s_slot_fraction": self.s_slot_fraction,
-            "mcs_profile": "company_20b_256qam_table_3",
+            "mcs_table": self.mcs_table,
+            "target_bler": self.target_bler,
+            "mcs_profile": (
+                "company_20b_256qam_table_3" if self.mcs_table == 3
+                else f"mcs_table_{self.mcs_table}"
+            ),
             "n_re_model": ("12 data symbols/RB in D; S scales N_RE by "
                            f"{self.s_slot_fraction:g}; no exact DMRS/PTRS/CORESET pattern"),
             "standard_boundary": ("TBS quantization follows 38.214 5.1.3.2; "
@@ -319,6 +435,7 @@ class Allocation:
     slot: str
     rbg_indices: tuple[int, ...]
     n_rbg: int
+    n_prb: int
     mcs: int
     rank: int
     scheduled_bytes: int
@@ -653,34 +770,16 @@ class ExperienceTraffic:
 _BLER_CACHE: dict[tuple[str, int, int], float] = {}
 _BLER_CACHE_STEP_DB = 0.05
 
-# Frequency-aware allocation can ask for an MCS hundreds of thousands of times.
-# Calling ``select_mcs`` there evaluates all 28 full BLER curves per query; a
-# 5 s x 8-rep A/B spent 806 s in that loop, and cProfile attributed 91.5% of a
-# short run to it.  Table 3 / 10% BLER has fixed tabulated crossings, so cache
-# the mathematically identical decision boundaries once.  ``inclusive`` keeps
-# exact floating-boundary behaviour bit-for-bit aligned with ``select_mcs``.
-_MCS_10PCT_THRESHOLDS = np.asarray([
-    la.DEFAULT_CURVE_BLER.required_sinr_db(mcs, 20_000, 0.1)
-    for mcs in la.MCS_TABLES[3]
-], dtype=float)
-_MCS_10PCT_INCLUSIVE = np.asarray([
-    float(la.DEFAULT_CURVE_BLER.bler(threshold, mcs, 20_000, 1)[0]) <= 0.1
-    for threshold, mcs in zip(
-        _MCS_10PCT_THRESHOLDS, la.MCS_TABLES[3], strict=True)
-], dtype=bool)
+def _select_mcs(sinr_db: float, lookup: TbsLookup) -> int:
+    """按链路表自己的 MCS table/目标 BLER 选档。
 
-
-def _select_mcs_10pct(sinr_db: float) -> int:
-    """Fast exact equivalent of table-3 ``select_mcs(..., target_bler=.1)``."""
-    value = float(sinr_db)
-    if np.isnan(value) or value == float("-inf"):
-        return 0
-    if value == float("inf"):
-        return 27
-    feasible = np.flatnonzero(
-        (_MCS_10PCT_THRESHOLDS < value)
-        | ((_MCS_10PCT_THRESHOLDS == value) & _MCS_10PCT_INCLUSIVE))
-    return int(feasible[-1]) if feasible.size else 0
+    :func:`linkadapt.select_mcs` 已缓存门限，因此这里既保留原热点优化，也不再
+    把 experience 主循环偷偷锁死在 10% BLER。
+    """
+    return int(la.select_mcs(
+        float(sinr_db), table=int(lookup.mcs_table),
+        target_bler=float(lookup.target_bler)
+    ).index)
 
 
 def _bler_lookup(mcs: int, sinr_db: float) -> float:
@@ -771,10 +870,10 @@ def _frequency_su_values(
                  else table.sinr_rbg_db)
     base = _subset_db(base_rows[snap, rank - 1], indices)
     true = _subset_db(table.sinr_rbg_db[snap, rank - 1], indices)
-    no_olla_mcs = _select_mcs_10pct(base)
+    no_olla_mcs = _select_mcs(base, lookup)
     tx = base + (float(olla_db) if olla_enabled else 0.0)
-    mcs = _select_mcs_10pct(tx)
-    tbs = int(lookup.tbs_bytes(slot, mcs, rank, len(indices)))
+    mcs = _select_mcs(tx, lookup)
+    tbs = int(lookup.tbs_bytes_for_indices(slot, mcs, rank, indices))
     return {"base": base, "true": true, "mcs": mcs,
             "mcs_without_olla": no_olla_mcs, "tbs": tbs}
 
@@ -818,12 +917,12 @@ def _frequency_mu_values(
         tx = no_olla_sinr
         if olla_enabled:
             tx += float(su_olla_db[user]) + float(mu_olla_db[user])
-        mcs = _select_mcs_10pct(tx)
-        no_olla_mcs = _select_mcs_10pct(no_olla_sinr)
+        mcs = _select_mcs(tx, lookup)
+        no_olla_mcs = _select_mcs(no_olla_sinr, lookup)
         out.append({
             "base": base, "corr": corr, "true": true, "mcs": mcs,
             "mcs_without_olla": no_olla_mcs,
-            "tbs": int(lookup.tbs_bytes(slot, mcs, rank, len(indices))),
+            "tbs": int(lookup.tbs_bytes_for_indices(slot, mcs, rank, indices)),
         })
     return out
 
@@ -864,10 +963,12 @@ def _build_su_plan(
             no_olla_mcs = int(values["mcs_without_olla"])
             true_sinr = float(values["true"])
         else:
-            need, fits = lookup.required_rbg(slot, mcs, rank, q)
+            full_order = _grant_indices(cursor, offset, num_rbg, num_rbg)
+            need, fits = lookup.required_rbg_for_indices(
+                slot, mcs, rank, q, full_order)
             n = min(int(need), remaining)
             indices = _grant_indices(cursor, offset, n, num_rbg)
-            tbs = lookup.tbs_bytes(slot, mcs, rank, n)
+            tbs = lookup.tbs_bytes_for_indices(slot, mcs, rank, indices)
             base_tx = float(base_tx_sinr_of[u])
             no_olla_mcs = int(mcs_without_olla_of[u])
             true_sinr = float(true_sinr_of[u])
@@ -980,10 +1081,12 @@ def _build_mu_plan(
                 no_olla_mcs = int(values["mcs_without_olla"])
                 true_sinr = float(values["true"])
             else:
-                need, fits = lookup.required_rbg(slot, mcs, rank, q)
+                full_order = _grant_indices(cursor, offset, num_rbg, num_rbg)
+                need, fits = lookup.required_rbg_for_indices(
+                    slot, mcs, rank, q, full_order)
                 n = min(int(need), remaining)
                 indices = _grant_indices(cursor, offset, n, num_rbg)
-                tbs = lookup.tbs_bytes(slot, mcs, rank, n)
+                tbs = lookup.tbs_bytes_for_indices(slot, mcs, rank, indices)
                 base_tx = float(base_tx_sinr_of[anchor])
                 no_olla_mcs = int(mcs_without_olla_of[anchor])
                 true_sinr = float(true_sinr_of[anchor])
@@ -1004,6 +1107,8 @@ def _build_mu_plan(
 
         pending.remove(partner)
         users = (anchor, partner)
+        offset = int(num_rbg) - remaining
+        full_order = _grant_indices(cursor, offset, num_rbg, num_rbg)
         ranks: list[int] = []
         mcs_list: list[int] = []
         base_list: list[float] = []
@@ -1026,10 +1131,11 @@ def _build_mu_plan(
             if bool(getattr(sched, "olla_enabled", True)):
                 # 用户指定口径：SU OLLA 与 MU OLLA 都是用户级，但状态分开维护。
                 tx_sinr += float(su_olla_db[u]) + float(mu_olla_db[u])
-            mcs_u = _select_mcs_10pct(tx_sinr)
-            no_olla_mcs = _select_mcs_10pct(no_olla_sinr)
+            mcs_u = _select_mcs(tx_sinr, lookup)
+            no_olla_mcs = _select_mcs(no_olla_sinr, lookup)
             q = int(queue_bytes[u])
-            need, fits = lookup.required_rbg(slot, mcs_u, mu_rank, q)
+            need, fits = lookup.required_rbg_for_indices(
+                slot, mcs_u, mu_rank, q, full_order)
             ranks.append(mu_rank)
             mcs_list.append(mcs_u)
             base_list.append(su_base)
@@ -1038,8 +1144,8 @@ def _build_mu_plan(
             corr_loss.append(cl)
             needs.append(int(need))
             fits_list.append(bool(fits))
-            potentials.append(lookup.tbs_bytes(slot, mcs_u, mu_rank, num_rbg))
-        offset = int(num_rbg) - remaining
+            potentials.append(lookup.tbs_bytes_for_indices(
+                slot, mcs_u, mu_rank, full_order))
         if frequency_aware:
             needs = []
             fits_list = []
@@ -1086,8 +1192,8 @@ def _build_mu_plan(
                 lookup=lookup, slot=slot)
             potentials = [int(x["tbs"]) for x in full_values]
         else:
-            tbs_list = [lookup.tbs_bytes(
-                slot, mcs_list[k], mu_rank, n) for k in range(2)]
+            tbs_list = [lookup.tbs_bytes_for_indices(
+                slot, mcs_list[k], mu_rank, indices) for k in range(2)]
         useful_list = [min(int(queue_bytes[u]), int(tbs_list[k]))
                        for k, u in enumerate(users)]
         if sum(useful_list) > 0:
@@ -1135,11 +1241,7 @@ def simulate_experience(
         value = float(getattr(sched, name, 1.0))
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"{name} 必须是有限正数")
-    for name in ("olla_step_up_db", "olla_step_down_db",
-                 "mu_olla_step_up_db", "mu_olla_step_down_db"):
-        value = float(getattr(sched, name))
-        if not np.isfinite(value) or value <= 0:
-            raise ValueError(f"{name} 必须是有限正数")
+
     if (not np.isfinite(float(sched.olla_min_db))
             or not np.isfinite(float(sched.olla_max_db))
             or float(sched.olla_min_db) >= float(sched.olla_max_db)):
@@ -1185,10 +1287,37 @@ def simulate_experience(
 
     n_ue = len(tables)
     n_snap = int(tables[0].sinr_db.shape[0])
+    mcs_table = int(getattr(tables[0], "mcs_table", 3))
+    link_target_bler = float(getattr(tables[0], "target_bler", 0.1))
+    if not np.isfinite(link_target_bler) or not 0.0 < link_target_bler < 1.0:
+        raise ValueError("链路表 target_bler 必须在 (0,1)")
+    # OLLA 步长在这里兑现"留空 = 按链路表 target_bler 自动反解"的合同。
+    # system.simulate 与 server 也会在更上游解析，但本函数作为公开入口
+    # 必须自给自足——否则默认 SchedulerConfig() 直调会在校验处 float(None)。
+    _resolve = getattr(sched, "resolved_for_target", None)
+    if callable(_resolve):
+        sched = _resolve(link_target_bler)
+    for name in ("olla_step_up_db", "olla_step_down_db",
+                 "mu_olla_step_up_db", "mu_olla_step_down_db"):
+        _raw = getattr(sched, name, None)
+        if _raw is None:
+            raise ValueError(
+                f"{name} 为 None 且调度配置不提供 resolved_for_target，"
+                "无法按链路表 target_bler 自动反解；请显式给步长")
+        _value = float(_raw)
+        if not np.isfinite(_value) or _value <= 0:
+            raise ValueError(f"{name} 必须是有限正数")
     if n_snap < 1:
         raise ValueError("链路表至少需要一个 snapshot")
     for i, table in enumerate(tables):
-        if int(getattr(table, "mcs_table", 3)) != 3:
+        if int(getattr(table, "mcs_table", 3)) != mcs_table:
+            raise ValueError(f"UE {i} 的 MCS table 与 UE0 不一致")
+        if not np.isclose(
+            float(getattr(table, "target_bler", 0.1)), link_target_bler,
+            rtol=0.0, atol=1e-12,
+        ):
+            raise ValueError(f"UE {i} 的 target_bler 与 UE0 不一致")
+        if mcs_table != 3:
             raise ValueError("experience_v2 的 TBS/BLER 反查只支持 MCS table 3")
         if table.sinr_db.shape[0] != n_snap:
             raise ValueError(f"UE {i} 的 snapshot 数与 UE0 不一致")
@@ -1206,7 +1335,19 @@ def simulate_experience(
                 raise ValueError(
                     "已启用 MU，但链路表没有完整 pair 数据；"
                     "请用 build_link_tables(..., mu_enabled=True) 预计算")
-    lookup = TbsLookup.build(sys_cfg.num_rbg, sys_cfg.rb_per_rbg, s_slot_fraction)
+    # MCS 选择目标与 OLLA 稳态目标是两个显式口径。MCP 默认会把它们对齐；
+    # Python API 仍允许研究者故意给 SU/MU 不同目标，结果中的
+    # target_bler_by_mode 会完整披露，不能在这里把这种消融误判为非法输入。
+    raw_rbg_sizes = getattr(sys_cfg, "rbg_prb_sizes", None)
+    rbg_sizes = (
+        tuple(int(sys_cfg.rb_per_rbg) for _ in range(int(sys_cfg.num_rbg)))
+        if raw_rbg_sizes is None
+        else tuple(int(value) for value in raw_rbg_sizes)
+    )
+    lookup = TbsLookup.build(
+        sys_cfg.num_rbg, sys_cfg.rb_per_rbg, s_slot_fraction,
+        rbg_prb_sizes=rbg_sizes, mcs_table=mcs_table,
+        target_bler=link_target_bler)
     frequency_aware = bool(getattr(
         getattr(sys_cfg, "rb_power_control", None), "enabled", False))
     tr = ExperienceTraffic(traffic_cfg, n_ue, sys_cfg.tti_ms,
@@ -1245,6 +1386,9 @@ def simulate_experience(
     user_grant_rbg_equiv = np.zeros(n_ue, dtype=float)
     user_attributed_rbg_equiv = np.zeros(n_ue, dtype=float)
     user_mu_grant_rbg_equiv = np.zeros(n_ue, dtype=float)
+    user_grant_prb_equiv = np.zeros(n_ue, dtype=float)
+    user_attributed_prb_equiv = np.zeros(n_ue, dtype=float)
+    user_mu_grant_prb_equiv = np.zeros(n_ue, dtype=float)
     user_mu_tx_measured = np.zeros(n_ue, dtype=int)
 
     # OLLA 是否在预启动期收敛，不能只看全程一个 BLER。下面同时保留
@@ -1274,11 +1418,14 @@ def simulate_experience(
     dl_tti_full = 0
     mu_tti = mu_rbg = mu_user_tx = 0
     mu_rbg_equiv = 0.0
+    mu_prb_equiv = 0.0
     su_decisions = mu_decisions = su_forced_clear = 0
     su_plan_useful = mu_plan_useful = 0
     allocated_rbg = scheduled_ues_sum = 0
     allocated_rbg_full = 0
     available_rbg_equiv = allocated_rbg_equiv = 0.0
+    available_prb_equiv = allocated_prb_equiv = 0.0
+    total_prb = int(sum(lookup.rbg_prb_sizes))
     # ``rbg_hist`` 是每个非零 grant 的大小，不能回答“一个 TTI 总共占了几个 RBG”。
     # 后者必须每个测量窗 DL 调度机会只记一次，而且把 idle TTI 记进 0 桶。
     rbg_hist: list[int] = []
@@ -1313,6 +1460,7 @@ def simulate_experience(
         slot_fraction = 1.0 if slot == "D" else float(s_slot_fraction)
         if in_measurement:
             available_rbg_equiv += int(sys_cfg.num_rbg) * slot_fraction
+            available_prb_equiv += total_prb * slot_fraction
         snap = (tti // snap_every) % n_snap
         cand = [u for u in range(n_ue) if tr.has_data(u)
                 and not (tables[u].outage is not None and tables[u].outage[snap])]
@@ -1339,8 +1487,8 @@ def simulate_experience(
             if tables[u].sinr_tx_db is not None and sched.olla_enabled:
                 base_tx_sinr = float(tables[u].sinr_tx_db[snap, rank - 1])
                 tx_sinr = base_tx_sinr + olla_db[u]
-                mcs = _select_mcs_10pct(tx_sinr)
-                mcs_without_olla = _select_mcs_10pct(base_tx_sinr)
+                mcs = _select_mcs(tx_sinr, lookup)
+                mcs_without_olla = _select_mcs(base_tx_sinr, lookup)
             else:
                 base_tx_sinr = float(tables[u].sinr_db[snap, rank - 1])
                 mcs = int(tables[u].mcs[snap, rank - 1])
@@ -1348,7 +1496,8 @@ def simulate_experience(
             rank_of[u], mcs_of[u] = rank, mcs
             base_tx_sinr_of[u] = base_tx_sinr
             mcs_without_olla_of[u] = mcs_without_olla
-            potential[i] = lookup.tbs_bytes(slot, mcs, rank, sys_cfg.num_rbg)
+            potential[i] = lookup.tbs_bytes_for_indices(
+                slot, mcs, rank, tuple(range(int(sys_cfg.num_rbg))))
             c = tr.queues[u].traffic_class
             if str(getattr(sched, "qos_priority_weighting", "none")) == \
                     "inverse_priority":
@@ -1435,6 +1584,8 @@ def simulate_experience(
         for group_idx, grant in enumerate(selected_plan.grants):
             n_alloc = int(grant.n_rbg)
             indices = tuple(int(x) for x in grant.rbg_indices)
+            grant_prb = int(sum(lookup.rbg_prb_sizes[index] for index in indices))
+            grant_prb_equiv = grant_prb * slot_fraction
             if used_indices.intersection(indices):
                 overlap_violations += 1
             used_indices.update(indices)
@@ -1483,7 +1634,8 @@ def simulate_experience(
                 elif accounting == "acked_goodput":
                     credit = acked
                 else:
-                    credit = lookup.tbs_bytes(slot, mcs, rank, sys_cfg.num_rbg)
+                    credit = lookup.tbs_bytes_for_indices(
+                        slot, mcs, rank, tuple(range(int(sys_cfg.num_rbg))))
                 inst[u] += credit
                 tx_count[u] += 1
                 nack_count[u] += int(not ack)
@@ -1508,8 +1660,12 @@ def simulate_experience(
                     user_grant_rbg_equiv[u] += grant_equiv
                     user_attributed_rbg_equiv[u] += (
                         grant_equiv / max(len(grant.users), 1))
+                    user_grant_prb_equiv[u] += grant_prb_equiv
+                    user_attributed_prb_equiv[u] += (
+                        grant_prb_equiv / max(len(grant.users), 1))
                     if grant.mode == "MU":
                         user_mu_grant_rbg_equiv[u] += grant_equiv
+                        user_mu_grant_prb_equiv[u] += grant_prb_equiv
                         user_mu_tx_measured[u] += 1
                 if sched.olla_enabled:
                     speed = (float(getattr(sched, "olla_warmup_speedup", 1.0))
@@ -1544,7 +1700,8 @@ def simulate_experience(
                 pos = cand_pos[u]
                 alloc = Allocation(
                     tti=tti, snapshot=snap, ue=u, traffic_class=cls, slot=slot,
-                    rbg_indices=indices, n_rbg=n_alloc, mcs=mcs, rank=rank,
+                    rbg_indices=indices, n_rbg=n_alloc, n_prb=grant_prb,
+                    mcs=mcs, rank=rank,
                     scheduled_bytes=tb_bytes, payload_bytes=payload,
                     acked_bytes=acked, padding_bytes=pad, pf_credit_bytes=int(credit),
                     queue_bytes_before=int(queue_before),
@@ -1581,9 +1738,11 @@ def simulate_experience(
                 rbg_hist.append(n_alloc)
                 allocated_rbg += n_alloc
                 allocated_rbg_equiv += n_alloc * slot_fraction
+                allocated_prb_equiv += grant_prb_equiv
                 if grant.mode == "MU":
                     mu_rbg += n_alloc
                     mu_rbg_equiv += n_alloc * slot_fraction
+                    mu_prb_equiv += grant_prb_equiv
         if users_this_tti and in_measurement:
             busy_tti += 1
             scheduled_ues_sum += users_this_tti
@@ -1771,17 +1930,17 @@ def simulate_experience(
             "residual_bler": None,
             "sched_tti": int(sched_cnt_measured[u]),
             "grant_prb_equivalent": float(
-                user_grant_rbg_equiv[u] * int(sys_cfg.rb_per_rbg)),
+                user_grant_prb_equiv[u]),
             "allocated_prb_equivalent_attributed": float(
-                user_attributed_rbg_equiv[u] * int(sys_cfg.rb_per_rbg)),
+                user_attributed_prb_equiv[u]),
             "cell_used_prb_attribution_share": float(
-                user_attributed_rbg_equiv[u]
-                / max(allocated_rbg_equiv, _EPS)),
+                user_attributed_prb_equiv[u]
+                / max(allocated_prb_equiv, _EPS)),
             "mu_paired_prb_equivalent": float(
-                user_mu_grant_rbg_equiv[u] * int(sys_cfg.rb_per_rbg)),
+                user_mu_grant_prb_equiv[u]),
             "mu_paired_prb_share_of_user_used": float(
-                user_mu_grant_rbg_equiv[u]
-                / max(user_grant_rbg_equiv[u], _EPS)),
+                user_mu_grant_prb_equiv[u]
+                / max(user_grant_prb_equiv[u], _EPS)),
             "mu_tx_share": float(
                 user_mu_tx_measured[u] / max(tx_count_measured[u], 1)),
             "retx_tti": 0,
@@ -1936,11 +2095,11 @@ def simulate_experience(
         raise RuntimeError(
             "TTI RBG occupancy 对账失败："
             f"hist={tti_hist_total}, measurement_dl_tti={int(dl_tti)}")
-    attributed_rbg_total = float(np.sum(user_attributed_rbg_equiv))
-    if not _resource_totals_close(attributed_rbg_total, allocated_rbg_equiv):
+    attributed_prb_total = float(np.sum(user_attributed_prb_equiv))
+    if not _resource_totals_close(attributed_prb_total, allocated_prb_equiv):
         raise RuntimeError(
             "用户 PRB attribution 对账失败："
-            f"users={attributed_rbg_total}, cell={allocated_rbg_equiv}")
+            f"users={attributed_prb_total}, cell={allocated_prb_equiv}")
     tti_occupied_rbg_distribution = {
         "scope": "measurement_window_dl_scheduling_opportunities_including_idle",
         "x": "occupied_rbg_count",
@@ -1957,11 +2116,11 @@ def simulate_experience(
         ],
     }
     serving_cell_prb_utilization = float(
-        allocated_rbg_equiv / max(available_rbg_equiv, _EPS))
+        allocated_prb_equiv / max(available_prb_equiv, _EPS))
     mu_paired_prb_share_of_used = float(
-        mu_rbg_equiv / max(allocated_rbg_equiv, _EPS))
+        mu_prb_equiv / max(allocated_prb_equiv, _EPS))
     mu_paired_prb_utilization = float(
-        mu_rbg_equiv / max(available_rbg_equiv, _EPS))
+        mu_prb_equiv / max(available_prb_equiv, _EPS))
     cell = {
         "cell_experienced_mbps": _mean(user_exp) or 0.0,
         "cell_head_inclusive_experienced_mbps": _mean(user_head_exp) or 0.0,
@@ -2108,12 +2267,9 @@ def simulate_experience(
         "mu_rbg_share": float(mu_rbg / max(allocated_rbg, 1)),
         "mu_paired_prb_share_of_used": mu_paired_prb_share_of_used,
         "mu_paired_prb_utilization": mu_paired_prb_utilization,
-        "mu_paired_prb_equivalent": float(
-            mu_rbg_equiv * int(sys_cfg.rb_per_rbg)),
-        "allocated_prb_equivalent": float(
-            allocated_rbg_equiv * int(sys_cfg.rb_per_rbg)),
-        "available_prb_equivalent": float(
-            available_rbg_equiv * int(sys_cfg.rb_per_rbg)),
+        "mu_paired_prb_equivalent": float(mu_prb_equiv),
+        "allocated_prb_equivalent": float(allocated_prb_equiv),
+        "available_prb_equivalent": float(available_prb_equiv),
         "mu_user_tx_share": float(
             mu_user_tx / max(int(np.sum(sched_cnt_measured)), 1)),
         "su_mu_plan": {
