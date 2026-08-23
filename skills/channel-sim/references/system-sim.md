@@ -40,8 +40,8 @@ sr_system_sim(
 
 | `evaluation_mode` | 版本 | 调度/资源 | 失败包 | KPI 边界 | 用途 |
 |---|---|---|---|---|---|
-| `capacity` | `legacy_v1` | 历史全带口径，单次选择一个 SU（或标量 MU 近似） | NewTx 后复用 ReTx BLER 曲线，最多 4 次 | `trim=none/tail/head_tail` | 复现旧结果、满缓冲容量、公平性 |
-| `experience` | `experience_v2` | TBS 反查最小 RBG，同 TTI 可排多个 UE，尾料可留空 | NACK 字节留在 FIFO，下次仍按 NewTx 判错；无软合并/进程时序 | DRB busy-period + FIFO 到达对象；小 burst 可按 fractional slot | 大小包混跑、等待/PDB、按需分配 |
+| `capacity` | `legacy_v1` | 历史全带口径，单次选择一个 SU（或标量 MU 近似） | 每 TB 最多一次 IR/CC；同 MCS/RBG 数/rank/TBS | `trim=none/tail/head_tail` | 复现旧结果、满缓冲容量、公平性 |
+| `experience` | `experience_v2` | TBS 反查最小 RBG，同 TTI 可排多个 UE，尾料可留空 | 每 TB 最多一次 IR/CC；失败字节留 FIFO，后续成为新 TB | DRB busy-period + FIFO 到达对象；小 burst 可按 fractional slot | 大小包混跑、等待/PDB、按需分配 |
 
 两者是**两个评估 profile**，不是一个算法的快慢档。当前 `experience_v2` 支持
 两用户、每用户 rank2 的数据受限 SU/MU 自适应；矩阵运算集中在
@@ -186,7 +186,7 @@ SCS、BWP 起点与 RBG configuration 若存在也必须匹配；任何错配立
 |---|---|---|
 | `ftp3` | 3GPP FTP Model 3，泊松到达的固定大小文件 | **默认**，评价体验速率的标准话务 |
 | `mixed` | 一部分 UE 发 1500 B 小文件，另一部分 UE 发大文件；包长和到达率都是外生量 | **experience_v2 推荐**，验证“小包不再偷走整个 TTI” |
-| `cdf` | 两份 `value,cdf` 文件分别驱动包大小与逐 UE renewal 包间隔 | 接公司/现场话务 CDF；公司曲线未到前只能用明确标注的 synthetic 输入 |
+| `cdf` | 两份 `value,cdf` 文件分别驱动包大小与逐 UE renewal 包间隔 | 接现场话务 CDF；外部曲线未接入前只能用明确标注的 synthetic 输入 |
 | `bimodal` | legacy_v1 按目标 RBG 数反推包长的历史模型 | 只复现旧结果；experience_v2 因因果倒置会拒绝 |
 | `full_buffer` | 缓冲区永不空 | 只看容量上限。**体验速率在这个模型下没有意义** |
 | `cbr` | 恒定比特率 | 固定码率业务 |
@@ -353,11 +353,10 @@ RBG 时，有效 SINR 仍沿用项目既有的 dB 算术平均，尚未用链路
 EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率折算，而非多小区
 联合 TTI 调度。
 
-公司 BLER 事件按一次已调度 TTI 中该用户的整个 TB 计：grant 确定 TBS、MCS 和资源后，
-以 post-MMSE SINR 查询一次 TBLER，并只抽一次 ACK/NACK；CB 不作为系统层独立事件。
-但当前 `company_20b_256qam` 导入常量没有 reference TBS/resource/rank 轴，体验运行时仍是
-`_bler_lookup(mcs, sinr)`。所以当前只能说“TB 事件单位正确、实际 TB-size 尚未参与选曲线”，
-不能因为调度器已经计算 TBS 就声称 BLER 已具有块长依赖。
+预置 BLER 事件按一次已调度 TTI 中该用户的独立单码字 TB 计：grant 确定 TBS、MCS 和资源后，
+以跨 RBG、跨 rank stream 做 dB 平均的码字级有效 SINR + MCS 查询一次通用 NewTx 曲线，
+并只抽一次 ACK/NACK；CB 不作为系统层独立事件。TBS/RE/rank/场景不进入 BLER lookup 是
+已确认的产品口径，不是数据缺口；它们仍用于承载字节、PF 记账与冻结重传身份。
 
 ## CSI 老化 `csi_aging` / `srs_period_ms` / `srs_hopping`
 
@@ -396,21 +395,20 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 **基站按陈旧 CSI 选 rank 和调度**（`best_se_gnb`），不是按真实 SINR——
 拿真实 SINR 挑 rank 等于让基站预知信道，老化损失会被凭空抹掉一大半。
 
-OLLA 默认只要求用户给 `target_bler`。ACK 步长默认 **+0.01 dB**，NACK 步长为
-`None` 时按 `down=up*(1-target)/target` 自动反解；目标 10% 时才得到 **−0.09 dB**。
+OLLA 默认只要求用户给 `target_bler`。ACK 步长默认 **+0.01 MCS**，NACK 步长为
+`None` 时按 `down=up*(1-target)/target` 自动反解；目标 10% 时才得到 **−0.09 MCS**。
+顺序是先由发送侧 SINR 反折无 OLLA MCS，再加连续 MCS offset、floor 并钳位。
 用户显式填写 SU/MU down 步长时保留该值并在结果标为 override；SU 与 MU 各自反解、
 状态仍按用户独立维护。（现网口头常说的 −0.1 对应 9.09%。）
+历史 `*_db` 参数名仅为 API 兼容保留，值的单位不是 dB。
 **稳态与步长绝对值无关**，所以 `olla_speedup` 等比放大只改收敛速度与稳态抖动：
-实测 k=1 时 8 秒内 IBLER 还停在 0.394、k=20 收敛到 0.100，而体验速率
-142.3 → 142.5 几乎不动。短仿真里基线常常压不动一档 MCS，可临时设 10；
+但 MCS-domain + floor 口径下的具体收敛速度和稳态偏差必须重新标定。
+2026-08-23 之前 dB-domain OLLA 的 IBLER/速率数字只作历史追溯。
 **出正式结论设回 1.0**，非 1.0 时结果里会带一条显式告警。
-
-实测 IBLER 一致地比理论高 4~5%（相对），六个取值全部如此——那是 MCS 整数档的
-系统性偏置（`select_mcs` 取「满足目标的最高档」，天然偏激进半档），不是噪声。
 
 `avg_mcs` 报的是 **OLLA 之后**的 MCS，即实际调度下去的档位。
 
-`experience_v2` 目前只接受公司 `company_20b_256qam / MCS table 3`，Table 1/2
+`experience_v2` 目前只接受 `preset_20b_256qam / MCS table 3` 预置表，Table 1/2
 传入后硬失败。代码保留显式 `mcs_table/profile` 边界与带数据指纹的 BLER cache key，
 但必须等下一套 MCS、TBLER/TBS 元数据完整接入后才允许扩展。
 

@@ -278,11 +278,11 @@ check(all(np.allclose(t.best_se, t.best_se_gnb) for t in tb0),
 
 # 发送侧 SINR = CQI 门限 + BF Gain，必须是有限值
 allfin = all(np.isfinite(t.sinr_tx_db).all() for t in tb)
-check(allfin, "发送侧 SINR 全部有限（CQI=0 时退回实测 PMI SINR，不是 -inf）")
+check(allfin, "发送侧 SINR 全部有限（内部 CQI0 查 MCS0 门限，不是 -inf）")
 check(all(t.bf_gain_db is not None and (t.bf_gain_db > 0).mean() > 0.9 for t in tb),
       "BF Gain 绝大多数为正（SVD 本就该赢过 Type I 码本）")
-check(all(t.cqi_index is not None and ((t.cqi_index >= 0) & (t.cqi_index <= 15)).all()
-          for t in tb), "CQI index 落在 0..15")
+check(all(t.cqi_index is not None and ((t.cqi_index >= 0) & (t.cqi_index <= 14)).all()
+          for t in tb), "内部 CQI index 落在 0..14")
 
 # ---------------------------------------------------------------------------
 section("6  配置校验与告警")

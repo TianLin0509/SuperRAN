@@ -19,6 +19,7 @@ from superran import experience as ex  # noqa: E402
 from superran import generate as gen  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import load  # noqa: E402
+from superran import loader as ld  # noqa: E402
 
 FAILED: list[str] = []
 
@@ -33,17 +34,47 @@ def sect(t: str) -> None:
     print("\n" + "=" * 70 + f"\n{t}\n" + "=" * 70)
 
 
-def test_company_curve_contract_exposes_current_tbs_axis_gap() -> None:
+def _memory_dataset(h_true: np.ndarray, h_est: np.ndarray) -> ld.Dataset:
+    """Small in-memory Dataset shell for a causal BF-gain regression."""
+    ds = object.__new__(ld.Dataset)
+    ds.dataset_id = "memory_bf_gain"
+    ds.summary = {"shape": {"N": 1}, "config": {}, "source": "internal_sim"}
+    ds.__dict__["h_true"] = np.asarray(h_true)[None]
+    ds.__dict__["h_est"] = np.asarray(h_est)[None]
+    ds.__dict__["h_interferers"] = None
+    return ds
+
+
+def test_tdd_bf_gain_uses_gnb_csi_not_true_channel() -> None:
+    """Changing h_true alone must not change the BF gain used for MCS."""
+    rng = np.random.default_rng(20260823)
+    shape = (1, 8, 4, 2)
+    h_est = (rng.normal(size=shape) + 1j * rng.normal(size=shape)) / np.sqrt(2)
+    h_true_a = h_est.copy()
+    h_true_b = (rng.normal(size=shape) + 1j * rng.normal(size=shape)) / np.sqrt(2)
+    common = dict(
+        cqi_index=5, use_estimated_csi=True, snr_db=10.0, max_rank=2)
+    arm_a = _memory_dataset(h_true_a, h_est).tdd_mcs(0, **common)
+    arm_b = _memory_dataset(h_true_b, h_est).tdd_mcs(0, **common)
+    assert arm_a["bf_gain_csi_view"] == "gnb_precoding_csi"
+    assert arm_a["bf_gain_user_db"] == arm_b["bf_gain_user_db"]
+    assert arm_a["pmi_stream_sinr_db"] == arm_b["pmi_stream_sinr_db"]
+    assert arm_a["svd_stream_sinr_db"] == arm_b["svd_stream_sinr_db"]
+    assert arm_a["bf_gain_true_user_db"] != arm_b["bf_gain_true_user_db"]
+    assert arm_b["true_channel_bf_audit_enters_mcs"] is False
+
+
+def test_preset_curve_contract_is_universal_single_codeword_tb() -> None:
     contract = la.bc.verify_curves()
     assert contract["consistent"]
-    assert "scheduled TTI transport block" in contract["error_event"]
-    assert "tb_size_bits" in contract["company_lookup_inputs"]
-    assert "tb_size_bits" not in contract["imported_curve_axes"]
+    assert "single-codeword" in contract["error_event"]
+    assert contract["preset_lookup_inputs"] == [
+        "codeword_effective_sinr_db", "mcs"]
+    assert "not modeled by product decision" in contract["tb_size_axis_status"]
+    assert "exact code rates" in contract["extra_code_rate_rows_status"]
 
-    # This equality is a deliberate negative contract for the current import: the
-    # event is one whole TTI/TB, but no source TBS axis is available to select a
-    # different curve.  Replace this assertion when the complete company table and
-    # its reference-TBS/resource metadata are imported.
+    # 预置表已明确：1/17 RBG 的 TBS 不同，但只要 MCS+码字 SINR 相同就查同一条
+    # 通用曲线。CB 数仍可被表 1/2 分析模型计算，却不得进入预置表 3 路径。
     lookup = ex.TbsLookup.build(17, 16)
     short_tbs = lookup.tbs_bytes("D", 12, 2, 1)
     long_tbs = lookup.tbs_bytes("D", 12, 2, 17)
@@ -64,6 +95,37 @@ def test_company_curve_contract_exposes_current_tbs_axis_gap() -> None:
         14.0, mcs, n_coded_bits=long_n_coded, n_code_blocks=long_cb
     )
     assert np.array_equal(short_tb, long_tb)
+    for bad_mcs in (True, 12.5):
+        try:
+            la.harq_retransmission_bler(bad_mcs, 10.0)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"非法重传 MCS 未被拒绝：{bad_mcs!r}")
+    for bad_max_tx in (3, 1.5, True):
+        try:
+            la.link_adaptation(
+                np.full(16, 10.0), n_prb=16, max_harq_tx=bad_max_tx)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"超过一次重传/非整数 max_harq_tx 未被拒绝：{bad_max_tx!r}")
+
+
+def test_preset_one_retransmission_cc_and_ir() -> None:
+    cc = la.harq_retransmission_bler(20, 16.0, combining="cc")
+    ir = la.harq_retransmission_bler(20, 16.0, combining="ir")
+    assert cc["transmitted_mcs"] == cc["lookup_mcs"] == 20
+    assert abs(cc["lookup_sinr_db"] - (16.0 + 10 * np.log10(2))) < 1e-12
+    assert ir["transmitted_mcs"] == 20 and ir["lookup_mcs"] == 10
+    assert ir["curve_tx_mode"] == cc["curve_tx_mode"] == "newtx"
+    assert ir["bler"] < cc["bler"] < float(
+        la.bc.get_curve(20, "newtx").evaluate(16.0)[0])
+    for mcs in range(28):
+        row = la.harq_retransmission_bler(mcs, 10.0, combining="ir")
+        assert 0 <= row["lookup_mcs"] <= mcs
+        assert row["equivalent_spectral_efficiency"] == la.MCS_TABLE_3[mcs].se / 2
 
 
 def main() -> None:
@@ -193,17 +255,22 @@ def main() -> None:
     check(b24 > b1, "码块越多 TB 级 BLER 越高（任一块错则整块错）")
 
     # -----------------------------------------------------------------------
-    sect("6.5  用户提供的表驱动 NewTx/ReTx BLER 曲线")
+    sect("6.5  预置单码字 TB-BLER 曲线与一次 HARQ 工程抽象")
 
     cv = la.bc.verify_curves()
     print(f"  {cv['n_mcs']} 个 MCS / {cv['n_curves']} 条曲线 / {cv['n_points']} 个点")
     check(cv["consistent"], "曲线哈希、覆盖、单调性和 10% 门限全部自洽")
     check(cv["hash_matches"], "曲线数据与导入时 SHA-256 一致")
-    check("scheduled TTI transport block" in cv["error_event"],
-          "公司误块事件明确是一调度 TTI 的 TB，不单列 CB")
-    check("tb_size_bits" in cv["company_lookup_inputs"] and
-          "tb_size_bits" not in cv["imported_curve_axes"],
-          "公司概念口径含 TB size，但当前导入曲线尚无 TB-size 查询轴")
+    check("single-codeword" in cv["error_event"]
+          and "CB is not exposed" in cv["error_event"],
+          "预置误块事件明确是一用户 grant/TTI 的单码字 TB，不单列 CB")
+    check(cv["preset_lookup_inputs"] == [
+              "codeword_effective_sinr_db", "mcs"],
+          "预置通用曲线只以单码字有效 SINR + MCS 查 BLER")
+    check("not modeled by product decision" in cv["tb_size_axis_status"],
+          "TBS/RE/rank/场景是明确忽略的维度，不再误报成待补查询轴")
+    check("exact code rates" in cv["extra_code_rate_rows_status"],
+          "额外未映射码率行的具体数值/语义未被原始导入保留，不能凭空解释")
     check(len(la.MCS_TABLE_3) == 28, "表 3 共 28 档，覆盖 MCS 0..27")
     check(max(m.q_m for m in la.MCS_TABLE_3) == 8, "表 3 含 256QAM")
 
@@ -223,7 +290,7 @@ def main() -> None:
     c15_contract = c15n.as_dict(include_points=False)
     check(c15_contract["error_event"] == cv["error_event"] and
           c15_contract["tb_size_axis_status"] == cv["tb_size_axis_status"],
-          "单曲线查询携带同一 TTI/TB 与 TB-size 缺口合同")
+          "单曲线查询携带同一单码字 TTI/TB 与通用曲线合同")
     current_model = la.CurveBlerModel("newtx")
     mcs12 = la.MCS_TABLE_3[12]
     short_n_coded = 16 * 12 * 12 * mcs12.q_m * 2
@@ -234,35 +301,79 @@ def main() -> None:
         14.0, mcs12, n_coded_bits=17 * short_n_coded, n_code_blocks=29
     )
     check(np.array_equal(short_tb_bler, long_tb_bler),
-          "反例锁定：当前公司曲线尚不随当次 coded bits/TBS/CB 数变化")
+          "反例锁定：当前预置曲线不随当次 coded bits/TBS/CB 数变化")
     check(float(c15n.evaluate(0.0)[0]) == 1.0 and
           abs(float(c15n.evaluate(30.0)[0]) - c15n.bler_points[-1]) < 1e-12,
           "曲线范围外保守钳位，不伪造外推尾部")
 
-    tab = la.link_adaptation(np.full(273, 14.2), n_prb=273, layers=1, mcs_table=3)
+    _orig_code_blocks = la.code_blocks
+    la.code_blocks = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("预置表 3 不应进入 CB 分段"))
+    try:
+        _single_codeword_probe = la.link_adaptation(
+            np.full(16, 14.2), n_prb=16, layers=1, mcs_table=3,
+            max_harq_tx=1)
+    finally:
+        la.code_blocks = _orig_code_blocks
+    check(_single_codeword_probe.bler >= 0.0,
+          "预置表 3 的端到端路径不调用 CB 分段/CBLER→TBLER 合成")
+
+    cc = la.harq_retransmission_bler(20, 16.0, combining="cc")
+    ir = la.harq_retransmission_bler(20, 16.0, combining="ir")
+    check(abs(cc["lookup_sinr_db"] - (16.0 + 10 * np.log10(2))) < 1e-12
+          and cc["lookup_mcs"] == 20,
+          "CC 保持 MCS20 曲线并把码字 SINR 精确抬升 10log10(2) dB")
+    check(ir["transmitted_mcs"] == 20 and ir["lookup_mcs"] == 10
+          and abs(ir["equivalent_spectral_efficiency"]
+                  - la.MCS_TABLE_3[20].se / 2) < 1e-12,
+          "IR 保持空口 MCS20，但半谱效按真实表反查到等效 MCS10")
+    check(ir["bler"] < cc["bler"]
+          < float(la.bc.get_curve(20, "newtx").evaluate(16.0)[0]),
+          "高阶 MCS 工作点上 IR 重传 BLER < CC < 初传 BLER")
+
+    tab = la.link_adaptation(np.full(273, 14.2), n_prb=273, layers=1,
+                             mcs_table=3, harq_combining="ir")
     check(tab.mcs_index == 15, "表 3 在 14.2 dB 选择 MCS15")
-    check(tab.bler_source == "company_20b_256qam", "结果显式标出表驱动 BLER 来源")
+    check(tab.bler_source == "preset_20b_256qam", "结果显式标出预置表 BLER 来源")
+    check(0 <= tab.cqi <= 13 and tab.cqi_source == la.INTERNAL_CQI_SOURCE,
+          "预置表端到端返回内部 CQI，不混用 38.214 CQI 编号")
     check(tab.retx_bler is not None and tab.retx_bler < tab.bler,
-          "HARQ 首传后使用独立 ReTx 曲线")
-    check(tab.harq_model == "newtx_then_retx_curve_reused",
-          "结果显式标出多次重传复用 ReTx 曲线的假设")
+          "HARQ 首传后按半谱效 IR 抽象从 NewTx 曲线推导重传 BLER")
+    check(tab.harq_model == "one_retransmission_ir_derived_from_newtx",
+          "结果显式标出只允许一次 IR 重传且只用 NewTx 曲线")
     check("SINR" in tab.bler_axis_source and "MMSE" in tab.bler_axis_source,
           "结果明确曲线横轴为经典 MMSE 接收机 SINR")
 
     # -----------------------------------------------------------------------
     sect("6.6  TDD CQI → BF Gain → MCS → OLLA")
 
-    cqi0 = la.cqi_to_mcs_by_se(0)
-    check(cqi0["scheduled"] is False and cqi0["mcs"] is None,
-          "CQI0 明确表示不调度，不静默降成 MCS0")
+    expected_internal = (0, 1, 3, 5, 7, 9, 12, 14, 16, 19, 21, 23, 25, 27, 28)
+    mapped_internal = tuple(
+        la.internal_cqi_to_mcs(i, mcs_table=1)["mcs"]
+        for i in range(len(expected_internal))
+    )
+    check(mapped_internal == expected_internal,
+          "内部 CQI0..14 逐项映射到已确认的 MCS 离散表")
 
-    cqi1 = la.cqi_to_mcs_by_se(1)
-    check(cqi1["mcs"] == 0 and cqi1["clamped_low"] is True,
-          "CQI1 低于公司表最低谱效时钳到 MCS0 并留痕")
+    cqi0 = la.internal_cqi_to_mcs(0)
+    check(cqi0["scheduled"] is True and cqi0["mcs"] == 0,
+          "内部 CQI0 是最低可用档并映射 MCS0")
 
-    cqi9 = la.cqi_to_mcs_by_se(9)
-    check(cqi9["mcs"] == 15 and cqi9["clamped_low"] is False,
-          "CQI9 先按谱效映射到公司表 MCS15")
+    cqi9 = la.internal_cqi_to_mcs(9)
+    check(cqi9["mcs"] == 19 and cqi9["mcs_clipped_to_profile"] is False,
+          "内部 CQI9 查离散表得到 MCS19")
+
+    cqi14 = la.internal_cqi_to_mcs(14)
+    check(cqi14["requested_mcs"] == 28 and cqi14["mcs"] == 27
+          and cqi14["mcs_clipped_to_profile"] is True,
+          "CQI14 保留 MCS28 合同，当前 0..27 曲线 profile 显式钳位")
+    for bad_cqi in (15, -1, 2.5, True):
+        try:
+            la.internal_cqi_to_mcs(bad_cqi)  # type: ignore[arg-type]
+            rejected = False
+        except ValueError:
+            rejected = True
+        check(rejected, f"内部 CQI 拒绝越界/非整数输入 {bad_cqi!r}")
 
     tdd = la.tdd_mcs_adaptation(
         9,
@@ -273,23 +384,23 @@ def main() -> None:
     )
     check(tdd["scheduled"] is True and tdd["rank"] == 2 and tdd["n_rb"] == 2,
           "TDD 决策保留逐 RB、逐流维度")
-    check(abs(tdd["cqi_mcs_sinr_db"] - 14.0421) < 1e-3,
-          "初始 MCS15 转成 NewTx 10% BLER SINR 门限")
+    check(abs(tdd["cqi_mcs_sinr_db"] - 17.6419) < 1e-3,
+          "初始 MCS19 转成 NewTx 10% BLER SINR 门限")
     check(tdd["bf_gain_per_stream_db"] == [3.0, 2.0],
           "BF Gain 逐流等于 SVD post-MMSE SINR 减 PMI post-MMSE SINR")
     check(abs(tdd["bf_gain_user_db"] - 2.5) < 1e-12,
           "用户 BF Gain 在所有 RB×流上做 dB 域算术平均")
-    check(abs(tdd["user_sinr_db"] - 16.5421) < 1e-3,
+    check(abs(tdd["user_sinr_db"] - 20.1419) < 1e-3,
           "用户 SINR 等于初始门限叠加逐 RB/流 BF Gain 后的 dB 域平均")
     check("dB domain" in tdd["sinr_aggregation"],
           "结果显式声明 dB 域平均口径")
-    check(tdd["mcs_after_bf"] == 17,
-          "叠加 BF Gain 后按 NewTx 门限重映射到 MCS17")
-    check(abs(tdd["mcs_before_floor"] - 16.8) < 1e-12 and
-          tdd["mcs_after_floor"] == 16 and tdd["final_mcs"] == 16,
+    check(tdd["mcs_after_bf"] == 21,
+          "叠加 BF Gain 后按 NewTx 门限重映射到 MCS21")
+    check(abs(tdd["mcs_before_floor"] - 20.8) < 1e-12 and
+          tdd["mcs_after_floor"] == 20 and tdd["final_mcs"] == 20,
           "OLLA 在 MCS 域相加后严格向下取整并钳位")
     check(0.0 <= tdd["final_mcs_newtx_bler"] <= 1.0,
-          "最终 MCS 返回公司曲线对应的 NewTx BLER")
+          "最终 MCS 返回预置曲线对应的 NewTx BLER")
     check(tdd["receiver"] == "classic MMSE" and
           "only precoding weight changes" in tdd["fairness_contract"],
           "结果钉住经典 MMSE 与只改变预编码权的公平对照")
@@ -304,7 +415,7 @@ def main() -> None:
     floor_edge = la.tdd_mcs_adaptation(
         9, [[14.0]], [[14.0]], olla_mcs_offset=-0.01,
     )
-    check(floor_edge["mcs_after_bf"] == 15 and floor_edge["final_mcs"] == 14,
+    check(floor_edge["mcs_after_bf"] == 19 and floor_edge["final_mcs"] == 18,
           "极小负 OLLA 也按数学 floor 降一档，不做截零取整")
 
     try:
@@ -320,6 +431,9 @@ def main() -> None:
     except ValueError:
         nan_rejected = True
     check(nan_rejected, "非有限 SINR 不进入 BF Gain 与 MCS 决策")
+
+    test_tdd_bf_gain_uses_gnb_csi_not_true_channel()
+    check(True, "sr_tdd_mcs 只用 gNB 可见 CSI 计算进入 MCS 的 BF Gain，h_true 只作事后审计")
 
     # -----------------------------------------------------------------------
     sect("7  链路自适应端到端")
@@ -512,6 +626,15 @@ def main() -> None:
             print("  -", f)
         sys.exit(1)
     print("链路自适应与并行生成全部通过。")
+
+
+def test_main_script():
+    """pytest 入口：脚本主体全部检查在此执行（失败时 sys.exit(1)）。
+
+    只跑脚本不跑 pytest（或反过来）都会漏掉另一半——两种执行模型必须看到
+    同一个真理，这条薄壳就是为此存在的。
+    """
+    main()
 
 
 if __name__ == "__main__":

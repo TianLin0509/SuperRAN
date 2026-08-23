@@ -10,7 +10,7 @@
 | "达成率只有 40%，算法不行" | 先看 MCS 分布：压在最高档就是表封顶，跟算法无关 |
 | "表 3 算出 0.1%，所以所有配置都可靠" | 曲线只代表经典 MMSE 接收机的 SINR→BLER 映射，其他维度当前不建模 |
 | "换 mcs_table=2 就一定更快" | 只有确实压在表顶时才有效。实测 29 dB 场景 1373 → 1690 Mbps，低信噪比处无差别 |
-| "BLER 是 3GPP 实测的" | 表 1/2 是有限码长分析模型，表 3 是用户提供的曲线，两者都不是标准曲线 |
+| "BLER 是 3GPP 实测的" | 表 1/2 是有限码长分析模型，表 3 是内置预置曲线，两者都不是标准曲线 |
 
 ## 香农谱效不是吞吐 —— `sr_throughput`
 
@@ -57,39 +57,40 @@
 
 **一条必须守住的边界**：表 1/2 的 MCS/CQI/TBS 按 38.214 精确算，QAM 约束
 容量精确求积，但 BLER 是**有限码长分析模型**。表 3 则是用户提供的 28 档 MCS +
-56 条 NewTx/ReTx 解调曲线（1824 点），**不是 3GPP 标准曲线**。数据所有者已确认：
-源标签 Es/No 就是经典 MMSE 接收机的 SINR；公司误块事件是一个已调度 TTI 中该用户
-的整个 TB，系统不单独暴露 CBLER。概念查询输入包含当次 TBS、post-MMSE SINR、MCS、
-NewTx/ReTx 与固定接收机 profile，每个 grant 只抽一次 TB ACK/NACK。物理编码内部即使
-存在多个 CB，也不能在公司曲线后再次做 CB→TB 合成。
-
-当前导入常量没有保存每档 reference TBS/resource/rank 映射，运行时也没有用当次 TBS
-选曲线。因此必须把结论写成“TTI/TB 事件单位已对齐，TB-size 轴尚未对齐”；其他信道、
-层数和译码器维度也未参数化。曲线范围外只能保守钳位，不能外推。
+56 条 NewTx/ReTx 解调曲线（1824 点），**不是 3GPP 标准曲线**。预置 profile 约定：
+源标签 Es/No 在预置 profile 中解释为经典 MMSE 的单码字有效 SINR；误块事件是一个用户 grant/TTI 的
+独立单码字 TB，系统不单独暴露 CBLER。查询输入只含 MCS + 码字级有效 SINR；跨 RBG、
+跨 rank stream 都做 dB 平均。TBS/RE/rank/场景/码字数不是查询轴，这是通用曲线合同。
+物理编码内部即使存在多个 CB，也不能在预置曲线后再次做 CB→TB 合成。曲线范围外只能
+保守钳位，不能外推。
 
 - `sr_mcs_info(table=1/2, show_bler_anchors=true)` —— 看分析模型门限
 - `sr_mcs_info(table=3, show_bler_anchors=true)` —— 看用户曲线两套门限与哈希自检
 - `sr_bler_curve(mcs=..., tx_mode="newtx"/"retx")` —— 取单档原始曲线或插值
 - `sr_tdd_mcs(dataset_id=..., cqi=..., olla_mcs_offset=...)` —— TDD 最终 MCS 与逐流审计链
 
-表 3 的 HARQ 首传用 NewTx、后续用 ReTx；只有一条 ReTx 曲线，因此多次重传会
-复用它并显式标成假设（`harq_model=newtx_then_retx_curve_reused`）。
-不要从现有点集额外推断块长、信道、层数或译码器的影响，也不要把公司 TBLER 再按 CB 数放大。
-表 3 没有 CQI 曲线，CQI 仍走 38.214 Table 2 + 分析 BLER，由 `cqi_source` 明示。
+表 3 每 TB 最多一次重传，默认 IR、可选 CC，全部只从 NewTx 曲线推导；原始 ReTx 行
+仅供审计。IR 用半谱效等效 MCS 查表，CC 用原 MCS +3.0103 dB；等效 MCS 不得写回空口。
+重传保持原 MCS/RBG 数/rank/TBS，失败字节后续成为新 TB。不要把预置 TBLER 再按 CB 数放大。
+表 3 使用已确认的内部 CQI0..14 离散表，不使用 38.214 CQI 编号。
 
 ## TDD 的 CQI、BF Gain 与 OLLA
 
 用户要求 TDD MCS 或提到 CQI/BF Gain/OLLA 时，调用 `sr_tdd_mcs`，**不要在对话里
-手算**。固定顺序是：`CQI → 按谱效映射初始 MCS → 该 MCS 的 NewTx 目标 BLER
+手算**。固定顺序是：`内部 CQI → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标 BLER
 SINR 门限 → + BF Gain → 重映射 MCS → + OLLA → floor → 钳位 0..27`。
 
 - CQI 是 PMI 权测得的 **pre-BF** 索引，是**长期滤波的宽带量**；
-  CQI0 不调度，但也不能当 MCS0——它的意思是"低于 CQI 表下界"，退回实测 PMI SINR
+  内部 CQI0 是最低可用档并映射 MCS0，不是 38.214 out-of-range
 - BF Gain 是**瞬时量**，逐 RB、逐流计算 `post-MMSE SINR_SVD - post-MMSE SINR_PMI`
+- 进入 MCS 的 BF Gain 只在 gNB 可见 `h_prec` 上计算；`h_true` 上的差只作事后审计，
+  固定 `h_est` 时换 `h_true` 不得改变当次 `bf_gain_user_db`
 - 两条链路必须共用信道、CSI、rank、功率、噪声、干扰和经典 MMSE 接收机，
   只改变预编码权；**rank 不同不是 BF Gain**
 - 用户 SINR 对全部 RB×流在 **dB 域做算术平均**，不做线性域平均或 MIESM
 - OLLA 单位是连续 MCS 档位，不是 dB；正值更激进；先相加再严格向下取整
+- 内部表是 `[0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]`；当前曲线
+  只有 MCS0..27，所以 CQI14 保留请求 MCS28 但在该 profile 上显式钳到27
 - 默认目标首传 BLER 10%，ACK +0.1、NACK -0.9；反馈只更新下一调度时刻
 
 **发送侧 SINR 是 `Γ(MCS(CQI)) + BFGain`，不是接收 SINR 的均值。** 后者是个

@@ -413,6 +413,11 @@ def _infer_layout(n_ports: int, n_h: int | None, n_v: int | None) -> tuple[int, 
     if n_h and n_v:
         dual = n_ports == 2 * n_h * n_v
         return n_h, n_v, dual
+    if n_ports in (192, 1536):
+        raise ValueError(
+            f"{n_ports} 是物理阵子数（64T/256T AAU 的 1 驱 N 子阵），不是 "
+            "RF 端口数；PMI/Type-I 码本定义在 RF 端口（64/256）上，请先用 "
+            "F 矩阵把阵子级信道投影到端口域")
     known = {
         256: (16, 8),
         192: (16, 6),

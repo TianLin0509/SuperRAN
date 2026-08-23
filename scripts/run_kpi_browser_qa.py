@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,10 +27,19 @@ INTERVAL_CDF = ROOT / "presets" / "traffic" / "synthetic_interarrival_ms.csv"
 
 def _browser_qa(html_path: str) -> dict:
     """Exercise both KPI tabs in isolated Chromium at desktop/mobile widths."""
-    report: dict = {"viewports": {}, "errors": []}
+    report: dict = {"viewports": {}, "errors": [], "browser_backend": ""}
     target = Path(html_path).resolve().as_uri()
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        try:
+            browser = pw.chromium.launch(headless=True)
+            report["browser_backend"] = "playwright_chromium"
+        except PlaywrightError as exc:
+            # 开发机常有系统 Edge、但没有额外下载 Playwright Chromium。
+            # 使用同一 Chromium API 的系统通道可完成等价 DOM/布局 QA；降级留痕。
+            if "Executable doesn't exist" not in str(exc):
+                raise
+            browser = pw.chromium.launch(channel="msedge", headless=True)
+            report["browser_backend"] = "system_msedge_fallback"
         for name, viewport in {
             "desktop": {"width": 1440, "height": 900},
             "mobile": {"width": 375, "height": 812},
@@ -205,6 +215,11 @@ def main() -> None:
     result = calibration.result.as_dict()
     result["dataset_id"] = "synthetic-kpi-browser-qa"
     result["traffic_calibration"] = calibration.as_dict()
+    if str(calibration.as_dict().get("status")) != "target_met":
+        raise SystemExit(
+            "话务校准未达标（status="
+            f"{calibration.as_dict().get('status')!r}），"
+            "本页不能作为目标利用率的校准证据")
     result.setdefault("notes", []).append(
         "本页只使用合成信道和示例 CDF，验证呈现、校准和统计口径；"
         "不代表公司 CDF、现网负载或算法收益。"

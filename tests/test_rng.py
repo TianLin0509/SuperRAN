@@ -496,6 +496,11 @@ check(_selection["source"] == "llm_agent_explicit"
       and "mu_paired_prb_share_of_used" in _selection["cell"]["prioritized"]
       and "first_packet_delay_ms_p95" in _selection["cell"]["prioritized"],
       "调用 Agent 可显式编排 KPI，选择来源与优先 key 可审计")
+_harq_selection = kv.select_kpis(
+    _mixed_rep.as_dict(), kpi_intent="重点看 IR HARQ 重传与残留误块")
+check("retx_bler" in _harq_selection["cell"]["prioritized"]
+      and "residual_bler" in _harq_selection["cell"]["prioritized"],
+      "Agent 识别 HARQ/重传意图后优先展示重传与残留 BLER")
 _bounded_html = kv.render_html({
     "cell": {
         "small_pdb_miss_ratio": {

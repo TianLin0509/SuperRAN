@@ -139,6 +139,12 @@ def constrain_physical_matrix(
         if np.any(used > p * (1.0 + 1e-6)):
             raise ValueError(
                 f"EBF 输入总功率越界：max={float(np.max(used)):.9g} > P={p:.9g}")
+        # 欠功率也不能静默放行：列范数非单位的输入（总功率明显小于 P）
+        # 多半是上游方向矩阵没归一，放行会把功率缩水藏进吞吐里。
+        if np.any(used < p * (1.0 - 1e-3)):
+            raise ValueError(
+                f"EBF 输入欠功率：min={float(np.min(used)):.9g} < P={p:.9g}；"
+                "预编码列应单位范数（总功率恰为 P），请检查上游方向矩阵")
     elif m == "pebf":
         max_ant = np.max(per_ant, axis=1)
         scale = np.minimum(1.0, np.sqrt(cap / np.maximum(max_ant, _EPS)))

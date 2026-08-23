@@ -9,6 +9,7 @@ audit artifact; no directional benefit claim is derived from these cases.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,8 +25,13 @@ from superran import hardware as hw  # noqa: E402
 from superran import rng as rg  # noqa: E402
 from superran import system as sy  # noqa: E402
 
-OUT = ROOT / "artifacts" / "results" / "experience_randomized_property_stress.json"
+_OUT_RAW = os.environ.get("SR_STRESS_OUTPUT")
+OUT = (Path(_OUT_RAW) if _OUT_RAW else
+       ROOT / "artifacts" / "results" / "experience_randomized_property_stress.json")
+if not OUT.is_absolute():
+    OUT = ROOT / OUT
 N_CASES = 18
+_SEED_BASE = int(os.environ.get("SR_STRESS_SEED", "83117"))
 
 
 def _channels(
@@ -60,7 +66,9 @@ def _channels(
 
 
 def _finite(value: Any) -> bool:
-    return value is None or not isinstance(value, float) or np.isfinite(value)
+    # None / 非数值必须判失败：KPI 键缺失或改名时 cell.get 返回 None，
+    # 旧实现把它当有限直接放行，检查形同虚设。
+    return isinstance(value, (int, float)) and bool(np.isfinite(value))
 
 
 def _run_case(case_id: int) -> dict[str, Any]:
@@ -76,7 +84,8 @@ def _run_case(case_id: int) -> dict[str, Any]:
     mu_enabled = bool(case_id % 4 != 0)
     precoder = "type1" if case_id % 5 == 0 else "svd"
     h_true, h_est, geo_sinr, geo_sir = _channels(70_000 + case_id)
-    book = rg.RngBook(master_seed=83_117, replication=case_id)
+    # 种子可经 SR_STRESS_SEED 换批；默认仍是历史基线 83117
+    book = rg.RngBook(master_seed=_SEED_BASE, replication=case_id)
     csi = ca.CsiConfig(
         srs_period_ms=srs_ms,
         hopping=hopping,
@@ -176,6 +185,8 @@ def _run_case(case_id: int) -> dict[str, Any]:
         ),
     }
     allocations = list(diag["allocation_sample"])
+    # 空样本上 all(...) 恒真——先断言非空，否则下面三条全是 vacuous-true
+    checks["allocations_nonempty"] = len(allocations) > 0
     checks["pf_credit_is_scheduled_tbs"] = all(
         int(row["pf_credit_bytes"]) == int(row["scheduled_bytes"])
         for row in allocations
@@ -198,7 +209,9 @@ def _run_case(case_id: int) -> dict[str, Any]:
     )
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
-        raise AssertionError(f"case {case_id} failed: {failed}")
+        raise AssertionError(
+            f"case {case_id} failed: {failed}; "
+            f"allocations={len(allocations)}, checks={checks}")
     return {
         "case": case_id,
         "power_constraint": mode,
@@ -222,9 +235,18 @@ def _run_case(case_id: int) -> dict[str, Any]:
 
 def main() -> None:
     rows: list[dict[str, Any]] = []
-    for case_id in range(N_CASES):
-        print(f"PROPERTY {case_id + 1}/{N_CASES}")
-        rows.append(_run_case(case_id))
+    try:
+        for case_id in range(N_CASES):
+            print(f"PROPERTY {case_id + 1}/{N_CASES}")
+            rows.append(_run_case(case_id))
+    finally:
+        # 失败也要留下已完成 case 的证据，不是零落盘
+        if rows:
+            OUT.parent.mkdir(parents=True, exist_ok=True)
+            OUT.write_text(json.dumps(
+                {"stage": "randomized_property_stress", "partial": True,
+                 "cases": rows}, ensure_ascii=False, indent=2, allow_nan=False),
+                encoding="utf-8", newline="\n")
     payload = {
         "stage": "randomized_property_stress",
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -234,6 +256,7 @@ def main() -> None:
         "cases": rows,
         "summary": {
             "cases": len(rows),
+            "master_seed": _SEED_BASE,
             "carrier_profile_id": hw.SUPERRAN_TDD_CARRIER_PROFILE_ID,
             "checks_per_case": len(rows[0]["checks"]),
             "checks_passed": sum(

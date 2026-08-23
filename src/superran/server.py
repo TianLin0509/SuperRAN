@@ -39,6 +39,7 @@ from . import decisions as dec
 from . import deliver as dlv
 from . import generate as gen
 from . import plan as pl
+from . import provenance
 
 mcp = _ServerClass("superran")
 
@@ -150,12 +151,18 @@ def _system_adaptation_contract(
     resolved_mu_down: float,
 ) -> dict[str, Any]:
     """Build auditable OLLA/MCS metadata for ``sr_system_sim`` only."""
+    from . import linkadapt as la  # noqa: PLC0415
     from . import system as sysm  # noqa: PLC0415
 
     return {
         "olla_configuration": {
             "target_bler": float(target_bler),
+            "domain": "continuous_mcs_index",
+            "application_order": "SINR-to-MCS, then OLLA, then floor and clip",
+            "legacy_parameter_names": "*_db names retained for API compatibility",
             "su": {
+                "step_up_mcs": float(olla_step_up_db),
+                "step_down_mcs": float(resolved_su_down),
                 "step_up_db": float(olla_step_up_db),
                 "step_down_db": float(resolved_su_down),
                 "step_down_source": (
@@ -164,6 +171,8 @@ def _system_adaptation_contract(
                 ),
             },
             "mu": {
+                "step_up_mcs": float(mu_olla_step_up_db),
+                "step_down_mcs": float(resolved_mu_down),
                 "step_up_db": float(mu_olla_step_up_db),
                 "step_down_db": float(resolved_mu_down),
                 "step_down_source": (
@@ -179,10 +188,21 @@ def _system_adaptation_contract(
             # 抄了就会漂，漂了这段元数据就在静默说谎。
             "table": int(inspect.signature(
                 sysm.build_link_tables).parameters["table"].default),
-            "profile": "company_20b_256qam",
+            "profile": "preset_20b_256qam",
+            "cqi_profile": la.INTERNAL_CQI_PROFILE_ID,
+            "cqi_to_mcs": list(la.INTERNAL_CQI_TO_MCS),
+            "cqi_zero_semantics": "lowest usable entry maps to MCS0",
+            "top_mapping_limit": (
+                "CQI14 requests MCS28; current MCS0..27 curve profile clips to 27"
+            ),
             "scope": (
-                "experience_v2 fixed company table"
+                "experience_v2 fixed preset table"
                 if mode == "experience" else "capacity legacy table"
+            ),
+            "bler_abstraction": (
+                "one user grant per TTI is one independent single-codeword TB; "
+                "codeword SINR is averaged in dB across RBGs and rank streams; "
+                "preset curves are universal across TBS/RE/rank/scenario"
             ),
             "extensibility": (
                 "table/profile remains an explicit internal contract; unsupported "
@@ -328,7 +348,10 @@ def sr_plan(
 
     用户若无明显偏好，直接用默认值调 sr_generate 即可，不必逐条确认。
     """
-    draft, profile = pl.create_draft(intent, preset=preset, overrides=overrides)
+    try:
+        draft, profile = pl.create_draft(intent, preset=preset, overrides=overrides)
+    except (KeyError, ValueError) as exc:
+        return {"error": str(exc)}
     proposal = pl.build_proposal(draft, profile, max_questions=max(1, min(max_questions, 8)))
 
     cfg, own = pl.resolved_config(draft)
@@ -361,7 +384,10 @@ def sr_revise(
     design 不影响任何仿真参数，但会写进计划书——三个月后回看时，
     这部分比参数值有用得多。
     """
-    draft, profile, changes = pl.revise_draft(draft_id, overrides, design)
+    try:
+        draft, profile, changes = pl.revise_draft(draft_id, overrides, design)
+    except (KeyError, ValueError) as exc:
+        return {"error": str(exc)}
     proposal = pl.build_proposal(draft, profile, max_questions=5)
     proposal["changes"] = changes
     proposal["next"] = "确认无误后调 sr_generate(draft_id=...)"
@@ -464,7 +490,10 @@ def _generate_sync(
     collect_ssb: bool | None = None,
 ) -> dict[str, Any]:
     if draft_id:
-        draft = pl.load_draft(draft_id)
+        try:
+            draft = pl.load_draft(draft_id)
+        except (KeyError, ValueError) as exc:
+            return {"error": str(exc)}
         profile = next(
             (p for p in dec.TASK_PROFILES if p.task == draft.task), dec.TASK_PROFILES[-1]
         )
@@ -552,13 +581,19 @@ def sr_deliver(dataset_id: str, want: str | None = None) -> dict[str, Any]:
 
     同一个数据集可以反复取货要不同的测量量，**不必重跑仿真**。
     """
-    return _jsonable(dlv.build_code(dataset_id, want))
+    try:
+        return _jsonable(dlv.build_code(dataset_id, want))
+    except (KeyError, FileNotFoundError, ValueError) as exc:
+        return {"error": f"加载数据集失败：{exc}"}
 
 
 @tool()
 def sr_describe_dataset(dataset_id: str) -> dict[str, Any]:
     """查看已生成数据集的维度、统计分布和可用字段。"""
-    s = gen.load_summary(dataset_id)
+    try:
+        s = gen.load_summary(dataset_id)
+    except (KeyError, FileNotFoundError, ValueError) as exc:
+        return {"error": f"加载数据集失败：{exc}"}
     return _jsonable(
         {
             "dataset_id": dataset_id,
@@ -1062,14 +1097,16 @@ async def sr_throughput(
     边缘用户吞吐是 3GPP 评估里的公平性指标，比均值更能说明问题。
 
     `mcs_table`：1 = 最高 64QAM（38.214 Table 5.1.3.1-1），
-    2 = 含 256QAM（Table 5.1.3.1-2），3 = 用户提供的 20B 256QAM MCS +
+    2 = 含 256QAM（Table 5.1.3.1-2），3 = 内置的 20B 256QAM MCS +
     NewTx/ReTx 解调曲线。**MCS 分布里大量样本压在最高档时，
     说明限制来自 MCS 表而不是信道**，换表 2 通常能明显提升。
 
-    表 1/2 的 BLER 是有限码长分析模型，不是实测。表 3 的 BLER 来自用户提供的
+    表 1/2 的 BLER 是有限码长分析模型，不是实测。表 3 的 BLER 来自预置的
     解调曲线，也不是 3GPP 标准曲线；源标签 Es/No 表示经典 MMSE 接收机 SINR。
-    表 3 的 HARQ 首传用 NewTx、后续用 ReTx 曲线；多次重传复用同一 ReTx 曲线。
-    表 3 没有 CQI 曲线，CQI 仍用 38.214 Table 2 + 分析 BLER，并在结果中标明来源。
+    表 3 的 HARQ 只允许一次重传：默认 IR 用半谱效等效 MCS，可选 CC 用原 MCS
+    的码字 SINR +3.0103 dB；两者都只查询 NewTx 曲线，空口 MCS 不会被等效档改写。
+    表 3 使用已确认的内部 CQI0..14 离散映射，CQI0→MCS0；它不是
+    38.214 CQI 表。
     """
     return await anyio.to_thread.run_sync(
         functools.partial(
@@ -1085,9 +1122,12 @@ def _throughput_sync(*, dataset_id: str, mcs_table: int, target_bler: float,
     from . import loader as ld
 
     ds = ld.load(dataset_id)
-    st = ds.throughput(max_samples=max_samples, mcs_table=mcs_table,
-                       cqi_table=min(mcs_table, 2), target_bler=target_bler,
-                       method=method)
+    throughput_kw: dict[str, Any] = {
+        "mcs_table": mcs_table, "target_bler": target_bler, "method": method,
+    }
+    if mcs_table != 3:
+        throughput_kw["cqi_table"] = min(mcs_table, 2)
+    st = ds.throughput(max_samples=max_samples, **throughput_kw)
     out = st.as_dict()
     out["dataset_id"] = dataset_id
     out["mcs_table"] = mcs_table
@@ -1115,9 +1155,12 @@ def sr_mcs_info(
     公开的 NR 链路级曲线**——常见量级是 MCS0 约 -5~-7 dB、MCS28 约 20~23 dB。
 
     `table=1/2` 是逐字录入的 38.214 标准值，BLER 是分析模型。
-    `table=3` 是用户提供的 20B 256QAM MCS 与 NewTx/ReTx 曲线：返回两套码率、
-    10% BLER 门限和数据哈希自检。它不是 3GPP 标准表；接收机为经典 MMSE，
-    源标签 Es/No 表示 SINR，其他链路维度暂不参数化。
+    `table=3` 是内置的 20B 256QAM MCS 与 NewTx/ReTx 预置曲线：返回两套码率、
+    10% BLER 门限和数据哈希自检。它不是 3GPP 标准表；源标签 Es/No 表示
+    经典 MMSE 的单码字有效 SINR。系统按已确认合同只用 MCS+SINR 查询通用
+    NewTx 曲线；TBS/RE/rank/场景不作为 BLER 查询轴，ReTx 行仅保留审计。
+    其 `cqi_table` 字段是内部 CQI0..14 → MCS 离散表，不是 38.214 CQI 表；
+    CQI14 的 `requested_mcs=28` 在当前 MCS0..27 profile 上会显式标记钳位。
     """
     from . import linkadapt as la
 
@@ -1128,16 +1171,20 @@ def sr_mcs_info(
         la.bc.mcs_profile_rows() if table == 3
         else [m.as_dict() for m in la.MCS_TABLES[table]]
     )
-    out: dict[str, Any] = {
-        "mcs_table": mcs_rows,
-        "cqi_table": [
+    cqi_rows = (
+        la.internal_cqi_mapping_rows(mcs_table=3)
+        if table == 3 else [
             {"index": c.index, "modulation": la._MOD_NAME[c.q_m],
              "code_rate": round(c.r_1024 / 1024, 4), "se": c.se}
-            for c in la.CQI_TABLES[min(table, 2)]
-        ],
+            for c in la.CQI_TABLES[table]
+        ]
+    )
+    out: dict[str, Any] = {
+        "mcs_table": mcs_rows,
+        "cqi_table": cqi_rows,
         "verify": la.bc.verify_curves() if table == 3 else la.verify_tables(),
         "source": la.MCS_TABLE_SOURCES[table],
-        "cqi_source": "3GPP TS 38.214 CQI Table 2" if table == 3 else "same table family",
+        "cqi_source": la.INTERNAL_CQI_SOURCE if table == 3 else "same table family",
     }
     if show_bler_anchors:
         out["bler_anchors"] = (
@@ -1154,14 +1201,15 @@ def sr_bler_curve(
     sinr_db_list: list[float] | None = None,
     target_bler: float = 0.1,
 ) -> dict[str, Any]:
-    """查用户提供的单档 BLER 曲线，并可在任意 SINR 点插值。
+    """查预置表中的单档 BLER 曲线，并可在任意 SINR 点插值。
 
     `mcs` 为 0..27；`tx_mode` 为 `newtx` 或 `retx`。默认返回完整原始点、码率、
-    10% BLER 门限和来源口径。传 `sinr_db_list` 时额外返回查询点的 BLER。
+    10% BLER 门限和来源口径。`retx` 仅用于查看/审计原始资产；当前系统 HARQ
+    的 IR/CC 都从 NewTx 曲线推导。传 `sinr_db_list` 时额外返回查询点的 BLER。
 
     插值在 log10(BLER) 域线性完成；低于曲线范围钳到 1，高于范围钳到最后一个
-    实测点，绝不外推一条看似精确的尾巴。源脚本标签 Es/No 已确认表示 SINR，
-    接收机为经典 MMSE；返回值同时保留原始标签和物理口径。
+    实测点，绝不外推一条看似精确的尾巴。源脚本标签 Es/No 已确认表示经典
+    MMSE 的单码字有效 SINR；返回值同时保留原始标签和物理口径。
     """
     from . import linkadapt as la
 
@@ -1185,12 +1233,18 @@ async def sr_tdd_mcs(
 ) -> dict[str, Any]:
     """TDD 下按 CQI、SVD-vs-PMI BF Gain 和 OLLA 选择最终 MCS。
 
-    真实调用链是：CQI → 按频谱效率映射表 3 初始 MCS → 该 MCS 的 NewTx 目标
+    真实调用链是：内部 CQI → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标
     BLER SINR 门限 → 在同一信道/CSI/rank/功率/干扰/MMSE 接收机下逐 RB、逐流计算
     ``SINR_SVD - SINR_PMI`` → 在 dB 域对全部 RB×流求算术平均 → 按表 3 重映射
     MCS → 加连续的 ``olla_mcs_offset`` → ``floor`` → 钳位到 0..27。
 
-    `CQI=0` 表示 out-of-range，不调度。`feedback_ack` 可选：给出时按目标首传
+    ``olla_mcs_offset`` 的单位是连续 MCS 档位。``sr_system_sim`` /
+    ``experience_v2`` 也遵循同一顺序：先由 SINR 反折无 OLLA MCS，再加
+    用户级 MCS-domain OLLA、floor 并钳位。系统 API 的 ``*_db`` 参数名
+    仅为历史兼容保留，值不再解释为 dB。
+
+    `CQI=0` 是最低可用档并映射 MCS0，不是 out-of-range。`feedback_ack` 可选：
+    给出时按目标首传
     BLER 更新下一时刻的 OLLA；10% 默认对应 ACK +0.1、NACK -0.9 MCS。当前时刻
     使用传入的 OLLA，反馈只影响返回的 `olla_next_offset_mcs`。
 
@@ -1277,9 +1331,12 @@ def _sweep_sync(*, dataset_id: str, snr_db_list: list[float] | None,
     n_prb = int(ds.h_true.shape[2])
     rows = []
     for snr in grid:
-        res = [ds.link_adaptation(i, snr_db=float(snr), n_prb=n_prb,
-                                  mcs_table=mcs_table, cqi_table=min(mcs_table, 2))
-               for i in range(n)]
+        link_kw: dict[str, Any] = {"mcs_table": mcs_table}
+        if mcs_table != 3:
+            link_kw["cqi_table"] = min(mcs_table, 2)
+        res = [ds.link_adaptation(
+            i, snr_db=float(snr), n_prb=n_prb, **link_kw)
+            for i in range(n)]
         st = la.throughput_stats(res)
         rows.append({
             "snr_db": float(snr),
@@ -1397,7 +1454,7 @@ def sr_design_interference(target_iot_db: float = 20.0) -> dict[str, Any]:
 
 
 @tool()
-def sr_probe_scenario(
+async def sr_probe_scenario(
     preset: str | None = None,
     config: dict[str, Any] | None = None,
     num_samples: int = 30,
@@ -1435,7 +1492,8 @@ def sr_probe_scenario(
     if not cfg:
         return {"error": "preset 与 config 至少给一个。"}
 
-    out = sc.probe(cfg, num_samples=num_samples)
+    out = await anyio.to_thread.run_sync(
+        functools.partial(sc.probe, cfg, num_samples=num_samples))
     out["preset"] = preset
     if dep_notes:
         out["dependent_override_notes"] = dep_notes
@@ -1443,7 +1501,7 @@ def sr_probe_scenario(
 
 
 @tool()
-def sr_compare_scenarios(
+async def sr_compare_scenarios(
     presets: list[str],
     num_samples: int = 30,
     overrides: dict[str, Any] | None = None,
@@ -1477,7 +1535,8 @@ def sr_compare_scenarios(
     if not named:
         return {"error": "presets 不能为空。"}
 
-    out = _jsonable(sc.compare_probes(named, num_samples=num_samples))
+    out = _jsonable(await anyio.to_thread.run_sync(
+        functools.partial(sc.compare_probes, named, num_samples=num_samples)))
     if dep_notes:
         out["dependent_override_notes"] = dep_notes
     return out
@@ -1489,7 +1548,7 @@ def sr_compare_scenarios(
 
 
 @tool()
-def sr_spec_sheet(
+async def sr_spec_sheet(
     draft_id: str | None = None,
     dataset_id: str | None = None,
     preset: str | None = None,
@@ -1554,7 +1613,10 @@ def sr_spec_sheet(
     if dataset_id:
         from . import load as _load
 
-        ds = _load(dataset_id)
+        try:
+            ds = _load(dataset_id)
+        except (KeyError, FileNotFoundError, ValueError) as exc:
+            return {"error": f"加载数据集失败：{exc}"}
         cfg = dict(ds.config)
         try:
             pos = ds.ue_position
@@ -1562,7 +1624,10 @@ def sr_spec_sheet(
         except Exception:  # noqa: BLE001
             ue_xy = None
     elif draft_id:
-        draft = pl.load_draft(draft_id)
+        try:
+            draft = pl.load_draft(draft_id)
+        except (KeyError, ValueError) as exc:
+            return {"error": str(exc)}
         cfg, _own = pl.resolved_config(draft)
         user_set = list(draft.user_set)
     elif preset:
@@ -1577,11 +1642,12 @@ def sr_spec_sheet(
     if not cfg:
         return {"error": "需要 draft_id / dataset_id / preset / config 其中之一。"}
 
-    out = sp.write_spec(
+    out = await anyio.to_thread.run_sync(functools.partial(
+        sp.write_spec,
         cfg, user_set=user_set, dataset_id=dataset_id,
         title=title or "仿真说明书", ue_xy=ue_xy, highlight=highlight,
         open_browser=open_browser,
-    )
+    ))
     if dep_notes:
         out["dependent_override_notes"] = dep_notes
     if out.get("writeback") == "post":
@@ -1600,7 +1666,7 @@ def sr_spec_sheet(
 
 
 @tool()
-def sr_await_config(timeout_s: float = 90.0, spec_id: str | None = None) -> dict[str, Any]:
+async def sr_await_config(timeout_s: float = 90.0, spec_id: str | None = None) -> dict[str, Any]:
     """等用户在说明书页面上点「应用到仿真」，把他改的参数取回来。
 
     **紧跟在 ``sr_spec_sheet`` 之后调**（前提是它返回 ``writeback="post"``）。
@@ -1624,7 +1690,9 @@ def sr_await_config(timeout_s: float = 90.0, spec_id: str | None = None) -> dict
     """
     from . import bridge as br
 
-    subs = br.await_submission(min(float(timeout_s), 240.0), spec_id)
+    # threading.Event.wait 是同步阻塞；放线程里等，别把事件循环冻住
+    subs = await anyio.to_thread.run_sync(
+        functools.partial(br.await_submission, min(float(timeout_s), 240.0), spec_id))
     if not subs:
         return {
             "got": 0,
@@ -1681,6 +1749,7 @@ def sr_system_sim(
     pf_window_tti: int = 100,
     pf_accounting: str = "auto",
     target_bler: float = 0.1,
+    harq_combining: str = "ir",
     olla_step_up_db: float = 0.01,
     olla_step_down_db: float | None = None,
     qos_avg_rate_exponent: float = 1.0,
@@ -1719,8 +1788,10 @@ def sr_system_sim(
 
     这是和链路级完全不同的一层。链路级问"这个信道能跑多快"，
     系统级问"**这个小区里的用户实际体验到多快**"——把话务到达与结束、
-    调度器的多用户取舍与缓冲区排空全算进去；legacy_v1 走 NewTx/ReTx 曲线重传，
-    experience_v2 的 NACK 字节留队后按 NewTx 重试，当前不做 HARQ 软合并。
+    调度器的多用户取舍与缓冲区排空全算进去。两种模式都把一个用户在一个 TTI
+    的 grant 视为一个独立单码字 TB；最多一次重传，发送 MCS/RBG/rank/TBS 不变。
+    默认 IR 以“原 MCS 半谱效对应的等效 MCS”查 NewTx 曲线；CC 以原 MCS、SINR
+    +10log10(2) dB 查同一 NewTx 曲线。
 
     ``capacity`` 保留历史 ``legacy_v1`` 的全带/trim 口径以复现旧结果；
     ``experience`` 的 ``experience_v2`` 才使用 28.552 Rel-19 DRB busy-period：
@@ -1786,6 +1857,9 @@ def sr_system_sim(
     target_bler : MCS 选择与 SU/MU OLLA 共用的目标 IBLER。未显式给 down 步长时，
         按 ``s_down=s_up*(1-target)/target`` 自动反解，防止链路表按 20% 选 MCS、
         主循环却仍按 10% OLLA 记账。
+    harq_combining : ``ir``（默认，增量冗余的半谱效等效 MCS）或 ``cc``
+        （追逐合并，码字 SINR +3.0103 dB）。每个 TB 最多重传一次；等效 MCS
+        只用于 BLER 查表，实际重传 MCS 与 RBG 数保持和初传一致。
     qos_* : ``qos_pf`` 的显式参数化形式
         ``w(priority) * R_inst^beta / R_avg^alpha * delay^gamma``。默认
         alpha=beta=1、gamma=0、w=1，严格退化成经典 PF；它不是未确认定义的 EPF。
@@ -1793,8 +1867,10 @@ def sr_system_sim(
         的 TB volume / padding volume 折算单时隙小 burst；``exclude`` 保留旧式盲区。
     mu_enabled : 是否允许 MU 配对。默认关，先看清 SU 基线。
     mu_corr_threshold : MU SUS 配对的归一化相关性上限，默认 0.7。
-    mu_olla_step_up_db / mu_olla_step_down_db : MU 专属用户级 OLLA 步长；
-        down 省略时按 target_bler 反解；状态按用户维护，不按配对关系拆分。
+    olla_step_up_db / olla_step_down_db : 历史参数名；值是连续 MCS 档位步长，
+        在 SINR 反折 MCS 之后叠加。down 省略时按 target_bler 反解。
+    mu_olla_step_up_db / mu_olla_step_down_db : MU 专属用户级 MCS-domain OLLA；
+        历史 ``*_db`` 名仅为兼容保留，状态按用户维护，不按配对关系拆分。
     neighbor_prb_util : **邻区 PRB 利用率**，默认 0.3。ChannelHub 的几何 SINR
         是按所有邻区都在发算的（等于 100%），真实网络 5G 典型是 10%/30%/50%。
         按 full buffer 算会把干扰放大到不真实的程度。1.0 退化成原行为。
@@ -2025,7 +2101,8 @@ def sr_system_sim(
             classes=profile_cfg)
         system_cfg = sysm.SystemConfig(
             evaluation_mode=mode, duration_s=float(duration_s),
-            tdd_pattern=tdd_pattern, seed=seed, snapshot_update_ms=snap_ms,
+            tdd_pattern=tdd_pattern, harq_combining=str(harq_combining),
+            seed=seed, snapshot_update_ms=snap_ms,
             power_constraint=str(power_constraint), rb_power_control=power_cfg,
             scs_khz=carrier["scs_khz"],
             num_rbg=carrier["num_rbg"], rb_per_rbg=carrier["rb_per_rbg"],
@@ -2057,6 +2134,20 @@ def sr_system_sim(
     _t_build = time.perf_counter()
     try:
         _array_md = ds.summary.get("antenna_model", {}) or {}
+        _port_order = _array_md.get("port_order")
+        _v_order = _array_md.get("vertical_index_order")
+        if (_port_order is None
+                and ds.summary.get("source") in ("internal_sim", "sionna_rt")):
+            # 与 loader.pmi 同一回退合同：没有天线元数据的旧样本按历史
+            # h_v_pol + bottom_to_top 读，并披露——不静默按 canonical 错配。
+            _port_order = "h_v_pol"
+            _v_order = _v_order or "bottom_to_top"
+            _pre_notes.append(
+                "**天线端口序回退**：数据集没有 antenna_model 元数据，PMI/Type-I "
+                "权按历史 h_v_pol + bottom_to_top 端口序读取（与 loader.pmi 同一合同）。")
+        elif _port_order is not None and _v_order is None:
+            _v_order = ("bottom_to_top" if str(_port_order) == "h_v_pol"
+                        else "top_to_bottom")
         tables = sysm.build_link_tables(
             h_users, [float(x) for x in sinr], num_ues=n_ue, geo_sir_db=sir,
             h_for_precoding_users=h_est_users,
@@ -2073,8 +2164,8 @@ def sr_system_sim(
             mu_csi_error_variance=float(mu_csi_error_variance),
             rb_power_control=power_cfg, power_geometry=power_geometry,
             bs_panel=ds.config.get("bs_panel"),
-            port_order=_array_md.get("port_order"),
-            vertical_index_order=_array_md.get("vertical_index_order"))
+            port_order=_port_order,
+            vertical_index_order=_v_order)
     except ValueError as exc:
         return {"error": str(exc)}
     mu_gain = (sysm.measure_mu_gain(
@@ -2257,6 +2348,25 @@ def sr_system_sim(
                 f"tolerance=±{cal_dict['tolerance_absolute']:.1%}。"
                 "结果按实测值保留，未回填目标数。")
     out["notes"] = notes
+    runtime_provenance = provenance.snapshot(source="system_sim")
+    dataset_provenance = ds.summary.get("provenance")
+    provenance_check = provenance.compare(dataset_provenance, runtime_provenance)
+    out["provenance"] = {
+        "dataset": dataset_provenance,
+        "runtime": runtime_provenance,
+        "compatibility": provenance_check,
+    }
+    if provenance_check["status"] == "mismatch":
+        out["notes"].append(
+            "**数据集与当前运行代码的血缘不一致**："
+            + "；".join(provenance_check["mismatches"])
+            + "。结果仍可用于历史复现，但做当前版本正式结论前应重新生成信道。"
+        )
+    elif provenance_check["status"] == "unknown":
+        out["notes"].append(
+            "**数据集缺少完整 provenance（旧产物）**：无法证明当前系统代码与"
+            "生成信道时的版本一致；正式结论建议用当前版本重新生成。"
+        )
     out["num_samples"] = len(h_users)
     out["summary"] = res.text()
     out["timing"] = {

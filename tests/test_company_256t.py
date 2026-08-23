@@ -356,3 +356,7 @@ def test_internal_sim_minimal_company_array_generation(
     assert pmi.precoder.shape[0] == n_ports
     assert pmi.port_order == "pol_h_v"
     assert pmi.vertical_index_order == "top_to_bottom"
+if __name__ == "__main__":
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-q"]))

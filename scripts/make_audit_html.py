@@ -367,7 +367,7 @@ bimodal 抽出的 RBG 数只用来定 burst 的字节数，<b>不影响实际占
 
 <h2 id="a3">三、仿真实现的遗漏与待定</h2>
 
-<p><b>已知并已标注的</b>（不算漏）：HARQ 软合并复用同一条 ReTx 曲线、
+<p><b>已知并已标注的</b>（不算漏）：HARQ 只做一次 IR/CC 的 BLER 级抽象、未展开 RV/LLR/process timing，
 MU 是标量近似而非逐 TTI 真配对、<code>interference_model="precoded"</code>
 目前是空转旋钮。</p>
 

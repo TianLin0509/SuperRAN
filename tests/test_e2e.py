@@ -10,6 +10,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 # Windows 中文控制台是 GBK：print 含 U+FFFD 等字符时会炸 UnicodeEncodeError，
@@ -197,7 +199,7 @@ check(paths.delays_s.max() > 0, "每径时延非零")
 
 g = ds.rsrp(0)
 print(f"  每天线增益 {g.min():.1f} ~ {g.max():.1f} dB")
-check(True, "RSRP 可取")
+check(bool(np.isfinite(g).all()) and g.size > 0, "RSRP 可取且全部有限")
 
 geo = ds.geometry
 print(f"  几何字段：{sorted(geo)}")

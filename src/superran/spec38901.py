@@ -308,6 +308,18 @@ def apply_spec_tables() -> dict[str, Any]:
         replacements.update({key: value for key, value in optional.items() if key in supported})
         _cdl._PROFILES[name] = dataclasses.replace(prof, **replacements)
         patched.append(name)
+    missing = [name for name in COVERED if name not in patched]
+    if missing:
+        # 旧/分叉 checkout 的 _PROFILES 键名变迁会让覆盖整个落空或只盖一半——
+        # 落空不算失败是这层防御最要防的场景：异常要阻断，落空更要阻断。
+        return {
+            "applied": False,
+            "profiles": patched,
+            "error": (
+                f"ChannelHub 的 CDL 剖面注册表缺少 {missing}"
+                "（_PROFILES 键名可能随版本变迁），五张表未能全部覆盖；"
+                "设 SUPERRAN_CDL_SPEC=0 可复现未校准行为（数据不得称为标准 CDL）"),
+        }
     return {
         "applied": bool(patched),
         "profiles": patched,

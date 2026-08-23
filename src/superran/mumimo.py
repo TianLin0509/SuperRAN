@@ -175,7 +175,7 @@ def se_from_sinr(sinr_db: float, rank: int, *, table: int = 3,
                  target_bler: float = 0.1) -> tuple[float, Any]:
     """用户级 SINR + rank → ``(谱效, Mcs)``。谱效 = ``rank × MCS 的谱效``。
 
-    表 3 是公司实测的 20B NewTx 曲线（28 档 MCS），最贴近现网。
+    表 3 是内置的 20B NewTx 预置曲线（28 档 MCS）。
     """
     from . import linkadapt as la  # noqa: PLC0415
 
@@ -297,7 +297,9 @@ def _wideband_user_vectors(h_eff: np.ndarray) -> np.ndarray:
         cov = rows.conj().T @ rows / n_rb
         ev, vec = np.linalg.eigh(cov)
         top = int(np.argmax(ev.real))
-        out[k] = np.sqrt(max(float(ev[top].real), 0.0)) * vec[:, top].conj()
+        # Hermitian PSD 矩阵的主特征向量本身就是主方向；取共轭得到的是
+        # C^T 的特征向量，当发射方向用会让 w^H C w ≠ λ_max。
+        out[k] = np.sqrt(max(float(ev[top].real), 0.0)) * vec[:, top]
     return out
 
 
@@ -530,6 +532,11 @@ def mu_precoder(
     w_out = np.ascontiguousarray(w_all / np.maximum(col, _EPS)[:, None, :])
     p_out = np.zeros((n_rb, n_str), dtype=np.float64)
     if power_allocation == "waterfilling":
+        if method == "mrt":
+            raise ValueError(
+                "mrt + waterfilling 是错配组合：注水目标函数只取 |diag(HW)|²"
+                "（并行无干扰信道），而 MRT 的主要损伤正是用户间干扰；"
+                "请改用 zf/rzf 或 equal 功率分配")
         # 等效增益 |h_k w_k|^2；注水到 Σp = total_power。注水本身是逐 RB 的
         # 二分求解，保持原样——它不是热点，也不该为了形式统一而改数值。
         gains = np.abs(np.einsum("fkb,fbk->fk", h_all, w_out)) ** 2
@@ -583,7 +590,12 @@ def _waterfill(gain: np.ndarray, noise_power: float | np.ndarray,
 # ---------------------------------------------------------------------------
 @dataclass
 class MuPerformance:
-    """一次 MU 传输的评估结果。"""
+    """一次 MU 传输的评估结果。
+
+    ``se_per_user`` / ``sum_se`` 是逐 RB 香农均值的容量族口径
+    （``E_f[log2(1+γ_f)]``），不是逐 RB 查 MCS 的单码字口径；跨家族比较
+    （如与 ``su_mu_adaptation`` 的 MCS 口径）时注意不要混用。
+    """
 
     users: list[int]
     sinr_per_user_db: np.ndarray

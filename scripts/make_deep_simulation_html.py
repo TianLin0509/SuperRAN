@@ -478,7 +478,8 @@ def build() -> str:
         b = b_by_ue[a["ue"]]
         alloc_rows.append(
             f"<tr><td>UE{a['ue']}<br><span class=mini>{a['traffic_class']}</span></td><td>{a['queue_bytes_before']}</td>"
-            f"<td>r{a['rank']} / MCS {a['mcs']}<br><span class=mini>无 OLLA: {a['mcs_without_olla']}; Δ={a['olla_before_db']:.2f}dB</span></td>"
+            f"<td>r{a['rank']} / MCS {a['mcs']}<br><span class=mini>无 OLLA: {a['mcs_without_olla']}; "
+            f"Δ={a.get('olla_before_mcs', a['olla_before_db']):.2f} MCS</span></td>"
             f"<td>{a['required_rbg']} → {a['n_rbg']}</td><td>{a['scheduled_bytes']} / {a['payload_bytes']}</td>"
             f"<td>{badge(a['ack'], 'ACK', 'NACK')}<br><span class=mini>BLER {a['bler']:.4f}</span></td>"
             f"<td class=good>{a['pf_credit_bytes']}</td><td class=bad>{b['pf_credit_bytes']}</td>"
@@ -638,7 +639,7 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 {source_excerpt('src/superran/experience.py','n_need, _fits = lookup.required_rbg',before=16,after=74,title='实际实现：PF 排序后逐 UE 按需分 RBG')}</section>
 
 <section><div class="section-head"><h2><span class="num">4</span>BLER、ACK/NACK、OLLA 与 PF 平均值</h2></div>
-<p>实际 true SINR 查 BLER 曲线；固定的 <code>[replication, TTI, UE]</code> 均匀随机数决定 ACK。NACK 不扣 payload，字节留队，下一次按 NewTx 重试；本轮没有 HARQ soft combining。</p>
+<p>实际单码字 true SINR 与空口 MCS 查预置 NewTx 曲线；固定的 <code>[replication, TTI, UE]</code> 均匀随机数决定 ACK。NACK 后最多一次重传：默认 IR 做半谱效等效 MCS 查表，可选 CC 做 +3.0103 dB；空口 MCS、RBG 数、rank 与 TBS 保持不变。</p>
 <div class="formula">{F_OLLA}</div><p>ACK 向下调 offset、NACK 向上调；步长比保证目标 IBLER。OLLA 改的是下一次 MCS，不改本次真实 SINR。</p>
 <div class="formula">{F_RAVG}</div><p>正确臂的 credit 是本次实际 scheduled TBS；故障臂是 full-band potential TBS。是否 ACK 不改变“本 TTI 消耗了多少无线机会”的调度公平口径。</p>
 {rbg_strip_svg(trace_a)}
@@ -677,13 +678,13 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 <tr><td>P0 · correctness</td><td>本轮14项修复、PF反向臂、位置聚类</td><td>代码 + tests + deep JSON + 本HTML</td><td>14入口全绿；门1/2/3；字节/RBG守恒</td></tr>
 <tr><td>P1 · 产品口径</td><td>EPF、PF credit、tail fill、HARQ retry、burst/PDB定义</td><td>一页参数合同 + preset</td><td>每个参数有默认值、来源、替代臂</td></tr>
 <tr><td>P2 · 数据可信</td><td>≥40 snapshots/UE；neighbor served-channel/W；负载trace</td><td>新 dataset + manifest + Gate1</td><td>历史覆盖 CSI 最大陈旧时长；无周期伪回放</td></tr>
-<tr><td>P3 · 现场标定</td><td>DMRS/PTRS/CORESET RE；公司BLER；HARQ RTT/RV/process</td><td>版本化 link profile</td><td>TBS/BLER/OLLA锚点逐项对账</td></tr>
+<tr><td>P3 · 现场标定</td><td>DMRS/PTRS/CORESET RE；BLER 标定；HARQ RTT/RV/process</td><td>版本化 link profile</td><td>TBS/BLER/OLLA锚点逐项对账</td></tr>
 <tr><td>P4 · 能力扩展</td><td>逐RBG SINR、频选调度、MU pairing/ZF/RZF</td><td>独立实验计划和基线</td><td>不得与P1/P2同时改；增益可归因</td></tr>
 </tbody></table></div>
 {decision_cards()}
 <section><div class="section-head"><h2>规范调研：哪些是标准，哪些只是工程选择</h2></div>
 <ul class="source-list">
-<li><a href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138214/19.04.00_60/ts_138214v190400p.pdf">ETSI TS 138 214 V19.4.0 / 3GPP TS 38.214</a>：§5.1.3.1 MCS 表、§5.1.3.2 TBS 量化、§5.2.2.2 PMI/Type-I codebook。项目的 TBS 量化边界来自这里；公司20B MCS profile和 RE overhead不是标准默认。</li>
+<li><a href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138214/19.04.00_60/ts_138214v190400p.pdf">ETSI TS 138 214 V19.4.0 / 3GPP TS 38.214</a>：§5.1.3.1 MCS 表、§5.1.3.2 TBS 量化、§5.2.2.2 PMI/Type-I codebook。项目的 TBS 量化边界来自这里；预置 20B MCS profile 和 RE overhead 不是标准默认。</li>
 <li><a href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138211/19.04.00_60/ts_138211v190400p.pdf">ETSI TS 138 211 V19.4.0 / 3GPP TS 38.211</a>：§6.4.1.4 SRS resource/sequence/mapping。SRS 周期、跳频与处理延迟仍需现场配置。</li>
 <li><a href="https://www.etsi.org/deliver/etsi_tr/138900_138999/138901/19.04.00_60/tr_138901v190400p.pdf">ETSI TR 138 901 V19.4.0 / 3GPP TR 38.901</a>：§7.2 UMa；§7.7.1 指明 CDL-A/B/C 为 NLOS，CDL-C 表在7.7.1-3。它支撑场景/信道，不定义 PF/EPF。</li>
 <li><a href="https://www.etsi.org/deliver/etsi_ts/128500_128599/128552/19.07.00_60/ts_128552v190700p.pdf">ETSI TS 128 552 V19.7.0 / 3GPP TS 28.552</a>：§5.1.1.3.1 定义 DRB.UEThpDl，明确面向跨多 slot 的大 burst，并排除清空 buffer 的最后 piece；small packet 需另报时延/PDB。</li>

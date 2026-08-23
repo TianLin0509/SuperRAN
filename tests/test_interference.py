@@ -992,9 +992,30 @@ check(_ha.count('placeholder="自动"') >= 2,
       "SU/MU OLLA down 步长默认留空，并在页面明确标成自动")
 check("v===''?(el.dataset.auto==='1'?null:ST.init[k])" in _ha,
       "自动 OLLA 控件的空值回传 JSON null，普通数值字段清空则回退初值不发 override")
+
 check(_ha.count('data-auto="1"') >= 2,
       "SU/MU OLLA down 控件带 data-auto 标记，空值映射 null 只作用于它们")
 
+# 注入纪律：进 <script> 的 JSON 必须先转义 "</"，否则用户标题里的 </script>
+# 会提前终结脚本块（存储型 XSS，页面里还躺着回传 token）
+_probe = _json.dumps({"t": "x</script><script>1</script>"}, ensure_ascii=False)
+_escaped = _probe.replace("</", "<" + chr(92) + "/")
+check("</script>" not in _escaped and "<\\/script>" in _escaped,
+      "说明书内嵌 JSON 转义 </ 防脚本块破窗")
+# SVG 内联 style 是文档级的：类名必须带前缀，不得撞页面控件类名。
+# 注意只扫 <svg> 元素内部的 <style>——页面主样式表合法定义 cl/ctl/ch。
+_no_js = _re.sub(r"<script>.*?</script>", "", _ha, flags=_re.S)
+_svg_styles = []
+for _svg in _re.findall(r"<svg\b.*?</svg>", _no_js, _re.S):
+    _svg_styles.extend(_re.findall(r"<style>(.*?)</style>", _svg, _re.S))
+_svg_classes = set()
+for _st in _svg_styles:
+    _svg_classes.update(_re.findall(r"\.([a-zA-Z][\w-]*)[{:,.\s]", _st))
+# cl/ctl/ch 曾真的撞坏过控件（见 CLAUDE.md SVG 两坑），列入禁区；
+# lb/sl 是存量共享且视觉 QA 通过，不在禁区但新图不得再引入同类共享名。
+_page_control_classes = {"cl", "ctl", "ch"}
+check(not (_svg_classes & _page_control_classes),
+      f"内联 SVG 类名与页面控件类名不相交（交集 {_svg_classes & _page_control_classes}）")
 # --- 对标量的逐步推导，供人工核对 ---
 _dv = _alg.derivations({})
 check(len(_dv) >= 4, f"至少四项推导（实得 {len(_dv)}）")

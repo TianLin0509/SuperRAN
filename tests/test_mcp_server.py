@@ -89,13 +89,18 @@ async def main() -> None:
                 "kpi_focus", "kpi_intent"}
             check(traffic_kpi_args.issubset(sim_props),
                   "MCP schema 公开 CDF、多 profile、目标 PRB 校准与 Agent KPI 编排")
+            check("harq_combining" in sim_props,
+                  "MCP schema 公开一次重传的 IR/CC 合并选择")
 
             print("\n" + "=" * 68 + "\n1.5  表驱动 BLER 查询\n" + "=" * 68)
             curve = _payload(await session.call_tool(
                 "sr_bler_curve",
                 {"mcs": 15, "tx_mode": "newtx", "sinr_db_list": [14.0, 14.05]},
             ))
-            check(curve.get("source_id") == "company_20b_256qam", "MCP 返回曲线来源")
+            check(curve.get("source_id") == "preset_20b_256qam", "MCP 返回预置曲线来源")
+            check("system_retx_model" in curve
+                  and "extra_code_rate_rows_status" in curve,
+                  "MCP 曲线返回系统重传口径与未保留额外码率行状态")
             check(abs(curve.get("required_sinr_db", 0.0) - 14.0421) < 1e-3,
                   "MCP 返回 MCS15 NewTx 10% BLER 门限")
             queried = curve.get("query", {}).get("bler", [])
@@ -109,6 +114,12 @@ async def main() -> None:
             check(len(mcs3.get("mcs_table", [])) == 28 and
                   mcs3.get("verify", {}).get("consistent") is True,
                   "MCP 表 3 覆盖 28 档且完整性自检通过")
+            cqi_rows = mcs3.get("cqi_table", [])
+            check([row.get("requested_mcs") for row in cqi_rows]
+                  == [0, 1, 3, 5, 7, 9, 12, 14, 16, 19, 21, 23, 25, 27, 28]
+                  and cqi_rows[-1].get("mcs") == 27
+                  and cqi_rows[-1].get("mcs_clipped_to_profile") is True,
+                  "MCP 表 3 显式返回内部 CQI 离散表与 MCS28 曲线缺口")
 
             print("\n" + "=" * 68 + "\n2  sr_capabilities\n" + "=" * 68)
             caps = _payload(await session.call_tool("sr_capabilities", {}))
@@ -221,13 +232,17 @@ async def main() -> None:
             ))
             check(tdd.get("scheduled") is True and tdd.get("rank", 0) >= 1,
                   "真实数据上完成 TDD MCS 决策并保留 rank")
-            check(tdd.get("cqi_initial_mcs") == 15 and
-                  abs(tdd.get("cqi_mcs_sinr_db", 0.0) - 14.0421) < 1e-3,
-                  "MCP 将 CQI9 映射到 MCS15 NewTx 门限")
+            check(tdd.get("cqi_initial_mcs") == 19 and
+                  abs(tdd.get("cqi_mcs_sinr_db", 0.0) - 17.6419) < 1e-3,
+                  "MCP 将内部 CQI9 映射到 MCS19 NewTx 门限")
             check(len(tdd.get("pmi_stream_sinr_db", [])) == tdd.get("rank") and
                   len(tdd.get("svd_stream_sinr_db", [])) == tdd.get("rank") and
                   len(tdd.get("bf_gain_per_stream_db", [])) == tdd.get("rank"),
                   "MCP 返回逐流 PMI/SVD SINR 与 BF Gain 审计量")
+            check(tdd.get("bf_gain_csi_view") == "gnb_precoding_csi"
+                  and tdd.get("bf_gain_enters_mcs") is True
+                  and tdd.get("true_channel_bf_audit_enters_mcs") is False,
+                  "MCP 明确 MCS 只消费 gNB CSI 上的 BF Gain，h_true 差值仅作审计")
             check(abs(tdd.get("user_sinr_db", 0.0) -
                       (tdd.get("cqi_mcs_sinr_db", 0.0) + tdd.get("bf_gain_user_db", 0.0))) < 2e-4,
                   "用户 SINR 等于 CQI 门限与 BF Gain 的 dB 域叠加")
@@ -243,8 +258,8 @@ async def main() -> None:
             cqi0 = _payload(await session.call_tool(
                 "sr_tdd_mcs", {"dataset_id": ds_id, "cqi": 0},
             ))
-            check(cqi0.get("scheduled") is False and cqi0.get("final_mcs") is None,
-                  "MCP 对 CQI0 返回不调度")
+            check(cqi0.get("scheduled") is True and cqi0.get("cqi_initial_mcs") == 0,
+                  "MCP 对内部 CQI0 从 MCS0 开始完整 BF/OLLA 决策")
 
             print("\n" + "=" * 68 + "\n6  sr_deliver —— 取货代码\n" + "=" * 68)
             d1 = _payload(await session.call_tool("sr_deliver", {"dataset_id": ds_id, "want": "信道"}))
@@ -356,6 +371,17 @@ async def main() -> None:
         _claims = {int(m) for m in _re.findall(r"(\d+)\s*个\s*`?sr_\*", _text)}
         check(_claims == {len(_code_tools)},
               f"正文声称的工具数 {sorted(_claims)} 等于实际 {len(_code_tools)}")
+
+
+def test_main_script():
+    """pytest 入口：MCP 全链路（失败时 sys.exit(1)）。
+
+    只跑脚本不跑 pytest（或反过来）都会漏掉另一半——两种执行模型必须看到
+    同一个真理，这条薄壳就是为此存在的。
+    """
+    FAILED.clear()
+    asyncio.run(main())
+    assert not FAILED, "MCP 全链路失败：" + "；".join(FAILED)
 
 
 if __name__ == "__main__":

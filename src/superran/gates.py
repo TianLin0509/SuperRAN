@@ -670,16 +670,22 @@ def gate_conclusion(
             "配对检验显著",
             paired.decision_significant,
             detail,
-            fix=(
-                "加样本，或换一个方差更小的指标"
-                if not paired.tests_agree
-                else "加样本，或换一个方差更小的指标"
-            ),
+            fix="加样本，或换一个方差更小的指标",
         )
     )
 
     dominated = paired.max_single_contribution > outlier_share
-    items.append(
+    if paired.n < 3:
+        items.append(
+            GateItem(
+                "不被单个样本主导",
+                True,
+                f"n={paired.n} 太小，主导性检查不适用（n=2 时最大占比恒 >50%）",
+                severity="info",
+            )
+        )
+    else:
+        items.append(
         GateItem(
             "不被单个样本主导",
             not dominated,
@@ -784,7 +790,8 @@ class ComparisonResult:
                 f"{self.arm_a} 与 {self.arm_b} **无法比较**，未过门："
                 f"{'、'.join(blockers)}。统计检验已跳过——错配数据上的 p 值没有意义。"
             )
-        rel = p.mean_diff / p.mean_b if abs(p.mean_b) > _EPS else float("nan")
+        _ratio_ok = str(self.metric_unit) != "dB" and abs(p.mean_b) > _EPS
+        rel = p.mean_diff / p.mean_b if _ratio_ok else float("nan")
         test_name = {"wilcoxon": "Wilcoxon 符号秩检验", "paired_t": "配对 t 检验"}[
             p.decision_test
         ]
@@ -792,7 +799,9 @@ class ComparisonResult:
         base = (
             f"{self.arm_a} 相对 {self.arm_b}：{self.metric} "
             f"{p.mean_a:.3f} vs {p.mean_b:.3f}{unit}，"
-            f"差值 {p.mean_diff:+.3f}（{rel:+.1%}），95% CI "
+            f"差值 {p.mean_diff:+.3f}"
+            + (f"（{rel:+.1%}）" if np.isfinite(rel) else "")
+            + "，95% CI "
             f"[{p.ci_low:+.3f}, {p.ci_high:+.3f}]，n={p.n}，"
             f"{test_name} p={p.decision_p_value:.3g}"
         )
@@ -912,6 +921,42 @@ def compare_results(
             )
         )
 
+    # 与 compare_arms 同一口径：先按稳定 UE 身份把重复快照折叠成独立观测。
+    # 外部结果按逐样本注册，不折叠会把区间报窄、p 值报小——只有两臂的
+    # ID 都等于数据集默认顺序时折叠才是对齐的，否则折叠本身会错位。
+    va, vb = a.values(), b.values()
+    fold_status, fold_reason = "skipped", ""
+    if not pair_issues:
+        from . import results as _rs  # noqa: PLC0415
+        if (a.ids() == _rs.sample_ids(a.dataset_id, a.n)
+                and b.ids() == _rs.sample_ids(b.dataset_id, b.n)):
+            try:
+                from . import loader as _ld  # noqa: PLC0415
+                _ds = _ld.load(a.dataset_id)
+                va, vb, _kept, fold_reason, _by, fold_status = _position_clusters(
+                    _ds, int(a.n), va, vb)
+            except Exception as exc:  # noqa: BLE001
+                fold_status = "unavailable"
+                fold_reason = f"数据集加载失败（{type(exc).__name__}）"
+        else:
+            fold_status, fold_reason = (
+                "unavailable", "两臂使用显式 ID 子集，无法映射回数据集行序")
+        if fold_status != "clustered":
+            items.append(
+                GateItem(
+                    "重复快照按稳定身份折叠",
+                    not _identity_fold_status_is_blocking(fold_status),
+                    f"未能折叠（{fold_reason}）；{int(a.n)} 条观测按独立样本计入，"
+                    "区间可能偏窄、p 值可能偏小。",
+                    severity=(
+                        "block"
+                        if _identity_fold_status_is_blocking(fold_status)
+                        else "warn"
+                    ),
+                    fix="生成时保留逐样本 ue_id，或自行按稳定身份折叠后注册",
+                )
+            )
+
     g2 = GateResult(
         gate="门 2 · 比较公平（外部结果）",
         items=items,
@@ -940,7 +985,7 @@ def compare_results(
             ],
         )
     else:
-        paired = paired_compare(a.values(), b.values())
+        paired = paired_compare(va, vb)
         g3 = gate_conclusion(paired, claimed_gain=claimed_gain)
 
     return ComparisonResult(
@@ -1007,6 +1052,15 @@ def _same_partition(ids_x: np.ndarray, ids_y: np.ndarray) -> bool:
             if (ids_x[i] == ids_x[j]) != (ids_y[i] == ids_y[j]):
                 return False
     return True
+
+
+def _identity_fold_status_is_blocking(status: str) -> bool:
+    """身份折叠失败是否足以让门 2 阻断。
+
+    移动轨迹缺稳定 ID 与静态数据的 ID/位置划分矛盾都会伪造独立样本量；
+    二者必须同口径阻断。普通旧数据缺位置只告警，保留历史兼容。
+    """
+    return status in {"mobility_missing_id", "partition_mismatch"}
 
 
 def _position_clusters(
@@ -1168,6 +1222,16 @@ def compare_arms(
     a2 = {**arm_a, "dataset_id": ds.dataset_id, "config": cfg}
     b2 = {**arm_b, "dataset_id": ds.dataset_id, "config": cfg}
     g2 = gate_comparison(a2, b2, pilot_std_diff=paired.std_diff, n_samples=paired.n)
+    if int(h_true.shape[0]) > n:
+        g2.items.append(
+            GateItem(
+                "样本截断披露",
+                True,
+                f"数据集共 {int(h_true.shape[0])} 条样本，本次比较只用前 {n} 条"
+                f"（max_samples={int(max_samples)}）；要用全量请调大 max_samples",
+                severity="info",
+            )
+        )
     if cluster_ids is not None:
         g2.items.append(
             GateItem(
@@ -1191,7 +1255,7 @@ def compare_arms(
                 "若同一 UE 位置有多个快照，区间会偏窄、p 值会偏小。",
                 severity=(
                     "block"
-                    if cluster_status in ("mobility_missing_id", "partition_mismatch")
+                    if _identity_fold_status_is_blocking(cluster_status)
                     else "warn"),
                 fix=(
                     "重新生成并保留逐样本 ue_id；移动轨迹不能用位置坐标充当独立身份"

@@ -178,20 +178,29 @@ def _sinr_from_snr_sir(snr_db: np.ndarray, sir_db: np.ndarray) -> np.ndarray:
     return np.where(np.isfinite(snr) & np.isfinite(sir), out, np.nan)
 
 
+def _probe_sinr_from_snr_sir(
+    snr_db: np.ndarray, sir_db: np.ndarray, *, num_cells: int,
+) -> np.ndarray:
+    """探测模式下按拓扑恢复全带 SINR。
+
+    单小区来源用 49.9 dB 表示“无干扰”的有限哨兵；多小区则必须把同一个数
+    当作合法（可能被夹逼的）SIR。用拓扑而不是数值猜语义。
+    """
+    if int(num_cells) <= 1:
+        return np.asarray(snr_db, dtype=float).copy()
+    return _sinr_from_snr_sir(snr_db, sir_db)
+
+
 def probe(
     cfg: dict[str, Any],
     num_samples: int = 30,
-    *,
-    keep_dataset: bool = False,
 ) -> dict[str, Any]:
-    """快速探测一个场景的几何特征。默认不落盘，跑完就扔。
+    """快速探测一个场景的几何特征。不落盘，跑完就扔。
 
     参数
     ----
     cfg : 场景配置（和 ``sr_generate`` 用的是同一份）
     num_samples : 探测样本数。30 个足够看清中位数量级；要看 5% 分位建议 100+。
-    keep_dataset : 保留探测数据集。默认 False —— 探测数据只覆盖 8.64 MHz，
-        留着容易被误当成正式数据用。
 
     返回的报告里 ``not_available`` 明确列出探测模式**没有**给出的量。
     """
@@ -251,6 +260,11 @@ def probe(
         if n >= ask:
             break
     elapsed = time.perf_counter() - t0
+    if n == 0:
+        raise RuntimeError(
+            "探测没有收到任何样本（与 sr_generate 同一口径的硬失败）；"
+            "请检查配置或先跑一次小样本 sr_generate 确认场景可用"
+        )
 
     arr = {k: np.asarray(v, dtype=np.float64) for k, v in cols.items()}
     marr = {k: np.asarray(v, dtype=np.float64) for k, v in metas.items()}
@@ -275,11 +289,15 @@ def probe(
         np.nan,
         np.clip(arr["ul_snr_dB"] + corr, -49.9, 49.9),
     )
-    sinr_full = _sinr_from_snr_sir(snr_full, arr["sir_dB"])
-    ul_sinr_full = _sinr_from_snr_sir(ul_snr_full, arr["ul_sir_geo_dB"])
+    cells = int(cfg.get("num_sites", 1) or 1) * int(cfg.get("sectors_per_site", 1) or 1)
+    # 单小区没有干扰源时 49.9 dB 只是有限哨兵（真实 SIR 是 ∞）。是否为哨兵
+    # 必须由拓扑决定，不能只看数值：多小区弱干扰也可能合法夹到 49.9 dB。
+    sinr_full = _probe_sinr_from_snr_sir(
+        snr_full, arr["sir_dB"], num_cells=cells)
+    ul_sinr_full = _probe_sinr_from_snr_sir(
+        ul_snr_full, arr["ul_sir_geo_dB"], num_cells=cells)
     n_snr_clamped = int(np.sum(snr_clamped & np.isfinite(arr["snr_dB"])))
 
-    cells = int(cfg.get("num_sites", 1) or 1) * int(cfg.get("sectors_per_site", 1) or 1)
     dl_iot = itf.iot_stats(sinr_full, arr["sir_dB"])
     ul_iot = itf.iot_stats(ul_sinr_full, arr["ul_sir_geo_dB"])
 
@@ -367,10 +385,6 @@ def probe(
             "把 link 设成 BOTH 再探测。"
         )
 
-    if keep_dataset:
-        out["warning"] = (
-            "keep_dataset=True：探测数据只覆盖部分带宽，不要拿它算谱效或做正式对比。"
-        )
     return out
 
 

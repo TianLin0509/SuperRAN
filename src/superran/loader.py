@@ -19,6 +19,24 @@ from . import measure
 from .paths import dataset_dir
 
 
+def _npy_first_dim(npz_path: Any, key: str) -> int:
+    """只读 npz 里某个数组的 .npy 头部，返回第一维（不加载数组本体）。"""
+    import ast  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    with zipfile.ZipFile(npz_path) as zf:
+        with zf.open(f"{key}.npy") as f:
+            magic = f.read(8)
+            if magic[:6] != b"\x93NUMPY":
+                raise ValueError(f"{key}.npy 不是合法的 npy 头")
+            if magic[6] == 1:
+                hlen = int.from_bytes(f.read(2), "little")
+            else:
+                hlen = int.from_bytes(f.read(4), "little")
+            header = ast.literal_eval(f.read(hlen).decode("latin1").strip())
+            return int(header["shape"][0])
+
+
 class Dataset:
     """一批信道样本 + 按需计算的测量量。
 
@@ -40,6 +58,17 @@ class Dataset:
             (self.dir / "summary.json").read_text(encoding="utf-8")
         )
         self._npz = np.load(self.dir / "channels.npz", allow_pickle=False)
+        # summary 的计数与 NPZ 的数组必须同源：summary N > NPZ 时越界检查放行、
+        # 索引处才炸；summary N < NPZ 时静默只用前 N 个样本，统计层面不可观测。
+        # 只读 .npy 头部，不加载数组。
+        _declared = int(self.summary.get("shape", {}).get("N", 0) or 0)
+        if _declared:
+            _actual = int(_npy_first_dim(self.dir / "channels.npz", "h_true"))
+            if _actual != _declared:
+                raise ValueError(
+                    f"数据集 {dataset_id!r} 的 summary（N={_declared}）与 "
+                    f"channels.npz（h_true 第一维 {_actual}）不一致——文件可能被"
+                    "截断或外部改写，拒绝加载")
 
     # ---- 基本信息 ----
     def __repr__(self) -> str:
@@ -190,7 +219,10 @@ class Dataset:
         return self._npz["ue_position"]
 
     def estimation_error_nmse_db(self) -> np.ndarray:
-        """逐样本的信道估计归一化均方误差，dB。理想信道模式下会是 -inf。"""
+        """逐样本的信道估计归一化均方误差，dB。
+
+        理想信道模式下被钳到约 **−300 dB**（1e-30 地板），不是数学意义的 -inf。
+        """
         err = self.h_est - self.h_true
         num = (np.abs(err) ** 2).sum(axis=(1, 2, 3, 4))
         den = (np.abs(self.h_true) ** 2).sum(axis=(1, 2, 3, 4))
@@ -570,15 +602,6 @@ class Dataset:
         idx = int(index)
         if idx < 0 or idx >= self.n:
             raise IndexError(f"sample index must be 0..{self.n - 1}, got {index}")
-        if int(cqi_index) == 0:
-            out = la.tdd_mcs_adaptation(
-                cqi_index, np.zeros((1, 1)), np.zeros((1, 1)),
-                olla_mcs_offset=olla_mcs_offset, target_bler=target_bler,
-                feedback_ack=feedback_ack, olla_ack_step_mcs=olla_ack_step_mcs,
-            )
-            out.update({"dataset_id": self.dataset_id, "sample_index": idx})
-            return out
-
         h_eval = self.h_true[idx]
         h_precoding = self.h_est[idx] if use_estimated_csi else h_eval
         common: dict[str, Any] = {
@@ -604,22 +627,45 @@ class Dataset:
 
         # CQI was measured with the Type-I/PMI weight, so its RI defines the scheduled
         # rank. SVD is then forced to exactly that rank for an apples-to-apples delta.
-        pmi = ll.link_performance(
-            h_eval, method="type1", max_rank=max_rank, rank_threshold=0.1, **common
+        # BF Gain is a **gNB prediction**, so both candidate weights are evaluated on
+        # the same CSI available for precoding.  Evaluating them on h_true here would
+        # leak the actual beam hit/miss into the scheduling decision whenever CSI is
+        # estimated or stale.  A separate true-channel audit is returned below but it
+        # never enters the current MCS decision.
+        pmi_pred = ll.link_performance(
+            h_precoding, method="type1", max_rank=max_rank,
+            rank_threshold=0.1, **common
         )
-        svd = ll.link_performance(
-            h_eval, method="svd", max_rank=pmi.rank, rank_threshold=0.0, **common
+        svd_pred = ll.link_performance(
+            h_precoding, method="svd", max_rank=pmi_pred.rank,
+            rank_threshold=0.0, **common
         )
-        if svd.rank != pmi.rank:
+        if svd_pred.rank != pmi_pred.rank:
             raise ValueError(
                 "SVD and PMI must use the same scheduled rank; "
-                f"got SVD rank {svd.rank}, PMI rank {pmi.rank}"
+                f"got SVD rank {svd_pred.rank}, PMI rank {pmi_pred.rank}"
+            )
+
+        pmi_true = ll.link_performance(
+            h_eval, method="type1", max_rank=max_rank,
+            rank_threshold=0.1, **common
+        )
+        svd_true = ll.link_performance(
+            h_eval, method="svd", max_rank=pmi_pred.rank,
+            rank_threshold=0.0, **common
+        )
+        if (pmi_true.rank != pmi_pred.rank
+                or svd_true.rank != svd_pred.rank):
+            raise ValueError(
+                "true-channel BF audit must preserve the gNB-scheduled rank; "
+                f"predicted PMI/SVD={pmi_pred.rank}/{svd_pred.rank}, "
+                f"true audit PMI/SVD={pmi_true.rank}/{svd_true.rank}"
             )
 
         out = la.tdd_mcs_adaptation(
             cqi_index,
-            svd.sinr_per_rb_db,
-            pmi.sinr_per_rb_db,
+            svd_pred.sinr_per_rb_db,
+            pmi_pred.sinr_per_rb_db,
             olla_mcs_offset=olla_mcs_offset,
             target_bler=target_bler,
             feedback_ack=feedback_ack,
@@ -629,11 +675,27 @@ class Dataset:
             "dataset_id": self.dataset_id,
             "sample_index": idx,
             "physical_sinr_db": physical_sinr,
-            "operating_point": pmi.operating_point or {
+            "operating_point": pmi_pred.operating_point or {
                 "mode": "synthetic_prebeam_snr", "snr_db": physical_sinr},
             "csi_for_precoding": "estimated" if use_estimated_csi else "ideal",
-            "pmi_indices": pmi.precoder_indices,
+            "bf_gain_csi_view": "gnb_precoding_csi",
+            "bf_gain_enters_mcs": True,
+            "true_channel_bf_audit_enters_mcs": False,
+            "pmi_indices": pmi_pred.precoder_indices,
+            "pmi_true_stream_sinr_db": [
+                round(float(x), 4)
+                for x in np.mean(pmi_true.sinr_per_rb_db, axis=0)
+            ],
+            "svd_true_stream_sinr_db": [
+                round(float(x), 4)
+                for x in np.mean(svd_true.sinr_per_rb_db, axis=0)
+            ],
+            "bf_gain_true_user_db": round(float(np.mean(
+                np.asarray(svd_true.sinr_per_rb_db, dtype=float)
+                - np.asarray(pmi_true.sinr_per_rb_db, dtype=float))), 4),
         })
+        out["bf_gain_prediction_error_db"] = round(
+            float(out["bf_gain_true_user_db"] - out["bf_gain_user_db"]), 4)
         return out
 
     def throughput(self, *, max_samples: int = 500, **kw: Any) -> Any:
@@ -650,7 +712,7 @@ class Dataset:
         return rs.sample_ids(self.dataset_id, self.n)
 
     def digest(self) -> str:
-        """数据集内容摘要（channels.npz 的 SHA-256），首次计算后缓存进 summary。"""
+        """数据集摘要（NPZ + 物理语义 summary），首次计算后缓存进 summary。"""
         from . import results as rs
 
         d = rs.dataset_digest(self.dataset_id)

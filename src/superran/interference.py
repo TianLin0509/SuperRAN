@@ -512,6 +512,12 @@ def _suggest_preset(target: float) -> str:
 
 _capture: dict[str, Any] = {}
 _installed = False
+_install_failure = ""
+
+
+def last_install_failure() -> str:
+    """最近一次安装 UL 几何 SIR 交接失败的原因；未失败为空串。"""
+    return _install_failure
 
 
 def install_geometry_capture() -> bool:
@@ -519,7 +525,7 @@ def install_geometry_capture() -> bool:
 
     失败不抛异常——拿不到上行 IoT 只是少一个指标，不该让整次生成崩掉。
     """
-    global _installed
+    global _installed, _install_failure
     if _installed:
         return True
     try:
@@ -532,9 +538,10 @@ def install_geometry_capture() -> bool:
             "ul_geometry_sir_dB"
         ):
             _installed = True
+            _install_failure = ""
             return True
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        _install_failure = f"metadata 路径不可用：{type(exc).__name__}: {exc}"
 
     try:
         from msg_embedding.data.sources import _system_sinr  # noqa: PLC0415
@@ -542,6 +549,7 @@ def install_geometry_capture() -> bool:
         orig = _system_sinr.compute_geometry_sinr_single_ue
         if getattr(orig, "_sr_wrapped", False):
             _installed = True
+            _install_failure = ""
             return True
 
         def wrapper(*args: Any, **kwargs: Any) -> dict:
@@ -561,8 +569,13 @@ def install_geometry_capture() -> bool:
         # 所以替换模块属性就够了，不需要动 internal_sim。
         _system_sinr.compute_geometry_sinr_single_ue = wrapper  # type: ignore[assignment]
         _installed = True
+        _install_failure = ""
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _install_failure = (
+            f"{_install_failure}；兼容钩子也挂不上：{type(exc).__name__}: {exc}"
+            if _install_failure else
+            f"兼容钩子挂不上：{type(exc).__name__}: {exc}")
         return False
 
 

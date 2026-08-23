@@ -1,46 +1,56 @@
-"""User-provided 20B 256QAM MCS demodulation curves (2026-07-31).
+"""Bundled 20B 256QAM preset MCS demodulation curves.
 
 Only the NewTx/ReTx curves directly mapped by MCS 0..27 are retained here.
-Additional code-rate curves present in the source script are intentionally omitted.
-The source script labels the horizontal axis ``Es/No``; the data owner confirmed that
-this quantity is SINR for a classic MMSE receiver.
+Additional code-rate curves present in the source script are intentionally omitted;
+the current product contract uses only the 28 curves explicitly mapped to MCS 0..27.
+The source payload labels the horizontal axis ``Es/No``; in this preset it is
+interpreted as codeword-level effective SINR for a classic MMSE receiver.
 
-The company abstraction treats one scheduled TTI's transport block as one BLER event;
-it does not expose code-block errors separately.  Conceptually the operating point
-includes that TTI's TB size, SINR, selected MCS and transmission kind.  The imported
-curve payload, however, preserves only MCS, NewTx/ReTx code rate and the SINR axis: it
-does not carry a machine-readable reference-TB-size/resource/rank mapping.  Current
-callers therefore reuse the same MCS curve across scheduled TB sizes and must report
-that as a model limitation instead of inventing a CB-to-TB conversion.
+The preset abstraction treats one user's scheduled grant in one TTI as one independent
+single-codeword TB/BLER event; it does not expose code-block errors separately.  By
+profile definition, the curve is universal: BLER lookup depends only on the
+codeword-level effective SINR and MCS. TBS, RE count, rank/layers, channel scenario and
+decoder details are deliberately outside this profile rather than missing lookup axes.
 
 This is not a 3GPP standard table and has not been independently checked against a
 public reference. Never label these points as 3GPP reference BLER curves.
 """
 from __future__ import annotations
 
-SOURCE_ID = "company_20b_256qam"
-SOURCE_PROVENANCE = "user-provided company demodulation curves, imported 2026-07-31"
+SOURCE_ID = "preset_20b_256qam"
+SOURCE_PROVENANCE = "bundled preset demodulation curves"
 SOURCE_AXIS_NAME = "SINR"
 SOURCE_AXIS_ORIGINAL_LABEL = "Es/No"
-SOURCE_AXIS_USAGE = "post-MMSE SINR (dB); the source label Es/No denotes SINR"
-RECEIVER_MODEL = "classic MMSE"
-ERROR_EVENT = "one scheduled TTI transport block (TB); CB is not exposed separately"
-COMPANY_LOOKUP_INPUTS = (
-    "tb_size_bits",
-    "post_mmse_sinr_db",
-    "mcs",
-    "tx_mode",
-    "receiver_profile",
+SOURCE_AXIS_USAGE = (
+    "codeword-level effective post-MMSE SINR (dB); the source label Es/No "
+    "denotes SINR"
 )
+RECEIVER_MODEL = "classic MMSE"
+ERROR_EVENT = (
+    "one user grant in one scheduled TTI = one independent single-codeword "
+    "transport block (TB); CB is not exposed separately"
+)
+PRESET_LOOKUP_INPUTS = ("codeword_effective_sinr_db", "mcs")
 IMPORTED_CURVE_AXES = ("mcs", "tx_mode", "post_mmse_sinr_db")
 TB_SIZE_AXIS_STATUS = (
-    "confirmed company semantic, but the reference TB-size/resource mapping is not "
-    "preserved in this imported curve payload"
+    "not modeled by product decision; the MCS curve is universal across scheduled "
+    "TB size, RE count, RBG count and rank"
 )
 PROFILE_SCOPE = (
-    "One scheduled TTI/TB is one BLER trial and CB is not modeled separately. "
-    "The imported curves do not parameterize actual scheduled TB size, resource "
-    "allocation, channel model, MIMO layers, or decoder details."
+    "One user grant in one TTI is one independent single-codeword TB/BLER trial. "
+    "CB is not modeled separately. The curve is universal across TBS, resources, "
+    "rank/layers, channel scenario and receiver implementation details."
+)
+SYSTEM_RETX_MODEL = (
+    "The system uses NewTx curves for all BLER queries. One retransmission is allowed: "
+    "CC adds 10log10(2) dB to codeword SINR; IR (default) maps half the original MCS "
+    "spectral efficiency to an equivalent lower MCS at unchanged SINR."
+)
+EXTRA_CODE_RATE_ROWS_STATUS = (
+    "The source script reportedly contained additional curve rows not mapped to "
+    "MCS 0..27. Their exact code rates, points and semantic mapping were not "
+    "preserved by the original import, so SuperRAN cannot identify or use them. "
+    "They are not required by the current universal MCS0..27 product contract."
 )
 DATA_SHA256 = "12fd4f3de4f1c47678331f7ebcbbd65013434dbb4d909e904210c4bca17e3d4e"
 

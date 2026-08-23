@@ -153,6 +153,9 @@ def build(e2e: dict | None = None, olla: dict | None = None,
             for r in e2e["rows"])
         e2e_block = f"""
 <h3>端到端实测（真实 ChannelHub 信道）</h3>
+<div class="callout c-amber"><p><b>历史口径提示：</b>本节数字来自 2026-08-23 之前的
+dB-domain OLLA 实现，用于追溯当时决策，<b>不是当前 MCS-domain OLLA 的性能证据</b>。
+口径更改后必须重跑才能作比较。</p></div>
 <p class="lead">{e2e['scenario']}。同一数据集、同一 seed，<b>只改 CSI 时延链</b>。</p>
 <div class="tbl-wrap"><table>
 <thead><tr><th>CSI 配置</th><th>平均 MCS</th><th>平均 rank</th>
@@ -466,7 +469,7 @@ SU 只是波束没对准，损失温和得多。</p>
 
 <div class="callout c-blue">
 <p><b>还剩什么。</b>提案 2/3/4/5 按你的意思搁置，没有动。
-<code>main</code> 分支仍落后 <code>agent/company-bler-curves</code>，合不合由你定。</p>
+当前 BLER 相关修改仍在独立工作分支，是否合入由维护者决定。</p>
 </div>
 
 <footer>superran 决策落地 · 公式由内联 KaTeX 排版（MathML 兜底），离线可用</footer>

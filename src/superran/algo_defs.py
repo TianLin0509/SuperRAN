@@ -389,7 +389,7 @@ def _rank_mcs() -> Family:
         caveat="**dB 域平均比线性平均保守得多。** 实测半好半坏（+20/−20 dB 各半）的信道，"
                "dB 域给 0 dB、线性给 17 dB，**差 17 dB**——深衰的 RBG 会把整个码字拖下去。"
                "逐 RB 查 MCS 再平均等于假设每个 RB 能用不同 MCS，系统性高估。",
-        source="38.214 §5.1.3；公司 20B 曲线；用户 2026-08-02 给的现场算法",
+        source="38.214 §5.1.3；预置 20B 曲线；项目系统级链路自适应口径",
         options=[
             Option("rank_sweep", "遍历 rank 1~4 取谱效最高",
                    formula=r"r^\star = \arg\max_r \; r \cdot SE(\text{MCS}"
@@ -413,7 +413,7 @@ def _rank_mcs() -> Family:
             ("算逐 RBG 逐流 SINR", "SINR_{b,s} = σ_s²·(P/r) / σ_n²"),
             ("RBG 内线性平均", "同一个调度单位，功率域相加合理"),
             ("RBG 间与流间 dB 域平均", "**先平均再查表**，这是单码字约束的体现"),
-            ("查 MCS", "选满足 10% 首传 BLER 的最高 MCS（表 3，公司 20B 曲线）"),
+            ("查 MCS", "选满足 10% 首传 BLER 的最高 MCS（预置表 3）"),
             ("算谱效 SE = r × SE(MCS)", "乘 rank 是因为 r 条流各发一份"),
             ("取所有 rank 里 SE 最大的", "这就是 rank 自适应的判决"),
         ], loop_back=(6, 1, "换下一个 rank")),
@@ -425,7 +425,7 @@ def _olla() -> Family:
         key="olla",
         name="OLLA 外环 + 发送/接收侧 SINR 分离",
         stage="系统级",
-        current="olla_db",
+        current="olla_mcs (legacy API name: olla_db)",
         config_key="olla_enabled",
         intro="**这是干扰影响吞吐的第一性路径。** 发送端不知道瞬时干扰，"
               "只有 CQI 反馈的粗略统计值；接收端实打实吃着干扰、SINR 更低、于是误码；"
@@ -433,38 +433,31 @@ def _olla() -> Family:
         formula=r"\Delta \leftarrow \begin{cases} \Delta + \delta_{up} & \text{ACK} \\ "
                 r"\Delta - \delta_{down} & \text{NACK} \end{cases}, \quad "
                 r"\text{BLER}_{\infty} = \frac{\delta_{up}}{\delta_{up} + \delta_{down}}",
-        caveat="**发送侧别做成「完全无干扰」。** 那是极端假设——实测发送侧 40.7 dB、"
-               "接收侧 12.7 dB，差 28 dB，OLLA 的钳位根本追不上，首传 BLER 飙到 0.85。"
-               "发送侧现在走 CQI 门限 + BF Gain（见「发送侧 SINR」那一族）。"
+        caveat="**发送侧别做成「完全无干扰」。** 发送侧应走内部 CQI 门限 + "
+               "BF Gain（见「发送侧 SINR」那一族），先反折基准 MCS，再叠加 OLLA。"
                "<br>**+0.01/−0.1 对应的稳态是 9.09% 而不是 10%。** "
                "稳态解 p = δ_up/(δ_up+δ_down)，要 10% 得取 δ_down = <b>0.09</b>。"
-               "<br>实测还会**一致地比理论高 4~5%（相对）**："
-               "MCS 是整数档，select_mcs 取的是「满足目标的最高档」，天然偏激进。"
-               "实测 δ_down=0.09 → IBLER 0.104、0.10 → 0.0954、0.19 → 0.0525，"
-               "六个取值全部落在理论值 +4~5% 上。",
-        source="用户 2026-08-02 给的现网粗估 +0.01/−0.1；"
-               "2026-08-03 按目标 10% 反解修正为 −0.09",
+               "<br>由于最终使用 floor(MCS+Δ)，理论步长比仍需用新口径"
+               "重新做收敛校验；旧 dB-domain OLLA 的实测数字不再作当前证据。",
+        source="已确认的内部 AMC 顺序（2026-08-23）；步长比按 target BLER 反解",
         options=[
-            Option("olla_db", "dB 域偏置（目标 10%）",
+            Option("olla_db", "MCS 域偏置（历史 key，目标 10%）",
                    formula=r"\delta_{down} = \delta_{up}\cdot\frac{1-p}{p} "
-                           r"= 0.01 \cdot \frac{0.9}{0.1} = 0.09\ \text{dB}",
+                            r"= 0.01 \cdot \frac{0.9}{0.1} = 0.09\ \text{MCS}",
                    summary="ACK 小步加、NACK 大步减，稳态 BLER 收敛到步长比",
                    detail="步长**比例**决定稳态 BLER，**绝对大小**只决定收敛速度。"
                           "目标 10%、δ_up=0.01 时精确解是 δ_down=<b>0.09</b>；"
                           "常说的 −0.1 给的是 9.09%。"
-                          "<br>**MCS 是整数档，0.01 dB 常常压不动一档**——"
-                          "短仿真里 BLER 还停在 0.16~0.22 而不是 10%，"
-                          "未收敛时结果里会主动告警。",
+                           "<br>OLLA 是连续 MCS 状态，发送时对基准 MCS + offset 严格 floor。"
+                           "未收敛时结果里会主动告警。",
                    when="默认；出正式结论用它",
                    cost="每次 ACK/NACK 一次加减"),
             Option("olla_fast", "等比放大加速收敛（olla_speedup）",
                    formula=r"(\delta_{up}, \delta_{down}) \to k\,(\delta_{up}, "
                            r"\delta_{down}), \quad p_{\infty} \text{ 不变}",
                    summary="比例不变、绝对值等比放大",
-                   detail="稳态 BLER 与 k 无关（约分掉了），但收敛快得多。"
-                          "实测 k=1 时 8 秒内 IBLER 还在 0.394，k=20 时收敛到 0.100，"
-                          "而**体验速率几乎不变**（142.3 → 142.5 Mbps）——"
-                          "放大只是更快到达同一个地方。"
+                    detail="步长比不变时理论稳态不变，放大主要改变收敛速度和抖动。"
+                           "MCS-domain 口径下的实测幅度要重新校验，不复用旧数据。"
                           "非 1.0 时结果里带显式告警。**出正式结论设回 1.0。**",
                    when="快速迭代、看趋势",
                    cost="稳态附近抖动更大"),
@@ -477,12 +470,12 @@ def _olla() -> Family:
         ],
         flow=Flow(steps=[
             ("算发送侧 SINR", "CQI 门限 + BF Gain（见「发送侧 SINR」族），不是接收 SINR 的均值"),
-            ("加 OLLA 偏置", "SINR_tx + Δ，Δ 初值 0"),
-            ("选 MCS", "按修正后的 SINR 查表，选满足目标 BLER 的最高档"),
+            ("反折基准 MCS", "按发送侧 SINR 查表，选满足目标 BLER 的最高档"),
+            ("加 OLLA 偏置", "floor(MCS_base + Δ) 并钳到 profile，Δ 初值 0"),
             ("按接收侧 SINR 判误码", "接收侧含**瞬时**干扰，所以实际 BLER 高于发送端预期"),
-            ("ACK → Δ += 0.01；NACK → Δ −= 0.09", "钳位在 [−20,+3] dB；稳态 p = 0.01/(0.01+0.09) = 10%"),
+            ("ACK → Δ += 0.01；NACK → Δ −= 0.09", "钳位在 [−20,+3] MCS；稳态 p = 0.01/(0.01+0.09) = 10%"),
         ], loop_back=(5, 1, "下一次调度"), branches=[
-            (4, "NACK", "进 HARQ 重传，查 ReTx 曲线")]),
+            (4, "NACK", "进入唯一一次 IR/CC 重传；只从 NewTx 曲线推导 BLER")]),
     )
 
 

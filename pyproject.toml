@@ -21,7 +21,7 @@ dependencies = [
 
 [project.optional-dependencies]
 rt = ["sionna-rt"]          # Phase 2 射线追踪，会连带装 mitsuba + drjit
-dev = ["pytest>=7.0", "ruff>=0.1"]
+dev = ["pytest>=7.0", "ruff>=0.1", "playwright>=1.45"]
 
 [project.scripts]
 superran-mcp = "superran.server:main"

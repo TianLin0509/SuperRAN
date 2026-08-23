@@ -308,3 +308,7 @@ def test_simulation_rejects_profile_mislabel_and_cross_cell_resource_pool() -> N
             traffic=sysm.TrafficConfig(model="full_buffer"),
             sched=sysm.SchedulerConfig(mu_enabled=False),
             kpi=sysm.KpiConfig(warmup_s=0.0))
+if __name__ == "__main__":
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-q"]))

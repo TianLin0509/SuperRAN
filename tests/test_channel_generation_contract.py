@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,12 +13,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from superran import channelhub as ch  # noqa: E402
 from superran import (  # noqa: E402
+    bridge,
     gates,  # noqa: E402
+    interference,
     load,
     measure,
+    provenance,
+    results,
+    scenario,
 )
+from superran import channelhub as ch  # noqa: E402
 from superran import generate as gen  # noqa: E402
 from superran import physical as ph  # noqa: E402
 from superran import plan as pl  # noqa: E402
@@ -342,30 +349,37 @@ def test_collect_labels_one_mobile_trajectory_as_one_ue(
     )
 
 
-def test_collect_refuses_to_invent_identity_for_mobile_with_untrustworthy_speed(
+
+def test_collect_mirrors_source_layout_for_mobility_speed_edge_cases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # mobility_mode 非 static 但速度为 0：旧行为按静态轮转合成假独立 id，
-    # 统计门拿到合法 id 就不再 block——正是移动数据聚类门要防的事故。
-    # 现在不发明身份：ue_id 全部缺失（metastr 落 "None"），交给 gates block。
+    # 源端合同（internal_sim.iter_samples）：mobility!="static" 且速度为正才生成
+    # 单条轨迹；速度 <=0 时退到静态多 UE 轮转布局。身份合成必须镜像它：
+    # 显式 0 速 -> 静态轮转 id（不是"移动缺身份"的误 block）；
+    # 速度键缺失 -> 源端默认 3.0 km/h -> 单轨迹 id=0。
     h_est = np.full((1, 4, 2, 1), 0.9 + 0.8j, dtype=np.complex64)
-    samples = [_fake_sample(h_est=h_est, marker=float(i)) for i in range(3)]
+    samples = [_fake_sample(h_est=h_est, marker=float(i)) for i in range(4)]
     monkeypatch.setattr(gen.ch, "iter_samples", lambda *_args, **_kw: iter(samples))
-    payload, _first_meta, _stats = gen._collect(
+    payload, _m, _s = gen._collect(
         "internal_sim",
-        {"num_samples": 3, "mobility_mode": "linear", "ue_speed_kmh": 0.0},
-        want=3,
-        lo=-np.inf,
-        hi=np.inf,
-        filtering=False,
+        {"num_samples": 4, "num_ues": 2, "mobility_mode": "linear",
+         "ue_speed_kmh": 0.0},
+        want=4, lo=-np.inf, hi=np.inf, filtering=False,
     )
-    assert "meta__ue_id" not in payload
-    np.testing.assert_array_equal(payload["metastr__ue_id"], ["None"] * 3)
+    np.testing.assert_array_equal(payload["meta__ue_id"], [0.0, 1.0, 0.0, 1.0])
     np.testing.assert_array_equal(
-        payload["metastr__ue_id_source"],
-        ["unavailable_mobility_speed"] * 3,
-    )
+        payload["metastr__ue_id_source"], ["internal_sim_global_index"] * 4)
 
+    samples2 = [_fake_sample(h_est=h_est, marker=float(i)) for i in range(3)]
+    monkeypatch.setattr(gen.ch, "iter_samples", lambda *_args, **_kw: iter(samples2))
+    payload2, _m2, _s2 = gen._collect(
+        "internal_sim",
+        {"num_samples": 3, "mobility_mode": "linear"},  # 速度键缺失
+        want=3, lo=-np.inf, hi=np.inf, filtering=False,
+    )
+    np.testing.assert_array_equal(payload2["meta__ue_id"], [0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(
+        payload2["metastr__ue_id_source"], ["internal_sim_single_trajectory"] * 3)
 
 def test_multicell_channelhub_site_state_contract_is_hard_gated() -> None:
     cfg = {"num_sites": 2, "sectors_per_site": 3}
@@ -600,3 +614,64 @@ def test_reciprocity_end_to_end_receive_gain() -> None:
     assert correct.spectral_efficiency > 0.9 * ideal.spectral_efficiency, (
         f"估计噪声预算内应接近理想：{correct.spectral_efficiency:.3f} vs "
         f"理想 {ideal.spectral_efficiency:.3f}")
+
+
+def test_fourth_audit_evidence_guards_are_not_self_defeating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """第四轮审查抓到的防线自身漏洞必须有反向回归。"""
+    assert gates._identity_fold_status_is_blocking("mobility_missing_id")
+    assert gates._identity_fold_status_is_blocking("partition_mismatch")
+    assert not gates._identity_fold_status_is_blocking("unavailable")
+
+    src = inspect.getsource(gen.generate)
+    assert src.index("dropped_fields: list[str] = []") < src.index("if n_workers > 1:")
+    assert "_install_failure" not in interference.install_geometry_capture.__code__.co_varnames
+
+    snr = np.asarray([45.0])
+    sir = np.asarray([49.9])
+    np.testing.assert_allclose(
+        scenario._probe_sinr_from_snr_sir(snr, sir, num_cells=1), snr)
+    assert float(scenario._probe_sinr_from_snr_sir(
+        snr, sir, num_cells=2)[0]) < float(snr[0])
+
+    monkeypatch.setattr(bridge, "_SEEN_CAP", 3)
+    bridge._seen.clear()
+    assert not bridge._remember_nonce("n0")
+    assert bridge._remember_nonce("n0")
+    assert not bridge._remember_nonce("n1")
+    assert not bridge._remember_nonce("n2")
+    assert not bridge._remember_nonce("n3")
+    assert bridge._seen == {"n3"}
+    bridge._seen.clear()
+
+
+def test_provenance_and_semantic_dataset_digest_contract() -> None:
+    base = provenance.snapshot(source="unit-test")
+    assert base["source_tree_sha256"] and base["source_file_count"]
+    same = json.loads(json.dumps(base))
+    assert provenance.compare(base, same)["status"] == "match"
+    changed = json.loads(json.dumps(base))
+    changed["physical_data"]["preset_bler_sha256"] = "changed"
+    assert provenance.compare(base, changed)["status"] == "mismatch"
+    legacy = json.loads(json.dumps(base))
+    legacy_value = legacy["physical_data"].pop("preset_bler_sha256")
+    legacy["physical_data"]["company_" + "bler_sha256"] = legacy_value
+    assert provenance.compare(legacy, base)["status"] == "match"
+    assert provenance.compare(None, base)["status"] == "unknown"
+
+    summary = {
+        "source": "internal_sim", "shape": {"N": 2},
+        "config": {"scenario": "UMa_NLOS"}, "elapsed_s": 1.0,
+    }
+    digest = results._semantic_summary_sha256(summary)
+    summary["elapsed_s"] = 99.0
+    assert results._semantic_summary_sha256(summary) == digest
+    summary["config"]["scenario"] = "UMi_NLOS"
+    assert results._semantic_summary_sha256(summary) != digest
+
+
+if __name__ == "__main__":
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-q"]))

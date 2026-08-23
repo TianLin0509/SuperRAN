@@ -61,6 +61,14 @@ CELL_KPIS = (
     KpiSpec("avg_rank", "平均 Rank", tags=("link", "mu")),
     KpiSpec("bler_first_tx", "首传 BLER", percent=True,
             tags=("link", "reliability")),
+    KpiSpec("retx_bler", "重传 BLER", percent=True,
+            tags=("link", "reliability", "harq")),
+    KpiSpec("residual_bler", "一次重传后残留 BLER", percent=True,
+            tags=("link", "reliability", "harq")),
+    KpiSpec("retx_attempts", "重传次数", "TB", digits=0,
+            tags=("link", "resource", "harq")),
+    KpiSpec("pending_harq_tb_at_end", "窗口末待重传 TB", "TB", digits=0,
+            tags=("link", "reliability", "harq")),
     KpiSpec("su_bler_first_tx", "SU 首传 BLER", percent=True,
             tags=("link", "reliability")),
     KpiSpec("mu_bler_first_tx", "MU 首传 BLER", percent=True,
@@ -94,6 +102,14 @@ USER_KPIS = (
     KpiSpec("avg_rank", "用户平均 Rank", tags=("link", "mu")),
     KpiSpec("bler_first_tx", "用户首传 BLER", percent=True,
             tags=("link", "reliability")),
+    KpiSpec("retx_bler", "用户重传 BLER", percent=True,
+            tags=("link", "reliability", "harq")),
+    KpiSpec("residual_bler", "用户一次重传后残留 BLER", percent=True,
+            tags=("link", "reliability", "harq")),
+    KpiSpec("retx_tti", "用户重传次数", "TB", digits=0,
+            tags=("link", "resource", "harq")),
+    KpiSpec("pending_harq_tb_at_end", "用户窗口末待重传 TB", "TB", digits=0,
+            tags=("link", "reliability", "harq")),
     KpiSpec("sched_tti", "用户调度次数", "TTI", digits=0,
             tags=("resource", "fairness")),
     KpiSpec("queued_bytes", "用户窗口末积压", "bytes", digits=0,
@@ -121,6 +137,7 @@ _KEYWORDS = {
     "link": ("mcs", "bler", "sinr", "cqi", "olla", "bf", "链路", "误块"),
     "fairness": ("用户", "边缘", "公平", "cdf", "p5", "fairness"),
     "reliability": ("可靠", "bler", "pdb", "误块", "reliability"),
+    "harq": ("harq", "重传", "retx", "追逐合并", "增量冗余", "chase", "ir", "cc"),
     "capacity": ("容量", "capacity", "throughput", "吞吐"),
 }
 
@@ -357,6 +374,10 @@ def _distribution(cell: dict[str, Any]) -> str:
 
 def _load_gauge(cell: dict[str, Any]) -> str:
     value, _, _ = _stat(cell, "serving_cell_prb_utilization")
+    if value is None:
+        return ('<div class="gauge"><p>正式仿真实测 <strong>n/a</strong>'
+                '——该结果口径不含本小区 PRB 利用率（legacy_v1 不产出此键）。'
+                '</p></div>')
     pct = max(0.0, min(100.0, (value or 0.0) * 100.0))
     return (
         '<div class="gauge"><div class="track"><div class="fill" '

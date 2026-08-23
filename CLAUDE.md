@@ -40,9 +40,18 @@ python tests/test_power_control.py          # EBF/PEBF/NEBF 与逐 RB 功率耦�
 python tests/test_physics_invariants.py     # 极化、子阵、SRS/LMMSE 物理不变量
 python tests/test_channel_generation_contract.py # ChannelHub 生成合同与最小网格
 python tests/test_developer_guide.py         # 开发者文档覆盖、离线结构与漂移检查
+python tests/test_carrier.py                 # 载波栅格、Type-0 边界、本地 TDD 合同
+python tests/test_company_256t.py            # 256T 阵列与码本
+python tests/test_system_sim_tool.py          # sr_system_sim 行为级（硬失败路径）
+python tests/test_benchmarks.py               # 预注册经典通信基准与 provenance
 ```
 
-当前共 **18 个可执行测试文件**。不要手写“总检查项”——循环内检查数会随配置展开，
+当前共 **21 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
+pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` 不再是
+0 检查假绿）；脚本式文件必须在 pytest 收集/薄壳路径中同样以异常或非零退出
+传播失败，不能只在 `if __name__ == '__main__'` 里检查全局 FAILED。
+新增测试文件时两个入口都要，别只加一种。
+不要手写"总检查项"——循环内检查数会随配置展开，
 静态 `check()` 调用点也不等于运行时检查数；以实际运行输出和开发者文档自动盘点为准。
 
 改动 `measure.py` / `generate.py` / `plan.py` / `decisions.py` / `scenes.py`
@@ -58,6 +67,16 @@ test_csi_aging + test_rng；
 改动 `csi_aging.py` 要跑 test_csi_aging；改动 `rng.py` 要跑 test_rng + test_system；
 改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）；
 改动开发者文档生成器要跑 `tests/test_developer_guide.py`。
+
+经典通信基准先读 `presets/classic_benchmarks.json` 的冻结判据，再运行
+`python scripts/run_classic_comm_benchmarks.py`。它验证解析关系、标准合同与机制，
+不是现场性能门；新增 case 必须先改 spec 并评审，不能看完结果后改判据。
+夜间全回归用 `python scripts/run_test_matrix.py --tier full`：逐文件心跳、超时、
+独立日志和 JSON 终态，避免 monolithic pytest 在收集阶段执行顶层脚本却长时间无输出。
+
+新数据集在 `summary.json.provenance` 保存 commit、dirty diff SHA-256、依赖和预置
+BLER 哈希；系统仿真把数据集 provenance 与当前 runtime 对账。`mismatch` 时只能做
+历史复现，正式结论应重新生成；旧数据缺 provenance 时必须报 `unknown`，不能当 match。
 
 公式渲染是**两层**：`katex.py` 内联 KaTeX（628 KB，资产由
 `python scripts/vendor_katex.py` 生成）负责排版，`mathml.py` 是没有 JS 时的兜底，
@@ -242,38 +261,40 @@ MCS 查表都不含随机），所以 n 次重复只重跑 TTI 主循环。代�
 抓它的办法是低信噪比处对香农：约束容量在 γ→0 时必须与 `log2(1+γ)` 重合。
 这条自检在 `test_linkadapt` 第 1 节里。
 
-### BLER 有分析模型和用户曲线两条后端，别混成一种证据
+### BLER 有分析模型和预置曲线两条后端，别混成一种证据
 
 表 1/2 使用 `BlerModel`（有限码长形状 + 可配实现损失，没有 3GPP 参考曲线
 兜底）；MCS/CQI 表逐字录自 38.214、TBS 按 §5.1.3.2 复刻、QAM 约束容量精确
 求积。**这三样不能和分析 BLER 混为一谈。**
 
-表 3 使用用户提供的 `company_20b_256qam`：28 档 MCS、56 条 NewTx/ReTx 曲线、
+表 3 使用内置的 `preset_20b_256qam`：28 档 MCS、56 条 NewTx/ReTx 预置曲线、
 1824 个点。原始数据在 `bler_data_20b.py`，查询/哈希/单调性/插值在
-`bler_curves.py`。它比分析模型更贴近该接收机配置，但**仍不是 3GPP 标准曲线**。
-数据所有者确认：源标签 `Es/No` 就是经典 MMSE 接收机的 SINR；公司误块事件是
-**一个已调度 TTI 中该用户的整个 TB**，系统不单独查询或统计 CBLER。公司概念查询输入
-包含该次 TBS、post-MMSE SINR、MCS、NewTx/ReTx 与固定接收机 profile，一次 grant
-只形成一次 TB ACK/NACK；物理编码内部即使分成多个 CB，也不能在表 3 路径上再次套
-CB→TB 合成。
+`bler_curves.py`。它保留离散瀑布形状，但**仍不是 3GPP 标准曲线**。
+预置 profile 将源标签 `Es/No` 解释为经典 MMSE 的**单码字有效 SINR**；误块事件是
+**一个用户在一个已调度 TTI 中的独立单码字 TB**，系统不单独查询或统计 CBLER。预置表
+查询只使用 `MCS + codeword_effective_sinr_db`；跨 RBG、跨 rank stream 都做 dB
+算术平均（RBG 内多个 RB 先在线性功率域平均）。TBS、RE、RBG 数、rank、场景、码字数和
+译码器细节本阶段都不是曲线查询轴，这是已确认的通用曲线合同，不是待补数据缺口。
+物理编码内部即使分成多个 CB，也不能在表 3 路径上再次套 CB→TB 合成。曲线范围外只能
+保守钳位，不能外推。
 
-当前导入常量只保存 MCS、NewTx/ReTx 码率和 SINR→BLER 点，没有保存每档 reference
-TBS/resource/rank 映射；`CurveBlerModel` 也尚未按 `n_coded_bits` 选曲线。因此准确边界是
-**TTI/TB 事件单位已对齐，但 TB-size 轴尚未对齐**。信道模型、MIMO 层数和译码器细节同样
-未参数化。曲线范围外只能保守钳位，不能外推；拿到源表完整 TBS/profile metadata 前，
-不得声称当前 BLER 已随实际块长变化。
-
-表 3 的 HARQ：首传用 NewTx；失败后用 ReTx。源数据每档只有一条 ReTx 曲线，
-多次重传会复用它，结果必须保留 `harq_model=newtx_then_retx_curve_reused`。
-表 3 没有 CQI 曲线，所以 CQI 仍用 38.214 Table 2 + 分析 BLER，并通过
-`cqi_source` 明示，不能谎称 CQI 也来自公司曲线。
+表 3 的 HARQ 只允许**一次重传**，默认 IR、可选 CC；两者都只查询 NewTx 曲线，原始
+ReTx 行保留作来源审计。CC 保持原 MCS 并把查询 SINR 增加 `10log10(2)=3.0103 dB`；
+IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在不变 SINR 上查表。
+等效 MCS 只用于 BLER lookup；空口 MCS、RBG 数、rank 与 TBS 必须和初传完全一致。
+重传失败后结束本次 HARQ，payload 留队并在后续成为新 TB；不得再挂第二次重传。
+表 3 使用已确认的内部 CQI0..14 离散映射：
+`[0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]`。它不是 38.214 CQI 表；
+自动 CQI 量化用各映射 MCS 的 NewTx 目标 BLER 门限。当前预置曲线仅
+有 MCS0..27，CQI14 原始请求 MCS28 但必须显式钳到27，不得伪造 MCS28 曲线。
 
 TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sr_tdd_mcs` 实现：
-`CQI index → 按谱效映射初始 MCS → 该 MCS 的 NewTx 目标 BLER SINR 门限
+`内部 CQI index → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标 BLER SINR 门限
 → + BF Gain → 按 SINR 重映射 MCS → + OLLA MCS offset → floor → 最终 MCS`。
 CQI 是 PMI 权测得的 pre-BF 值。BF Gain 逐 RB、逐流计算为同一信道、CSI、rank、
 功率、噪声、干扰与经典 MMSE 接收机下 `SINR_SVD - SINR_PMI`；用户 SINR 对全部
-RB×流在 dB 域做算术平均。OLLA 的单位是连续 MCS 档位，不是 dB；正值更激进，
+RB×流在 dB 域做算术平均。内部 CQI0 映射 MCS0，不是 out-of-range。OLLA 的
+单位是连续 MCS 档位，不是 dB；正值更激进，
 最终结果严格向下取整并钳位到 0..27。默认 10% 首传 BLER 下 ACK +0.1、NACK -0.9，
 反馈只作用于下一调度时刻。所有中间量与口径必须保留在结果中，不能只返回最终 MCS。
 
@@ -772,10 +793,15 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 老化的全部代价就是"基站以为打准了其实没有"，而那个口径直接把它抹平。
 
 两个实现细节：宽带 PMI 是慢时间尺度的量，逐 UE 逐 rank 在时间平均信道上搜一次
-码本就够（逐快照重搜既慢又不符合物理）；**CQI=0 不能退化成 −inf**，
-它的意思是"低于 CQI 表下界"而不是"这个用户不存在"，退回实测 PMI SINR。
+码本就够（逐快照重搜既慢又不符合物理）；内部 **CQI=0 映射 MCS0**，
+是最低可用档，不再借用 38.214 out-of-range 语义。
 
-### OLLA 的稳态只取决于步长比，且实测一致高于理论 4~5%
+`Dataset.tdd_mcs` / `sr_tdd_mcs` 也必须遵守同一因果边界：进入 MCS 的
+`bf_gain_user_db` 只能在 gNB 可见的 `h_prec` 上计算。同一权打到
+`h_true` 得到的 `bf_gain_true_user_db` 与 prediction error 只作事后审计，
+不得回填当次 MCS。固定 `h_est` 只改 `h_true`，发送决策 BF Gain 必须逐位不变。
+
+### OLLA 是 MCS-domain 状态，步长比由目标 BLER 反解
 
 `(1−p)·δ_up = p·δ_down` ⟹ `p = δ_up/(δ_up+δ_down)` ⟹ `δ_down = δ_up·(1−p)/p`。
 目标 10%、`δ_up=0.01` 时**精确解是 0.09**；现网常说的 −0.1 给的是 9.09%。
@@ -783,18 +809,13 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 `None`，进入仿真后才按链路表的目标值解析；只有目标恰为 10% 时结果才是 −0.09。
 用户显式给 down 时视为有意 override，必须保留并在结果中标来源。
 
-**稳态与步长的绝对值无关**（约分掉了），所以 `olla_speedup` 等比放大只改收敛
-速度与稳态抖动。实测 k=1 时 8 秒内 IBLER 还在 0.394、k=20 收敛到 0.100，
-而体验速率 142.3 → 142.5 几乎不动。
+`olla_speedup` 等比放大两个步长，理论上不改目标 BLER，但会改收敛速度与
+稳态抖动。最终发送档是 `floor(mcs_without_olla + olla_offset)`，所以新口径下
+必须重新跑收敛标定；2026-08-23 之前 dB-domain OLLA 的 BLER/速率数字仅供历史
+追溯，不能写成当前实测结论。
 
-**实测一致地比理论高 4~5%（相对），六个取值全部如此**：
-0.04→0.209(0.200)、0.06→0.150(0.143)、0.09→0.104(0.100)、
-0.10→0.095(0.091)、0.15→0.066(0.063)、0.19→0.053(0.050)。
-不是噪声，是 MCS 整数档的系统性偏置——`select_mcs` 取「满足目标的**最高**档」，
-天然偏激进半档。想让实测正好落在 10% 得取 ≈0.094，但那是拿单一工作点过拟合。
-
-顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 里 `m` 由
-`sinr_tx_db + olla_db[u]` 选出，`mcs_sum` 累加的就是它），即实际调度下去的档位。
+顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 先用
+`sinr_tx_db` 反折 `mcs_without_olla`，再调 `apply_olla_mcs`），即实际调度下去的档位。
 
 `simulate_experience` 作为公开入口**自己**也会兑现"留空=按目标反解"：
 它拿链路表的 `target_bler` 调 `resolved_for_target`，不再依赖调用方先解析
@@ -819,8 +840,10 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 配套变化：统计门 `_position_clusters` 在静态数据上要求 ue_id 聚类与
 `ue_position` 聚类给出**同一个划分**（独立锚点对账，防生成端假设自证），
 聚类失败原因改为结构化状态（`mobility_missing_id` / `partition_mismatch`
-block，其余 warn），不再靠文案子串定严重度；声明移动模式但速度不可信时
-生成端不再发明身份（`unavailable_mobility_speed`），交给移动数据 block。
+block，其余 warn），不再靠文案子串定严重度；移动模式的身份合成严格镜像
+源端布局合同（`internal_sim` 速度 ≤0 时退到静态轮转、键缺失按源端默认
+3.0 km/h 走单轨迹），只有速度非有限才不给身份
+（`unavailable_mobility_speed`）交给移动数据 block。
 探测类工具（`sr_probe_scenario` / `sr_compare_scenarios` / `sr_spec_sheet`）
 的 preset+overrides 合并也走 `_apply_dependent_overrides`，改带宽不会再
 把 preset 的 `num_rb`/SRS 几何带进探测。

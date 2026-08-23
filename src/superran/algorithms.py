@@ -150,7 +150,7 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="mcs_selection",
             name="MCS 选择（单码字）",
             stage="链路自适应",
-            choice="表 3（公司实测 20B NewTx 曲线，28 档）+ 10% 首传 BLER",
+            choice="表 3（预置 20B NewTx 曲线，28 档）+ 10% 首传 BLER",
             formula="逐 RB SINR → RBG 内线性平均 → RBG 间与流间 dB 域平均"
                     " → 用户级 SINR → 选满足目标 BLER 的最高 MCS",
             why="**一个用户一个 TTI 只发一个码字**，同一个 MCS 覆盖全部 RB 与全部流。"
@@ -158,7 +158,7 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
                 "后者等于假设每 RB 能用不同 MCS，系统性高估。两者的差正是单码字的损失。",
             caveat="dB 域平均比线性平均保守：实测半好半坏（+20/−20 dB）的信道，"
                    "dB 域给 0 dB、线性给 17 dB，**差 17 dB**。深衰的 RBG 会把整个码字拖下去。",
-            source="38.214 §5.1.3；公司 20B 曲线（bler_data_20b.py，含 SHA-256）",
+            source="38.214 §5.1.3；预置 20B 曲线（bler_data_20b.py，含 SHA-256）",
             alternatives=["表 1/2：38.214 标准表 + 分析 BLER 模型"],
         ),
         Algorithm(
@@ -250,7 +250,8 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             name="发送侧 / 接收侧 SINR 分离",
             stage="系统级",
             choice="发送侧 = Γ(MCS(CQI)) + BF Gain；接收侧 = 当前真实信道的瞬时 post-MMSE SINR",
-            formula="MCS = select_mcs(Γ(MCS(CQI)) + BF Gain + OLLA)；"
+            formula="MCS_base = select_mcs(Γ(MCS(CQI)) + BF Gain)；"
+                    "MCS_tx = floor(MCS_base + OLLA)；"
                     "BLER = curve(MCS)@SINR_rx",
             why="**这是基站可知量与接收端真实量的边界。** CQI 给出终端测得、长期滤波的"
                 "宽带基线；基站再用自己的 SRS/PMI 信道估计计算瞬时 BF Gain。接收端则在"
@@ -264,11 +265,11 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="olla",
             name="OLLA 外环链路自适应",
             stage="系统级",
-            choice="ACK +0.01 dB / NACK −0.09 dB（项目基线）",
+            choice="ACK +0.01 MCS / NACK −0.09 MCS（项目基线）",
             formula="稳态 BLER → step_up / (step_up + |step_down|) = 0.01/0.10 = 10%",
             why="外环用 ACK/NACK 把发送端不知道的那部分干扰补偿掉。"
                 "步长比例决定稳态 BLER，绝对大小决定收敛速度。",
-            caveat="**步长小收敛很慢**：每次 NACK 只压 0.09 dB，而 MCS 是整数档，"
+            caveat="**步长小收敛很慢**：每次 NACK 只压 0.09 MCS，而发送档会 floor，"
                    "小步长常常压不动一档。短仿真里 BLER 可能还未回到 10%。"
                    "要看稳态结论就加长时长；要快收敛就临时调大步长"
                    "（比例不变则稳态 BLER 不变）。未收敛时结果里会主动告警。",
@@ -322,12 +323,12 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="harq",
             name="HARQ",
             stage="系统级",
-            choice="legacy_v1 用 NewTx/ReTx 曲线；experience_v2 用 NACK 留队后 NewTx 重试",
-            why="两个 profile 显式分开：前者保留历史可复现行为，后者先保证 FIFO 字节与"
-                "按需资源守恒，不虚构尚未实现的 HARQ 进程状态。",
-            caveat="两者都没有真正的 Chase/IR 软合并。experience_v2 的重试不应解释成"
-                "标准 HARQ；要研究重传增益必须新增进程号、RV/软缓冲与丢弃上限。",
-            source="公司 20B 曲线；软合并不做是用户 2026-08-02 定的边界",
+            choice="两个 profile 均为每 TB 最多一次重传；默认 IR，可选 CC",
+            why="初传与重传都只消费预置 NewTx 曲线：IR 用半谱效等效 MCS，CC 用原 MCS "
+                "+3.0103 dB；空口 MCS/RBG 数/rank/TBS 冻结。",
+            caveat="这是 BLER 级工程抽象，尚未展开 RV、LLR、并行 process 与标准 timing。"
+                   "重传失败字节留队，后续作为新 TB，而不是第二次重传。",
+            source="预置表的通用曲线与一次 CC/IR 口径",
         ),
     ]
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 _PKG_ROOT = Path(__file__).resolve().parent
@@ -50,5 +51,12 @@ def prereg_dir() -> Path:
     return p
 
 
+_HANDLE_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
 def dataset_dir(dataset_id: str) -> Path:
+    # 句柄是 MCP 工具的自由文本入参，不能当"自己人生成的安全串"——
+    # 越界读（..、绝对路径）必须在这里拦死。
+    if not _HANDLE_RE.fullmatch(str(dataset_id)):
+        raise ValueError(f"非法 dataset_id {dataset_id!r}：只允许 [A-Za-z0-9_-]")
     return datasets_dir() / dataset_id

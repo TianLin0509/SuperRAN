@@ -721,7 +721,7 @@ vehicular_120kmh:
     pathloss_db: 112.55
     distance_m: 205.93
     los_ratio: 0.19
-    doppler_hz: 265.11
+    doppler_hz: 388.89   # 解析值 |v|/λ（120 km/h @ 3.5 GHz）；旧值 265.11 是双重投影 bug 修复前的探测残留
     ms_per_sample: 1031
   config:
     source: internal_sim
@@ -761,7 +761,7 @@ highspeed_350kmh:
     pathloss_db: 124.96
     distance_m: 409.86
     los_ratio: 0.048
-    doppler_hz: 773.28
+    doppler_hz: 1134.26   # 解析值 |v|/λ（350 km/h @ 3.5 GHz）；旧值 773.28 同上
     ms_per_sample: 581
   config:
     source: internal_sim
@@ -945,7 +945,7 @@ hst_350kmh:
     pathloss_db: 101.76
     distance_m: 125.37
     los_ratio: 0.333
-    doppler_hz: 817.95
+    doppler_hz: 842.59   # 解析值 |v|/λ（350 km/h @ 2.6 GHz）；旧值 817.95 同上
     snr_clamped_out: 3   # 探测口径下撞 +50 dB 夹逼，SNR 分布已剔除这些样本
     ms_per_sample: 548
   config:
@@ -995,7 +995,7 @@ hst_hypercell_comp:
     pathloss_db: 101.76
     distance_m: 125.37
     los_ratio: 0.333
-    doppler_hz: 817.95
+    doppler_hz: 842.59   # 解析值 |v|/λ（350 km/h @ 2.6 GHz）；旧值 817.95 同上
     snr_clamped_out: 3   # 探测口径下撞 +50 dB 夹逼，SNR 分布已剔除这些样本
     ms_per_sample: 567
   config:

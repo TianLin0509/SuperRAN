@@ -97,6 +97,23 @@ def _atom(t: str) -> str:
         name = t[1:]
         if name == "text":
             return ""                      # 由 _render 处理（要吃掉后面的组）
+        # 间距与装饰命令：渲染成对应空白/符号，不是字面命令名
+        if name in (",", ";", ":", " "):
+            return '<mspace width="0.167em"/>'
+        if name == "!":
+            return '<mspace width="-0.167em"/>'
+        if name == "quad":
+            return '<mspace width="1em"/>'
+        if name in ("big", "Big", "bigg", "Bigg", "left", "right"):
+            return ""
+        if name == "lfloor":
+            return "<mo>⌊</mo>"
+        if name == "rfloor":
+            return "<mo>⌋</mo>"
+        if name in ("lceil", "rceil"):
+            return "<mo>⌈</mo>" if name == "lceil" else "<mo>⌉</mo>"
+        if name == "mathcal":
+            return ""                      # 花体退化为普通大写字母
         sym = _SYM.get(name)
         if sym is None:
             return f"<mi>{html.escape(name)}</mi>"

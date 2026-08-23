@@ -317,14 +317,15 @@ _BANDWIDTH = Decision(
     question="带宽多少？",
     default=100e6,
     why=(
-        "带宽决定频域维度（100 MHz@30kHz 对应 273 个 RB），"
+        "带宽决定频域维度（100 MHz@30kHz 在 38.104 标准表对应 273 个 RB；"
+        "TDD 系统仿真合同固定 272 RB，生成系统级信道前会明确舍去 1 RB），"
         "既是压缩率的分母，也决定时延分辨率——做定位/时延估计时，"
         "分辨率约等于光速除以带宽，100 MHz 对应 3 米。\n"
         "完整档位有 13 档（5/10/15/20/25/30/40/50/60/70/80/90/100 MHz），"
         "上面只列常用的，其余直接写数值即可。"
     ),
     options=[
-        Option(100e6, "100 MHz", "273 RB @30kHz，n78 典型", recommended=True),
+        Option(100e6, "100 MHz", "273 RB @30kHz（系统仿真口径 272），n78 典型", recommended=True),
         Option(20e6, "20 MHz", "51 RB，跑得快，适合先验证流程"),
         Option(50e6, "50 MHz", "133 RB，折中"),
         Option(5e6, "5 MHz", "11 RB，窄带物联场景"),
@@ -1065,6 +1066,12 @@ def sample_size_advice(
 
     if std_diff is not None and expected_effect:
         need = required_samples(std_diff, expected_effect)
+        if need <= 0:
+            return {
+                "mode": "由效应量定样本数",
+                "note": ("输入算不出有效样本数（std_diff 非有限/非正）。"
+                         "先跑 20 个样本量出逐样本差值的标准差，再回来算。"),
+            }
         return {
             "mode": "由效应量定样本数",
             "std_diff": round(float(std_diff), 4),

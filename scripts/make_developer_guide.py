@@ -53,6 +53,7 @@ DETAILED_MODULE_EXEMPTIONS = {"__init__", "katex", "mathml"}
 
 from superran import bler_curves as bc  # noqa: E402
 from superran import katex as kx  # noqa: E402
+from superran import linkadapt as la  # noqa: E402
 from superran import mathml as mm  # noqa: E402
 
 
@@ -229,14 +230,28 @@ F_RANK = M(
     r"r^\star=\arg\max_{r\in\{1,2,3,4\}}\ r\cdot\eta\!\left("
     r"\gamma_{\mathrm{eff}}(r)\right)",
 )
+F_BF_STREAM = M(
+    r"\gamma_{f,k}^{(x)}=\frac{1}{\left[\left(I_r+\frac{P}{r}"
+    r"G_{x,f}^{H}R_{n,f}^{-1}G_{x,f}\right)^{-1}\right]_{kk}}-1,\qquad "
+    r"G_{x,f}=H_{\mathrm{gNB},f}W_{x,f},\ x\in\{\mathrm{TX},\mathrm{PMI}\}",
+)
+F_BF_RBG = M(
+    r"\bar\gamma_{b,k}^{(x)}=\frac{1}{|\mathcal F_b|}\sum_{f\in\mathcal F_b}"
+    r"\gamma_{f,k}^{(x)},\qquad "
+    r"\Gamma_{b,k}^{(x)}=10\log_{10}\bar\gamma_{b,k}^{(x)}",
+)
+F_BF_GAIN = M(
+    r"G_{\mathrm{BF},b}=\frac{1}{r}\sum_{k=1}^{r}"
+    r"\left(\Gamma_{b,k}^{(\mathrm{TX})}-\Gamma_{b,k}^{(\mathrm{PMI})}\right),"
+    r"\qquad G_{\mathrm{BF}}=\frac{1}{B}\sum_{b=1}^{B}G_{\mathrm{BF},b}",
+)
 F_TX_SINR = M(
     r"\gamma_{\mathrm{tx,SU}}=\Gamma(\mathrm{MCS}(\mathrm{CQI}))"
-    r"+G_{\mathrm{BF}}+\Delta_{\mathrm{OLLA}}\qquad[\mathrm{dB}]",
+    r"+G_{\mathrm{BF}}\qquad[\mathrm{dB}]",
 )
 F_MU_SINR = M(
     r"\gamma_{\mathrm{tx,MU}}=\Gamma(\mathrm{MCS}(\mathrm{CQI}))+G_{\mathrm{BF}}"
-    r"+\Delta_{\mathrm{SU\ OLLA}}+L_{\mathrm{corr}}+L_{\mathrm{power}}"
-    r"+\Delta_{\mathrm{MU\ OLLA}}",
+    r"+L_{\mathrm{corr}}+L_{\mathrm{power}}",
 )
 F_POWER_LOSS = M(r"L_{\mathrm{power}}=-10\log_{10}K_{\mathrm{MU}}\ \mathrm{dB}")
 F_TBS = M(r"N_{\mathrm{info}}=N_{\mathrm{RE}}Q_mR\nu,\qquad TBS=Q_{38.214}(N_{\mathrm{info}})")
@@ -256,6 +271,15 @@ F_RAVG = M(
 F_OLLA = M(
     r"\Delta(t+1)=\operatorname{clip}\!\left(\Delta(t)+"
     r"\mathbf1_{\mathrm{ACK}}s_{\uparrow}-\mathbf1_{\mathrm{NACK}}s_{\downarrow}\right)",
+)
+F_FINAL_MCS = M(
+    r"\begin{aligned}"
+    r"m_{\mathrm{base}}&=\mathcal S(\gamma_{\mathrm{base}},p_{\mathrm{target}}),\\"
+    r"m_{\mathrm{tx,SU}}&=\operatorname{clip}\!\left(\left\lfloor m_{\mathrm{base,SU}}+"
+    r"\Delta_{\mathrm{SU}}\right\rfloor\right),\\"
+    r"m_{\mathrm{tx,MU}}&=\operatorname{clip}\!\left(\left\lfloor m_{\mathrm{base,MU}}+"
+    r"\Delta_{\mathrm{SU}}+\Delta_{\mathrm{MU}}\right\rfloor\right)"
+    r"\end{aligned}"
 )
 F_BUSY_RATE = M(
     r"R_{\mathrm{trim}}=\frac{\sum_{i=1}^{K-1}B_i}"
@@ -396,12 +420,39 @@ F_EESM = M(
 F_TB_BLER = M(
     r"P_{\mathrm{TB}}=1-(1-P_{\mathrm{CB}})^C",
 )
-F_COMPANY_TTI_BLER = M(
+F_MCS_PROFILE = M(
+    r"R_m=\frac{r_m}{1024},\qquad \eta_m=Q_{m}R_m"
+)
+F_CODEWORD_SINR = M(
     r"\begin{aligned}"
-    r"p_t^{\mathrm{TTI/TB}}&=\Pr\!\left(E_{\mathrm{TB},t}=1\mid "
-    r"A_t,\gamma_t,m_t,x_t,\rho\right),\\"
-    r"\mathrm{ACK}_t&=\mathbf 1\!\left\{U_t>p_t^{\mathrm{TTI/TB}}\right\}"
+    r"\gamma_{g,s}^{\mathrm{dB}}&=10\log_{10}\!\left("
+    r"\frac{1}{|\mathcal B_g|}\sum_{b\in\mathcal B_g}\gamma_{b,s}\right),\\"
+    r"\gamma_{\mathrm{cw}}^{\mathrm{dB}}&="
+    r"\frac{1}{N_GN_s}\sum_{g=1}^{N_G}\sum_{s=1}^{N_s}"
+    r"\gamma_{g,s}^{\mathrm{dB}}"
+    r"\end{aligned}"
+)
+F_MCS_SELECT = M(
+    r"m^\star=\max\left\{m\in\{0,\ldots,27\}:"
+    r"f_m\!\left(\gamma_{\mathrm{cw}}^{\mathrm{dB}}\right)"
+    r"\le p_{\mathrm{target}}\right\}"
+)
+F_PRESET_TTI_BLER = M(
+    r"\begin{aligned}"
+    r"p_t^{\mathrm{NewTx}}&=f_{m_t}(\gamma_t),\\"
+    r"\mathrm{ACK}_t&=\mathbf 1\!\left\{U_t>p_t^{\mathrm{NewTx}}\right\}"
     r"\end{aligned}",
+)
+F_HARQ_CC = M(
+    r"p_t^{\mathrm{CC}}=f_{m_t}\!\left(\gamma_t+10\log_{10}2\right)"
+)
+F_HARQ_IR = M(
+    r"\begin{aligned}"
+    r"\eta_{\mathrm{eq}}&=\eta_{m_t}/2,\qquad "
+    r"m_{\mathrm{eq}}=\max\{j:\eta_j\leq\eta_{\mathrm{eq}}\},\\"
+    r"p_t^{\mathrm{IR}}&=f_{m_{\mathrm{eq}}}(\gamma_t),\qquad "
+    r"P_{\mathrm{res}}=p_t^{\mathrm{NewTx}}p_t^{\mathrm{IR}}"
+    r"\end{aligned}"
 )
 F_LOG_BLER_INTERP = M(
     r"\log_{10}p(x)=(1-\alpha)\log_{10}p_i+"
@@ -1013,7 +1064,7 @@ def pmi_pipeline_svg() -> str:
         body += arrow(x1, 70, x2, 70)
     body += svg_box(120, 174, 288, 76, "参照链", "Hprec 上 Wtx − WPMI → BF Gain", "accent")
     body += svg_box(470, 174, 288, 76, "反馈链", "Htrue 上 WPMI → PMI-SINR → CQI", "good")
-    body += svg_box(820, 174, 288, 76, "发送链", "CQI + BF + OLLA → MCS", "b")
+    body += svg_box(820, 174, 288, 76, "发送链", "CQI → SINR+BF → MCS → OLLA", "b")
     body += arrow(1023, 106, 614, 174, "q(s)")
     body += arrow(408, 212, 470, 212, "同一 PMI")
     body += arrow(758, 212, 820, 212, "因果输入")
@@ -1163,15 +1214,15 @@ def reference_signal_svg() -> str:
 
 def bler_pipeline_svg() -> str:
     body = svg_box(20, 34, 180, 72, "逐 RE/RB SINR", "频选、逐流真值", "accent")
-    body += svg_box(238, 34, 190, 72, "有效 SINR", "MIESM / EESM / 单值输入", "b")
+    body += svg_box(238, 34, 190, 72, "有效 SINR", "当前 dB 平均 / 可选 MIESM", "b")
     body += svg_box(466, 34, 190, 72, "CQI / MCS / TBS", "38.214 表与量化", "good")
-    body += svg_box(694, 34, 190, 72, "BLER backend", "分析模型 / 公司曲线", "b")
+    body += svg_box(694, 34, 190, 72, "BLER backend", "分析模型 / 预置曲线", "b")
     body += svg_box(922, 34, 190, 72, "ACK / NACK", "独立随机流 + OLLA", "accent")
     for x1, x2 in ((200, 238), (428, 466), (656, 694), (884, 922)):
         body += arrow(x1, 70, x2, 70)
     body += svg_box(108, 176, 270, 76, "分析 BLER", "QAM MI + finite length + CB→TB", "warn")
-    body += svg_box(435, 176, 270, 76, "company_20b_256qam", "一次 TTI/TB · 28 MCS · New/ReTx", "good")
-    body += svg_box(762, 176, 270, 76, "系统边界", "legacy ReTx；experience 无软合并", "danger")
+    body += svg_box(435, 176, 270, 76, "preset_20b_256qam", "单码字 TTI/TB · MCS+SINR", "good")
+    body += svg_box(762, 176, 270, 76, "一次 HARQ", "IR 半谱效（默认）/ CC +3 dB", "warn")
     body += arrow(789, 106, 243, 176, "table 1/2")
     body += arrow(789, 106, 570, 176, "table 3")
     body += arrow(1017, 106, 897, 176, "HARQ semantics")
@@ -1240,7 +1291,7 @@ def bler_threshold_svg() -> str:
     )
     return svg_wrap(
         body, width, height,
-        "公司曲线 28 档 MCS 的 NewTx/ReTx 10% BLER 门限；门限差是曲线横向间距，不等同于标准 HARQ 合并增益",
+        "预置曲线 28 档 MCS 的 NewTx/ReTx 10% BLER 门限；门限差是曲线横向间距，不等同于标准 HARQ 合并增益",
         css_class="bler-threshold-chart",
     )
 
@@ -1351,7 +1402,7 @@ def bler_curve_atlas_svg() -> str:
             )
     return svg_wrap(
         body, width, height,
-        "company_20b_256qam 全部 56 条原始 NewTx/ReTx BLER 瀑布曲线，按调制阶数分面",
+        "preset_20b_256qam 全部 56 条原始 NewTx/ReTx BLER 瀑布曲线，按调制阶数分面",
         css_class="bler-curve-atlas",
     )
 
@@ -1379,31 +1430,359 @@ def bler_curve_summary_table() -> str:
     )
 
 
+def bler_mcs_profile_table() -> str:
+    """Render the exact 28-entry preset MCS profile plus IR lookup mapping."""
+    rows = []
+    for mcs in la.MCS_TABLE_3:
+        new = bc.get_curve(mcs.index, "newtx")
+        ir_lookup = la.mcs_for_spectral_efficiency(mcs.se / 2.0, table=3)
+        r1024 = f"{float(mcs.r_1024):.3f}".rstrip("0").rstrip(".")
+        rows.append((
+            str(mcs.index), new.modulation, str(mcs.q_m),
+            f"{mcs.rate:.3f}", r1024, f"{mcs.se:.4f}",
+            f"{new.required_sinr_db(0.1):.3f}",
+            f"{mcs.se / 2.0:.4f}", str(ir_lookup.index),
+        ))
+    return table(
+        ["MCS", "调制", "Qm", "R", "1024R", "η=QmR bit/RE",
+         "NewTx 10%门限 dB", "IR 半谱效", "IR lookup MCS"],
+        rows,
+    )
+
+
+def bler_reproduction_payload() -> str:
+    """Machine-copyable profile whose raw-row digest equals DATA_SHA256."""
+    payload = {
+        "schema": "superran.preset_bler_profile.v1",
+        "source_id": bc.data.SOURCE_ID,
+        "data_sha256": bc.data.DATA_SHA256,
+        "hash_recipe": (
+            "sha256(json.dumps(raw_mcs_curve_rows,separators=(',',':')).encode())"
+        ),
+        "axis": {
+            "name": bc.data.SOURCE_AXIS_NAME,
+            "original_label": bc.data.SOURCE_AXIS_ORIGINAL_LABEL,
+            "interpretation": bc.data.SOURCE_AXIS_USAGE,
+            "unit": "dB",
+        },
+        "lookup_inputs": list(bc.data.PRESET_LOOKUP_INPUTS),
+        "error_event": bc.data.ERROR_EVENT,
+        "system_curve_use": (
+            "NewTx rows only; raw ReTx rows are retained for source audit"
+        ),
+        "mcs_profile": [
+            {
+                "mcs": int(m.index), "q_m": int(m.q_m),
+                "code_rate": float(m.rate),
+                "spectral_efficiency_bit_per_re": float(m.se),
+            }
+            for m in la.MCS_TABLE_3
+        ],
+        # JSON serializes tuples as arrays. Re-hashing this parsed field with the
+        # recipe above reproduces DATA_SHA256 exactly.
+        "raw_mcs_curve_rows": bc.data.MCS_CURVE_ROWS,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+BLER_REFERENCE_IMPLEMENTATION = r'''
+"""Independent NumPy reference for preset_20b_256qam.
+
+Save the manual's JSON block as preset_20b_256qam.json, then run this file.
+It intentionally does not import SuperRAN.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+
+import numpy as np
+
+with open("preset_20b_256qam.json", encoding="utf-8") as f:
+    PROFILE = json.load(f)
+
+ROWS = PROFILE["raw_mcs_curve_rows"]
+digest = hashlib.sha256(
+    json.dumps(ROWS, separators=(",", ":")).encode()
+).hexdigest()
+assert digest == PROFILE["data_sha256"]
+assert len(ROWS) == 28
+
+
+def curve(mcs: int, mode: str = "newtx"):
+    """Return (q_m, rate, x_dB, bler) for one raw source curve."""
+    if (isinstance(mcs, (bool, np.bool_))
+            or not isinstance(mcs, (int, np.integer)) or not 0 <= int(mcs) < 28):
+        raise ValueError("mcs must be integer 0..27")
+    mcs = int(mcs)
+    if mode not in ("newtx", "retx"):
+        raise ValueError("mode must be newtx/retx")
+    row = ROWS[mcs]
+    assert row[0] == mcs
+    q_m = int(row[1])
+    rate, start_db, step_db, points = row[2 if mode == "newtx" else 3]
+    y = np.asarray(points, dtype=float)
+    x = float(start_db) + float(step_db) * np.arange(y.size)
+    assert step_db > 0 and y.size >= 2
+    assert np.all((0 < y) & (y <= 1)) and np.all(np.diff(y) <= 0)
+    return q_m, float(rate), x, y
+
+
+def lookup_bler(mcs: int, codeword_sinr_db: float) -> float:
+    """System lookup: NewTx curve, log10 interpolation, conservative clamp."""
+    s = float(codeword_sinr_db)
+    if math.isnan(s) or s == -math.inf:
+        return 1.0
+    _, _, x, y = curve(mcs, "newtx")
+    log_p = np.interp(
+        s, x, np.log10(y), left=0.0, right=float(np.log10(y[-1]))
+    )
+    return float(np.clip(10.0 ** log_p, 0.0, 1.0))
+
+
+def required_sinr_db(mcs: int, target_bler: float = 0.1) -> float:
+    """Invert one NewTx curve in log10(BLER) between the bracketing points."""
+    if not 0 < target_bler <= 1:
+        raise ValueError("target_bler must be in (0,1]")
+    _, _, x, y = curve(mcs, "newtx")
+    if target_bler > y[0] or target_bler < y[-1]:
+        raise ValueError("target is outside measured BLER range")
+    for i in range(y.size - 1):
+        if y[i] >= target_bler >= y[i + 1]:
+            if y[i] == y[i + 1]:
+                return float(x[i])
+            frac = ((math.log10(target_bler) - math.log10(y[i])) /
+                    (math.log10(y[i + 1]) - math.log10(y[i])))
+            return float(x[i] + frac * (x[i + 1] - x[i]))
+    return float(x[-1])
+
+
+def codeword_sinr_db(sinr_lin_rb_stream, rb_per_rbg: int = 16) -> float:
+    """[RB,stream] linear SINR -> one codeword SINR in dB."""
+    s = np.asarray(sinr_lin_rb_stream, dtype=float)
+    if s.ndim == 1:
+        s = s[:, None]
+    if s.ndim != 2 or min(s.shape) < 1 or rb_per_rbg < 1:
+        raise ValueError("need non-empty [RB,stream] and positive rb_per_rbg")
+    rbg_stream_db = []
+    for start in range(0, s.shape[0], rb_per_rbg):
+        # RBs inside an RBG: linear mean per stream; streams stay separate here.
+        rbg_lin = s[start:start + rb_per_rbg].mean(axis=0)
+        rbg_stream_db.extend(10.0 * np.log10(np.maximum(rbg_lin, 1e-12)))
+    # Equal dB weight across granted RBGs and selected-rank streams.
+    return float(np.mean(rbg_stream_db))
+
+
+def spectral_efficiency(mcs: int) -> float:
+    q_m, rate, _, _ = curve(mcs, "newtx")
+    return q_m * rate
+
+
+def select_mcs(codeword_sinr_db: float, target_bler: float = 0.1) -> int:
+    """Highest MCS whose NewTx BLER is at or below target; fallback is MCS0."""
+    if not 0 < target_bler < 1:
+        raise ValueError("target_bler must be in (0,1)")
+    best = 0
+    for mcs in range(28):
+        if lookup_bler(mcs, codeword_sinr_db) <= target_bler:
+            best = mcs
+    return best
+
+
+def retransmission_bler(transmitted_mcs: int, codeword_sinr_db: float,
+                        combining: str = "ir"):
+    """Return lookup-only MCS/SINR/BLER; transmitted MCS never changes."""
+    if (isinstance(transmitted_mcs, (bool, np.bool_))
+            or not isinstance(transmitted_mcs, (int, np.integer))
+            or not 0 <= int(transmitted_mcs) < 28):
+        raise ValueError("transmitted_mcs must be integer 0..27")
+    mcs = int(transmitted_mcs)
+    if combining == "cc":
+        lookup_mcs = mcs
+        lookup_sinr_db = float(codeword_sinr_db) + 10.0 * math.log10(2.0)
+    elif combining == "ir":
+        target_se = spectral_efficiency(mcs) / 2.0
+        eligible = [j for j in range(28)
+                    if spectral_efficiency(j) <= target_se + 1e-12]
+        lookup_mcs = max(eligible) if eligible else 0
+        lookup_sinr_db = float(codeword_sinr_db)
+    else:
+        raise ValueError("combining must be ir/cc")
+    return {
+        "transmitted_mcs": mcs,
+        "lookup_mcs": lookup_mcs,
+        "lookup_sinr_db": lookup_sinr_db,
+        "bler": lookup_bler(lookup_mcs, lookup_sinr_db),
+    }
+
+
+def draw_ack(bler: float, rng: np.random.Generator) -> bool:
+    return bool(rng.random() > bler)
+
+
+# Frozen anchors: if one fails, the copied data or implementation drifted.
+assert abs(lookup_bler(15, 14.00) - 0.1320) < 1e-12
+assert abs(lookup_bler(15, 14.05) - 0.0949) < 1e-12
+assert abs(required_sinr_db(15, 0.1) - 14.042068) < 1e-6
+assert retransmission_bler(20, 16.0, "ir")["lookup_mcs"] == 10
+assert abs(retransmission_bler(20, 16.0, "cc")["lookup_sinr_db"]
+           - 19.0102999566) < 1e-9
+print("PASS: preset_20b_256qam reproduced")
+'''
+
+
 def bler_detail_atlas() -> str:
+    verify = bc.verify_curves()
+    m15 = bc.get_curve(15, "newtx")
+    cc20 = la.harq_retransmission_bler(20, 16.0, combining="cc")
+    ir20 = la.harq_retransmission_bler(20, 16.0, combining="ir")
+    raw_payload = bler_reproduction_payload()
     return (
-        '<section class="detail-data-atlas" data-bler-atlas>'
-        '<h2>把 56 条公司曲线真正摊开看</h2>'
-        '<p>下面两张图和 28 行表由 <code>bler_data_20b.py</code> 当前常量在构建时直接生成，'
-        '不是手工抄数。第一张只比较 BLER=10% crossing；第二张绘制全部 28×NewTx/ReTx '
-        '瀑布。实线/虚线之间的距离只说明这两组源曲线的横向差，不能脱离源配置解释成标准化的'
-        '软合并增益。</p>'
+        '<section class="detail-data-atlas" data-bler-atlas '
+        'data-bler-reimplementation="complete" data-bler-sha256="'
+        + esc(str(verify["data_sha256"])) + '">'
+        '<h2>复现资产总览：先确认拿到的是同一套数据</h2>'
+        '<p>这一节的表、图、JSON 和代码都在构建手册时从当前 Python 常量生成；没有手抄第二份。'
+        '复现者首先核对 profile、横轴、错误事件和 SHA，再实现插值与状态机。只对着一张截图拟合'
+        'S 曲线，无法复现曲线平台、边界钳位和 MCS 间非均匀间距。</p>'
+        + metric_cards((
+            ("MCS 档位", str(verify["n_mcs"]), "0..27"),
+            ("原始曲线", str(verify["n_curves"]), "28 NewTx + 28 ReTx audit"),
+            ("原始点", f'{int(verify["n_points"]):,}', "每条 21..50 点"),
+            ("SINR 网格", "0.05 dB", "逐曲线等间隔"),
+        ))
+        + table(
+            ["合同项", "必须复现的值", "实现含义"],
+            [
+                ("source_id", str(verify["source_id"]), "不能标成 3GPP BLER 曲线"),
+                ("lookup 输入", "codeword_effective_sinr_db + MCS", "不含 TBS/RE/rank/场景轴"),
+                ("错误事件", "一个用户 grant/TTI 的单码字 TB", "每个 TB 只抽一次 ACK/NACK"),
+                ("系统曲线", "仅 NewTx 28 条", "ReTx 原始行只做资产审计"),
+                ("数据 SHA-256", str(verify["data_sha256"]), "按 raw rows 的紧凑 JSON 计算"),
+            ],
+        )
+        + '<h2>完整预置 MCS Table 3：28 档逐行可复算</h2>'
+        '<p><code>R</code> 是 NewTx 曲线随附码率，<code>1024R</code> 只是展示换算；'
+        '<code>η=QmR</code> 是单层名义 bit/RE，不含 rank、TBS 量化或导频开销。MCS0 与 MCS1 '
+        '虽然 Qm/R/η 相同，仍是两条不同 BLER 曲线，不能按谱效去重。最后两列把默认 IR 的'
+        '“半谱效→等效 lookup MCS”也预先摊开。<strong>窄屏请在表内横向滑动查看全部 9 列。</strong></p>'
+        + bler_mcs_profile_table()
+        + '<h2>曲线数据结构：从一行常量重建横轴</h2>'
+        '<p>每个 raw row 的精确结构如下。第 3、4 项分别是 NewTx 与原始 ReTx 审计分支；'
+        '每个分支只保存起点、步长和 BLER 序列，横轴必须用 '
+        '<code>x[i]=start_db+i×step_db</code> 重建。</p>'
+        + code(
+            "row = [\n"
+            "  mcs, q_m,\n"
+            "  [newtx_code_rate, newtx_start_db, newtx_step_db, newtx_bler_points],\n"
+            "  [retx_code_rate,  retx_start_db,  retx_step_db,  retx_bler_points],\n"
+            "]",
+            "python",
+        )
+        + table(
+            ["曲线操作", "精确规则", "禁止的替代写法"],
+            [
+                ("区间内查询", "在 log10(BLER) 域按 SINR 线性插值", "不能直接在线性 BLER 域插值"),
+                ("低于横轴", "BLER=1", "不能外推到大于 1 或沿首段斜率延伸"),
+                ("高于横轴", "钳到最后一个实测 BLER", "不能外推虚构 10^-6 尾部"),
+                ("目标门限", "在包围 target 的两点间做同一 log 插值反解", "不能取最近网格点"),
+                ("MCS 选择", "逐档检查 NewTx BLER≤target，取最高 index", "不能只按 η 或固定 SINR gap 估计"),
+            ],
+        )
+        + '<h2>56 条原始曲线：先看门限，再看完整瀑布</h2>'
+        '<p>第一张图比较 BLER=10% crossing；第二张图绘制全部 28×NewTx/ReTx。'
+        '实线/虚线间距只描述原始资产，不能解释成当前系统的标准 HARQ 增益。当前系统初传、CC、IR '
+        '全部只消费 NewTx 实线。</p>'
         + bler_threshold_svg()
         + bler_curve_atlas_svg()
         + '<h2>28 档曲线审计表</h2>'
-        '<p><code>R New/Re</code> 是源曲线随附的码率；SINR 范围外，当前实现低侧钳到 1，'
-        '高侧钳到最后一个实测 BLER。表中没有 TB size 列并非公司口径不看 TBS，而是本次导入'
-        '没有把每档 reference TBS/resource profile 结构化保存下来。</p>'
+        '<p><code>R New/Re</code> 是源曲线随附码率；表中没有 TB size/rank/场景列，是因为当前'
+        '预置 profile 明确把 MCS 曲线视为通用曲线，不是导入遗漏。</p>'
         + bler_curve_summary_table()
+        + '<h2>从 [RB,stream] 到 ACK/NACK：七步实现顺序</h2>'
+        + table(
+            ["步骤", "输入→输出", "必须锁住的不变量"],
+            [
+                ("1 数据体检", "raw rows→可信 profile", "28 顺序 MCS、56 曲线、SHA、有限/单调/target crossing"),
+                ("2 RBG 内聚合", "逐 RB/stream 线性 SINR→逐 RBG/stream dB", "每 16 RB 先在线性域逐流平均"),
+                ("3 单码字压缩", "逐 RBG/stream dB→γcw", "只平均本 grant RBG 与选定 rank streams"),
+                ("4 选择 MCS", "γcw+target→m*", "只查 NewTx；最高满足档；MCS0 fallback 仍保留真实高 BLER"),
+                ("5 TB 判错", "m*+γcw→p→ACK/NACK", "一个 UE grant/TTI 只抽一次；不做 CB 二次合成"),
+                ("6 唯一重传", "NACK→CC/IR lookup", "空口 MCS/RBG 数/rank/TBS 冻结；lookup MCS 不能写回 DCI"),
+                ("7 结果记账", "ACK/NACK→队列/BLER/KPI", "重传失败结束 HARQ；窗口末 pending 单列右删失"),
+            ],
+        )
+        + '<h2>不依赖 SuperRAN 的 NumPy 参考实现</h2>'
+        '<p>下面代码只依赖 NumPy 和本页完整 JSON。它实现 SHA 核对、横轴重建、对数域插值、'
+        '门限反查、单码字 SINR 聚合、MCS 选择、CC/IR 和 ACK 抽样；末尾五个断言是冻结锚点。'
+        '复制后若输出 PASS，就已经重建了本章当前系统 BLER 核心。</p>'
+        + code(BLER_REFERENCE_IMPLEMENTATION, "python")
+        + '<h2>必须得到的复现锚点</h2>'
+        + table(
+            ["锚点", "期望值", "抓住的错误"],
+            [
+                ("MCS15 @ 14.00 dB", f"BLER={float(m15.evaluate(14.0)[0]):.4f}", "线性概率插值/横轴偏移"),
+                ("MCS15 @ 14.05 dB", f"BLER={float(m15.evaluate(14.05)[0]):.4f}", "0.05 dB 网格被粗化"),
+                ("MCS15 的 10%门限", f"{m15.required_sinr_db(0.1):.6f} dB", "最近点代替 log 反插值"),
+                ("MCS20/16 dB CC", f"lookup MCS20, SINR={float(cc20['lookup_sinr_db']):.6f} dB, BLER={float(cc20['bler']):.6f}", "3 dB 写成近似常数或误用 ReTx 行"),
+                ("MCS20/16 dB IR", f"lookup MCS{int(ir20['lookup_mcs'])}, BLER={float(ir20['bler']):.6f}", "半谱效映射写死成 MCS7/8"),
+            ],
+        )
+        + '<h2>完整 1,824 点机器可复制 JSON</h2>'
+        '<p>把下面内容原样保存为 <code>preset_20b_256qam.json</code>。字段 '
+        '<code>raw_mcs_curve_rows</code> 重新按 <code>hash_recipe</code> 序列化后，摘要必须等于'
+        '<code>data_sha256</code>；否则不要继续画曲线或跑系统仿真。</p>'
+        '<details class="raw-data"><summary>展开/复制完整 JSON（28 MCS，56 曲线，1,824 点）</summary>'
+        + code(raw_payload, "json")
+        + '</details>'
+        + '<h2>复现完成的验收清单</h2>'
+        + table(
+            ["层次", "通过条件", "失败时先查"],
+            [
+                ("数据", "SHA 一致；28/56/1824；每条 x 递增、BLER 非增且在 (0,1]", "JSON 编码、float 精度、分支索引"),
+                ("曲线", "五个冻结锚点逐值一致；边界钳位一致", "log10 插值、left/right 参数"),
+                ("MCS", "所有测试 SINR 都选到相同最高满足档", "target 比较符、MCS0 fallback、重复 SE 档"),
+                ("SINR", "全平输入原值返回；+20/−20 dB 两 RBG 得 0 dB", "是否误做全局线性平均"),
+                ("HARQ", "MCS20 IR lookup=10；CC +3.0102999566 dB；空口身份不变", "lookup MCS 与 transmitted MCS 混写"),
+                ("系统", "逐 TB 一次 draw；字节守恒；最多一次重传；pending 右删失", "CB 二次合成、第二次重传、窗口边界"),
+            ],
+        )
+        + '<p><strong>明确边界：</strong>复现上述内容等于复现 SuperRAN 当前预置 Table 3 的工程'
+        'BLER 抽象，不等于复现真实 LDPC decoder、RV/LLR 软缓冲或一套 3GPP 标准 BLER 曲线。</p>'
         + '</section>'
+    )
+
+
+def bf_gain_svg() -> str:
+    body = svg_box(22, 92, 180, 76, "gNB 可见 CSI", "h_prec / 可能陈旧", "accent")
+    body += svg_box(258, 24, 190, 72, "PMI 参照权", "Type-I-style 宽带", "b")
+    body += svg_box(258, 166, 190, 72, "TX 实际权", "SVD / Type-I", "b")
+    body += svg_box(500, 24, 190, 72, "同功率约束", "EBF / PEBF / NEBF", "warn")
+    body += svg_box(500, 166, 190, 72, "同功率约束", "EBF / PEBF / NEBF", "warn")
+    body += svg_box(744, 24, 176, 72, "post-MMSE", "逐 RB × 逐流", "good")
+    body += svg_box(744, 166, 176, 72, "post-MMSE", "逐 RB × 逐流", "good")
+    body += svg_box(970, 92, 150, 76, "TX − PMI", "RBG/流 dB 聚合", "accent")
+    body += arrow(202, 116, 258, 60)
+    body += arrow(202, 144, 258, 202)
+    body += arrow(448, 60, 500, 60)
+    body += arrow(448, 202, 500, 202)
+    body += arrow(690, 60, 744, 60)
+    body += arrow(690, 202, 744, 202)
+    body += arrow(920, 60, 970, 112, "PMI")
+    body += arrow(920, 202, 970, 148, "TX")
+    return svg_wrap(
+        body, 1140, 270,
+        "同一 gNB CSI、rank、功率约束与接收机；唯一改变预编码权",
     )
 
 
 def link_flow_svg() -> str:
     items = [
         (25, "CQI", "长期宽带"), (175, "Γ(MCS(CQI))", "CQI 门限反映射"),
-        (365, "BF Gain", "SVD − PMI"), (525, "SU OLLA", "用户级闭环"),
-        (680, "MCS", "发送侧选择"), (820, "真实 SINR", "当前 h_true"),
-        (975, "BLER", "查表判错"),
+        (365, "BF Gain", "SVD − PMI"), (525, "基准 MCS", "SINR 反折"),
+        (680, "SU OLLA", "MCS 域闭环"), (820, "发送 MCS", "floor + clip"),
+        (975, "BLER", "真实 SINR 查表"),
     ]
     body = ""
     boxes = []
@@ -1421,7 +1800,7 @@ def link_flow_svg() -> str:
     body += arrow(455, 185, 610, 120, "+")
     body += arrow(665, 185, 660, 120, "+")
     body += arrow(875, 185, 710, 120, "+")
-    return svg_wrap(body, 1140, 285, "CQI + BF + OLLA 到 MCS；MU 在 SU 链上再加 CorrLoss、PowerLoss 与 MU OLLA")
+    return svg_wrap(body, 1140, 285, "CQI 查表、SINR+BF 反折基准 MCS，再叠加 MCS-domain OLLA")
 
 
 def mu_decision_svg() -> str:
@@ -1563,7 +1942,7 @@ def product_surfaces_showcase() -> str:
       <div class="surface-copy">
         <span class="surface-stage">RUN · AFTER</span>
         <h3>Agent 自适应 KPI 工作台</h3>
-        <p>22 项小区 KPI、20 项用户 KPI、逐 UE 图与经验 CDF、0..17 RBG 分布和 MU 资源对账同页呈现；
+        <p>26 项小区 KPI、24 项用户 KPI、逐 UE 图与经验 CDF、0..17 RBG 分布和 MU/HARQ 资源对账同页呈现；
         Agent 只重排关注项，所有数值与完整排序证据仍保留。</p>
         <a href="#/kpi">查看 KPI 口径与工作台合同 →</a>
       </div>
@@ -1654,7 +2033,7 @@ def overview_page(modules: list[ModuleDoc], tools: list[SymbolDoc], tests: list[
   <a href="#/calibration"><b>校准物理模型</b><span>38.901 §7.8 → CDF/KS → Gate 职责边界</span></a>
   <a href="#/raytracing"><b>核对射线追踪身份</b><span>场景资产 → Paths/CFR → RT/fallback → probe 边界</span></a>
   <a href="#/referencesignals"><b>复核参考信号</b><span>RB 表 → TDD → Gold/SRS → CSI-RS 扫描</span></a>
-  <a href="#/bler"><b>分清 BLER 后端</b><span>QAM MI → MIESM/EESM → 公司曲线 → HARQ 近似</span></a>
+  <a href="#/bler"><b>分清 BLER 后端</b><span>当前 dB 聚合 → 预置曲线；QAM/MIESM 是可选分析链</span></a>
   <a href="#/externalresults"><b>接入外部算法</b><span>预注册 → ResultArtifact → 有序配对 → 发布门</span></a>
 </div>
 <h2>本页如何保持可信</h2>
@@ -3008,7 +3387,7 @@ SINR 高 14 dB；拿 σ₁² 反标噪声会把这 14 dB 人为抵消。</p>
         [
             ("se / best_se", "h_est 设计、h_true 评估", "真实接收 SINR → 单码字 MCS → rank×SE；用于结果/legacy 实发记账"),
             ("se_gnb / best_se_gnb", "全在 gNB 当前可见 CSI 上", "调度器估计的可达谱效；避免偷看未来/真实信道"),
-            ("sinr_tx", "CQI 门限 + gNB BF Gain", "发送侧 MCS 输入；OLLA 在 TTI 循环再加"),
+            ("sinr_tx", "CQI 门限 + gNB BF Gain", "先反折无 OLLA MCS；OLLA 在 TTI 循环以 MCS offset 再加"),
             ("TBS(17)", "slot、MCS、rank、17 RBG", "experience PF 排序的 fullband potential，单位 bytes"),
             ("grant TBS(n)", "实际 grant bitmap", "experience 实发与 PF credit；功控时对 subset 重聚合/重选 MCS"),
         ],
@@ -3033,17 +3412,98 @@ SINR 高 14 dB；拿 σ₁² 反标噪声会把这 14 dB 人为抵消。</p>
     )
 
 
+def bfgain_page() -> Page:
+    body = bf_gain_svg()
+    body += """
+<h2>BF Gain 究竟是什么</h2>
+<p>SuperRAN 中的 BF Gain 不是天线口径增益、不是奇异值比，也不是用真实接收
+SINR 事后反推的余量。它的定义是：<strong>基站当前可见 CSI 上，实际 TX 预编码权
+相对 PMI 参照权的 post-MMSE SINR dB 差</strong>。两套权的 rank、功率、损伤、接收机和
+频域聚合完全相同，唯一改变的是权。</p>
+"""
+    body += F_BF_STREAM + F_BF_RBG + F_BF_GAIN
+    body += table(
+        ["量", "使用的信道视角", "是否进入当次 MCS", "用途"],
+        [
+            ("bf_gain_user_db", "h_prec / gNB 可见 CSI", "是", "加到 CQI 初始 MCS 的目标 BLER SINR 门限"),
+            ("bf_gain_rbg", "h_prec / gNB 可见 CSI", "是（频率感知路径）", "逐 RBG grant 聚合"),
+            ("bf_gain_true_user_db", "当前 h_true", "否", "事后审计实际波束命中情况"),
+            ("bf_gain_prediction_error_db", "true 审计 − gNB 预测", "否", "观察 CSI 估计/老化误差，由后续 OLLA 闭环吸收"),
+        ],
+    )
+    body += """
+<h2>从信道到一个 BF Gain 的实际顺序</h2>
+"""
+    body += steps((
+        ("取 gNB CSI", "<p>系统仿真使用当前可用的 <code>h_prec</code>；打开 SRS 老化后它可能来自较早快照。</p>"),
+        ("构造两套权", "<p>PMI 权由 Type-I-style 宽带码本搜索得到；TX 权默认为 SVD。<code>precoder=type1</code> 时两者相同。</p>"),
+        ("锁死公平条件", "<p>两边强制同 rank，每流 <code>P/r</code>，同时经过同一 EBF/PEBF/NEBF 功率约束。</p>"),
+        ("算 post-MMSE SINR", "<p>在同一 gNB CSI 和总损伤上分别计算 TX/PMI 的逐 RB×流线性 SINR。</p>"),
+        ("RB → RBG → 宽带", "<p>RBG 内先线性平均 RB，转 dB 后对流平均；最后对全带 RBG 平均并作 TX−PMI。</p>"),
+        ("进入 AMC", "<p><code>Γ(MCS(CQI))+G_BF</code> 得到发送侧预测 SINR，再反折无 OLLA MCS。</p>"),
+    ))
+    body += callout(
+        "danger", "h_true 不能进当次 BF Gain",
+        "<p>如果先用 h_est 设计权，却在 h_true 上评估 SVD/PMI 差后加到当次 MCS，"
+        "就等于让基站预知波束是否打准。当 CSI 完美时两者恰好一致，这个 bug 不会显形；"
+        "只有开老化/估计误差才会暴露。</p>",
+    )
+    body += callout(
+        "warn", "BF Gain 不保证非负",
+        "<p>EBF 下、完美 CSI 且同 rank 时，SVD 通常不会输给量化 PMI。但陈旧 CSI、"
+        "NEBF 破坏正交性、码本/rank 边界或数值工作点都可使差值为负。代码不把它静默钳到0。</p>",
+    )
+    body += table(
+        ["边界情形", "预期结果", "原因"],
+        [
+            ("TX 权 = PMI 权", "BF Gain = 0 dB", "两条计算链逐值相同"),
+            ("h_prec = h_true", "predicted = true audit", "无 CSI 估计/老化失配"),
+            ("h_prec 陈旧", "predicted 可高于 true", "基站在旧信道上以为 SVD 仍对准"),
+            ("rank 不同", "拒绝比较", "否则混入层数和每流功率差"),
+        ],
+    )
+    body += "<p class=source-row>" + source_ref(
+        "src/superran/system.py", "BF Gain = SVD − PMI") + " · " + source_ref(
+        "src/superran/csi_aging.py", "def mmse_stream_sinr") + " · " + source_ref(
+        "src/superran/mumimo.py", "def user_sinr_db") + " · " + source_ref(
+        "src/superran/loader.py", "def tdd_mcs") + "</p>"
+    return Page(
+        "bfgain", "BF Gain：SVD 相对 PMI 的可见增益", "链路算法", "BEAMFORMING GAIN",
+        "明确 BF Gain 用哪份 CSI、哪两套权、什么功率/接收参考面以及如何从逐 RB/流聚合为宽带 dB 值。", body,
+        ("BF Gain", "SVD", "PMI", "h_prec", "post-MMSE", "CSI 老化"),
+    )
+
+
 def linkadapt_page() -> Page:
     body = link_flow_svg()
     body += """
 <h2>发送侧不是接收侧长期均值</h2>
 """ + F_TX_SINR
     body += """
-<p>CQI 是终端用 Type-I/PMI 参照权在真实信道上测得并按报告周期更新的长期宽带量；先映射
+<p>CQI 是终端用 Type-I/PMI 参照权在真实信道上测得并按报告周期更新的长期宽带量；先查内部
+离散表 <code>[0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]</code> 映射
 初始 MCS，再取该 MCS 的 10% BLER SINR 门限 Γ。BF Gain 则是 gNB 在自己可见的（可能陈旧）
 SRS CSI 上，实际发送权相对 PMI 权的 post-MMSE SINR差。两者相加后重选 MCS，最后由用户级
-SU OLLA 调整。</p>
+MCS-domain SU OLLA 调整。内部 CQI0 映射 MCS0，不是 out-of-range。</p>
 """
+    mapping_rows = la.internal_cqi_mapping_rows(mcs_table=3)
+    body += table(
+        ["内部 CQI", "原始映射 MCS", "当前曲线 profile 实际 MCS", "状态"],
+        [
+            (
+                str(row["cqi"]), str(row["requested_mcs"]), str(row["mcs"]),
+                "上界钳位：缺 MCS28 BLER 曲线"
+                if row["mcs_clipped_to_profile"] else "逐项精确映射",
+            )
+            for row in mapping_rows
+        ],
+    )
+    body += callout(
+        "warn", "CQI14 的映射合同与当前曲线覆盖不同",
+        "<p>内部表确认为 CQI14→MCS28，但 <code>preset_20b_256qam</code> "
+        "只有 MCS0..27。代码保留 <code>requested_mcs=28</code> 并显式钳到27；"
+        "获得 MCS28 的码率与 NewTx BLER 曲线前，不做外推或复制 MCS27。</p>",
+    )
     body += callout(
         "danger", "禁止 oracle",
         "<p>把真实接收 SINR 的全仿真均值回填给发送侧，会同时泄露未来信道和实际波束命中效果。"
@@ -3052,17 +3512,39 @@ SU OLLA 调整。</p>
     )
     body += """
 <h2>OLLA 如何闭环</h2>
-""" + F_OLLA
+""" + F_OLLA + F_FINAL_MCS
     body += """
 <p>用户默认只设目标 BLER。给定 ACK 上调步长 <code>s_up</code> 后，系统用
 <code>s_down=s_up(1-p)/p</code> 反解 NACK 下调步长；例如 <code>p=10%</code>、
-<code>s_up=0.01 dB</code> 得 <code>s_down=0.09 dB</code>。用户若显式填入 down 步长，
+<code>s_up=0.01 MCS</code> 得 <code>s_down=0.09 MCS</code>。用户若显式填入 down 步长，
 系统不覆盖，但结果会标成 <code>explicit_user_override</code>，与默认的
 <code>auto_from_target_bler</code> 区分。warmup 可用同一比例的加速因子加快收敛；
 测量窗和预热窗分别记录。SU OLLA 与 MU OLLA 都是用户级数组，
 后者不区分具体配对关系。</p>
-<h2>体验路径当前只使用公司 MCS Table 3</h2>
-<p><code>experience_v2</code> 只接受 <code>company_20b_256qam / table=3</code>。
+<p><strong>顺序已统一：</strong>先以 <code>base_tx_sinr_db</code> 查询预置 BLER 表，
+得到并记录 <code>mcs_without_olla</code>；再把用户级连续 MCS offset 加到该 MCS，
+<code>floor</code> 并钳位后得到 allocation 中的最终 <code>mcs</code>。MU 先在 SINR 域叠加
+<code>corr_loss_db</code> 与 <code>power_loss_db</code> 并反折基准 MCS，再加 SU/MU 两份
+MCS-domain OLLA。历史 <code>*_before_db</code> 字段名仅为 API 兼容保留。</p>
+"""
+    body += table(
+        ["阶段", "SU", "MU", "结果留痕"],
+        [
+            ("基准档", "S(γbase,target)", "S(γbase+CorrLoss+PowerLoss,target)", "mcs_without_olla"),
+            ("最终发送档", "floor(m_base+SU-OLLA)", "floor(m_base,MU+SU-OLLA+MU-OLLA)", "mcs"),
+            ("真实判错", "最终 mcs + true SINR", "最终 mcs + pair true SINR", "bler / ack"),
+        ],
+    )
+    body += callout(
+        "warn", "历史 *_db 参数名只是兼容层",
+        "<p><code>sr_tdd_mcs</code>、<code>sr_system_sim</code> 和 <code>experience_v2</code> "
+        "现在都使用连续 MCS-index OLLA。系统状态仍按用户、SU/MU 分开收敛；"
+        "旧 <code>olla_step_*_db</code> 名称暂时保留，返回值会用 <code>olla_domain</code> "
+        "明确其单位。</p>",
+    )
+    body += """
+<h2>体验路径当前只使用预置 MCS Table 3</h2>
+<p><code>experience_v2</code> 只接受 <code>preset_20b_256qam / table=3</code>。
 传入 Table 1/2 会硬失败，因为仅放开 MCS 索引却没有同套 BLER、TBS/profile
 元数据，会把两个物理口径拼在一起。<code>TbsLookup.build(..., mcs_table=...)</code>
 和链路表仍显式保留 table/profile 接口；未来要扩展时按完整 profile 插件增加，
@@ -3084,9 +3566,9 @@ SU OLLA 调整。</p>
     )
     body += """
 <h2>BLER 与 HARQ 边界</h2>
-<p>表 1/2 是 38.214 MCS/CQI + 分析 BLER 模型；表 3 是用户提供的 20B 256QAM 28 档
-NewTx/ReTx 曲线。capacity/legacy 可查 ReTx 曲线，但没有真实软缓冲；experience_v2 的 NACK
-payload 留队、下一次按 NewTx 再判错，明确不称为标准 HARQ 软合并。</p>
+<p>表 1/2 是 38.214 MCS/CQI + 分析 BLER 模型；表 3 是内置的 20B 256QAM 28 档预置
+MCS 曲线。系统初传与重传都只消费 NewTx 曲线：每个 TB 最多一次重传，默认 IR 用半谱效
+等效 MCS 查表，可选 CC 用同档曲线 +3.0103 dB。原始 ReTx 行保留作来源审计，不进入系统判错。</p>
 """
     body += "<p class=source-row>发送侧：" + source_ref("src/superran/system.py", "发送侧 SINR = CQI") + " · TBS：" + source_ref("src/superran/experience.py", "class TbsLookup") + "</p>"
     return Page(
@@ -3099,86 +3581,115 @@ payload 留队、下一次按 NewTx 再判错，明确不称为标准 HARQ 软�
 def bler_page() -> Page:
     body = bler_pipeline_svg()
     body += """
-<h2>先把五种“标准程度”拆开</h2>
-<p>MCS/CQI 表和 TBS 算法逐项来自 38.214；QAM 互信息是给定星座与噪声约定下的数值积分；
-MIESM/EESM 是链路到系统映射；<code>BlerModel</code> 是有限码长形状与实现损失组成的分析模型；
-<code>company_20b_256qam</code> 是用户提供的接收机曲线。最后两者都不能写成“3GPP BLER 曲线”。</p>
-<p>因此每个 BLER 结果至少要带 <code>backend</code>、<code>model_version</code>、MCS、传输类型和
-SINR 参考面；对公司后端还要带该 TTI 的实际 TBS 与曲线 profile。只给一个概率无法判断它
-能否用于当前接收机、块长或系统模式。</p>
-<h2>公司口径：一次 TTI 的 TB 就是一次 BLER 事件</h2>
-""" + F_COMPANY_TTI_BLER
+<h2>先分清当前主链与两条可选旁路</h2>
+<p><strong>当前体验系统主链只有：</strong>逐 RB/stream SINR → RBG 内线性平均 →
+跨 RBG/选定 rank streams 做 dB 平均 → 预置 BLER 表选最终发送 MCS并判 TB ACK/NACK。
+它不调用 QAM 约束容量，也不调用 MIESM/EESM。</p>
+<p>旁路 A 是表 1/2 的分析 <code>BlerModel</code>，会用 QAM 互信息和有限码长形状；
+旁路 B 是显式链路级 <code>effective_sinr()/link_adaptation()</code>，可选 MIESM/EESM。
+MCS/CQI 表与 TBS 算法来自 38.214，但分析 BLER 和预置曲线都不能写成“3GPP BLER 曲线”。</p>
+<p>因此每个 BLER 结果至少要带 <code>backend</code>、<code>model_version</code>、空口 MCS、
+码字级有效 SINR、NewTx/重传身份与曲线 profile。TBS、RBG 数和 rank 仍要随 allocation 保存，
+用于证明重传身份没有改变，但按当前预置 profile 它们不是 BLER 曲线的查询轴。</p>
+<h2>先钉住可执行链：MCS 表 → 单码字 SINR → 曲线选档</h2>
+""" + F_MCS_PROFILE + F_CODEWORD_SINR + F_MCS_SELECT
     body += """
-<p>公司仿真并不单独查询 CBLER，也不在系统层用 CB 数再次合成 TBLER。调度器先确定这个 TTI
-给该用户的 RBG、rank、MCS 和 TBS；随后用同一工作点的 TB size、经典 MMSE post-processing
-SINR、MCS、NewTx/ReTx 与固定接收机 profile 查询一次 BLER，再抽一次 ACK/NACK。</p>
+<p>预置 Table 3 固定 28 档 MCS。每档由 <code>Qm</code>、码率 <code>R</code>、名义谱效
+<code>η=QmR</code> 和一条 NewTx BLER 曲线共同定义；MCS index 才是曲线身份，不能只看谱效。
+系统收到逐 RB、逐 stream 的线性 SINR 后，先在每个 16-RB RBG 内逐流做线性平均，再对实际
+grant 的全部 RBG 与选定 rank streams 做 dB 平均，得到唯一 <code>γcw</code>。最后逐档查询
+NewTx 曲线，选 BLER 不超过目标值的最高 MCS。详细版给出完整 28 行表、1,824 个原始点和独立
+NumPy 重实现。</p>
+<h2>预置表口径：一次 TTI 的 TB 就是一次 BLER 事件</h2>
+""" + F_PRESET_TTI_BLER
+    body += """
+<p>当前表驱动仿真不单独查询 CBLER，也不在系统层用 CB 数再次合成 TBLER。每个用户在一个 TTI
+中的 grant 视为一个独立、单码字 TB；调度器先确定 RBG、rank、MCS 和 TBS，随后只用该用户的
+单码字有效 SINR与 MCS 查询一次通用 NewTx 曲线，再抽一次 ACK/NACK。跨 RBG 与跨 rank stream
+均采用 dB 算术平均；RBG 内多个 RB 先在线性功率域平均。</p>
 """
     body += table(
         ["层次", "已经确认的口径", "SuperRAN 当前实际承载"],
         [
-            ("公司误块事件", "一个已调度 TTI 中该用户的整个 TB；CB 不单独暴露",
-             "每个 grant/用户只抽一次 ACK/NACK，与公司事件单位一致"),
-            ("公司概念查询输入", "当次 TBS、post-MMSE SINR、MCS、NewTx/ReTx、固定 profile",
-             "当前曲线对象只保存 MCS、tx_mode、码率与 SINR→BLER 点"),
-            ("当前缺口", "不同 TB size 应落到其对应的一 TTI/TB 曲线工作点",
-             "导入数据没有 reference TBS/resource/rank 轴；运行时实际只按 MCS+SINR+tx_mode 查询"),
-            ("CB 的位置", "物理编码内部可以存在多个 CB，但公司系统 BLER 接口不单报 CB",
+            ("预置表误块事件", "一个已调度 TTI 中该用户的单码字 TB；CB 不单独暴露",
+             "每个 grant/用户只抽一次 ACK/NACK，与预置事件单位一致"),
+            ("预置表查询输入", "单码字有效 SINR + MCS",
+             "TBS、RE、RBG、rank、码字数、场景和接收机细节均不作为查询轴"),
+            ("曲线范围", "MCS0..27 的通用初传曲线",
+             "同一曲线跨 TBS/rank/场景复用是已确认产品口径，不再标成数据缺口"),
+            ("CB 的位置", "物理编码内部可以存在多个 CB，但预置表 BLER 接口不单报 CB",
              "表 3 禁止再套 CB→TB 公式；表 1/2 分析后端才使用该公式"),
         ],
     )
     body += callout(
-        "warn", "TBS 已经算出来，不等于 BLER 查询已经使用了 TBS",
-        "<p><code>experience_v2</code> 会为 1～17 个 RBG 计算不同 TBS，但当前 "
-        "<code>_bler_lookup(mcs, sinr)</code> 没有 TBS 参数。因此现状是“事件单位正确、块长轴缺失”。"
-        "在获得每档曲线对应的 reference TBS/resource profile 前，不能静默声称已经实现公司完整查询。"
-        "</p>",
+        "decision", "当前是单码字通用 TB-BLER 抽象，不展开 RE/TBS/CB",
+        "<p><code>experience_v2</code> 仍为 1～17 个 RBG 精确计算 TBS，因为它决定可发送字节、"
+        "padding、PF 记账与重传身份；但 BLER lookup 明确保持 <code>(mcs, codeword_sinr_db)</code>。"
+        "这不是忘记传 TBS，而是当前预置 profile 的显式约定。</p>",
     )
     body += """
-<h2>QAM 约束容量与频率选择性有效 SINR</h2>
+<h2>可选链路级分析能力：当前预置表系统路径不使用</h2>
 """ + F_QAM_MI + F_MIESM + F_EESM
     body += """
-<p><code>linkadapt.effective_sinr()</code> 已支持 MIESM 与 EESM。MIESM 默认不需要逐 MCS beta，
-EESM 的内置 beta 仅按调制阶数给常见近似值，正式使用必须用自己的链路级 BLER 曲线标定。
-这项库能力目前没有替换 experience_v2 的“RBG 内线性、跨 RBG dB 平均”口径；手册把两者并列，
-避免因为函数已经存在就误以为系统链路表已经使用。</p>
+<p><strong>这三条公式不在当前 <code>experience_v2 + table=3</code> 主链路中。</strong>
+QAM 约束容量用于表 1/2 的分析 BLER 模型，回答“给定星座时理论上最多承载多少互信息”；
+MIESM/EESM 是把频选 SINR 压成一个等效值的通用链路级方法，只有调用
+<code>linkadapt.effective_sinr()</code> / <code>link_adaptation(..., esm=...)</code> 时才生效。
+当前预置表系统路径采用前文明确的“RBG 内线性、跨 RBG 与选定 rank streams 做 dB 平均”，
+然后直接查预置 NewTx 曲线。因此它们在本章只用于解释可选后端与未来升级方向，不参与当前体验结果。</p>
+"""
+    body += table(
+        ["能力", "当前代码中的用途", "experience_v2 + table=3"],
+        [
+            ("QAM constrained MI", "表 1/2 分析 BLER、通用链路级诊断", "不使用"),
+            ("MIESM/EESM", "显式调用 effective_sinr/link_adaptation 的频选压缩", "不使用"),
+            ("RBG/stream dB 平均", "预置表系统路径的单码字 SINR", "当前实际使用"),
+            ("预置 NewTx 曲线", "MCS 选择与 TB BLER", "当前实际使用"),
+        ],
+    )
+    body += """
 <h2>分析 BLER 后端怎样从 CB 合到 TB</h2>
 """ + F_TB_BLER
     body += """
 <p>分析后端先用 QAM MI 判断码率相对约束容量的裕量，再用码长和实现损失形成单码块瀑布，
 最后按码块数合成 TB BLER。<code>anchor_check()</code> 只能把各 MCS 的 10% 门限摆出来与独立公开曲线
 对照；没有参考曲线时，它不是自动“校准通过”证书。调制切换点允许门限小幅回落，单调性只在同一
-Qm 内检查。这个分析后端用于表 1/2，不描述公司表 3 的运行逻辑。</p>
-<h2>公司 20B 曲线的真实数据合同</h2>
+Qm 内检查。这个分析后端用于表 1/2，不描述预置表 3 的运行逻辑。</p>
+<h2>预置 20B 曲线的数据合同</h2>
 """ + F_LOG_BLER_INTERP
     body += table(
         ["字段", "当前事实", "不能外推的内容"],
         [
-            ("事件单位", "一个调度 TTI 的 TB，CB 不单独建模", "不能再套独立 CB 合成公式"),
-            ("规模", "28 档 MCS、NewTx/ReTx 各一条，共 56 条曲线、1,824 个点", "当前 payload 没有 reference TBS/resource/rank 维度"),
-            ("横轴", "源标签 Es/No；数据所有者确认表示经典 MMSE 接收机 SINR", "不能套到另一接收机或原始天线前 SNR"),
+            ("事件单位", "一个用户 grant/TTI 的单码字 TB，CB 不单独建模", "不能再套独立 CB 合成公式"),
+            ("系统使用", "MCS0..27 的 28 条 NewTx 曲线", "原始 ReTx 行保留审计，但不进入当前系统 BLER"),
+            ("原始资产", "NewTx/ReTx 各 28 条，共 56 条曲线、1,824 个点", "源脚本额外未映射 MCS 的行，其具体码率/点/语义未被原始导入保留；当前合同不需要它们"),
+            ("横轴", "源标签 Es/No；预置表解释为单码字经典 MMSE 有效 SINR", "跨 RBG/rank 采用已确认的 dB 平均，不是原始天线前 SNR"),
             ("插值", "log10(BLER) 域线性；范围外保守钳位", "不外推未测量的低 BLER 尾部"),
             ("完整性", "SHA-256、28 MCS 覆盖、横轴/BLER 单调、10% crossing", "hash 一致只证明数据没漂，不证明现场代表性"),
-            ("CQI", "仍使用 38.214 CQI Table 2 + 分析 BLER", "不能声称 CQI 也来自公司曲线"),
+            ("CQI", "仍使用 38.214 CQI Table 2 + 分析 BLER", "不能声称 CQI 也来自预置 BLER 曲线"),
         ],
     )
+    body += "<h2>只允许一次重传：默认 IR，可选 CC</h2>" + F_HARQ_CC + F_HARQ_IR
     body += callout(
-        "danger", "NewTx/ReTx 与标准 HARQ 进程不是一回事",
-        "<p><code>legacy_v1</code> 首传查 NewTx、失败后查同一条 ReTx 曲线，多次重传会复用它，"
-        "但没有软缓冲状态。<code>experience_v2</code> 的 NACK payload 留在 FIFO，下一次仍按 NewTx 判错。"
-        "两种近似都必须随结果保存 model_version，不能统称“已实现 HARQ”。</p>",
+        "decision", "等效 MCS 只改 BLER 查表，不改空口发送参数",
+        "<p>初传 NACK 后，TB 进入唯一一次重传：MCS、RBG 数、rank 与 TBS 全部冻结，"
+        "并在相同 D/S slot 类型上发送。默认 IR 把初传 MCS 的谱效除以 2，再用"
+        " <code>searchsorted</code> 式的向下查表得到等效 MCS；CC 保持原档并增加 3.0103 dB。"
+        "两者都只查询 NewTx 曲线。重传失败则结束本次 HARQ，字节留在 DRB 队列，后续作为新 TB；"
+        "不会发生第二次重传。当前仍未展开 RV、软比特、并行 process 和标准 HARQ timing。</p>",
     )
     body += (
         '<p>标准边界可直接回查 ETSI 发布的 '
         '<a href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138212/18.05.00_60/ts_138212v180500p.pdf" '
         'target="_blank" rel="noreferrer">3GPP TS 38.212 V18.5.0</a>（TB CRC、CB 分段与 LDPC）和 '
         '<a href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138214/18.03.00_60/ts_138214v180300p.pdf" '
-        'target="_blank" rel="noreferrer">3GPP TS 38.214 V18.3.0</a>（MCS 与 TBS）。两份标准都不会替特定接收机提供一套通用公司 BLER 瀑布。</p>'
+        'target="_blank" rel="noreferrer">3GPP TS 38.214 V18.3.0</a>（MCS 与 TBS）。两份标准都不会替特定接收机提供一套通用预置 BLER 瀑布。</p>'
     )
-    body += "<p class=source-row>映射与分析模型：" + source_ref("src/superran/linkadapt.py", "def effective_sinr") + " · 公司曲线：" + source_ref("src/superran/bler_curves.py", "def verify_curves") + " · TTI 判错：" + source_ref("src/superran/experience.py", "def _bler_lookup") + "</p>"
+    body += "<p class=source-row>映射与分析模型：" + source_ref("src/superran/linkadapt.py", "def effective_sinr") + " · 预置曲线：" + source_ref("src/superran/bler_curves.py", "def verify_curves") + " · TTI 判错：" + source_ref("src/superran/experience.py", "def _bler_lookup") + "</p>"
     return Page(
-        "bler", "BLER 后端、有效 SINR 与 HARQ 边界", "链路算法", "BLER & LINK MAPPING",
-        "一次 TTI/TB 的公司 BLER 事件、28 档 NewTx/ReTx 曲线、有效 SINR 与系统重传边界。", body,
-        ("BLER", "TTI/TB", "TBS", "company_20b_256qam", "NewTx", "ReTx"),
+        "bler", "BLER：MCS 表、曲线与 HARQ 复现", "链路算法", "BLER & LINK MAPPING",
+        "从 28 档 MCS、单码字有效 SINR 和 1,824 个原始点，逐步复现 TB 判错与一次 CC/IR 重传。", body,
+        ("BLER", "MCS Table 3", "有效 SINR", "preset_20b_256qam", "HARQ", "复现"),
         detail_extra=bler_detail_atlas(),
     )
 
@@ -3259,7 +3770,7 @@ def modes_page() -> Page:
             ("队列", "历史 traffic/burst 抽象", "arrival-object FIFO、NACK 留队、warmup 切窗"),
             ("体验速率", "legacy trim", "DRB busy-period + fractional small burst + 含头速率"),
             ("资源 KPI", "整带占用为主", "PRB utilization、0..17 占用、MU/used、用户归因"),
-            ("HARQ", "NewTx/ReTx 曲线近似", "无软合并；NACK 下次按 NewTx"),
+            ("HARQ", "一次 IR/CC；同 MCS/RBG 数/rank/TBS", "一次 IR/CC；按需 RBG 身份冻结并有 allocation 证据"),
         ],
     )
     body += callout(
@@ -3344,6 +3855,11 @@ def experience_page() -> Page:
             ("legacy_fullband", "同 MCS/rank 的 TBS(17)", "反向哨兵/兼容；按需 RBG 下会严重高记"),
         ],
     )
+    body += (
+        "<p>HARQ 重传也占用真实 RBG，因此默认同样按冻结的 scheduled TBS 进入 "
+        "<code>R_credit</code>；但它不进入首传 BLER、SU/MU OLLA 或 SU/MU plan 收益统计。"
+        "同 D/S 类型的待重传 TB 先于新 TB 调度，重传后无论 ACK/NACK 都结束本次 HARQ。</p>"
+    )
     body += """
 <div class="toy"><div><b>正确记账</b><p>若 TPF=100、旧 R̄=1,000 B、用户只获 1 RBG，
 MCS12/rank2 的 TBS=1,729 B：新 R̄=0.99×1,000+0.01×1,729=<strong>1,007.29 B</strong>。</p></div>
@@ -3368,7 +3884,7 @@ MCS12/rank2 的 TBS=1,729 B：新 R̄=0.99×1,000+0.01×1,729=<strong>1,007.29 B
         "<p>当前决策 D1 先使用经典 PF。QoS-PF 作为参数化扩展保留，但默认 α=β=1、γ=0、"
         "priority weighting=none，必须逐分配退化为经典 PF；现场 EPF 定义未冻结前不冒充标准算法。</p>",
     )
-    body += "<p class=source-row>载波栅格：" + source_ref("src/superran/carrier.py", "class CarrierGrid") + " · 排序/计划/记账：" + source_ref("src/superran/experience.py", "potential[i] = lookup.tbs_bytes") + " · " + source_ref("src/superran/experience.py", 'accounting == "scheduled_tbs"') + "</p>"
+    body += "<p class=source-row>载波栅格：" + source_ref("src/superran/carrier.py", "class CarrierGrid") + " · 排序/计划/记账：" + source_ref("src/superran/experience.py", "potential[i] = (") + " · " + source_ref("src/superran/experience.py", 'accounting == "scheduled_tbs"') + "</p>"
     return Page(
         "experience", "体验模式调度与 PF 记账", "系统仿真", "EXPERIENCE_V2",
         "逐 TTI 的 PF、SU/MU plan、按需 RBG 和 R_avg 正确记账。", body,
@@ -3457,8 +3973,8 @@ HTML 工作台，并把 <code>html_path</code>、可用时的 loopback <code>url
         ["工作台区域", "默认承载", "为什么不能只看小区均值"],
         [
             ("Agent 关注横幅", "kpi_focus/intent、命中标签、排序来源与理由", "读者能审计为何这些 KPI 位于首屏"),
-            ("小区级 Tab", "22 项已登记 KPI、95% CI、负载表、0..17 RBG 分布、MU/话务画像", "回答整体容量、体验、资源和可靠性"),
-            ("用户级 Tab", "20 项已登记 KPI、逐 UE 图、跨 UE 经验 CDF、全量明细", "暴露边缘 UE、饿死、覆盖不足和 profile 差异"),
+            ("小区级 Tab", "26 项已登记 KPI、95% CI、负载表、0..17 RBG 分布、MU/HARQ/话务画像", "回答整体容量、体验、资源和可靠性"),
+            ("用户级 Tab", "24 项已登记 KPI、逐 UE 图、跨 UE 经验 CDF、全量明细", "暴露边缘 UE、饿死、覆盖不足和 profile 差异"),
             ("折叠证据", "其余 KPI、公式口径、告警与 Result JSON", "自适应展示只重排，不删除或重算不利证据"),
         ],
     )
@@ -3652,7 +4168,7 @@ def gates_page() -> Page:
 """
     body += callout(
         "danger", "测试通过 ≠ 物理正确",
-        "<p>Gate/测试能证明合同、自洽、不漂移；公司 BLER 曲线、实测 Jones 方向图、现场 CQI filter"
+        "<p>Gate/测试能证明合同、自洽、不漂移；预置 BLER 曲线、实测 Jones 方向图、现场 CQI filter"
         "若没有独立外部数据，测试只能保护 hash/边界，不能证明模型等同真实网络。</p>",
     )
     body += """
@@ -3689,7 +4205,7 @@ SVD vs Type-I 全链路。</p>
     body += table(
         ["合同字段", "为什么存在", "失败时行为"],
         [
-            ("dataset_digest", "同名 dataset_id 的 channels.npz 内容仍可能被替换", "摘要不同，硬阻断"),
+            ("dataset_digest", "同名 dataset_id 的 NPZ 或物理语义 summary 仍可能被替换", "摘要不同，硬阻断"),
             ("ordered sample_ids", "长度相同也可能排序或筛选不同", "报告首个错位及集合是否相同"),
             ("values_sha256", "逐样本值保存在压缩 NPZ，不进入 MCP JSON", "文件内容可复核；非有限值注册时拒绝"),
             ("code_sha256", "三个月后定位真正跑数的脚本版本", "未提供可为空，但复现证据变弱"),
@@ -3963,7 +4479,7 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
             ("Agent 决策与说明书闭环", "decisions / plan / algorithms / algo_defs* / spec / bridge", '<a href="#/agentloop">决策引擎、算法目录与说明书闭环</a>', "确定性关键词路由；单一 resolved config；loopback 白名单回传"),
             ("射线追踪与场景探测", "scenes / scenario / channelhub", '<a href="#/raytracing">射线追踪、场景资产与快速探测</a>', "channel_generation_mode 判真；资产只读；probe 不可算 PDP/SE"),
             ("参考信号与物理基线", "physical / hardware / csi_aging", '<a href="#/referencesignals">参考信号、TDD 与波束扫描</a>', "38.104 RB 表；SRS 周期；CSI-RS DFT 不等于 PMI"),
-            ("BLER 与有效 SINR", "linkadapt / bler_curves / bler_data_20b", '<a href="#/bler">BLER 后端、有效 SINR 与 HARQ 边界</a>', "MIESM/EESM 尚未进入体验链；公司曲线不是 3GPP 曲线"),
+            ("BLER 与有效 SINR", "linkadapt / bler_curves / bler_data_20b", '<a href="#/bler">BLER：MCS 表、曲线与 HARQ 复现</a>', "MIESM/EESM 尚未进入体验链；预置曲线不是 3GPP 曲线"),
             ("外部算法证据合同", "analysis / results / deliver", '<a href="#/externalresults">预注册、外部算法与结果合同</a>', "MCP 不执行外部代码；摘要与有序 sample_ids 先于统计"),
         ],
         raw={2},
@@ -4065,7 +4581,7 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         "MU、物理不变量与开发手册定向回归均通过。MSG-Platform 的多 UE static 位置轮转回归也已通过。</p>"
         "<p>这些证据证明合同、守恒、机制反例与边界处理，不等价于所有性能假设已经成立。"
         "SRS/PMI Hello World 的 Gate 3 仍阻断，50% MU pilot 的 Gate 2 仍阻断；公司实测方向图、"
-        "完整 Type-I 多层码本和带 TBS/profile 轴的 BLER 资产仍是外部校准边界。主手册浏览器 QA 已覆盖"
+        "完整 Type-I 多层码本和现场标定的 EESM/MIESM 仍是外部校准边界。主手册浏览器 QA 已覆盖"
         "桌面/平板/手机：38/38 页、89/89 个 KaTeX 公式、276 条路由、36 张图、0 px 页面级溢出、"
         "0 个控制台错误；真实 KPI 工作台另通过双 Tab 点击、桌面/手机与 19 个用户指标面板检查。</p>",
     )
@@ -4085,7 +4601,7 @@ def limitations_page() -> Page:
         [
             ("PF", "经典 PF；α=β=1、γ=0、无业务权重", "现场 EPF 定义未知前不自造厂商算法"),
             ("尾料 RBG", "业务传完即留空", "PRB 利用率反映真实话务，不虚构 padding 调度"),
-            ("误块", "沿用当前 HARQ/队列语义", "下一阶段再细化丢弃/退回策略"),
+            ("误块/HARQ", "单码字 TB；最多一次 IR/CC 重传", "同 MCS/RBG 数/rank/TBS；失败字节留队成为新 TB"),
             ("小 burst", "fractional-slot 推荐口径", "保留单时隙 burst，不制造体验 KPI 盲区"),
             ("预启动", "默认 1 s，PF/OLLA/SRS 演进但不计 KPI", "避开冷启动；结果仍检查收敛"),
             ("物理 SRS", "C_SRS=63/B_SRS=1/b_hop=0，T_SRS=20 slot", "30 kHz 下每 10 ms 发 16 RB，17 跳覆盖 272 RB；与系统级 srs_period_ms 分清单位"),
@@ -4109,7 +4625,7 @@ def limitations_page() -> Page:
             ("PMI/RI", "Type-I-style 宽带列集合、端口置换与独立 rank 选择", "严格 38.214 多层/子带/subset restriction/反馈比特与 RI pipeline"),
             ("RB 功控算法", "给定 profile 的守恒、逐小区耦合与逐 RBG 调度已实现", "跨小区闭环优化目标、约束信令与现场策略；当前不是自动功控算法"),
             ("MU", "SUS + ZF/RZF、pair table、用户级 MU-OLLA", "现场配对细则、最大用户/层数、接收机与 CSI error 标定"),
-            ("BLER/HARQ", "分析模型 + 公司 20B NewTx/ReTx 曲线；legacy/experience 都无标准软合并状态", "公司 MCS×rank×TBS×接收机曲线与 RV/进程/软缓冲模型"),
+            ("BLER/HARQ", "预置通用 NewTx 曲线；每 TB 最多一次 IR/CC，空口身份冻结", "若升级为标准 HARQ，再补 RV、LLR、并行 process 与严格 timing"),
             ("话务 CDF", "可插拔经验 CDF + 标量 size/interval 校准", "公司视频/XR/FTP CDF 文件与用户 mix"),
             ("CDL 几何", "标准 profile 的 20-ray 相对几何旋到实际链路；仍非场景确定性 ray tracing", "Sionna RT Paths 或实测 CIR/角度"),
             ("RT 快速探测", "InternalSim 有几何 probe；Sionna RT 只能减少 UE/drop 跑小 N 完整路径", "若后端提供路径缓存/增量求解，再单独定义可验证 RT probe"),
@@ -4128,7 +4644,7 @@ def limitations_page() -> Page:
 <li>现场 EPF 的确切公式：乘性/加性时延因子、HoL/平均时延、budget 来源。</li>
 <li>公司 AAU 的实测 Jones pattern、6° 下倾来源与频段/波束校准编号。</li>
 <li>MU 配对/层数/接收机的产品细节，以及用户级 MU-OLLA 是否需按场景再分状态。</li>
-<li>公司话务 CDF 与 BLER 曲线；它们决定 30%/50% 负载校准是否有现场意义。</li>
+<li>现场话务 CDF 与 BLER 标定曲线；它们决定 30%/50% 负载校准是否有现场意义。</li>
 <li>有效 SINR 是否引入 EESM/MIESM，以及 β 的链路级标定协议。</li>
 <li>是否把 MU 流间 <code>waterfilling</code> 暴露到体验系统，以及 RB 功控的优化目标是小区吞吐、边缘体验还是跨小区加权效用。</li>
 </ol>
@@ -4509,7 +5025,7 @@ def build() -> str:
         agentloop_page(), hardware_page(), channel_page(), raytracing_page(), antenna_page(),
         pdp_page(), reference_signals_page(), srs_page(), csi_page(), pmi_page(),
         measurements_page(modules), beamforming_page(), powercontrol_page(), robust_page(),
-        sinr_page(), linkadapt_page(), bler_page(), mu_page(),
+        sinr_page(), bfgain_page(), linkadapt_page(), bler_page(), mu_page(),
         modes_page(), experience_page(), traffic_page(), kpi_page(),
         calibration_page(), interference_page(), rng_page(), gates_page(),
         external_results_page(), tests_page(tests, modules),

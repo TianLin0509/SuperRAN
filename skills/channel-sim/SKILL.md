@@ -132,8 +132,9 @@ digraph channel_sim {
 1/2/3 的口径边界与 `sr_mcs_info` / `sr_bler_curve` / `sr_tdd_mcs`（TDD 的 CQI /
 BF Gain / OLLA）→ `references/link-adaptation.md`
 
-公司表 3 按“一次已调度 TTI 的整个 TB”查询 TBLER，不单报 CB；当前导入曲线尚缺
-reference TBS/resource/rank 轴，因此不能声称实际 TB-size 已参与查表，更不能再次做 CB→TB 合成。
+预置表 3 按“一用户 grant/TTI 的独立单码字 TB”查询 TBLER，不单报 CB；曲线按 profile
+合同跨 TBS/RE/rank/场景通用，只用码字级有效 SINR + MCS 查询。不能再次做 CB→TB 合成。
+HARQ 最多一次，默认 IR、可选 CC，空口 MCS/RBG 数/rank/TBS 保持不变。
 
 ## 第 5 段 · 系统级体验速率 —— `sr_system_sim`
 
@@ -157,22 +158,24 @@ reference TBS/resource/rank 轴，因此不能声称实际 TB-size 已参与查�
 
 **先选评估 profile；它们是两种模式，不是同一模式的两个精度参数：**
 
-- `evaluation_mode="capacity"` → `legacy_v1`：保留历史的全带调度、NewTx/ReTx 曲线
-  重传和 `trim` 口径，用于复现旧结果、看满缓冲容量与调度公平性。它一次调度按全带
+- `evaluation_mode="capacity"` → `legacy_v1`：保留历史的全带调度与 `trim` 口径，
+  HARQ 也已统一为一次 IR/CC、只从 NewTx 曲线推导，用于复现容量和调度公平性。它一次调度按全带
   记账，不可拿来验证“按需 RBG 后小包是否受益”。
 - `evaluation_mode="experience"` → `experience_v2`：按 TS 28.552 Rel-19 的 DRB
   busy-period 记录事件；用 TBS 单调反查表求“恰够”的 RBG 数，同一 TTI 可服务多个 UE，
-  没有需求的尾料留空；PF 平均速率按**实际 scheduled TBS**更新。NACK 字节留在 FIFO
-  队列等待下一次 NewTx，当前不模拟 HARQ 软合并/进程时序。推荐 `traffic_model="mixed"`
+  没有需求的尾料留空；PF 平均速率按**实际 scheduled TBS**更新。NACK 后冻结 MCS、
+  RBG 数、rank 与 TBS，最多一次 IR/CC 重传；失败字节留在 FIFO，之后成为新 TB。推荐 `traffic_model="mixed"`
   让大小文件 UE 同场竞争；全大包会退化成全带，全小包没有大包体验可比较。
 
-`experience_v2` 当前只接受公司 `company_20b_256qam / MCS table 3`。Table 1/2
-即使存在于链路级工具，也不能混入体验路径，因为它们没有同一套公司 TBLER/TBS profile；
+`experience_v2` 当前只接受 `preset_20b_256qam / MCS table 3` 预置表。Table 1/2
+即使存在于链路级工具，也不能混入体验路径，因为它们没有同一套 TBLER/TBS profile；
 实现保留显式 profile/table 接口，新增曲线与元数据齐全后再扩展。
 
-OLLA 通常只配置 `target_bler`。SU/MU 各自的 ACK 步长默认 +0.01 dB，NACK 步长留空时按
-`down = up × (1-target)/target` 自动反解；例如目标 10% 得 0.09 dB。只有用户明确填写
+OLLA 通常只配置 `target_bler`。SU/MU 各自的 ACK 步长默认 +0.01 MCS，NACK 步长留空时按
+`down = up × (1-target)/target` 自动反解；例如目标 10% 得 0.09 MCS。先由 SINR 反折
+无 OLLA MCS，再叠加连续 MCS-domain OLLA。只有用户明确填写
 `olla_step_down_db` / `mu_olla_step_down_db` 时才覆盖自动值，结果必须标注来源。
+其中 `*_db` 是历史 API 名，值的单位是 MCS 档。
 
 两种 profile 的 KPI 名即使相似也不可直接拼在一张趋势图里；结果必须连同
 `model_version`、`pf_accounting` 和物理近似一起保存。
@@ -280,6 +283,12 @@ SRS hopping 也不是通用旋钮：当前只有 272 RB 上的
 **这里的测量量是物理量，不是训练特征。** PDP 不归一化、带真实时延轴；RSRP 不截断；SRS 给完整协方差与全部特征值；PMI 给 Type-I-style 单面板列码本子集近似的索引与预编码矩阵（多层是贪心近似，不冒充完整 38.214 矩阵码本）。用户提到 ChannelHub 的 16-token 特征时，那是另一套，别混用。
 
 **先小后大。** 正式实验前先跑 20 个样本确认流程通再放大；`sr_plan` 的 `estimated.size_mb` 超过 1 GB 时提醒用户。**信噪比不能直接设定**——它由路损、发射功率、撒点位置共同决定；要求特定区间时走拒绝采样，可能很慢甚至取不到样本。
+
+**经典基准不是现场校准。** 修改 PHY、调度、随机数、数据合同或门禁后，先运行
+`python scripts/run_classic_comm_benchmarks.py`；case 与通过判据冻结在
+`presets/classic_benchmarks.json`，禁止看结果后删 case/改阈值。即使全过，也只能说
+选定的解析关系与机制成立，不能替代预置/现场 BLER、业务 CDF 或现网 KPI。每批新数据还要检查
+`summary.provenance`；代码/依赖/曲线哈希 mismatch 时重新生成后再做正式结论。
 
 **公司 64T/256T 都走已确认的真实子阵，并统一 `pol_h_v + top_to_bottom`**；旧 64T 布局只作显式历史兼容，历史性能差值不能当当前通用结论 → `references/default-hardware.md`。
 **CDL 剖面表已被替换为逐字核对过的 38.901 标准值**（`SUPERRAN_CDL_SPEC=0` 可复现未修正前的结果；CDL-D/E 未覆盖）。**引擎不可用时如实说缺什么，不要假装能跑**（`sr_capabilities` 查；`quadriga_real` 需要 MATLAB/Octave）。

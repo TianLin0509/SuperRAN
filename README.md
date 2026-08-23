@@ -115,8 +115,9 @@ print(st.text())
 QAM 约束容量用 Gauss-Hermite 求积**精确算**，表 1/2 的 MCS/CQI 与 TBS 按
 38.214 精确复刻；默认 BLER 是有限码长分析模型（没有 3GPP 参考曲线兜底）。
 
-现在另有显式可选的 `mcs_table=3`：28 档用户 MCS profile + 56 条 NewTx/ReTx
-解调曲线（1824 点）。它用曲线选 MCS，HARQ 首传后切到 ReTx 曲线：
+现在另有显式可选的 `mcs_table=3`：28 档预置 MCS profile + 56 条 NewTx/ReTx
+原始解调曲线（1824 点）。系统只消费 28 条 NewTx 曲线；ReTx 行用于审计。HARQ
+最多一次重传，默认 IR（半谱效等效 MCS），可选 CC（原 MCS、SINR +3.0103 dB）：
 
 ```python
 st = ds.throughput(mcs_table=3)
@@ -124,11 +125,12 @@ sr_bler_curve(mcs=15, tx_mode="newtx", sinr_db_list=[14.0, 14.05])
 # BLER = [0.132, 0.0949]，10% 门限 14.042 dB
 ```
 
-表 3 **不是 3GPP 标准表**；源脚本标签 `Es/No` 已确认表示经典 MMSE 接收机
-的 SINR。TB/CB、块长、信道模型、MIMO 层数和译码器细节暂不参数化。
+表 3 **不是 3GPP 标准表**；预置 profile 将源标签 `Es/No` 解释为经典 MMSE 的单码字
+有效 SINR。每个用户 grant/TTI 是一个独立单码字 TB，不另算 CBLER；曲线按预置
+口径跨 TBS/RE/rank/场景通用，只用 MCS+SINR 查询。
 `sr_mcs_info(table=3, show_bler_anchors=true)` 可查看全部门限、码率和哈希自检。
 
-TDD AMC 已支持完整的 `CQI → 初始 MCS → NewTx SINR 门限 → BF Gain →
+TDD AMC 已支持完整的 `内部 CQI 离散表 → 初始 MCS → NewTx SINR 门限 → BF Gain →
 重映射 MCS → OLLA → floor` 链路。BF Gain 是同一信道、CSI、rank、功率、
 干扰和经典 MMSE 接收机下，SVD 权相对 PMI 权的逐 RB、逐流 post-MMSE SINR
 差值；用户 SINR 对全部 RB×流在 dB 域做算术平均：
@@ -141,7 +143,13 @@ sr_tdd_mcs(dataset_id="ds_xxxxxxxx", cqi=9, olla_mcs_offset=-0.2,
 在 Claude Code / Codex CLI 里不需要自己写 Python，直接告诉 Agent：
 “请调用 superran 的 `sr_tdd_mcs`，对数据集 `ds_xxxxxxxx`、CQI 9、
 OLLA -0.2 MCS 计算最终 MCS，并解释逐流 BF Gain。”Agent 会调用 MCP 并返回
-完整中间量。`CQI=0` 明确不调度；反馈只更新下一时刻 OLLA，当前决策不回写。
+完整中间量。内部 `CQI=0` 是最低可用档并映射 `MCS0`；反馈只更新
+下一时刻 OLLA，当前决策不回写。映射表为
+`[0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]`。当前预置曲线只覆盖
+`MCS0..27`，所以 `CQI14→MCS28` 保留为原始表项，但在该 profile 上显式钳到 27。
+诊断和系统仿真统一使用 MCS-domain OLLA：先由发送侧 SINR 反折无 OLLA MCS，
+再加连续 MCS offset、`floor` 并钳到当前 profile。系统 API 中历史 `*_db` 参数名
+暂为兼容保留，其值不再解释为 dB。
 
 `sr_sweep_snr` 出谱效/吞吐 vs SNR 曲线——实测低信噪比达成 77%、
 高信噪比因 MCS 封顶掉到 38%。
@@ -213,7 +221,7 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 
 ## 文档
 
-- **[SuperRAN 开发者文档 `docs/index.html`](docs/index.html)** —— 当前实现的主入口：无线物理、64T4R/192×64 阵列、SRS/LMMSE、EBF/PEBF/NEBF、SU/MU、capacity/experience、话务/PF/KPI、34 个 MCP 工具、Skill、全部公开 API 与本次审计修复；单文件离线可打开
+- **[SuperRAN 开发者文档 `docs/index.html`](docs/index.html)** —— 当前实现的主入口：无线物理、64T4R/192×64 阵列、SRS/LMMSE、EBF/PEBF/NEBF、独立 BF Gain 章节、SU/MU、capacity/experience、话务/PF/KPI、34 个 MCP 工具、Skill、全部公开 API 与本次审计修复；单文件离线可打开
 - **[安装说明 `SETUP.html`](SETUP.html)** —— 由哪几块拼成、要装什么、怎么装、装完先跑什么、排错
 - **[`INSTALL_AGENT.md`](INSTALL_AGENT.md)** —— 写给 AI agent 看的安装步骤，丢给它自己装
 - **[能力手册 `CAPABILITIES.html`](CAPABILITIES.html)** —— 能产生哪些信道、能拿到哪些观察量（含形状与单位）、参数全表、能力边界
@@ -222,9 +230,9 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 - **[从 SINR 到真实吞吐 `LINK_ADAPTATION.html`](LINK_ADAPTATION.html)** —— L1 链路自适应、38.214 MCS/CQI、SNR 扫描曲线、并行生成
 - **[测试体系历史说明 `TESTS.html`](TESTS.html)** —— 2026-07-31 的历史快照，用于理解测试理念与事故案例；当前文件/接口清单以开发者文档为准
 - **仿真说明书** —— `sr_spec_sheet` 出的 HTML，默认只返回 URL、不打断用户；明确传 `open_browser=True` 才弹浏览器。页面以拓扑图打头，其余折进页签，还能改参数点「应用到仿真」把改动送回 agent（`sr_await_config` 接）。落在 `artifacts/specs/`，拷走用 `file://` 打开时自动退回复制粘贴
-- **CDF 话务与目标负载校准** —— 包大小/包间隔各读一份 `value,cdf`，支持全局×profile 双标量、多 profile 与 `ue_ids` 显式用户映射；`target_prb_utilization=0.30` 用公共随机数调话务，最后另跑正式重复实验，未达容差绝不回填目标值。内置 synthetic CDF 只用于接口演示，后续可直接替换公司曲线
+- **CDF 话务与目标负载校准** —— 包大小/包间隔各读一份 `value,cdf`，支持全局×profile 双标量、多 profile 与 `ue_ids` 显式用户映射；`target_prb_utilization=0.30` 用公共随机数调话务，最后另跑正式重复实验，未达容差绝不回填目标值。内置 synthetic CDF 只用于接口演示，后续可直接替换现场 CDF
 - **Agent 自适应 KPI 结果页** —— `sr_system_sim(evaluation_mode="experience")` 自动返回 `kpi_view.html_path/url`，顶层为“小区级 / 用户级”；用户级指标同时支持按 UE 图、跨 UE 经验 CDF 和明细表。调用 Agent 可传 `kpi_focus` 优先展示相关 KPI，其余折叠且不丢失，选择理由完整回传。页面含首包时延、含头速率、本小区 PRB 利用率、0..17 RBG 分布、MU 配对比例与用户级 PRB 归因，离线打开不依赖外部资源
-- **体验仿真的冻结合同** —— 当前 TDD 系统只接受 100 MHz @ 30 kHz、272 RB = 17×16，标准 273 RB 在生成前明确舍去 1 RB；SRS hopping 只接受本地版本化的 C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0 17-hop profile。`experience_v2` 只用公司 `company_20b_256qam / MCS table 3`；OLLA 默认由 `target_bler` 与 ACK 步长反解 NACK 步长，仍允许显式 override，结果会标注来源。通用载波/MCS 接口保留给链路级与未来扩展，不会静默混入当前体验结果
+- **体验仿真的冻结合同** —— 当前 TDD 系统只接受 100 MHz @ 30 kHz、272 RB = 17×16，标准 273 RB 在生成前明确舍去 1 RB；SRS hopping 只接受本地版本化的 C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0 17-hop profile。`experience_v2` 只用 `preset_20b_256qam / MCS table 3` 预置表；OLLA 默认由 `target_bler` 与 ACK 步长反解 NACK 步长，仍允许显式 override，结果会标注来源。通用载波/MCS 接口保留给链路级与未来扩展，不会静默混入当前体验结果
 - **[MU-MIMO 算法流程 `MU_MIMO.html`](MU_MIMO.html)** —— 配对/预编码/功率分配逐步展开，含六个待确认的设计选择与实测数字
 - **[通宵成果与待审 `TONIGHT.html`](TONIGHT.html)** —— 6 个 bug、5 个新需求提案、8 个待拍板的决策点
 - **[通宵进展与待审问题 `MORNING_REVIEW.html`](MORNING_REVIEW.html)** —— 3GPP/ITU 对标结果 + 12 个待拍板的问题
@@ -461,10 +469,32 @@ python tests/test_power_control.py
 python tests/test_physics_invariants.py
 python tests/test_channel_generation_contract.py
 python tests/test_developer_guide.py
+python tests/test_carrier.py
+python tests/test_company_256t.py
+python tests/test_system_sim_tool.py
+python tests/test_benchmarks.py
 ```
 
-当前共 **18 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
+当前共 **21 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
 容易失真的手写“总项数”；以实际运行输出和开发者文档的自动盘点为准。
+
+经典通信正确性套件先冻结判据再运行：
+
+```bash
+python scripts/run_classic_comm_benchmarks.py
+```
+
+结果落在 `artifacts/results/classic_comm_benchmarks.json`，包含 commit、dirty diff、
+依赖版本、预置 BLER 哈希、逐 case 门禁和限制。它用于判断实现是否满足经典关系，
+不替代现场 BLER/话务/现网 KPI 校准。
+
+可观察、可终止的逐文件回归：
+
+```bash
+python scripts/run_test_matrix.py --tier quick
+python scripts/run_test_matrix.py --tier physics
+python scripts/run_test_matrix.py --tier full
+```
 
 ## 致谢
 

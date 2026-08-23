@@ -1,10 +1,10 @@
 """Table-driven BLER curves and integrity checks.
 
-The first profile is the user-provided ``company_20b_256qam`` data set. The source
-script labels its horizontal axis ``Es/No``; the data owner confirmed that it denotes
-SINR for a classic MMSE receiver.  The company error event is one scheduled TTI's
-transport block, not a separately exposed code block.  This module preserves that
-semantic as metadata while also exposing that the imported points lack a TB-size axis.
+The first profile is the bundled ``preset_20b_256qam`` data set. Its source payload
+labels the horizontal axis ``Es/No``; this preset interprets it as
+codeword-level effective SINR for a classic MMSE receiver. One user grant in one TTI is
+one independent single-codeword TB error event; CB is not exposed. By product decision,
+the MCS curve is universal and does not need a TBS/RE/rank/scenario axis.
 """
 from __future__ import annotations
 
@@ -94,10 +94,12 @@ class DemodCurve:
             "axis_interpretation": data.SOURCE_AXIS_USAGE,
             "receiver_model": data.RECEIVER_MODEL,
             "error_event": data.ERROR_EVENT,
-            "company_lookup_inputs": list(data.COMPANY_LOOKUP_INPUTS),
+            "preset_lookup_inputs": list(data.PRESET_LOOKUP_INPUTS),
             "imported_curve_axes": list(data.IMPORTED_CURVE_AXES),
             "tb_size_axis_status": data.TB_SIZE_AXIS_STATUS,
             "profile_scope": data.PROFILE_SCOPE,
+            "system_retx_model": data.SYSTEM_RETX_MODEL,
+            "extra_code_rate_rows_status": data.EXTRA_CODE_RATE_ROWS_STATUS,
             "start_db": self.start_db,
             "end_db": self.end_db,
             "step_db": self.step_db,
@@ -202,13 +204,14 @@ def verify_curves(target_bler: float = 0.1) -> dict[str, Any]:
         "hash_matches": raw_hash == data.DATA_SHA256,
         "issues": issues,
         "error_event": data.ERROR_EVENT,
-        "company_lookup_inputs": list(data.COMPANY_LOOKUP_INPUTS),
+        "preset_lookup_inputs": list(data.PRESET_LOOKUP_INPUTS),
         "imported_curve_axes": list(data.IMPORTED_CURVE_AXES),
         "tb_size_axis_status": data.TB_SIZE_AXIS_STATUS,
+        "extra_code_rate_rows_status": data.EXTRA_CODE_RATE_ROWS_STATUS,
         "caveat": (
-            "User-provided demodulation curves, not a 3GPP reference table. "
-            "The source label Es/No denotes post-MMSE SINR. The company event is one "
-            "scheduled TTI/TB, but the imported curves do not parameterize the actual "
-            "scheduled TB size or other missing link dimensions."
+            "Bundled preset demodulation curves, not a 3GPP reference table. "
+            "The source label Es/No denotes codeword-level post-MMSE effective SINR. "
+            "One TTI-user grant is one single-codeword TB; the curve is universal by "
+            "product decision. System retransmission BLER is derived from NewTx curves."
         ),
     }

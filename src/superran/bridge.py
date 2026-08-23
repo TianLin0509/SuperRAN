@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -75,6 +76,7 @@ _token: str = ""
 _pages: dict[str, _Page] = {}
 _inbox: list[Submission] = []
 _seen: set[str] = set()          # 幂等键，防重发变成两份改动
+_SEEN_CAP = 10_000               # 超过即清空；幂等窗口只需覆盖秒级重试
 _arrived = threading.Event()
 _waiters = 0                     # 当前有几个 sr_await_config 正阻塞着等
 
@@ -83,6 +85,20 @@ def _dbg(msg: str) -> None:
     # stdio 传输下 stdout 是 JSON-RPC 通道，调试只能走 stderr。
     if os.environ.get("SUPERRAN_DEBUG"):
         print(f"[superran.bridge] {msg}", file=sys.stderr, flush=True)
+
+
+def _remember_nonce(nonce: str) -> bool:
+    """记录页面回传 nonce，返回它是否已见过；集合保持有界。"""
+    if not nonce:
+        return False
+    with _lock:
+        duplicate = nonce in _seen
+        if not duplicate:
+            if len(_seen) >= _SEEN_CAP:
+                # 窗口只覆盖页面秒级自动重试；达到上限后清空比无界增长安全。
+                _seen.clear()
+            _seen.add(nonce)
+        return duplicate
 
 
 def inbox_dir():
@@ -154,9 +170,18 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(413, {"ok": False, "error": "payload 尺寸不合法"})
             return
         try:
-            data = json.loads(self.rfile.read(n).decode("utf-8"))
+            data = json.loads(
+                self.rfile.read(n).decode("utf-8"),
+                # Python 的 json 默认放行 NaN/Infinity 字面量——接口开着就要
+                # 按"任何人都能戳"来写，非有限值不允许进入配置链。
+                parse_constant=lambda c: (_ for _ in ()).throw(
+                    ValueError(f"非法 JSON 常量 {c}")),
+            )
         except Exception as exc:  # noqa: BLE001
             self._json(400, {"ok": False, "error": f"JSON 解析失败：{exc}"})
+            return
+        if not isinstance(data, dict):
+            self._json(400, {"ok": False, "error": "POST 体必须是 JSON 对象"})
             return
 
         spec_id = str(data.get("id") or "")
@@ -172,10 +197,7 @@ class _Handler(BaseHTTPRequestHandler):
         # **幂等键。** 回执可能在路上丢（服务正好退出、socket 被掐），页面因此会重发。
         # 没有 nonce 的话重发就是第二份改动，agent 那边看起来像用户点了两次。
         nonce = str(data.get("nonce") or "")[:64]
-        with _lock:
-            dup = bool(nonce) and nonce in _seen
-            if nonce:
-                _seen.add(nonce)
+        dup = _remember_nonce(nonce)
         if dup:
             self._json(200, {"ok": True, "dup": True, "n": len(cleaned),
                              "msg": "这次改动之前已经送到了"})
@@ -221,9 +243,12 @@ def _sanitize(raw: Any, allowed: frozenset[str]) -> tuple[bool, dict[str, Any], 
         if isinstance(v, bool) or v is None:
             return False, {}, f"{key} 的值类型不支持"
         if isinstance(v, (int, float)):
+            if not math.isfinite(v):
+                return False, {}, f"{key} 的值必须有限（收到非有限数值）"
             out[key] = v
         elif isinstance(v, str):
-            if len(v) > 128:
+            # rb_power_overrides 是 JSON 文本，多段 override 轻松超 128 字符
+            if len(v) > (4096 if key == "rb_power_overrides" else 128):
                 return False, {}, f"{key} 的值过长"
             out[key] = v
         else:

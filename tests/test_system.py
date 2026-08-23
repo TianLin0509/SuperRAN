@@ -7,7 +7,9 @@ from __future__ import annotations
 import inspect as _inspect
 import sys
 import tempfile
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -329,8 +331,9 @@ check(0.15 < _h8["p_full"] < 0.5, f"满带宽占比回到 0.30 附近（实得 {
 # **PF 度量必须和实发口径一致。** MU 下实发被限到 rank≤2，
 # 记 rank4 的谱效会让 PF 以为给足了，公平性判据整个偏掉。
 _src = _inspect.getsource(sysm.simulate)
-check("min(int(tables[u].best_rank[snap]), mu.MU_MAX_RANK)" in _src,
-      "PF 更新在 MU 下用 rank≤2 的谱效")
+check("r = min(r, mu.MU_MAX_RANK)" in _src
+      and "actual_inst_se[u] = mcs_obj.se * r" in _src,
+      "PF 更新按实发 MCS 与 MU rank≤2 记瞬时服务量")
 
 # 形状不一致要当场报错，不能静默广播出错误结果
 try:
@@ -388,15 +391,15 @@ import inspect as _insp  # noqa: E402
 
 _src = _insp.getsource(sysm.simulate)
 
-# --- bug A：重传 BLER 查的必须是实发 MCS，不是真实 SINR 反查的理想档 ---
-# 用低档查 ReTx 曲线 → 重传几乎必然成功 → 残留 BLER 系统性偏低，
-# 而这个偏差不会以任何方式报出来。
-check('_bler_lookup(m, float(tables[u].sinr_db[snap, r - 1]), "retx")' in _src,
-      "重传 BLER 查的是实发 MCS m")
-check('_bler_lookup(int(tables[u].mcs[snap, r - 1]),' not in _src,
-      "旧的错误写法（拿理想档查重传）已经不在了")
+# --- bug A：重传必须保留实发 MCS，等效低档只能作为 BLER lookup_mcs ---
+check("harq_retransmission_bler" in _src
+      and "m, sinr, combining=sys_cfg.harq_combining" in _src,
+      "legacy 重传以冻结的实发 MCS 调预置 CC/IR 抽象")
+check('_bler_lookup(m, sinr, "retx")' not in _src
+      and 'get_curve(int(mcs), "retx")' not in _src,
+      "legacy 系统路径不再直接消费原始 ReTx 曲线")
 
-# --- bug D：公司 BLER 源曲线是 0.05 dB 网格，缓存不能粗化成 0.5 dB ---
+# --- bug D：预置 BLER 源曲线是 0.05 dB 网格，缓存不能粗化成 0.5 dB ---
 # MCS15 在 14.24 dB 的细网格值是 14.25 dB/2.53%，旧 0.5 dB 路径会取
 # 14.0 dB/13.2%，ACK/NACK 概率差五倍，不是可忽略的性能优化。
 _x_bler = 14.24
@@ -404,9 +407,9 @@ _curve15 = bc.get_curve(15, "newtx")
 _want_bler = float(_curve15.evaluate(14.25)[0])
 _coarse_bler = float(_curve15.evaluate(14.0)[0])
 check(abs(sysm._bler_lookup(15, _x_bler) - _want_bler) < 1e-12,
-      "legacy 系统 BLER 缓存保持公司曲线 0.05 dB 分辨率")
+      "legacy 系统 BLER 缓存保持预置曲线 0.05 dB 分辨率")
 check(abs(expm._bler_lookup(15, _x_bler) - _want_bler) < 1e-12,
-      "experience_v2 BLER 缓存保持公司曲线 0.05 dB 分辨率")
+      "experience_v2 BLER 缓存保持预置曲线 0.05 dB 分辨率")
 check(abs(_coarse_bler - _want_bler) > 0.05,
       "反向哨兵：旧 0.5 dB 量化在瀑布区确会造成显著概率偏差")
 check(expm._bler_lookup(15, float("nan")) == 1.0
@@ -415,7 +418,7 @@ check(expm._bler_lookup(15, float("nan")) == 1.0
 check(abs(expm._bler_lookup(15, float("inf"))
           - sysm._bler_lookup(15, float("inf"))) < 1e-12
       and expm._bler_lookup(15, float("inf")) < 1.0,
-      "experience_v2 的 +Inf SINR 与 legacy 一致钳到公司曲线高 SINR 尾部")
+      "experience_v2 的 +Inf SINR 与 legacy 一致钳到预置曲线高 SINR 尾部")
 
 # --- bug B：S 时隙的 RE 与 dl_ratio 必须用同一个系数 ---
 check(abs(sysm.S_SLOT_DL_FRACTION - 0.7) < 1e-9, "S 时隙折合系数 0.7")
@@ -488,6 +491,41 @@ sect("12  experience_v2：DRB busy-period、按需 RBG 与 Rel-19 小 burst")
 
 # --- TBS 表：D/S × 28 MCS × rank1..4 × 17 RBG，反查必须给最小够用值 ---
 _lut = expm.TbsLookup.build(17, 16, sysm.S_SLOT_DL_FRACTION)
+_olla_point = SimpleNamespace(
+    sinr_tx_rbg_db=np.full((1, 1, 17), 14.0),
+    sinr_rbg_db=np.full((1, 1, 17), 14.0),
+)
+_olla_values = expm._frequency_su_values(
+    table=_olla_point, snap=0, rank=1, indices=(0,),
+    olla_db=1.0, olla_enabled=True, lookup=_lut, slot="D")
+check(_olla_values["mcs_without_olla"]
+      == la.select_mcs(14.0, table=3, target_bler=0.1).index
+      and _olla_values["mcs"]
+      == _olla_values["mcs_without_olla"] + 1
+      and _olla_values["mcs"] > _olla_values["mcs_without_olla"],
+      "SU 先按预置 BLER 表+基准 SINR 得到基准 MCS，再叠加 MCS-domain OLLA")
+_olla_sinr = np.full((8, 1), 14.2)
+_olla_mcs = la.select_mcs(14.2, table=3, target_bler=0.1).index
+_olla_mcs_grid = np.full((8, 1), _olla_mcs, dtype=int)
+_olla_se = np.full((8, 1), la.MCS_TABLES[3][_olla_mcs].se)
+_olla_link = sysm.UeLinkTable(
+    ue=0, sinr_db=_olla_sinr, mcs=_olla_mcs_grid, se=_olla_se,
+    best_rank=np.ones(8, dtype=int), best_se=_olla_se[:, 0],
+    geo_sinr_db=14.2, outage=np.zeros(8, dtype=bool), iot_db=0.0, sir_db=40.0,
+    sinr_tx_db=_olla_sinr.copy(), mcs_tx=_olla_mcs_grid.copy(),
+    se_gnb=_olla_se.copy(), best_se_gnb=_olla_se[:, 0].copy())
+_olla_closed_loop = sysm.simulate(
+    [_olla_link],
+    sys_cfg=sysm.SystemConfig(
+        evaluation_mode="experience", duration_s=1.0, tdd_pattern="D", seed=42),
+    traffic=sysm.TrafficConfig(model="full_buffer"),
+    sched=sysm.SchedulerConfig(mu_enabled=False),
+    kpi=sysm.KpiConfig(warmup_s=0.2))
+check(abs(_olla_closed_loop.cell["bler_first_tx"] - 0.1) < 0.02
+      and _olla_closed_loop.cell["olla_convergence"][
+          "all_active_modes_converged"] is True
+      and _olla_closed_loop.cell["olla_domain"] == "continuous_mcs_index",
+      "MCS-domain OLLA 真实 ACK/NACK 闭环在1秒内收敛到目标 10% BLER")
 check(_lut.values.shape == (2, 28, 4, 17),
       f"TBS 表覆盖 D/S、28 MCS、rank1..4、17 RBG（实得 {_lut.values.shape}）")
 check(bool(np.all(np.diff(_lut.values, axis=-1) > 0)),
@@ -634,6 +672,90 @@ for _a in _ex.diagnostics["allocation_sample"]:
     _sample_overlap |= bool(_seen.intersection(_a["rbg_indices"]))
     _seen.update(_a["rbg_indices"])
 check(not _sample_overlap, "allocation 明细中的 RBG bitmap 也逐 TTI 无重叠")
+
+# --- HARQ 行为级回归：冻结 TB 身份、只重传一次、D/S 类型不串 -------
+_orig_newtx_lookup = expm._bler_lookup
+_orig_retx_lookup = la.harq_retransmission_bler
+expm._bler_lookup = lambda _mcs, _sinr: 1.0
+
+
+def _forced_failed_retx(mcs, sinr, *, combining="ir", table=3):
+    return {
+        "bler": 1.0, "lookup_mcs": max(0, int(mcs) - 1),
+        "lookup_sinr_db": float(sinr), "combining": combining,
+    }
+
+
+la.harq_retransmission_bler = _forced_failed_retx
+try:
+    _harq_run = sysm.simulate(
+        _T[:1],
+        sys_cfg=sysm.SystemConfig(
+            evaluation_mode="experience", duration_s=0.03,
+            seed=9041, tdd_pattern="DS", harq_combining="ir"),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(
+            mu_enabled=False, olla_enabled=False, pf_accounting="auto"),
+        kpi=sysm.KpiConfig(warmup_tti=0),
+    )
+finally:
+    expm._bler_lookup = _orig_newtx_lookup
+    la.harq_retransmission_bler = _orig_retx_lookup
+
+_harq_rows = _harq_run.diagnostics["allocation_sample"]
+_harq_new = {a["tti"]: a for a in _harq_rows
+             if a["harq_tx_mode"] == "newtx"}
+_harq_retx = [a for a in _harq_rows if a["harq_tx_mode"] == "retx"]
+check(bool(_harq_retx), "强制 NACK 轨迹确实产生 HARQ 重传")
+check(all(
+    a["original_tb_tti"] in _harq_new
+    and (a["mcs"], a["n_rbg"], a["rank"], a["scheduled_bytes"])
+    == (_harq_new[a["original_tb_tti"]]["mcs"],
+        _harq_new[a["original_tb_tti"]]["n_rbg"],
+        _harq_new[a["original_tb_tti"]]["rank"],
+        _harq_new[a["original_tb_tti"]]["scheduled_bytes"])
+    and a["slot"] == _harq_new[a["original_tb_tti"]]["slot"]
+    and a["plan_selected_reason"] == "HARQ_retx_priority"
+    for a in _harq_retx),
+    "重传逐 TB 保持 MCS/RBG 数/rank/TBS 与 D/S 类型，并强制 SU 优先")
+check(all(sum(1 for row in _harq_rows
+              if row["original_tb_tti"] == first_tti) == 2
+          for first_tti in (a["tti"] for a in _harq_new.values())
+          if any(r["original_tb_tti"] == first_tti for r in _harq_retx)),
+      "每个获得重传机会的原 TB 恰有初传+一次重传，不存在第二次重传")
+check(_harq_run.cell["retx_bler"] == 1.0
+      and _harq_run.cell["residual_bler"] == 1.0,
+      "强制重传失败轨迹的重传 BLER 与右删失后残留 BLER 都精确为 1")
+
+# 预置曲线机制点：MCS20 / 16 dB 位于初传失败、CC 瀑布、IR 低档尾部。
+_harq_point = sysm.UeLinkTable(
+    ue=0,
+    sinr_db=np.array([[16.0]]),
+    mcs=np.array([[20]], dtype=int),
+    se=np.array([[la.MCS_TABLE_3[20].se]]),
+    best_rank=np.array([1], dtype=int),
+    best_se=np.array([la.MCS_TABLE_3[20].se]),
+    geo_sinr_db=16.0,
+    outage=np.array([False]),
+    mcs_table=3,
+    target_bler=0.1,
+)
+_harq_real: dict[str, sysm.SystemResult] = {}
+for _combining in ("cc", "ir"):
+    _harq_real[_combining] = sysm.simulate(
+        [_harq_point],
+        sys_cfg=sysm.SystemConfig(
+            evaluation_mode="experience", duration_s=1.0,
+            tdd_pattern="D", seed=230823, harq_combining=_combining),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+        kpi=sysm.KpiConfig(warmup_tti=0),
+    )
+check(_harq_real["ir"].cell["retx_bler"]
+      < _harq_real["cc"].cell["retx_bler"]
+      and _harq_real["ir"].cell["cell_served_mbps"]
+      > _harq_real["cc"].cell["cell_served_mbps"],
+      "真实 MCS20/16 dB 系统轨迹满足 IR 重传 BLER < CC，且 ACK 吞吐更高")
 
 # 服务小区 PRB 利用率是内生 KPI：full-buffer 必须 100%，无到达必须 0%。
 _load_cfg = sysm.SystemConfig(
@@ -802,11 +924,17 @@ check(bool(_full_groups) and all(
 check(all(a["pf_credit_bytes"] == a["scheduled_bytes"] for a in _mu_alloc),
       "MU PF-RU 同样按本 UE 实际 scheduled TBS 更新，不按全带或和速率记账")
 _a0 = _mu_alloc[0]
-_formula_sinr = (_a0["base_tx_sinr_db"] + _a0["su_olla_before_db"]
-                 + _a0["corr_loss_db"] + _a0["power_loss_db"]
-                 + _a0["mu_olla_before_db"])
-check(la.select_mcs(_formula_sinr, table=3, target_bler=0.1).index == _a0["mcs"],
-      "MU MCS 严格使用 CQI+BF+SU-OLLA+CorrLoss+powerLoss+MU-OLLA")
+_formula_sinr = (_a0["base_tx_sinr_db"]
+                 + _a0["corr_loss_db"] + _a0["power_loss_db"])
+_formula_base_mcs = la.select_mcs(
+    _formula_sinr, table=3, target_bler=0.1).index
+_formula_final_mcs = la.apply_olla_mcs(
+    _formula_base_mcs,
+    _a0["su_olla_before_mcs"] + _a0["mu_olla_before_mcs"],
+    mcs_table=3)["final_mcs"]
+check(_formula_base_mcs == _a0["mcs_without_olla"]
+      and _formula_final_mcs == _a0["mcs"],
+      "MU 先在 SINR 域加 CorrLoss/powerLoss 反折基准 MCS，再叠加 SU/MU OLLA")
 _lookup = expm.TbsLookup.build(17, 16)
 _snap = 0
 _ordered = list(range(len(_mu_tables)))
@@ -827,8 +955,27 @@ _floor_plan = expm._build_mu_plan(
     sched=sysm.SchedulerConfig(mu_enabled=True, mu_corr_threshold=1.0),
     su_olla_db=np.full(len(_ordered), -100.0),
     mu_olla_db=np.zeros(len(_ordered)), blocked_data=False)
-check(not _floor_plan.has_mu,
-      "MU OLLA 压到 MCS0 仍超过 50% BLER 时判 pair 不可用并回退 SU")
+check(_floor_plan.has_mu,
+      "MCS-domain 负 OLLA 只降低发送档位，不伪造更低的物理 SINR")
+_unusable_tables = deepcopy(_mu_tables)
+for _table in _unusable_tables:
+    if _table.sinr_tx_db is not None:
+        _table.sinr_tx_db[:] = -30.0
+_unusable_base = {
+    u: float(_unusable_tables[u].sinr_tx_db[_snap, _rank_of[u] - 1])
+    for u in _ordered
+}
+_unusable_plan = expm._build_mu_plan(
+    _ordered, queue_bytes={u: 500_000 for u in _ordered}, lookup=_lookup,
+    slot="D", num_rbg=17, rank_of=_rank_of, mcs_of=_mcs_of,
+    base_tx_sinr_of=_unusable_base, mcs_without_olla_of=_mcs_of,
+    true_sinr_of=_true_of, potential_of=_potential_of,
+    tables=_unusable_tables, snap=_snap,
+    sched=sysm.SchedulerConfig(mu_enabled=True, mu_corr_threshold=1.0),
+    su_olla_db=np.full(len(_ordered), -100.0),
+    mu_olla_db=np.zeros(len(_ordered)), blocked_data=False)
+check(not _unusable_plan.has_mu,
+      "真实发送侧 SINR 下 MCS0 仍超过 50% BLER 时才判 pair 不可用")
 _olla_state = _large.diagnostics["olla_state_final"]
 check(_olla_state["su_db"] != _olla_state["mu_db"]
       and "not pair-specific" in _olla_state["scope"],
@@ -948,6 +1095,9 @@ _expect_value_error(
 _expect_value_error(
     lambda: sysm.SystemConfig(tdd_pattern="UUU"),
     "至少需要一个 D 或 S", "下行仿真拒绝没有任何下行机会的 TDD pattern")
+_expect_value_error(
+    lambda: sysm.SystemConfig(harq_combining="magic"),
+    "ir / cc", "HARQ 合并只接受 IR/CC")
 _expect_value_error(
     lambda: sysm.SystemConfig(seed=-1),
     "seed", "系统随机种子拒绝负数")

@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -16,6 +18,8 @@ import yaml
 
 from . import decisions as dec
 from .paths import drafts_dir, presets_file
+
+_HANDLE_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 # ---------------------------------------------------------------------------
 # 抽象参数 → ChannelHub 实参 的翻译
@@ -225,6 +229,9 @@ class Draft:
 
 
 def _draft_path(draft_id: str) -> Path:
+    # 与 dataset_id 同一纪律：越界读/写必须拦在拼路径之前。
+    if not _HANDLE_RE.fullmatch(str(draft_id)):
+        raise ValueError(f"非法 draft_id {draft_id!r}：只允许 [A-Za-z0-9_-]")
     return drafts_dir() / f"{draft_id}.json"
 
 
@@ -285,7 +292,17 @@ def _apply_dependent_overrides(
 def save_draft(d: Draft) -> None:
     p = _draft_path(d.draft_id)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(d.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    # 先写临时文件再原子替换：进程中断不会留下半截 JSON
+    import tempfile  # noqa: PLC0415
+
+    fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(d.as_dict(), ensure_ascii=False, indent=2))
+        os.replace(tmp, p)
+    except BaseException:
+        os.unlink(tmp)
+        raise
 
 
 def load_draft(draft_id: str) -> Draft:
@@ -306,6 +323,10 @@ def create_draft(
     profile = dec.classify_intent(intent)
     preset_name = preset or _guess_preset(intent, profile)
     presets = load_presets()
+    if preset is not None and preset_name not in presets:
+        raise ValueError(
+            f"未知预设 {preset!r}；可用：{sorted(presets)}。"
+            "不给 preset 时会按意图自动挑选")
     if preset_name not in presets:
         preset_name = "single_cell_64t4r"
 

@@ -2,9 +2,9 @@
 
 **这一层回答的问题和链路级不一样。** 链路级问"这个信道能跑多快"，
 系统级问"**这个小区里的用户实际体验到多快**"——后者要把话务的到达与结束、
-调度器在多用户间的取舍与缓冲区排空算进去。``legacy_v1`` 保留历史
-NewTx/ReTx 曲线重传；``experience_v2`` 的 NACK 字节留队后按 NewTx 重试，
-当前没有 HARQ 软合并或进程时序。
+调度器在多用户间的取舍与缓冲区排空算进去。两个模式都把一次用户 grant
+视为一个单码字 TB，并只允许一次 IR/CC 重传：空口 MCS/RBG 数/rank/TBS 冻结，
+BLER 从预置 NewTx 曲线推导。当前不展开 RV、LLR、并行 process 或标准时序。
 
 本文件保留历史 ``legacy_v1`` 口径以复现旧结果；它的 ``tail/head_tail`` 是
 项目早期的近似实现，不能再冒充 28.552。标准化的 DRB busy-period、首传起点、
@@ -59,6 +59,7 @@ PfAccounting = Literal["auto", "legacy_best_se", "scheduled_tbs",
 PriorityWeighting = Literal["none", "inverse_priority"]
 ThroughputTrim = Literal["none", "tail", "head_tail"]
 SmallBurstPolicy = Literal["fractional_slot", "exclude"]
+HarqCombining = Literal["ir", "cc"]
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +407,9 @@ class SchedulerConfig:
     qos_delay_exponent: float = 0.0          # gamma
     qos_priority_weighting: PriorityWeighting = "none"
     # --- OLLA（外环链路自适应）---
-    # 发送端按无干扰选 MCS，接收端吃着干扰误码，OLLA 把偏置压下来。
+    # 发送端先由 CQI 门限 + BF Gain 反折 MCS，再叠加连续 MCS 域
+    # OLLA，floor 后钳位。下面 ``*_db`` 是已发布 API 的历史字段名，
+    # 只为参数兼容保留；值的物理单位已明确是连续 MCS index，不是 dB。
     # 步长按目标 BLER 不对称：ACK 加 up、NACK 减 down，
     # 稳态时 BLER → up/(up+down)。默认 down=None，进入仿真时从链路表
     # target_bler 反解；用户显式给值则完整保留，供消融/特殊研究。
@@ -568,6 +571,12 @@ class SchedulerConfig:
             "mu_precoder": self.mu_precoder,
             "mu_csi_error_variance": self.mu_csi_error_variance,
             "olla_enabled": self.olla_enabled,
+            "olla_domain": "continuous_mcs_index",
+            "olla_parameter_name_compatibility": (
+                "legacy *_db input names are retained; values are MCS-index offsets"
+            ),
+            "olla_baseline_steps_mcs": [self.olla_step_up_db,
+                                          self.olla_step_down_db],
             "olla_baseline_steps_db": [self.olla_step_up_db, self.olla_step_down_db],
             "olla_down_source": _down_src(
                 self.olla_step_down_db, None if auto is None else auto[0]),
@@ -577,11 +586,21 @@ class SchedulerConfig:
                 [round(self.step_up, 6), round(self.step_down, 6)]
                 if resolved else [round(self.step_up, 6), None]
             ),
+            "olla_effective_steps_mcs": (
+                [round(self.step_up, 6), round(self.step_down, 6)]
+                if resolved else [round(self.step_up, 6), None]
+            ),
+            "mu_olla_baseline_steps_mcs": [self.mu_olla_step_up_db,
+                                             self.mu_olla_step_down_db],
             "mu_olla_baseline_steps_db": [self.mu_olla_step_up_db,
                                            self.mu_olla_step_down_db],
             "mu_olla_down_source": _down_src(
                 self.mu_olla_step_down_db, None if auto is None else auto[1]),
             "mu_olla_effective_steps_db": (
+                [round(self.mu_step_up, 6), round(self.mu_step_down, 6)]
+                if resolved else [round(self.mu_step_up, 6), None]
+            ),
+            "mu_olla_effective_steps_mcs": (
                 [round(self.mu_step_up, 6), round(self.mu_step_down, 6)]
                 if resolved else [round(self.mu_step_up, 6), None]
             ),
@@ -759,6 +778,8 @@ class SystemConfig:
     # 则是每组真实 PRB 数，TBS、功控和利用率全部以它为准。
     rbg_prb_sizes: tuple[int, ...] | None = None
     tdd_pattern: str = "DDDSU"           # 只统计 D 时隙
+    # 每个 TB 最多一次重传。IR：半谱效等效 MCS（默认）；CC：SINR +10log10(2)。
+    harq_combining: HarqCombining = "ir"
     # **信道快照之间隔多久，由 ChannelHub 决定，不能拍脑袋。**
     # internal_sim.py:3252 把 UE 每个"时隙"推进
     #     speed × max(srs_periodicity, csirs_periodicity) × slot_duration_s
@@ -816,6 +837,8 @@ class SystemConfig:
             raise ValueError("tdd_pattern 只允许 D/S/U 且不能为空")
         if not any(slot in "DS" for slot in pattern):
             raise ValueError("下行系统仿真的 tdd_pattern 至少需要一个 D 或 S 时隙")
+        if str(self.harq_combining).lower() not in ("ir", "cc"):
+            raise ValueError("harq_combining 只支持 ir / cc")
         if (not np.isfinite(self.snapshot_update_ms)
                 or float(self.snapshot_update_ms) <= 0):
             raise ValueError("snapshot_update_ms 必须是有限正数")
@@ -872,6 +895,9 @@ class SystemConfig:
                 "rbg_boundaries": [list(pair) for pair in self.rbg_boundaries],
                 "num_rb": self.num_rb,
                 "tdd_pattern": self.tdd_pattern,
+                "harq_combining": str(self.harq_combining).lower(),
+                "max_retransmissions": 1,
+                "tb_error_unit": "one user grant in one TTI = one single-codeword TB",
                 "dl_slot_ratio": round(self.dl_ratio, 4),
                 "snapshot_update_ms": self.snapshot_update_ms,
                 "power_constraint": self.power_constraint,
@@ -973,7 +999,7 @@ class UeLinkTable:
     # 零时延时它与 ``se`` / ``best_se`` 逐位相同。
     se_gnb: np.ndarray | None = None       # [snapshot, rank]
     best_se_gnb: np.ndarray | None = None  # [snapshot]
-    mcs_table: int = 3                     # experience_v2 当前只接受公司表 3
+    mcs_table: int = 3                     # experience_v2 当前只接受预置表 3
     # 建表时用的目标 BLER。**主循环必须读它，不能自己写死 0.1**——
     # 否则 build_link_tables(target_bler=...) 选出来的 rank 和主循环选出来的 MCS
     # 是按两个不同判据来的，而这种不一致在结果里完全看不出来。
@@ -1066,27 +1092,23 @@ def _type1_precoder(
 
 
 def _cqi_of(sinr_db: float, target_bler: float) -> int:
-    """用户级 SINR → CQI index（38.214 Table 5.2.2.1-3，即 CQI 表 2）。"""
+    """用户级 PMI-SINR → 内部 CQI 0..14。
+
+    内部 CQI0 是最低可用档并映射 MCS0，不是 38.214 的 out-of-range。
+    量化门限由“内部 CQI→MCS 离散表 + 预置 NewTx BLER 曲线”共同确定。
+    """
     from . import linkadapt as la  # noqa: PLC0415
 
-    if not np.isfinite(sinr_db):
-        return 0
-    return int(la.select_cqi(float(sinr_db), table=2,
-                             target_bler=float(target_bler)))
+    return int(la.select_internal_cqi(
+        float(sinr_db), target_bler=float(target_bler), mcs_table=3))
 
 
 def _cqi_threshold_sinr(cqi_index: int, target_bler: float) -> float:
-    """CQI → 按谱效映射的初始 MCS → 该 MCS 在目标 BLER 下的 NewTx SINR 门限。
-
-    这是现场 TDD AMC 链路的前两步。CQI=0（不可调度）时返回 −inf，
-    让下游把它判成发不出去，而不是悄悄当成 MCS 0。
-    """
+    """内部 CQI → 离散映射 MCS → 目标 BLER 的 NewTx SINR 门限。"""
     from . import bler_curves as bc  # noqa: PLC0415
     from . import linkadapt as la  # noqa: PLC0415
 
-    m = la.cqi_to_mcs_by_se(int(cqi_index), cqi_table=2, mcs_table=3)
-    if not m["scheduled"]:
-        return float("-inf")
+    m = la.internal_cqi_to_mcs(int(cqi_index), mcs_table=3)
     return float(bc.get_curve(int(m["mcs"]), "newtx").required_sinr_db(float(target_bler)))
 
 
@@ -1487,7 +1509,9 @@ def build_link_tables(
         if len(prec_snaps) != len(snaps):
             raise ValueError(f"UE {i} 的评估/预编码快照数不一致")
         if len(snaps) < num_snapshots:
-            # 时隙不够就复用，但**不伪造起伏**——复用会在结果里如实标注
+            # 时隙不够就循环复用，**不伪造起伏**。注意复用当前不在结果里
+            # 标注：server 路径不传 num_snapshots（默认 1），本分支仅测试
+            # 可达；若未来开放，需要先补 snapshots_reused 披露字段。
             snaps = [snaps[t % len(snaps)] for t in range(num_snapshots)]
             prec_snaps = [prec_snaps[t % len(prec_snaps)] for t in range(num_snapshots)]
         n_s = len(snaps)
@@ -1685,7 +1709,7 @@ def build_link_tables(
 
         # --- 发送侧 SINR = CQI 门限 + BF Gain（用户 2026-08-03 定的口径）---
         # 现场流程（CLAUDE.md 已固化）：
-        #   CQI → 按谱效映射初始 MCS → 该 MCS 的目标 BLER SINR 门限
+        #   内部 CQI → 离散表映射初始 MCS → 该 MCS 的目标 BLER SINR 门限
         #   → + BF Gain → 按 SINR 重映射 MCS → + OLLA → floor
         # 这里只走到"+BF Gain"为止，OLLA 留在 TTI 主循环里逐 TTI 更新。
         #
@@ -1710,7 +1734,7 @@ def build_link_tables(
                 cqi_by_snapshot[_s, _r] = held_cqi
                 thr = _cqi_threshold_sinr(
                     int(cqi_by_snapshot[_s, _r]), target_bler)
-                # **CQI=0 不能退化成 −inf。** 它表示低于表下界，不是用户消失。
+                # 内部 CQI0 本身就是 MCS0 的有效低档；只有输入不可用时才走下面的防御回退。
                 if not np.isfinite(thr):
                     thr = filtered_pmi if np.isfinite(filtered_pmi) else -20.0
                 gain = bf_gain[_s, _r] if np.isfinite(bf_gain[_s, _r]) else 0.0
@@ -2213,6 +2237,12 @@ class _Traffic:
         self.queue: list[list[_Burst]] = [[] for _ in range(n_ue)]
         self.done: list[list[_Burst]] = [[] for _ in range(n_ue)]
         self._p_arrive = cfg.arrival_rate_hz * tti_ms / 1000.0
+        if self._p_arrive > 1.0:
+            raise ValueError(
+                f"伯努利到达模型要求 arrival_rate_hz × TTI ≤ 1（当前 "
+                f"{cfg.arrival_rate_hz} Hz × {tti_ms} ms = {self._p_arrive:.2f}）："
+                "超过后每 TTI 恒到达一个文件，offered load 被静默钳位。"
+                "请降低到达率，或改用 experience_v2 的泊松到达")
         self.offered_bytes = 0
         # 小包只占 1 个 RBG：按 1/num_rbg 的 RE 数、中等 MCS 估个字节数。
         # 它小到一个 TTI 就发完，所以体验速率完全由调度时延决定。
@@ -2354,6 +2384,7 @@ class UeKpi:
     avg_mcs: float
     avg_rank: float
     bler_first_tx: float
+    retx_bler: float
     residual_bler: float
     sched_tti: int
     retx_tti: int
@@ -2420,6 +2451,19 @@ class SystemResult:
 # ---------------------------------------------------------------------------
 # 主循环
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _LegacyHarqTb:
+    """一个等待唯一一次重传的 TB；发送身份在首次 NACK 时冻结。"""
+
+    mcs: int
+    rank: int
+    tb_bytes: int
+    payload_bytes: int
+    slot: str
+    first_tti: int
+    was_mu: bool
+
+
 def simulate(
     tables: list[UeLinkTable],
     *,
@@ -2515,6 +2559,12 @@ def simulate(
         return SystemResult(
             config={"system": sys_cfg.as_dict(), "traffic": traffic.as_dict(),
                     "scheduler": sched.as_dict(), "kpi": kpi.as_dict(),
+                    "harq_model": {
+                        "max_retransmissions": 1,
+                        "combining": str(sys_cfg.harq_combining).lower(),
+                        "bler_source": "preset NewTx curves only",
+                        "identity": "same MCS/RBG-count/rank/TBS as initial TB",
+                    },
                     "mu_se_ratio": 1.0, "rng": book.as_dict(),
                     "physical_approximations": {
                         "sinr": (
@@ -2523,7 +2573,11 @@ def simulate(
                             "mean in dB across granted RBGs, not calibrated EESM/MIESM"
                             if sys_cfg.rb_power_control.enabled else
                             "wideband; no per-RBG frequency-selective scheduling"),
-                        "harq": "none; NACK payload retries later as NewTx",
+                        "harq": (
+                            "one retransmission; same MCS/RBG-count/rank/TBS; "
+                            f"{str(sys_cfg.harq_combining).upper()} combining derived "
+                            "from preset NewTx curves; failed retransmission payload "
+                            "later becomes a new TB"),
                         "allocator": (
                             "one PF sort; data-limited SU/MU plans; compare useful bytes; "
                             "unused tail RBG stays idle"),
@@ -2538,7 +2592,7 @@ def simulate(
                             "CQI uses causal expanding mean at report instants"),
                         "power_constraint": sys_cfg.power_constraint,
                         "crn_event_mapping": "harq and scheduler tie-break indexed by [TTI,UE]",
-                        "tbs_resources": ("38.214 TBS quantization with company MCS table 3; "
+                        "tbs_resources": ("38.214 TBS quantization with preset MCS table 3; "
                                           "12 data symbols/RB and S-slot 0.7 scaling"),
                         "type1": ("single-panel Type-I-style beam-column subset; "
                                   "greedy multi-layer approximation"),
@@ -2576,12 +2630,13 @@ def simulate(
     served = np.zeros(n_ue)
     sched_cnt = np.zeros(n_ue, dtype=int)
     retx_cnt = np.zeros(n_ue, dtype=int)
+    retx_nack = np.zeros(n_ue, dtype=int)
     mcs_sum = np.zeros(n_ue)
     rank_sum = np.zeros(n_ue)
     nack_first = np.zeros(n_ue)
     tx_first = np.zeros(n_ue)
     nack_final = np.zeros(n_ue)
-    harq_pending: dict[int, tuple[int, int]] = {}   # ue -> (剩余重传次数, TB bytes)
+    harq_pending: dict[int, _LegacyHarqTb] = {}
 
     dl_tti = 0
     busy_tti = 0
@@ -2589,7 +2644,7 @@ def simulate(
     outage_tti = 0
     su_fits_skip = 0
     mu_rbg = 0
-    olla_db = np.zeros(n_ue)              # 每用户的 OLLA 偏置（dB）
+    olla_db = np.zeros(n_ue)              # 历史变量名；实际单位为连续 MCS index
     pattern = sys_cfg.tdd_pattern.upper() or "D"
 
     # **调度器只能用基站自己估的谱效。** 用真实谱效等于让它预知信道，
@@ -2612,6 +2667,7 @@ def simulate(
         snap = (tti // snap_every) % n_snap
 
         cand = [u for u in range(n_ue) if tr.has_data(u)
+                and (u not in harq_pending or harq_pending[u].slot == _slot)
                 and not (tables[u].outage is not None and tables[u].outage[snap])]
         blocked = sum(1 for u in range(n_ue) if tr.has_data(u)
                       and tables[u].outage is not None and tables[u].outage[snap])
@@ -2641,6 +2697,13 @@ def simulate(
         else:
             order = np.argsort(-metric)
 
+        # 同 slot 类型的待重传 TB 优先，且只重传一次。相同 slot 保证原 MCS/rank/
+        # 全带 RBG 对应的 TBS 不因 D/S 可用 RE 不同而改变。
+        _retx_ready = [
+            u for u in cand
+            if u in harq_pending and harq_pending[u].slot == _slot
+        ]
+
         # **SU 能一个 TTI 传完就不触发 MU**（用户 2026-08-02 的现场准则）——
         # 数据都发完了，配对没有意义，还白白引入用户间干扰。
         _top = cand[order[0]]
@@ -2649,11 +2712,16 @@ def simulate(
         _su_bytes = int(la.transport_block_size(
             re_per_tti, _top_mcs.rate, _top_mcs.q_m, layers=_top_rank) // 8)
         _fits_in_su = tr.bytes_left(_top) <= _su_bytes
-        use_mu = (sched.mu_enabled and mu_se_ratio > 1.0
-                  and len(cand) >= 2 and not _fits_in_su)
-        if _fits_in_su and len(cand) >= 2:
-            su_fits_skip += 1
-        picked = [cand[i] for i in order[:sched.max_mu_users]] if use_mu else [cand[order[0]]]
+        if _retx_ready:
+            use_mu = False
+            picked = [min(_retx_ready, key=lambda u: harq_pending[u].first_tti)]
+        else:
+            use_mu = (sched.mu_enabled and mu_se_ratio > 1.0
+                      and len(cand) >= 2 and not _fits_in_su)
+            if _fits_in_su and len(cand) >= 2:
+                su_fits_skip += 1
+            picked = ([cand[i] for i in order[:sched.max_mu_users]]
+                      if use_mu else [cand[order[0]]])
         if use_mu:
             mu_tti += 1
             mu_rbg += sys_cfg.num_rbg          # MU 时整band 都是配对的
@@ -2664,53 +2732,58 @@ def simulate(
         # 靠不同的空间波束区分。早先按 1/K 分 RE，MU 的聚合吞吐就和 SU 一模一样——
         # 等于把空间复用做成了时频复用，MU 增益整个消失。
         n_pair = len(picked)
+        actual_inst_se = np.zeros(n_ue, dtype=float)
         for u in picked:
-            r = int(tables[u].best_rank[snap])
-            if use_mu:
-                r = min(r, mu.MU_MAX_RANK)      # MU 每用户硬顶 rank2（工程约束）
-            # **发送端按无干扰的 SINR + OLLA 偏置选 MCS**，
-            # 接收端按含干扰的 SINR 判误码。两者的差就是 OLLA 要收敛掉的东西。
-            if tables[u].sinr_tx_db is not None and sched.olla_enabled:
-                _tx = float(tables[u].sinr_tx_db[snap, r - 1]) + olla_db[u]
-                m = la.select_mcs(_tx, table=_table_id,
-                                  target_bler=_target_bler).index
-            else:
-                m = int(tables[u].mcs[snap, r - 1])
-            mcs_obj = _mcs_table[m]
-            tbs_bits = la.transport_block_size(
-                re_per_tti, mcs_obj.rate, mcs_obj.q_m, layers=r)
-            if use_mu:
-                # 配对后每人只分到 1/K 的功率、还要吃残余干扰。
-                # mu_se_ratio 是建表阶段用真实 SU/MU 自适应测出来的**聚合**比值，
-                # 所以这里除以配对数，使 K 个用户加起来 = ratio x 单用户 SU。
-                tbs_bits *= mu_se_ratio / n_pair
-            tb_bytes = max(1, int(tbs_bits // 8))
-
-            # HARQ：首传按该 MCS 的 BLER 判 ACK/NACK，失败进重传
             pend = harq_pending.get(u)
             if pend is not None:
-                left, size = pend
-                # 重传查 ReTx 曲线（合并增益体现在曲线本身更靠左）。
-                # 用上一次的 SINR 近似——真软合并要 LLR，本项目明确不做。
-                #
-                # **查的必须是实发的 MCS，不是"这个 SINR 该用的 MCS"。**
-                # 早先写成 tables[u].mcs[snap, r-1]，那是拿真实 SINR 反查出来的
-                # **理想档**；而实发的 m 来自发送侧 SINR + OLLA，通常更高
-                # （首传之所以失败正是因为点高了，开 CSI 老化后更明显）。
-                # 用低档去查 ReTx 曲线 → BLER 偏低 → 重传几乎必然成功 →
-                # **残留 BLER 系统性偏低**，而这个偏差不会以任何方式报出来。
-                bler = _bler_lookup(m, float(tables[u].sinr_db[snap, r - 1]), "retx")
+                r, m = int(pend.rank), int(pend.mcs)
+            else:
+                r = int(tables[u].best_rank[snap])
+                if use_mu:
+                    r = min(r, mu.MU_MAX_RANK)  # MU 每用户硬顶 rank2（工程约束）
+            # 发送端先按 CQI 门限 + BF Gain 的 SINR 反折基准 MCS，
+            # 再在 MCS 域叠加 OLLA；接收端仍按真实 SINR 判误码。
+            if pend is None:
+                if tables[u].sinr_tx_db is not None and sched.olla_enabled:
+                    _tx = float(tables[u].sinr_tx_db[snap, r - 1])
+                    _base_mcs = int(la.select_mcs(
+                        _tx, table=_table_id, target_bler=_target_bler).index)
+                    m = int(la.apply_olla_mcs(
+                        _base_mcs, float(olla_db[u]),
+                        mcs_table=_table_id)["final_mcs"])
+                else:
+                    m = int(tables[u].mcs[snap, r - 1])
+            mcs_obj = _mcs_table[m]
+            if pend is not None:
+                tb_bytes = int(pend.tb_bytes)
+                payload_bytes = int(pend.payload_bytes)
+            else:
+                tbs_bits = la.transport_block_size(
+                    re_per_tti, mcs_obj.rate, mcs_obj.q_m, layers=r)
+                if use_mu:
+                    # 配对后每人只分到 1/K 的功率、还要吃残余干扰。
+                    # mu_se_ratio 是建表阶段用真实 SU/MU 自适应测出来的**聚合**比值，
+                    # 所以这里除以配对数，使 K 个用户加起来 = ratio x 单用户 SU。
+                    tbs_bits *= mu_se_ratio / n_pair
+                tb_bytes = max(1, int(tbs_bits // 8))
+                payload_bytes = min(int(tr.bytes_left(u)), tb_bytes)
+            actual_inst_se[u] = mcs_obj.se * r * (
+                mu_se_ratio / n_pair if use_mu else 1.0)
+
+            # HARQ：首传按该 MCS 的 BLER 判 ACK/NACK，失败进重传
+            if pend is not None:
+                sinr = float(tables[u].sinr_db[snap, r - 1])
+                retx = la.harq_retransmission_bler(
+                    m, sinr, combining=sys_cfg.harq_combining, table=_table_id)
+                bler = float(retx["bler"])
                 retx_cnt[u] += 1
                 if harq_draw[tti, u] > bler:
-                    # **重传成功也要计入 served。** 早先这里漏了，
-                    # 字节进了缓冲区却没进统计，对账差 4.5%。
-                    served[u] += tr.serve(u, tti, size)
-                    harq_pending.pop(u, None)
-                elif left > 1:
-                    harq_pending[u] = (left - 1, size)
+                    served[u] += tr.serve(u, tti, payload_bytes)
                 else:
-                    harq_pending.pop(u, None)
+                    retx_nack[u] += 1
                     nack_final[u] += 1
+                # 无论 ACK/NACK 都结束本次 HARQ；失败字节仍在队列，后续作为新 TB。
+                harq_pending.pop(u, None)
                 sched_cnt[u] += 1
                 mcs_sum[u] += m
                 rank_sum[u] += r
@@ -2730,22 +2803,17 @@ def simulate(
                                      sched.olla_max_db)
             else:
                 nack_first[u] += 1
-                harq_pending[u] = (3, tb_bytes)
+                harq_pending[u] = _LegacyHarqTb(
+                    mcs=m, rank=r, tb_bytes=tb_bytes,
+                    payload_bytes=payload_bytes, slot=_slot,
+                    first_tti=tti, was_mu=bool(use_mu))
                 if sched.olla_enabled:      # NACK：大步下调
                     olla_db[u] = max(olla_db[u] - sched.step_down,
                                      sched.olla_min_db)
 
         # --- PF 平均速率更新 ---
-        inst = np.zeros(n_ue)
-        for u in picked:
-            # **PF 的瞬时速率必须和实发口径一致。** MU 下实发被限到 rank≤2，
-            # 而 best_se 可能是 rank4 的——记错了会让 PF 以为给足了，
-            # 公平性判据整个偏掉。
-            if use_mu:
-                _r = min(int(tables[u].best_rank[snap]), mu.MU_MAX_RANK)
-                inst[u] = tables[u].se[snap, _r - 1] * mu_se_ratio / len(picked)
-            else:
-                inst[u] = tables[u].best_se[snap]
+        # PF 使用实际发射 MCS/rank（重传也保持原 TB 参数），不拿当前 best_se 冒充。
+        inst = actual_inst_se
         a = 1.0 / sched.pf_window_tti
         r_avg = (1.0 - a) * r_avg + a * inst
         if progress and tti % 5000 == 0:
@@ -2778,7 +2846,10 @@ def simulate(
             avg_mcs=float(mcs_sum[u] / max(sched_cnt[u], 1)),
             avg_rank=float(rank_sum[u] / max(sched_cnt[u], 1)),
             bler_first_tx=float(nack_first[u] / max(tx_first[u], 1)),
-            residual_bler=float(nack_final[u] / max(tx_first[u], 1)),
+            retx_bler=float(retx_nack[u] / max(retx_cnt[u], 1)),
+            residual_bler=float(
+                nack_final[u]
+                / max(tx_first[u] - int(u in harq_pending), 1)),
             sched_tti=int(sched_cnt[u]), retx_tti=int(retx_cnt[u]),
         ))
 
@@ -2799,7 +2870,15 @@ def simulate(
         "avg_mcs": float(np.sum(mcs_sum) / max(np.sum(sched_cnt), 1)),
         "avg_rank": float(np.sum(rank_sum) / max(np.sum(sched_cnt), 1)),
         "bler_first_tx": float(np.sum(nack_first) / max(np.sum(tx_first), 1)),
-        "residual_bler": float(np.sum(nack_final) / max(np.sum(tx_first), 1)),
+        "retx_bler": float(np.sum(retx_nack) / max(np.sum(retx_cnt), 1)),
+        "retx_attempts": int(np.sum(retx_cnt)),
+        "retx_nacks": int(np.sum(retx_nack)),
+        "residual_bler": float(
+            np.sum(nack_final) / max(np.sum(tx_first) - len(harq_pending), 1)),
+        "pending_harq_tb_at_end": int(len(harq_pending)),
+        "residual_bler_definition": (
+            "failed unique retransmissions / initial TBs whose HARQ outcome is "
+            "observed; end-of-run pending TBs are right-censored"),
         "dl_tti": dl_tti, "scheduled_tti": busy_tti,
         "occupancy": busy_tti / max(dl_tti, 1),
         "mu_share": mu_tti / max(busy_tti, 1),
@@ -2822,6 +2901,10 @@ def simulate(
         "olla_db_mean": float(np.mean(olla_db)),
         "olla_db_p5": float(np.percentile(olla_db, 5)),
         "olla_db_p95": float(np.percentile(olla_db, 95)),
+        "olla_mcs_mean": float(np.mean(olla_db)),
+        "olla_mcs_p5": float(np.percentile(olla_db, 5)),
+        "olla_mcs_p95": float(np.percentile(olla_db, 95)),
+        "olla_domain": "continuous_mcs_index",
         "olla_target_bler": round(sched.olla_step_up_db
                                   / (sched.olla_step_up_db + sched.olla_step_down_db), 4),
         # **MU 配对比例**：MU 配对的 RBG 数占已调度 RBG 总数。
@@ -2946,6 +3029,13 @@ def simulate(
     return SystemResult(
         config={"system": sys_cfg.as_dict(), "traffic": traffic.as_dict(),
                 "scheduler": sched.as_dict(), "kpi": kpi.as_dict(),
+                "harq_model": {
+                    "max_retransmissions": 1,
+                    "combining": str(sys_cfg.harq_combining).lower(),
+                    "bler_source": "preset NewTx curves only",
+                    "identity": "same MCS/RBG-count/rank/TBS as initial TB",
+                    "timing": "retransmit on the same D/S slot type",
+                },
                 "mu_se_ratio": round(float(mu_se_ratio), 4),
                 "rng": {**book.as_dict(),
                         "event_mapping": "harq and scheduler tie-break indexed by [TTI,UE]"}},
@@ -3450,11 +3540,11 @@ _BLER_CACHE_STEP_DB = 0.05
 def _bler_lookup(mcs: int, sinr_db: float, tx_mode: str = "newtx") -> float:
     """查表 BLER，按源曲线 0.05 dB 网格量化后缓存。
 
-    公司曲线的原始横轴步长就是 0.05 dB。旧实现按 0.5 dB 缓存，在瀑布区会把
+    预置曲线的原始横轴步长就是 0.05 dB。旧实现按 0.5 dB 缓存，在瀑布区会把
     工作点最多平移 0.25 dB，足以显著改变 ACK/NACK；缓存不能以牺牲源数据一个
     数量级的分辨率为代价。
 
-    **key 里带曲线数据的 SHA-256。** 当前只有一套公司曲线，所以不带也是对的；
+    **key 里带曲线数据的 SHA-256。** 当前只有一套预置曲线，所以不带也是对的；
     但 ``MCS_TABLE_SOURCES`` 已经为第二套 profile 留了位置，届时一个进程级
     全局字典会静默返回上一套的值——和"CDL 表被异常吞掉后继续用错表"是同一类事故。
     """

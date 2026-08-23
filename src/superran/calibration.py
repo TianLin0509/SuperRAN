@@ -108,15 +108,29 @@ def coupling_loss_db(ds: Any) -> Metric:
     它把路损模型、天线方向图、下倾角、小区选择规则**串起来一起考**，
     所以是最基础也最灵敏的一项：任何一环错了这条 CDF 都会整体平移。
     """
-    tx = np.asarray(ds.scalar("tx_power_dbm"), dtype=float)
-    rx = np.asarray(ds.scalar("rx_power_serving_dbm"), dtype=float)
+    try:
+        tx = np.asarray(ds.scalar("tx_power_dbm"), dtype=float)
+        rx = np.asarray(ds.scalar("rx_power_serving_dbm"), dtype=float)
+    except (KeyError, AttributeError, OSError, ValueError) as exc:
+        return Metric(
+            name="耦合损耗（服务小区）",
+            clause="38.901 §7.8.1 指标1 / §7.8.2 指标1",
+            unit="dB",
+            values=np.asarray([]),
+            applicable=False,
+            reference="R1-165974（大尺度）/ R1-165975（全校准）",
+            note=f"数据集缺 tx_power_dbm/rx_power_serving_dbm（{type(exc).__name__}），本项不适用",
+        )
     return Metric(
         name="耦合损耗（服务小区）",
         clause="38.901 §7.8.1 指标1 / §7.8.2 指标1",
         unit="dB",
         values=tx - rx,
         reference="R1-165974（大尺度）/ R1-165975（全校准）",
-        note="= 发射功率 - 接收功率 = 路损 - 天线增益。串联检验路损模型 + 天线方向图 + 小区选择。",
+        note=("= 发射功率 - 接收功率 = 路损 - 天线增益。串联检验路损模型 + 天线方向图 + 小区选择。"
+              "口径注意：本实现是逐链路 LOS/NLOS 混合口径的发收功率差，而 R1-165974/5 的"
+              "参考曲线按条款原文是 LOS-conditioned（based on LOS pathloss）；NLOS 场景下"
+              "两者会有整体平移，对比分位点时先看这条口径差。"),
     )
 
 
@@ -135,8 +149,19 @@ def geometry_db(ds: Any, *, with_noise: bool = True) -> Metric:
     多小区时如果 SINR 与纯热噪声 SNR 逐点相同，说明干扰根本没算进去。
     """
     key = "sinr_dB" if with_noise else "sir_dB"
-    v = np.asarray(ds.scalar(key), dtype=float)
-    snr = np.asarray(ds.scalar("snr_dB"), dtype=float)
+    try:
+        v = np.asarray(ds.scalar(key), dtype=float)
+        snr = np.asarray(ds.scalar("snr_dB"), dtype=float)
+    except (KeyError, AttributeError, OSError, ValueError) as exc:
+        return Metric(
+            name=f"几何量（{'含噪声' if with_noise else '不含噪声'}）",
+            clause="38.901 §7.8.1 指标2 / §7.8.2 指标2",
+            unit="dB",
+            values=np.asarray([]),
+            applicable=False,
+            reference="R1-165974 / R1-165975",
+            note=f"数据集缺 {key}/snr_dB（{type(exc).__name__}），本项不适用",
+        )
     finite = np.isfinite(v)
 
     note = "含白噪声（宽带 SINR）" if with_noise else "不含噪声（宽带 SIR）"

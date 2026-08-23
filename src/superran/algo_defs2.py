@@ -293,36 +293,35 @@ def _harq() -> Family:
         key="harq",
         name="HARQ",
         stage="系统级",
-        current="curve_reuse",
-        config_key="",
-        intro="首传失败后重传。合并增益体现在 ReTx 曲线本身比 NewTx 曲线更靠左。",
-        formula=r"P(\text{成功}) = 1 - \prod_{k=1}^{N} \text{BLER}_k",
-        caveat="**没有真正的软合并（Chase / IR）**——那需要 LLR，而比特级链路"
-               "本项目明确不做。多次重传复用同一条 ReTx 曲线，"
-               "结果里保留 <code>harq_model=newtx_then_retx_curve_reused</code> 标明这一点。"
-               "**重传增益会被低估。**",
-        source="公司 20B 曲线；软合并不做是用户 2026-08-02 定的边界",
+        current="ir",
+        config_key="harq_combining",
+        intro="每个单码字 TB 最多一次重传；空口 MCS、RBG 数、rank 与 TBS 保持不变。",
+        formula=(r"P_{\mathrm{res}}=P_{\mathrm{N}}(m,\gamma)"
+                 r"P_{\mathrm{R}}(m,\gamma)"),
+        caveat="这是系统级工程抽象，不展开 RV、LLR、并行 HARQ process 与标准时序。"
+               "原始 ReTx 行只保留用于来源审计，不进入当前系统重传判错。",
+        source="预置表口径：通用 NewTx 曲线 + 一次 CC/IR 重传",
         options=[
-            Option("curve_reuse", "NewTx / ReTx 双曲线",
-                   summary="首传查 NewTx 曲线，失败后查 ReTx 曲线",
-                   detail="表 3 的源数据每档 MCS 有一条 NewTx 和一条 ReTx。"
-                          "多次重传复用同一条 ReTx——**这是个已知的天花板**。",
-                   when="默认（也是唯一可用的）",
+            Option("ir", "IR 增量冗余（默认）",
+                   formula=r"\eta_{eq}=\eta_m/2,\quad m_{eq}=\max\{j:\eta_j\leq\eta_{eq}\}",
+                   summary="半谱效映射等效低档 MCS，在原 SINR 上查 NewTx 曲线",
+                   detail="m_eq 只用于 BLER 查表；重传空口仍发送初传 m 和相同 RBG 数。",
+                   when="默认系统仿真",
                    cost="查表"),
-            Option("chase", "Chase 合并（未实现）",
-                   formula=r"\gamma_{comb} = \sum_{k} \gamma_k",
-                   summary="把多次重传的软信息按 SINR 相加",
-                   detail="需要 LLR。**本项目明确不做比特级链路，所以这条做不了。**",
-                   when="不可用",
-                   cost="需要比特级链路"),
+            Option("cc", "CC 追逐合并",
+                   formula=r"\gamma_{eq,dB}=\gamma_{dB}+10\log_{10}2",
+                   summary="同一 MCS 的 NewTx 曲线，查询 SINR 增加 3.0103 dB",
+                   detail="两次等功率重复发送的一次合并近似。",
+                   when="对照实验",
+                   cost="查表"),
         ],
         flow=Flow(steps=[
             ("首传", "按发送侧 SINR + OLLA 选 MCS，按接收侧 SINR 查 NewTx 曲线"),
             ("抽 ACK / NACK", "伯努利，概率就是查到的 BLER"),
             ("NACK 则进重传队列", "该 UE 在重传完成前不开新的首传"),
-            ("重传查 ReTx 曲线", "曲线更靠左，体现合并增益"),
-            ("最多 4 次", "还失败就丢弃，计入残留 BLER"),
-        ], loop_back=(4, 3, "还没成功就再来一次"),
+            ("唯一一次重传", "IR 半谱效映射或 CC +3.0103 dB；只查 NewTx 曲线"),
+            ("结束本次 HARQ", "失败字节留队，后续作为新 TB，不再第二次重传"),
+        ],
            branches=[(2, "ACK", "数据交付，OLLA 上调偏置")]),
     )
 
@@ -426,7 +425,7 @@ def _two_phase() -> Family:
             ("第一相：测 MU/SU 比值", "在若干快照上跑真实的 SU/MU 自适应，取中位数"),
             ("第一相：判覆盖外", "用户级 SINR 够不到 MCS 0 门限的快照标出来"),
             ("第二相：TTI 主循环", "只读表 + 算 PF 度量 + 更新缓冲区，**无矩阵运算**"),
-            ("第二相：BLER 查表", "按公司源曲线 0.05 dB 网格缓存，不降采样瀑布区"),
+            ("第二相：BLER 查表", "按预置源曲线 0.05 dB 网格缓存，不降采样瀑布区"),
         ], branches=[(2, "MU 比值离散度 > 30%", "标量近似不成立，结果里告警")]),
     )
 
@@ -544,14 +543,14 @@ def _tx_sinr() -> Family:
                    formula=r"\mathrm{CQI} \to \mathrm{MCS} \to \Gamma_{10\%} "
                            r"\to +\,\mathrm{BFGain} \to \mathrm{MCS}' \to "
                            r"+\,\mathrm{OLLA} \to \lfloor \cdot \rfloor",
-                   summary="现场口径：CQI 按谱效映射 MCS，取该 MCS 的目标 BLER SINR 门限，加 BF 增益",
-                   detail="CQI 用 38.214 Table 5.2.2.1-3（表 2，含 256QAM）。"
+                   summary="现场口径：内部 CQI 查离散表得 MCS，取该 MCS 的目标 BLER SINR 门限，加 BF 增益",
+                   detail="内部 CQI0..14 表为 [0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]，"
+                          "不是 38.214 CQI 编号。"
                           "PMI 走 <b>Type-I-style 宽带列码本近似</b>——全带共用一个权，"
                           "正对应现场的<b>全带 CQI</b>（不做子带 CQI、不做频选调度）。"
                           "<br>宽带 PMI 是慢时间尺度的量，所以逐 UE 在完整时频样本的"
                           "功率协方差上搜一次，不逐快照重搜，也不平均复信道。"
-                          "<br><b>CQI=0 不退化成 −inf</b>：它的意思是「低于 CQI 表下界」，"
-                          "不是「这个用户不存在」，退回实测 PMI SINR，OLLA 还能在它上面工作。",
+                           "<br><b>CQI=0 直接映射 MCS0</b>，是最低可用档，不是 out-of-range。",
                    when="默认",
                    cost="每 UE 每 rank 一次 Type I 码本搜索，约 40 ms"),
             Option("rx_longterm", "接收 SINR 的长期均值（已弃用）",
@@ -572,18 +571,18 @@ def _tx_sinr() -> Family:
         flow=Flow(steps=[
             ("终端测 CQI", "用基站下发的 Type I 宽带 PMI 权，在**真实信道**上测，"
                            "含干扰；长期滤波后上报一个宽带值"),
-            ("量化成 CQI index", "38.214 Table 5.2.2.1-3，满足 10% BLER 的最高档"),
-            ("CQI → 初始 MCS", "按谱效就近映射到 MCS 表 3"),
+            ("量化成 CQI index", "按内部映射 MCS 的 10% BLER 门限量化到 0..14"),
+            ("CQI → 初始 MCS", "逐项查内部离散表，不用线性公式或谱效近似"),
             ("取该 MCS 的 SINR 门限", "该档 NewTx 曲线上 BLER=10% 对应的 SINR"),
             ("基站自算 BF Gain", "同一信道、同一 rank、同一功率、同一接收机下 "
                                  "SINR_SVD − SINR_PMI，逐 RBG 逐流在 dB 域平均；"
                                  "**开老化时算的是陈旧信道上的增益**"),
             ("相加得发送侧 SINR", "Γ(MCS(CQI)) + BF Gain"),
             ("重映射 MCS", "按发送侧 SINR 选满足目标 BLER 的最高 MCS"),
-            ("加 OLLA 偏置", "逐 TTI 更新的 dB 域偏置，ACK +0.01 / NACK −0.09"),
+            ("加 OLLA 偏置", "在重映射 MCS 后加连续 MCS 偏置，再 floor/钳位"),
             ("接收端判误码", "用**真实**接收 SINR 查 BLER 曲线——发送侧与接收侧的差就在这里变成误码"),
         ], branches=[
-            (1, "CQI = 0（低于表下界）", "退回实测 PMI SINR，不用 −inf"),
+            (1, "CQI = 0", "查表得 MCS0，继续完整 BF/OLLA 链"),
         ], loop_back=(8, 7, "ACK/NACK 反馈驱动 OLLA，下一次调度生效")),
     )
 

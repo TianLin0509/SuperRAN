@@ -135,6 +135,12 @@ def register_stream(name: str, purpose: str) -> None:
     if n in STREAMS and STREAMS[n] != purpose:
         raise ValueError(f"流 {n!r} 已登记为 {STREAMS[n]!r}，不要改用途——"
                          f"改用途等于悄悄换掉一批随机数")
+    key = stream_key(n)
+    for existing in STREAMS:
+        if existing != n and stream_key(existing) == key:
+            raise ValueError(
+                f"流名 {n!r} 的派生键与已有流 {existing!r} 撞车（crc32）——"
+                "撞名两条流会静默共用同一随机序列，请换个名字")
     STREAMS[n] = str(purpose)
 
 
@@ -318,13 +324,23 @@ class KpiStat:
 
     @property
     def cv(self) -> float:
-        """变异系数 ``s/|mean|``。跨 KPI 比较离散度时用它，量纲无关。"""
+        """变异系数 ``s/|mean|``。跨 KPI 比较离散度时用它，量纲无关。
+
+        dB 域量（名字以 ``_db`` 结尾）的 cv 随参考点平移改变，无意义，返回 nan。
+        """
+        if "_db" in str(self.name):
+            return float("nan")
         m = abs(self.mean)
         return self.std / m if m > _EPS else float("nan")
 
     @property
     def rel_half_width(self) -> float:
-        """置信区间半宽占均值的比例。**报数字前先看它**——它就是最后一位的可信度。"""
+        """置信区间半宽占均值的比例。**报数字前先看它**——它就是最后一位的可信度。
+
+        dB 域量（名字以 ``_db`` 结尾）同上，返回 nan。
+        """
+        if "_db" in str(self.name):
+            return float("nan")
         m = abs(self.mean)
         return self.half_width / m if m > _EPS else float("nan")
 
@@ -397,6 +413,19 @@ def check_pairable(books_a: list[RngBook], books_b: list[RngBook]) -> list[dict[
             "detail": f"A 臂 {len(books_a)} 次、B 臂 {len(books_b)} 次",
             "fix": "两臂用同一个 rng.replications(...) 的返回值",
         })
+        return issues
+    for label, books in (("A", books_a), ("B", books_b)):
+        keys = [(b.master_seed, b.replication) for b in books]
+        if len(set(keys)) != len(keys):
+            issues.append({
+                "check": "臂内每次重复必须是不同的流",
+                "detail": (f"{label} 臂内有重复的 (master_seed, replication)——"
+                           "最常见于 [book] * n 笔误：n 次重复逐位相同，"
+                           "差值恒为常数，零方差分支照样给出 p≈0，"
+                           "伪显著在统计层面完全不可观测"),
+                "fix": "用 rng.replications(master_seed, n) 生成，别用列表乘法",
+            })
+    if issues:
         return issues
     ka = [(b.master_seed, b.replication) for b in books_a]
     kb = [(b.master_seed, b.replication) for b in books_b]
@@ -474,16 +503,24 @@ def compare_replications(
     sa, sb = summarize(a, arm_a), summarize(b, arm_b)
     hw = (paired.ci_high - paired.ci_low) / 2.0
     effect = paired.mean_diff
-    rel = effect / sb.mean if abs(sb.mean) > _EPS else float("nan")
-    rel_hw = hw / abs(sb.mean) if abs(sb.mean) > _EPS else float("nan")
-    rel_text = f"（{rel:+.1%}）" if np.isfinite(rel) else "（基线为 0，不报相对百分比）"
+    _ratio_ok = str(unit) != "dB" and abs(sb.mean) > _EPS
+    rel = effect / sb.mean if _ratio_ok else float("nan")
+    rel_hw = hw / abs(sb.mean) if _ratio_ok else float("nan")
+    rel_text = (f"（{rel:+.1%}）" if np.isfinite(rel)
+                else ("（dB 域不报相对百分比）" if str(unit) == "dB"
+                      else "（基线为 0，不报相对百分比）"))
 
     # **效应小于置信区间就拒绝下结论**，而不是照报百分比。
     # 还要再过一次 gates 的判决检验（以 Wilcoxon 为准，见 gates.PairedResult）——
     # 区间不跨零但非参检验不显著时同样不能声称，这正是 CLAUDE.md 里
     # 「门 3 的判决必须显式说清用哪个检验」那条要求的。
     significant = bool(paired.ci_excludes_zero and paired.decision_significant)
-    if significant:
+    if paired.n < 2:
+        verdict = "inconclusive"
+        vtext = (f"{arm_a} 相对 {arm_b}：{metric} 只有 {paired.n} 次重复，"
+                 "无法估计离散度，**不能下结论**（CI 至少需要 2 次重复，"
+                 "判决检验至少 6 次）。")
+    elif significant:
         verdict = "significant"
         vtext = (f"{arm_a} 相对 {arm_b}：{metric} {sa.mean:.3f} vs {sb.mean:.3f} {unit}，"
                  f"差值 {effect:+.3f}{rel_text}，95% CI "

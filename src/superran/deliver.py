@@ -149,12 +149,21 @@ def build_code(dataset_id: str, want: str | list[str] | None = None) -> dict[str
         scenario=summary.get("scenario"),
         src=src,
     )
+    is_rt = (summary.get("sample_meta", {}) or {}).get("channel_generation_mode") == "sionna_rt"
+
     for name in wanted:
+        if name == "paths" and is_rt:
+            # 生成时就知道这是 RT 数据，不能原样输出必然崩溃的 ds.paths() 块
+            code += (
+                "\n# ── 每条径的几何 ─────────────────────────────\n"
+                "# 本数据集由射线追踪生成，多径来自真实建筑几何；ds.paths() 会抛\n"
+                "# NotImplementedError——套用 CDL/TDL 标准剖面得到的角度与本数据无关，\n"
+                "# 属于错误结果。需要每径角度请改用 CDL 模型重新生成。\n"
+            )
+            continue
         block = _BLOCKS.get(name)
         if block:
             code += block
-
-    is_rt = (summary.get("sample_meta", {}) or {}).get("channel_generation_mode") == "sionna_rt"
 
     notes: list[str] = []
     if "paths" in wanted and is_rt:
@@ -173,7 +182,7 @@ def build_code(dataset_id: str, want: str | list[str] | None = None) -> dict[str
             "射线追踪数据：信道来自真实建筑几何的反射与绕射，"
             "channel_model 字段仅作为 ChannelHub 内部回退标记，不代表实际信道生成方式。"
         )
-    if "topology" in wanted and not summary.get("shape", {}).get("N"):
+    if "topology" in wanted and int(summary.get("cells_configured", 2) or 2) < 2:
         notes.append("单小区场景没有干扰信道。")
 
     return {

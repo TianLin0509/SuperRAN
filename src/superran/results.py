@@ -53,8 +53,28 @@ def _sha256_file(path: Any, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+_SEMANTIC_SUMMARY_KEYS = (
+    "source", "num_samples", "cells_configured", "cells_actual",
+    "bs_panel", "ue_panel", "antenna_model", "parallel_dropped_fields",
+    "interference_modeled", "shape", "channel_contract",
+    "configured_channel_model", "effective_channel_model",
+    "effective_channel_model_counts", "scenario", "config", "sample_meta",
+    "provenance",
+)
+
+
+def _semantic_summary_sha256(summary: dict[str, Any]) -> str:
+    """只哈希会改变数据物理语义的 summary 字段，排除耗时/路径/说明书。"""
+    semantic = {key: summary.get(key) for key in _SEMANTIC_SUMMARY_KEYS}
+    encoded = json.dumps(
+        semantic, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=True,
+    ).encode("utf-8")
+    return _sha256_bytes(encoded)
+
+
 def dataset_digest(dataset_id: str, *, refresh: bool = False) -> str:
-    """数据集内容摘要（``channels.npz`` 的 SHA-256）。
+    """数据集内容摘要（NPZ + 物理语义 summary 的版本化 SHA-256）。
 
     首次算完写进 ``summary.json`` 缓存——几百 MB 的文件每次都哈希太慢，
     而它一旦生成就不会再变（重新生成会得到新的 dataset_id）。
@@ -62,11 +82,33 @@ def dataset_digest(dataset_id: str, *, refresh: bool = False) -> str:
     d = dataset_dir(dataset_id)
     sp = d / "summary.json"
     summary = json.loads(sp.read_text(encoding="utf-8"))
+    npz = d / "channels.npz"
+    st = npz.stat()
     cached = summary.get("dataset_digest")
-    if cached and not refresh:
+    sidecar = summary.get("dataset_digest_source") or {}
+    semantic_sha256 = _semantic_summary_sha256(summary)
+    npz_unchanged = (sidecar.get("npz_mtime_ns") == st.st_mtime_ns
+                     and sidecar.get("npz_size") == st.st_size
+                     and bool(sidecar.get("npz_sha256")))
+    fresh = (npz_unchanged
+             and sidecar.get("semantic_sha256") == semantic_sha256
+             and sidecar.get("digest_version") == "npz+semantic-v2")
+    if cached and not refresh and fresh:
         return str(cached)
-    digest = _sha256_file(d / "channels.npz")
+    # 无侧车（旧缓存）或 npz 被原地替换过时，必须重算——否则两臂注册会
+    # 读到同一份陈旧摘要，"数据集内容一致"的检查被混过去。
+    # 只改 summary 语义时复用已验证的 NPZ 摘要；数百 MB 数据不必重新哈希。
+    npz_sha256 = str(sidecar["npz_sha256"]) if npz_unchanged else _sha256_file(npz)
+    digest = _sha256_bytes(
+        f"npz+semantic-v2\n{npz_sha256}\n{semantic_sha256}".encode("ascii"))
     summary["dataset_digest"] = digest
+    summary["dataset_digest_source"] = {
+        "digest_version": "npz+semantic-v2",
+        "npz_mtime_ns": st.st_mtime_ns,
+        "npz_size": st.st_size,
+        "npz_sha256": npz_sha256,
+        "semantic_sha256": semantic_sha256,
+    }
     sp.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return digest
 
@@ -164,6 +206,10 @@ def register(
     sids = list(ids) if ids is not None else sample_ids(dataset_id, v.size)
     if len(sids) != v.size:
         raise ValueError(f"sample_ids 与 values 长度不符：{len(sids)} vs {v.size}")
+    if len(set(sids)) != len(sids):
+        raise ValueError(
+            "sample_ids 含重复 ID：同一样本注册两次会伪造独立样本量，"
+            "区间偏窄、p 值偏小，统计层面不可观测")
     if ids is None and n_ds and v.size != n_ds:
         raise ValueError(
             f"values 长度 {v.size} 与数据集样本数 {n_ds} 不符。"
@@ -200,7 +246,8 @@ def register(
         n=int(v.size),
         values_path=str(out),
         values_sha256=_sha256_file(out),
-        sample_ids_sha256=_sha256_bytes("\n".join(sids).encode("utf-8")),
+        sample_ids_sha256=_sha256_bytes(
+            json.dumps(sids, ensure_ascii=False).encode("utf-8")),
         method_metadata=dict(method_metadata or {}),
         code_sha256=(_sha256_file(code_path) if code_path else None),
         prereg_id=prereg_id,
@@ -257,6 +304,17 @@ def check_pairable(a: ResultArtifact, b: ResultArtifact) -> list[dict[str, Any]]
     而它照样会算出一个数。
     """
     issues: list[dict[str, Any]] = []
+
+    for r in (a, b):
+        if _sha256_file(r.values_path) != r.values_sha256:
+            issues.append({
+                "check": "结果文件未被改动",
+                "detail": (f"{r.arm_name} 的 values npz 与注册时的 SHA-256 不符——"
+                           "注册后被替换或截断，统计摘要与真实数据已脱钩"),
+                "fix": "用同一份结果重新 register",
+            })
+    if issues:
+        return issues
 
     if a.dataset_id != b.dataset_id:
         issues.append(

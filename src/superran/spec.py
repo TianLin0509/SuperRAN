@@ -53,6 +53,7 @@ from __future__ import annotations
 import html
 import json
 import math
+import re
 import time
 import uuid
 from typing import Any
@@ -674,9 +675,11 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "auto：experience 用 scheduled TBS；ACK goodput 是研究口径，不是默认"),
     ("target_bler", "目标 IBLER", "number", (0.01, 0.5, 0.01),
      "MCS 选择与 SU/MU OLLA 共用；默认 0.10"),
-    ("olla_step_up_db", "SU-OLLA ACK 步长 dB", "number", (0.001, 1.0, 0.001),
+    ("harq_combining", "HARQ 合并", "select", ["ir", "cc"],
+     "默认 IR=半谱效等效 MCS；CC=原 MCS 的码字 SINR +3.0103 dB；最多一次重传"),
+    ("olla_step_up_db", "SU-OLLA ACK 步长（MCS档）", "number", (0.001, 1.0, 0.001),
      "默认 0.01；进入 KPI 窗口后按该基础步长更新"),
-    ("olla_step_down_db", "SU-OLLA NACK 步长 dB", "auto_number",
+    ("olla_step_down_db", "SU-OLLA NACK 步长（MCS档）", "auto_number",
      (0.001, 2.0, 0.001),
      "留空=按 target BLER 自动反解；10% 且 up=0.01 时为 0.09"),
     ("qos_avg_rate_exponent", "QoS-PF 平均速率指数 α", "number", (0.0, 4.0, 0.1),
@@ -698,9 +701,9 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "每个复信道系数的 sigma_e²；必须来自估计器协方差或离线标定，不能偷看 h_true"),
     ("mu_corr_threshold", "MU 相关性门限", "number", (0.0, 1.0, 0.05),
      "SUS 配对上限；默认 0.7，越低越严格"),
-    ("mu_olla_step_up_db", "MU-OLLA ACK 步长 dB", "number", (0.001, 1.0, 0.001),
+    ("mu_olla_step_up_db", "MU-OLLA ACK 步长（MCS档）", "number", (0.001, 1.0, 0.001),
      "用户级、非 pair-specific；与 down 步长共同决定目标 BLER"),
-    ("mu_olla_step_down_db", "MU-OLLA NACK 步长 dB", "auto_number",
+    ("mu_olla_step_down_db", "MU-OLLA NACK 步长（MCS档）", "auto_number",
      (0.001, 2.0, 0.001),
      "留空=按 target BLER 自动反解；10% 且 up=0.01 时为 0.09"),
     ("precoder", "实际发射权", "select", ["svd", "type1"],
@@ -749,6 +752,7 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "large_pdb_ms": 300.0,
     "pf_accounting": "auto",
     "target_bler": 0.1,
+    "harq_combining": "ir",
     "olla_step_up_db": 0.01,
     "olla_step_down_db": None,
     "qos_avg_rate_exponent": 1.0,
@@ -866,7 +870,7 @@ RB 数与 RBG 配置不在这里开放修改；若用其他带宽生成链路级
 </div>
 <textarea id="pl" class="pl" readonly rows="9"></textarea>
 <script>
-const ST={json.dumps(state, ensure_ascii=False)};
+const ST={json.dumps(state, ensure_ascii=False).replace('</', '<' + chr(92) + '/')};
 const cur=Object.assign({{}},ST.init);
 const NL=String.fromCharCode(10);
 const F=(k,v)=>{{
@@ -1258,11 +1262,11 @@ def _svg_pdp(spec: dict[str, Any]) -> str:
     pmin = min(min(powers), -30.0)
     out = [f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="时延功率谱">']
     out.append('<style>.lb{font:11px ui-monospace,Consolas,monospace;fill:#6e6e73}'
-               '.cl{stroke:#0071e3;stroke-width:2.2;opacity:.8}</style>')
+               '.pdpl{stroke:#0071e3;stroke-width:2.2;opacity:.8}</style>')
     for d, p in zip(delays, powers, strict=False):
         x = pad + (d / dmax) * (W - 2 * pad)
         y = H - 34 - (p - pmin) / (0 - pmin) * (H - 62)
-        out.append(f'<line class="cl" x1="{x:.1f}" y1="{H-34}" x2="{x:.1f}" y2="{y:.1f}"/>')
+        out.append(f'<line class="pdpl" x1="{x:.1f}" y1="{H-34}" x2="{x:.1f}" y2="{y:.1f}"/>')
     out.append(f'<line x1="{pad}" y1="{H-34}" x2="{W-pad}" y2="{H-34}" '
                f'stroke="#d2d2d7" stroke-width="1"/>')
     out.append(f'<text class="lb" x="{pad}" y="{H-14}">0</text>'
@@ -1438,7 +1442,7 @@ def _facts(spec: dict[str, Any], highlight: list[str] | None = None) -> list[dic
         {"n": f'{f["num_rb"]}',
          "k": f'RB（{f["num_rbg"]} x {f["rbg_size"]} RBG）',
          "keys": ["num_rb", "subcarrier_spacing"]},
-        {"n": _esc(cfg.get("scenario", "-")),
+        {"n": str(cfg.get("scenario", "-")),
          "k": f'场景 · {cfg.get("channel_model", "-")}',
          "keys": ["scenario", "channel_model"]},
     ]
@@ -1515,7 +1519,7 @@ def render_html(
 
     facts = "".join(
         f'<div class="fact{" hi" if it["hi"] else ""}">'
-        f'<div class="n">{it["n"]}</div><div class="k">{_esc(it["k"])}</div></div>'
+        f'<div class="n">{_esc(it["n"])}</div><div class="k">{_esc(it["k"])}</div></div>'
         for it in _facts(spec, highlight)
     )
 
@@ -1682,6 +1686,8 @@ def write_spec(
     # 实测就这么丢过一份：HST 的拓扑图被单小区的覆盖成了一个孤零零的点。
     # 数据集句柄本身唯一，其余情况补一段随机后缀。
     stem = dataset_id or f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", stem):
+        raise ValueError(f"非法说明书句柄 {stem!r}：只允许 [A-Za-z0-9_-]")
 
     # 回传地址要**先拿到再渲染**——它是要写进页面 JS 的。
     apply_url, serve_error = "", ""

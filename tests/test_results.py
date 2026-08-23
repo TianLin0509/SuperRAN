@@ -227,15 +227,17 @@ r = g.compare_results(art_a.result_id, art_b.result_id)
 print(r.text())
 check(r.gate2.passed, "门 2 通过")
 check(r.gate3.passed, "门 3 通过")
-check(r.paired.n == ds.n, "配对样本数正确")
+check(r.paired.n == 8, "配对样本数按稳定 UE 身份折叠（24 条快照 → 8 个独立 UE）")
 check(r.paired.decision_significant, "真实差异被检出")
 check(r.metric == "spectral_efficiency", "结论句带指标名")
 check("bit/s/Hz" in r.statement(), "结论句带单位")
 check(r.identity["status"] == "primary", "判为预注册主结论")
 check(pr_gen.prereg_id in r.statement(), "结论句里写出预注册号")
 
-# 与内置对比走的是同一套统计实现
-pc = g.paired_compare(art_a.values(), art_b.values())
+# 与内置对比走的是同一套统计实现（含同一套独立观测折叠）
+_ids = np.asarray([int(x) for x in np.asarray(ds.scalar("ue_id"))], dtype=object)
+fa, fb, _kept = g.paired_cluster_means(art_a.values(), art_b.values(), _ids)
+pc = g.paired_compare(fa, fb)
 check(abs(pc.decision_p_value - r.paired.decision_p_value) < 1e-30,
       "外部结果与内置用同一套统计实现（判决标准一致）")
 

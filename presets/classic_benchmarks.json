@@ -1,0 +1,100 @@
+{
+  "suite_id": "superran-classic-comm-v1",
+  "locked_at": "2026-08-22T12:05:00-07:00",
+  "locked_before_first_run": true,
+  "purpose": "Correctness and conformance checks only; never a field-performance or product-gain claim.",
+  "seed": 20260822,
+  "cases": [
+    {
+      "id": "B01_awgn_shannon_siso",
+      "title": "AWGN SISO equals Shannon capacity",
+      "primary_metric": "max_abs_error_bit_per_s_hz",
+      "expected": "max_abs_error <= 1e-5 and capacity strictly increases with SNR",
+      "sources": [
+        "https://github.com/NVlabs/sionna/blob/main/doc/source/phy/api/channel/wireless/index.rst"
+      ]
+    },
+    {
+      "id": "B02_mimo_svd_upper_bound",
+      "title": "Per-RB SVD is bounded by capacity and dominates the Type-I-style subset",
+      "primary_metric": "violation_count",
+      "expected": "zero bound violations and zero Type-I-over-SVD violations across 24 frozen channels",
+      "sources": [
+        "https://nvlabs.github.io/sionna/v1.2.2/phy/tutorials/Simple_MIMO_Simulation.html"
+      ]
+    },
+    {
+      "id": "B03_lmmse_low_snr",
+      "title": "Matched-prior LMMSE channel estimation suppresses low-SNR noise",
+      "primary_metric": "paired_nmse_db_difference",
+      "expected": "LMMSE minus LS is significantly negative under the preregistered matched exponential PDP",
+      "sources": [
+        "https://nvlabs.github.io/sionna/_modules/sionna/phy/ofdm/channel_estimation.html"
+      ]
+    },
+    {
+      "id": "B04_olla_target_bler",
+      "title": "OLLA converges to the configured target BLER",
+      "primary_metric": "steady_state_first_tx_bler",
+      "expected": "target 0.10 lies inside the replication 95% CI and absolute mean error <= 0.02",
+      "sources": [
+        "https://nvlabs.github.io/sionna/v2.0.0/sys/tutorials/notebooks/LinkAdaptation.html"
+      ]
+    },
+    {
+      "id": "B05_pf_throughput_fairness",
+      "title": "PF occupies the throughput-fairness middle ground",
+      "primary_metric": "paired_throughput_and_jain",
+      "expected": "max-C/I throughput exceeds PF while PF Jain fairness exceeds max-C/I, both through CRN Gate 3",
+      "sources": [
+        "https://nvlabs.github.io/sionna/sys/api/scheduling.html",
+        "https://cttc-lena.gitlab.io/nr/nrmodule.pdf"
+      ]
+    },
+    {
+      "id": "B06_per_antenna_power_constraints",
+      "title": "EBF/PEBF/NEBF reproduce the expected SU and correlated-MU counterexample",
+      "primary_metric": "power_constraint_invariants",
+      "expected": "SU NEBF is within 5% of EBF and above PEBF; correlated MU has NEBF leakage and NEBF sum-SE below PEBF",
+      "sources": [
+        "https://www.mathworks.com/help/5g/ug/tdd-reciprocity-based-pdsch-beamforming-using-srs.html"
+      ]
+    },
+    {
+      "id": "B07_tdd_srs_reciprocity",
+      "title": "UL-SRS reciprocity mapping restores the DL precoding convention",
+      "primary_metric": "receive_spectral_efficiency",
+      "expected": "correct conjugate mapping beats the wrong convention and reaches at least 90% of ideal-CSI SE",
+      "sources": [
+        "https://www.mathworks.com/help/5g/ug/srs-based-downlink-channel-measurements-for-tdd-system.html"
+      ]
+    },
+    {
+      "id": "B08_jakes_doppler_time_scale",
+      "title": "Jakes correlation and coherence time use the correct Doppler time scale",
+      "primary_metric": "max_j0_error_and_speed_scaling",
+      "expected": "rho matches scipy J0 to 1e-12 and Tcoh(3 km/h)/Tcoh(30 km/h) is between 8 and 12",
+      "sources": [
+        "https://nvlabs.github.io/sionna/rt/tutorials/Mobility.html"
+      ]
+    },
+    {
+      "id": "B09_nr_tbs_rbg_monotonicity",
+      "title": "38.214 TBS allocation is monotone but not safely linearized",
+      "primary_metric": "all_sequences_strictly_increasing",
+      "expected": "all 224 D/S x MCS x rank sequences are strictly increasing; the frozen MCS12/rank2 full-band point differs from one-RBG linear extrapolation by 0.5%-2%",
+      "sources": [
+        "https://www.etsi.org/deliver/etsi_ts/138200_138299/138214/18.08.00_60/ts_138214v180800p.pdf"
+      ]
+    },
+    {
+      "id": "B10_tr38901_channel_gate",
+      "title": "A freshly generated 38.901 channel passes the full independent gate set",
+      "primary_metric": "gate1_blocker_count",
+      "expected": "18 checks execute and no blocking check fails; calibration caveats remain visible",
+      "sources": [
+        "https://www.etsi.org/deliver/etsi_tr/138900_138999/138901/19.04.00_60/tr_138901v190400p.pdf"
+      ]
+    }
+  ]
+}

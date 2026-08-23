@@ -139,9 +139,13 @@ def check_pathloss_vs_38901(ds: Any, *, tol_db: float = 3.0) -> Check:
     if not m.any():
         return Check("路损对标 38.901", False, "没有有效样本", severity="warn")
 
-    # 只用落在 38.901 适用距离内的样本比对；范围外的公式本就未定义
+    # 只用落在 38.901 适用距离内的样本比对；范围外的公式本就未定义。
+    # 适用范围定义在 d_2D 上，数据给的是 d_3D——按配置高度换算后再过滤。
     lo, hi = UMA_VALID_D2D_M
-    in_range = m & (d3 >= lo) & (d3 <= hi)
+    _h_bs = float(cfg.get("tx_height_m", 25.0) or 25.0)
+    _h_ut = float(cfg.get("ue_height_m", 1.5) or 1.5)
+    d2 = np.sqrt(np.maximum(d3 ** 2 - (_h_bs - _h_ut) ** 2, 1.0))
+    in_range = m & (d2 >= lo) & (d2 <= hi)
     n_out = int(m.sum() - in_range.sum())
     if not in_range.any():
         return Check("路损对标 38.901", False,
@@ -625,7 +629,18 @@ def check_estimation_error_sane(ds: Any) -> Check:
     if not finite.size:
         return Check("信道估计误差合理", False, "无有效 NMSE", severity="warn")
     med = float(np.median(finite))
-    ok = -60.0 < med < 0.0
+    if med <= -60.0:
+        return Check(
+            "信道估计误差合理",
+            True,
+            f"估计模式 {mode}，NMSE 中位数 {med:.1f} dB —— 异常地好；"
+            "高 SINR + LMMSE + 强空间相关下可达，若不是该工况请检查是否误用了理想信道",
+            measured=round(med, 1),
+            expected="-60 ~ 0 dB",
+            tolerance="估计误差应存在但不失控",
+            severity="warn",
+        )
+    ok = med < 0.0
     return Check(
         "信道估计误差合理",
         ok,

@@ -144,9 +144,13 @@ def test_system_adaptation_metadata_distinguishes_auto_and_override() -> None:
         "explicit_user_override"
     )
     assert out["olla_configuration"]["su"]["step_down_db"] == pytest.approx(0.04)
+    assert out["olla_configuration"]["domain"] == "continuous_mcs_index"
+    assert out["olla_configuration"]["su"]["step_down_mcs"] == pytest.approx(0.04)
     assert out["mcs_profile"]["table"] == 3
-    assert out["mcs_profile"]["profile"] == "company_20b_256qam"
-    assert out["mcs_profile"]["scope"] == "experience_v2 fixed company table"
+    assert out["mcs_profile"]["profile"] == "preset_20b_256qam"
+    assert out["mcs_profile"]["cqi_to_mcs"] == [
+        0, 1, 3, 5, 7, 9, 12, 14, 16, 19, 21, 23, 25, 27, 28]
+    assert out["mcs_profile"]["scope"] == "experience_v2 fixed preset table"
 
 
 def test_variable_rbg_tbs_uses_actual_bitmap_not_group_count() -> None:
@@ -332,3 +336,7 @@ def test_full_buffer_partial_grid_prb_accounting_is_exact() -> None:
         float(user["allocated_prb_equivalent_attributed"])
         for user in run.users
     ) == pytest.approx(run.cell["allocated_prb_equivalent"])
+if __name__ == "__main__":
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-q"]))

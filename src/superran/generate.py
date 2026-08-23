@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 
 from . import channelhub as ch
+from . import provenance
 from .paths import dataset_dir
 
 _DEBUG = bool(os.environ.get("SUPERRAN_DEBUG"))
@@ -123,14 +124,17 @@ def _stable_ue_identity(
     source = str(source_name).strip().lower()
     if source == "internal_sim":
         mobility = str(cfg.get("mobility_mode", "static")).strip().lower()
-        speed = _as_float(cfg.get("ue_speed_kmh", 0.0))
-        if mobility == "static":
+        # 镜像源端布局合同（internal_sim.iter_samples）：mobility=="static"
+        # 或 ue_speed_kmh<=0 时走静态多 UE 轮转布局；移动模式且速度为正
+        # 才生成一条服务轨迹。速度键缺失时源端默认 3.0 km/h（_dict_get 的
+        # 默认值），这里必须同步，否则会把轨迹误判成静态。
+        speed = _as_float(cfg.get("ue_speed_kmh", 3.0))
+        if mobility == "static" or (np.isfinite(speed) and speed <= 0.0):
             n_ues = max(int(cfg.get("num_ues", 1) or 1), 1)
             offset = int(cfg.get("sample_index_offset", 0) or 0)
             return (offset + int(attempted_index)) % n_ues, "internal_sim_global_index"
-        if not np.isfinite(speed) or speed <= 0.0:
-            # 声明了移动模式但速度不可信：不发明身份。统计门对"移动数据缺
-            # ue_id"是 block，放行假独立 id 正是那条门想防的事故。
+        if not np.isfinite(speed):
+            # 速度非有限：源端行为不可预测，不发明身份，交给统计门 block。
             return None, "unavailable_mobility_speed"
         return 0, "internal_sim_single_trajectory"
     if source == "sionna_rt":
@@ -224,6 +228,13 @@ def _ensure_bs_panel(cfg: dict[str, Any]) -> tuple[list[int], bool]:
     raw = cfg.get("bs_panel")
     if raw:
         p = [int(x) for x in raw]
+        if len(p) != 3 or any(v < 1 for v in p):
+            raise ValueError("bs_panel 必须是三个正整数 [N_H, N_V, N_P]")
+        declared = cfg.get("num_bs_tx_ant")
+        if declared is not None and int(declared) != p[0] * p[1] * p[2]:
+            raise ValueError(
+                f"bs_panel {p} 与 num_bs_tx_ant={declared} 矛盾；"
+                "两个都给时必须一致，只给一个即可自动推导")
         cfg["num_bs_tx_ant"] = p[0] * p[1] * p[2]
         cfg["num_bs_rx_ant"] = p[0] * p[1] * p[2]
         return p, False
@@ -420,7 +431,7 @@ def _run_parallel(
                 progress(min(acc, num_samples), num_samples)
             _dbg(f"  worker {done}/{len(jobs)} 回来，累计 {acc} 个样本")
 
-    payload = _merge_chunks(paths)
+    payload, dropped_fields = _merge_chunks(paths)
     # 各块可能多给一两个（对齐到 num_ues 的整数倍），统一截到要的数量
     if payload:
         n_have = len(next(iter(payload.values())))
@@ -433,7 +444,7 @@ def _run_parallel(
         shutil.rmtree(tmpdir, ignore_errors=True)
     except OSError:
         pass
-    return payload, first_meta, acc, att, rej, observed
+    return payload, first_meta, acc, att, rej, observed, dropped_fields
 
 
 def _parallel_exactness_blocker(
@@ -503,10 +514,13 @@ def _collect(
 
     for sample in ch.iter_samples(source_name, cfg_run):
         attempted += 1
-        sinr = _as_float(getattr(sample, "sinr_dB", None))
-        if np.isfinite(sinr):
-            observed_sinr.append(sinr)
-        if filtering and not (lo <= sinr <= hi):
+        # 参数名是 snr_range_dB，过滤量就必须是 SNR：多小区场景 SINR 与
+        # SNR 可差 30+ dB，拿 SINR 截出的样本其 SNR 分布可以完全落在用户
+        # 区间之外（曾确实如此——参数名、文档与报错全都承诺 SNR）。
+        snr = _as_float(getattr(sample, "snr_dB", None))
+        if np.isfinite(snr):
+            observed_sinr.append(snr)
+        if filtering and not (lo <= snr <= hi):
             rejected += 1
             if attempted >= ask:
                 break
@@ -699,26 +713,31 @@ def _chunk_worker(args: tuple) -> tuple[str, dict[str, Any], dict[str, Any]]:
     return (tmp_path if payload else "", first_meta, stats)
 
 
-def _merge_chunks(paths: list[str]) -> dict[str, np.ndarray]:
+def _merge_chunks(paths: list[str]) -> tuple[dict[str, np.ndarray], list[str]]:
     """把各 worker 落的 npz 沿样本轴拼起来。
 
     只保留**所有块都有**的字段：某块缺 h_interferers 而别块有时，拼出来会
     出现长度不一致的数组，后面读取会错位——宁可丢掉那个字段并在摘要里说明。
     """
     if not paths:
-        return {}
+        return {}, []
     opened = [np.load(p, allow_pickle=False) for p in paths]
     try:
         common = set(opened[0].files)
         for z in opened[1:]:
             common &= set(z.files)
+        all_keys: set[str] = set()
+        for z in opened:
+            all_keys |= set(z.files)
+        dropped = sorted(all_keys - common)
         out: dict[str, np.ndarray] = {}
         for k in sorted(common):
             arrs = [z[k] for z in opened]
             if any(a.shape[1:] != arrs[0].shape[1:] for a in arrs):
-                continue  # 形状不一致的字段直接丢，不做危险的补齐
+                dropped.append(k)  # 形状不一致的字段直接丢，不做危险的补齐
+                continue
             out[k] = np.concatenate(arrs, axis=0)
-        return out
+        return out, sorted(set(dropped))
     finally:
         for z in opened:
             z.close()
@@ -805,6 +824,7 @@ def generate(
     _dbg(f"进入迭代 ask={ask} n_ues={n_ues} workers={n_workers} source={source_name}")
 
     parallel_fallback: str | None = None
+    dropped_fields: list[str] = []
     if n_workers > 1:
         parallel_fallback = _parallel_exactness_blocker(
             source_name, cfg_run, filtering=filtering
@@ -814,7 +834,8 @@ def generate(
             _dbg(f"并行语义门未通过，改用串行：{parallel_fallback}")
         else:
             try:
-                payload, first_meta, accepted, attempted, rejected, observed_sinr = _run_parallel(
+                (payload, first_meta, accepted, attempted, rejected, observed_sinr,
+                 dropped_fields) = _run_parallel(
                     source_name, cfg_run, num_samples=num_samples, n_workers=n_workers,
                     lo=lo, hi=hi, filtering=filtering, base_seed=int(cfg.get("seed", 0) or 0),
                     n_ues=n_ues, ask_factor=1,
@@ -938,6 +959,10 @@ def generate(
         ul_sinr = payload.get("scalar__ul_sinr_dB")
         if ul_geo is not None and ul_sinr is not None and np.isfinite(ul_geo).any():
             iot_block["ul"] = _intf.iot_stats(ul_sinr, ul_geo).as_dict()
+        else:
+            _ul_why = _intf.last_install_failure()
+            if _ul_why:
+                iot_block["ul_missing_reason"] = _ul_why
 
     # 预注册口径随数据一起存档。**必须在生成时绑定，事后补绑没有意义**——
     # 预注册的全部价值就在于"看数据之前写下的"，事后写的只是记录。
@@ -1011,6 +1036,8 @@ def generate(
             ),
             "fallback_reason": parallel_fallback,
         },
+        # 某块缺字段时整个数据集丢掉该字段（如 h_interferers）——必须留痕
+        "parallel_dropped_fields": dropped_fields or None,
         "interference_modeled": interference_modeled if cells_cfg > 1 else None,
         "interference_note": interference_note,
         "rs_opportunity": rs_opportunity_block,
@@ -1026,6 +1053,7 @@ def generate(
         "size_mb": round((out_dir / "channels.npz").stat().st_size / 1e6, 1),
         "snr_filter": {
             "enabled": bool(filtering),
+            "filtered_quantity": "snr_dB",
             "range_dB": [lo, hi] if filtering else None,
             "attempted": attempted,
             "rejected": rejected,
@@ -1045,6 +1073,7 @@ def generate(
         "tau_rms_ns": first_meta.get("tau_rms_ns"),
         "config": cfg,
         "sample_meta": first_meta,
+        "provenance": provenance.snapshot(source=source_name),
         "created_at": time.time(),
         "path": str(out_dir),
     }
