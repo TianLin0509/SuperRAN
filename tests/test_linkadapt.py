@@ -52,15 +52,30 @@ def test_tdd_bf_gain_uses_gnb_csi_not_true_channel() -> None:
     h_est = (rng.normal(size=shape) + 1j * rng.normal(size=shape)) / np.sqrt(2)
     h_true_a = h_est.copy()
     h_true_b = (rng.normal(size=shape) + 1j * rng.normal(size=shape)) / np.sqrt(2)
+    # Change only the spatial realization, not the pre-beam power/noise operating
+    # point.  Otherwise snr_db intentionally re-anchors N0 and this is no longer a
+    # pure h_true-causality test.
+    h_true_b *= np.sqrt(
+        np.mean(np.abs(h_true_a) ** 2) / np.mean(np.abs(h_true_b) ** 2))
     common = dict(
         cqi_index=5, use_estimated_csi=True, snr_db=10.0, max_rank=2)
     arm_a = _memory_dataset(h_true_a, h_est).tdd_mcs(0, **common)
     arm_b = _memory_dataset(h_true_b, h_est).tdd_mcs(0, **common)
     assert arm_a["bf_gain_csi_view"] == "gnb_precoding_csi"
     assert arm_a["bf_gain_user_db"] == arm_b["bf_gain_user_db"]
+    assert arm_a["gnb_predicted_amc_sinr_db"] == arm_b["gnb_predicted_amc_sinr_db"]
+    assert arm_a["final_mcs"] == arm_b["final_mcs"]
     assert arm_a["pmi_stream_sinr_db"] == arm_b["pmi_stream_sinr_db"]
     assert arm_a["svd_stream_sinr_db"] == arm_b["svd_stream_sinr_db"]
     assert arm_a["bf_gain_true_user_db"] != arm_b["bf_gain_true_user_db"]
+    assert arm_a["actual_receive_sinr_db"] != arm_b["actual_receive_sinr_db"]
+    for arm in (arm_a, arm_b):
+        expected_bler = float(la.bc.get_curve(
+            arm["final_mcs"], "newtx").evaluate(arm["actual_receive_sinr_db"])[0])
+        assert abs(arm["final_mcs_newtx_bler"] - expected_bler) < 1e-6
+        assert arm["actual_bler_available"] is True
+        assert arm["physical_tx_sinr_label"] == "SINR_NEBF"
+        assert arm["sinr_views"]["bler_observation"]["db"] == arm["actual_receive_sinr_db"]
     assert arm_b["true_channel_bf_audit_enters_mcs"] is False
 
 
@@ -399,8 +414,15 @@ def main() -> None:
     check(abs(tdd["mcs_before_floor"] - 20.8) < 1e-12 and
           tdd["mcs_after_floor"] == 20 and tdd["final_mcs"] == 20,
           "OLLA 在 MCS 域相加后严格向下取整并钳位")
-    check(0.0 <= tdd["final_mcs_newtx_bler"] <= 1.0,
-          "最终 MCS 返回预置曲线对应的 NewTx BLER")
+    check(tdd["final_mcs_newtx_bler"] is None
+          and tdd["actual_bler_available"] is False
+          and tdd["bler_status"] == "unknown_without_true_receive_sinr",
+          "只有 CQI/BF/OLLA 标量时不拿 AMC 预测坐标冒充真实 BLER")
+    check("predicted_final_mcs_newtx_bler" not in tdd,
+          "结果不再输出容易被误读为真实误块率的预测 BLER")
+    check(abs(tdd["sinr_svd_gnb_db"] - tdd["sinr_pmi_gnb_db"]
+              - tdd["bf_gain_user_db"]) < 2e-4,
+          "gNB 物理 SVD/PMI SINR 之差逐值闭合到 BF Gain")
     check(tdd["receiver"] == "classic MMSE" and
           "only precoding weight changes" in tdd["fairness_contract"],
           "结果钉住经典 MMSE 与只改变预编码权的公平对照")
@@ -431,6 +453,13 @@ def main() -> None:
     except ValueError:
         nan_rejected = True
     check(nan_rejected, "非有限 SINR 不进入 BF Gain 与 MCS 决策")
+
+    one_rbg = la.codeword_sinr_db([[20.0], [-20.0]], rb_per_rbg=2)
+    two_rbg = la.codeword_sinr_db([[20.0], [-20.0]], rb_per_rbg=1)
+    check(abs(one_rbg["user_db"] - 10.0 * np.log10(50.005)) < 1e-12,
+          "RBG 内 RB SINR 先在线性功率域平均")
+    check(abs(two_rbg["user_db"]) < 1e-12,
+          "跨 RBG 在 dB 域算术平均，+20/−20 dB 得 0 dB")
 
     test_tdd_bf_gain_uses_gnb_csi_not_true_channel()
     check(True, "sr_tdd_mcs 只用 gNB 可见 CSI 计算进入 MCS 的 BF Gain，h_true 只作事后审计")

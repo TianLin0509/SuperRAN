@@ -566,8 +566,9 @@ def _svgs(path):
     XML 解析必然失败，看起来像"生成的 SVG 坏了"。
     """
     h = Path(path).read_text(encoding="utf-8")
-    body = _re.sub(r"<script>.*?</script>", "", h, flags=_re.S)
-    return h, _re.findall(r"<svg.*?</svg>", body, _re.S)
+    body = _re.sub(r"<script[^>]*>.*?</script>", "", h, flags=_re.S)
+    svgs = _re.findall(r"<svg.*?</svg>", body, _re.S)
+    return h, [svg for svg in svgs if 'aria-hidden="true"' not in svg[:300]]
 
 
 # 多小区（六边形栅格）
@@ -646,7 +647,7 @@ check(_h1.count('<section id="pn') == 7, "七个面板都在")
 check('id="tb1" checked' in _h1, "默认停在总览")
 # tab 必须是纯 CSS 的：**JS 挂了、被禁用、或者浏览器老旧，页签也得能切**。
 # 页面现在确实有一段脚本（交互调参面板），但它不许碰页签。
-_js_all = "".join(_re.findall(r"<script>(.*?)</script>", _h1, _re.S))
+_js_all = "".join(_re.findall(r"<script[^>]*>(.*?)</script>", _h1, _re.S))
 check('name="tb"' not in _js_all and "tb1" not in _js_all,
       "脚本不碰页签（JS 挂了也不影响导航）")
 check("#tb1:checked~.panels>#pn1" in _h1, "页签靠 CSS :checked 切换，不是 JS")
@@ -678,8 +679,9 @@ _h6 = Path(_r6["html_path"]).read_text(encoding="utf-8")
 check('class="fact hi"' not in _h6, "没传 highlight 时不乱高亮")
 
 # 说明文字里的 ** 要变成 <b>，不能在页面上露出星号
+_body_only = _re.sub(r"<script[^>]*>.*?</script>", "", _h1, flags=_re.S)
 _body_only = _re.sub(r"<details class=\"algo\".*?</details>", "",
-                     _h1.split("<footer>")[0], flags=_re.S)
+                     _body_only.split("<footer>")[0], flags=_re.S)
 check("**" not in _body_only, "页面正文没有裸露的 markdown 星号")
 
 # 画布随规模自适应：单站不该用多小区那么大的画布
@@ -701,6 +703,12 @@ for _k in ("num_sites", "sectors_per_site", "isd_m", "num_ues", "num_bs_tx_ant",
 check('id="cp"' in _h1 and 'id="rs"' in _h1, "有复制与重置按钮")
 check('id="pl"' in _h1, "有可粘贴的 payload 文本框")
 check("overrides = " in _h1, "payload 里带 overrides，agent 能直接照做")
+check(_h1.count("data-action=") == 4 and _h1.count("data-download=") == 2,
+      "说明书提供摘要复制、JSON 下载、页面截图、分享与打印/PDF")
+check("superran_spec_export_v1" in _h1 and "Resolved page config JSON" in _h1,
+      "下载的是版本化说明书与页面已解析配置，不是另造一份默认值")
+check('id="impact"' in _h1 and _h1.count('data-impact="') == 4,
+      "配置改动显式显示信道/链路表/TTI/KPI 四层重算影响")
 
 # 拓扑预览的坐标由 ChannelHub 现算后内嵌，前端只做线性缩放——
 # 不在 JS 里重写栅格逻辑，就不会出现"图上七站、跑出来十九站"
@@ -715,13 +723,14 @@ check('const ST=' in _h1 and '"unit"' in _h1, "单位布局内嵌进页面")
 # 结果塌成真换行落进单引号字符串里 —— 整段脚本 SyntaxError、页面点不动，
 # 而 HTML 结构检查完全看不出来。现在用 String.fromCharCode(10)，不带转义。
 _all_js = _re.findall(r"<script>(.*?)</script>", _h1, _re.S)
-# 页面上现在有三段脚本：KaTeX 本体（第三方，不体检）、调参面板、KaTeX 升级器。
-# **只体检我们自己手写的那段**——第三方压缩产物里当然全是跨行引号与转义。
+# 页面上现在有四段普通脚本：KaTeX 本体、统一页面操作、调参面板、KaTeX 升级器。
+# application/json 数据块不执行，且不会被这个正则计入。
 _own = [x for x in _all_js if "katex" not in x[:400].lower()
-        and "const ST=" in x]
-check(len(_all_js) == 3, f"三段内联脚本：KaTeX 本体 + 调参面板 + 升级器（实得 {len(_all_js)}）")
-check(len(_own) == 1, "调参面板的脚本唯一可辨认")
-_js = _own
+        and ("const ST=" in x or "page-action-data" in x)]
+check(len(_all_js) == 4,
+      f"四段内联脚本：KaTeX + 页面操作 + 调参 + 升级器（实得 {len(_all_js)}）")
+check(len(_own) == 2, "页面操作与调参脚本各自唯一可辨认")
+_js = [x for x in _own if "const ST=" in x]
 _bad = []
 for _i, _ln in enumerate(_js[0].splitlines(), 1):
     _stripped = _re.sub(r"\\.", "", _ln)          # 去掉转义对
@@ -729,6 +738,10 @@ for _i, _ln in enumerate(_js[0].splitlines(), 1):
         _bad.append(_i)
 check(not _bad, f"脚本里没有跨行的引号字符串（可疑行：{_bad[:5]}）")
 check("String.fromCharCode(10)" in _js[0], "换行用字符码而不是反斜杠转义")
+_action_js = [x for x in _own if "page-action-data" in x][0]
+check("String.fromCharCode(10)" in _action_js
+      and "captureImage" in _action_js and "navigator.share" in _action_js,
+      "统一操作脚本无跨行转义，并含截图与系统分享/复制降级")
 
 # **SVG 的 <style> 是文档级的，不是这张图私有的。** 页面上两张图时后注入的
 # 会盖掉同名 class —— 预览图的 .sec{fill:url(#sg2)} 曾把静态图的扇区填充

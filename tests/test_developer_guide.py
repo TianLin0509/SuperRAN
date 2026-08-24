@@ -15,6 +15,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 GUIDE = ROOT / "docs" / "index.html"
 GENERATOR = ROOT / "scripts" / "make_developer_guide.py"
+DETAILS = ROOT / "scripts" / "developer_guide_details.py"
 
 
 def _html() -> str:
@@ -114,6 +115,16 @@ def test_guide_is_offline_utf8_hash_routed_and_accessible() -> None:
     assert "Agent 自适应 KPI 工作台" in text
     assert "26 项小区 KPI、24 项用户 KPI" in text
     assert "应用到仿真" in text
+    assert text.count('data-real-ui-screenshot="true"') >= 4
+    for name in (
+        "spec-workbench-overview.png", "spec-workbench-config.png",
+        "kpi-workbench-cell.png", "kpi-workbench-user.png",
+    ):
+        assert f'data-source="{name}"' in text
+        raw = (ROOT / "docs" / "assets" / "ui" / name).read_bytes()
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n" and len(raw) > 20_000
+    assert text.count("data:image/png;base64,") >= 4
+    assert "JSON/CSV 下载、摘要复制、页面截图、系统分享与打印/PDF" in text
     assert 'python -u scripts\\run_srs_pmi_hello_world.py' in text
     assert "主实验点估计" in text and "+0.7%" in text
     assert "Wilcoxon p=0.846" in text
@@ -153,7 +164,7 @@ def test_every_chapter_has_two_reading_depths_and_every_formula_is_explained() -
     pages = _pages(text)
 
     assert len(pages) == meta["logical_pages"] == meta["detailed_pages"] == 39
-    assert meta["annotated_formulas"] == 87
+    assert meta["annotated_formulas"] == 91
     assert meta["detailed_module_exemptions"] == 3
     assert meta["detailed_module_coverage"] == (
         meta["modules"] - meta["detailed_module_exemptions"]
@@ -191,6 +202,21 @@ def test_every_chapter_has_two_reading_depths_and_every_formula_is_explained() -
         assert 'class="symbol-list"' in card
         assert card.count("<dt>") >= 3
         assert "<dd>" in card
+
+
+def test_detailed_examples_are_html_strings_not_tuple_repr() -> None:
+    spec = importlib.util.spec_from_file_location(
+        "_superran_developer_guide_details", DETAILS)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    bad = {
+        key: type(value.example).__name__
+        for key, value in module.DETAIL_SPECS.items()
+        if not isinstance(value.example, str)
+    }
+    assert bad == {}, f"detailed example rendered as Python repr: {bad}"
 
 
 def test_bler_manual_payload_and_independent_reference_are_executable(

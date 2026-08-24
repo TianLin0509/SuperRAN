@@ -46,6 +46,7 @@ from typing import Any
 import numpy as np
 
 from . import bler_curves as bc
+from . import carrier as carrier_grid
 
 _EPS = 1e-30
 
@@ -927,6 +928,51 @@ def _sinr_grid_db(values: Any, name: str) -> np.ndarray:
     return grid
 
 
+def codeword_sinr_db(
+    sinr_per_rb_stream_db: Any,
+    *,
+    rb_per_rbg: int = 16,
+    rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
+) -> dict[str, Any]:
+    """Aggregate ``[RB, stream]`` post-MMSE SINR to the current codeword view.
+
+    RBGs average RB SINR in the **linear power domain**.  The resulting
+    ``[RBG, stream]`` values are converted to dB, then averaged arithmetically
+    across RBGs and streams.  This mirrors the system-table contract and is not
+    presented as a calibrated EESM/MIESM mapping.
+    """
+    grid_db = _sinr_grid_db(sinr_per_rb_stream_db, "sinr_per_rb_stream_db")
+    if (isinstance(rb_per_rbg, (bool, np.bool_))
+            or not isinstance(rb_per_rbg, (int, np.integer))
+            or int(rb_per_rbg) < 1):
+        raise ValueError("rb_per_rbg must be a positive integer")
+    n_rb = int(grid_db.shape[0])
+    bounds = (
+        carrier_grid.validate_boundaries(n_rb, rbg_boundaries)
+        if rbg_boundaries is not None
+        else carrier_grid.uniform_boundaries(n_rb, min(int(rb_per_rbg), n_rb))
+    )
+    lin = 10.0 ** (grid_db / 10.0)
+    rbg_lin = np.stack([
+        np.mean(lin[start:stop], axis=0) for start, stop in bounds
+    ])
+    rbg_stream_db = 10.0 * np.log10(np.maximum(rbg_lin, _EPS))
+    stream_db = np.mean(rbg_stream_db, axis=0)
+    return {
+        "user_db": float(np.mean(stream_db)),
+        "stream_db": np.asarray(stream_db, dtype=float),
+        "rbg_stream_db": np.asarray(rbg_stream_db, dtype=float),
+        "n_rb": n_rb,
+        "n_rbg": len(bounds),
+        "rb_per_rbg": int(rb_per_rbg),
+        "rbg_boundaries": tuple((int(a), int(b)) for a, b in bounds),
+        "aggregation": (
+            "RB linear mean within each RBG; arithmetic mean across "
+            "RBG x stream in dB domain"
+        ),
+    }
+
+
 def tdd_mcs_adaptation(
     cqi_index: int,
     svd_sinr_per_rb_db: Any,
@@ -938,15 +984,22 @@ def tdd_mcs_adaptation(
     mcs_table: int = 3,
     feedback_ack: bool | None = None,
     olla_ack_step_mcs: float = 0.1,
+    rb_per_rbg: int = 1,
+    rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
 ) -> dict[str, Any]:
     """Run the agreed TDD CQI/BF-gain/OLLA MCS decision with a full audit trail.
 
-    ``BF Gain[rb,layer] = SINR_SVD - SINR_PMI`` under the same channel, rank,
-    power allocation, noise/interference, CSI and classic MMSE receiver. The internal
-    CQI is first mapped through the confirmed discrete table, then to that MCS's NewTx target-BLER
-    SINR. The per-RB/per-layer BF deltas are added and arithmetically averaged in dB.
-    Finally the SINR is remapped to MCS and the continuous MCS-domain OLLA offset is
-    added, floored, and clipped to the table range.
+    ``BF Gain = SINR_SVD - SINR_PMI`` under the same channel, rank, power
+    allocation, noise/interference, CSI and classic MMSE receiver.  The internal
+    CQI is first mapped through the confirmed discrete table, then to that MCS's
+    NewTx target-BLER SINR.  RBs are first combined into RBGs in the linear domain;
+    the RBG/stream deltas are then averaged arithmetically in dB.  Finally this
+    *gNB-side AMC prediction* is remapped to MCS and the continuous MCS-domain OLLA
+    offset is added, floored, and clipped to the table range.
+
+    This scalar helper has no receive-side ``h_true`` observation.  It therefore
+    never reports a physical BLER: the selected MCS must be paired with the actual
+    receive-side codeword SINR before querying a BLER curve.
     """
     if mcs_table != 3:
         raise ValueError("TDD preset-curve adaptation currently requires mcs_table=3")
@@ -977,20 +1030,30 @@ def tdd_mcs_adaptation(
     pmi_order = np.argsort(-np.mean(pmi, axis=0))
     svd = svd[:, svd_order]
     pmi = pmi[:, pmi_order]
-    bf_delta = svd - pmi
+    svd_agg = codeword_sinr_db(
+        svd, rb_per_rbg=rb_per_rbg, rbg_boundaries=rbg_boundaries)
+    pmi_agg = codeword_sinr_db(
+        pmi, rb_per_rbg=rb_per_rbg, rbg_boundaries=rbg_boundaries)
+    bf_delta_rbg = (
+        np.asarray(svd_agg["rbg_stream_db"], dtype=float)
+        - np.asarray(pmi_agg["rbg_stream_db"], dtype=float)
+    )
 
     initial_mcs = int(mapping["mcs"])
     initial_curve = bc.get_curve(initial_mcs, "newtx")
     cqi_mcs_sinr_db = initial_curve.required_sinr_db(target_bler)
-    estimated_svd = cqi_mcs_sinr_db + bf_delta
-    bf_gain_user_db = float(np.mean(bf_delta))
-    user_sinr_db = float(np.mean(estimated_svd))
+    bf_gain_per_stream = np.mean(bf_delta_rbg, axis=0)
+    bf_gain_user_db = float(np.mean(bf_gain_per_stream))
+    predicted_tx_sinr_db = float(cqi_mcs_sinr_db + bf_gain_user_db)
 
     thresholds = [
         (m.index, bc.get_curve(m.index, "newtx").required_sinr_db(target_bler))
         for m in MCS_TABLE_3
     ]
-    feasible = [idx for idx, threshold in thresholds if threshold <= user_sinr_db]
+    feasible = [
+        idx for idx, threshold in thresholds
+        if threshold <= predicted_tx_sinr_db
+    ]
     below_mcs0 = not feasible
     mcs_after_bf = max(feasible) if feasible else MCS_TABLE_3[0].index
 
@@ -1014,20 +1077,35 @@ def tdd_mcs_adaptation(
         "receiver": bc.data.RECEIVER_MODEL,
         "rank": int(svd.shape[1]),
         "n_rb": int(svd.shape[0]),
+        "n_rbg": int(svd_agg["n_rbg"]),
+        "rb_per_rbg": int(svd_agg["rb_per_rbg"]),
+        "rbg_boundaries": [list(x) for x in svd_agg["rbg_boundaries"]],
         "target_bler": float(target_bler),
         "cqi_initial_mcs": initial_mcs,
         "cqi_mcs_sinr_db": round(float(cqi_mcs_sinr_db), 4),
-        "pmi_stream_sinr_db": [round(float(x), 4) for x in np.mean(pmi, axis=0)],
-        "svd_stream_sinr_db": [round(float(x), 4) for x in np.mean(svd, axis=0)],
+        "pmi_stream_sinr_db": [
+            round(float(x), 4) for x in pmi_agg["stream_db"]],
+        "svd_stream_sinr_db": [
+            round(float(x), 4) for x in svd_agg["stream_db"]],
         "bf_gain_per_stream_db": [
-            round(float(x), 4) for x in np.mean(bf_delta, axis=0)
+            round(float(x), 4) for x in bf_gain_per_stream
         ],
         "bf_gain_user_db": round(bf_gain_user_db, 4),
+        "sinr_svd_gnb_db": round(float(svd_agg["user_db"]), 4),
+        "sinr_pmi_gnb_db": round(float(pmi_agg["user_db"]), 4),
         "estimated_svd_stream_sinr_db": [
-            round(float(x), 4) for x in np.mean(estimated_svd, axis=0)
+            round(float(cqi_mcs_sinr_db + x), 4)
+            for x in bf_gain_per_stream
         ],
-        "user_sinr_db": round(user_sinr_db, 4),
-        "sinr_aggregation": "arithmetic mean over all RB x layers in dB domain",
+        # ``user_sinr_db`` is retained as a legacy alias.  It is a gNB prediction,
+        # never the true receive-side SINR used for BLER.
+        "user_sinr_db": round(predicted_tx_sinr_db, 4),
+        "gnb_predicted_amc_sinr_db": round(predicted_tx_sinr_db, 4),
+        "gnb_predicted_amc_sinr_definition": (
+            "target-BLER threshold of MCS(CQI) plus gNB-visible SVD-minus-PMI BF gain"
+        ),
+        "actual_receive_sinr_db": None,
+        "sinr_aggregation": str(svd_agg["aggregation"]),
         "stream_pairing": "descending dB-domain mean SINR",
         "bf_gain_definition": "SVD post-MMSE SINR minus PMI post-MMSE SINR",
         "mcs_after_bf": int(mcs_after_bf),
@@ -1042,9 +1120,13 @@ def tdd_mcs_adaptation(
         "final_mcs_required_sinr_db": round(
             final_curve.required_sinr_db(target_bler), 4
         ),
-        "final_mcs_newtx_bler": round(
-            float(final_curve.evaluate(user_sinr_db)[0]), 6
+        "final_mcs_margin_to_predicted_amc_db": round(
+            predicted_tx_sinr_db - final_curve.required_sinr_db(target_bler), 4
         ),
+        "final_mcs_newtx_bler": None,
+        "actual_bler_available": False,
+        "bler_status": "unknown_without_true_receive_sinr",
+        "bler_sinr_source": None,
         "olla_update": olla_update,
         "olla_next_offset_mcs": (
             olla_update["next_offset_mcs"] if olla_update is not None else olla

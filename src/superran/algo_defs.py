@@ -433,8 +433,8 @@ def _olla() -> Family:
         formula=r"\Delta \leftarrow \begin{cases} \Delta + \delta_{up} & \text{ACK} \\ "
                 r"\Delta - \delta_{down} & \text{NACK} \end{cases}, \quad "
                 r"\text{BLER}_{\infty} = \frac{\delta_{up}}{\delta_{up} + \delta_{down}}",
-        caveat="**发送侧别做成「完全无干扰」。** 发送侧应走内部 CQI 门限 + "
-               "BF Gain（见「发送侧 SINR」那一族），先反折基准 MCS，再叠加 OLLA。"
+        caveat="**AMC 预测别做成「完全无干扰」。** 应走内部 CQI 门限 + "
+               "BF Gain（见「AMC 预测坐标」那一族），先反折基准 MCS，再叠加 OLLA。"
                "<br>**+0.01/−0.1 对应的稳态是 9.09% 而不是 10%。** "
                "稳态解 p = δ_up/(δ_up+δ_down)，要 10% 得取 δ_down = <b>0.09</b>。"
                "<br>由于最终使用 floor(MCS+Δ)，理论步长比仍需用新口径"
@@ -462,15 +462,15 @@ def _olla() -> Family:
                    when="快速迭代、看趋势",
                    cost="稳态附近抖动更大"),
             Option("off", "关闭 OLLA",
-                   summary="MCS 直接由发送侧 SINR 决定，不做外环修正",
+                   summary="MCS 直接由 SINR_AMC_PRED 决定，不做外环修正",
                    detail="用来看「如果发送端对干扰一无所知会怎样」——"
                           "这正是 OLLA 存在的理由。",
                    when="对照实验",
                    cost="零"),
         ],
         flow=Flow(steps=[
-            ("算发送侧 SINR", "CQI 门限 + BF Gain（见「发送侧 SINR」族），不是接收 SINR 的均值"),
-            ("反折基准 MCS", "按发送侧 SINR 查表，选满足目标 BLER 的最高档"),
+            ("算 SINR_AMC_PRED", "CQI 门限 + BF Gain（见同名算法族），不是物理 TX/RX SINR"),
+            ("反折基准 MCS", "按 SINR_AMC_PRED 查门限，选满足目标 BLER 的最高档"),
             ("加 OLLA 偏置", "floor(MCS_base + Δ) 并钳到 profile，Δ 初值 0"),
             ("按接收侧 SINR 判误码", "接收侧含**瞬时**干扰，所以实际 BLER 高于发送端预期"),
             ("ACK → Δ += 0.01；NACK → Δ −= 0.09", "钳位在 [−20,+3] MCS；稳态 p = 0.01/(0.01+0.09) = 10%"),

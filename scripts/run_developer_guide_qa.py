@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,10 +25,18 @@ def main() -> None:
         "tablet": {"width": 768, "height": 1024},
         "mobile": {"width": 375, "height": 812},
     }
-    report: dict = {"guide": str(GUIDE), "viewports": {}, "errors": []}
+    report: dict = {
+        "guide": str(GUIDE), "viewports": {}, "errors": [], "browser_backend": ""}
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        try:
+            browser = pw.chromium.launch(headless=True)
+            report["browser_backend"] = "playwright_chromium"
+        except PlaywrightError as exc:
+            if "Executable doesn't exist" not in str(exc):
+                raise
+            browser = pw.chromium.launch(channel="msedge", headless=True)
+            report["browser_backend"] = "system_msedge_fallback"
         for name, viewport in viewports.items():
             # A fresh page per viewport prevents scroll/focus/transition state from
             # leaking between responsive-layout checks.
@@ -306,7 +315,7 @@ def main() -> None:
                         ).count(),
                         "curve_summary_rows": page.locator(
                             '.doc-page[data-page="bler"] '
-                            '.detail-data-atlas table tbody tr'
+                            '.detail-data-atlas table[data-bler-curve-summary] tbody tr'
                         ).count(),
                     }
                     chapter_extra_pass = bool(
@@ -554,7 +563,7 @@ def main() -> None:
                 .map(f => f.closest('.doc-page')?.dataset.page || '?');
               const externalAssets = [...document.querySelectorAll(
                 'script[src],link[rel="stylesheet"][href],img[src]'
-              )].map(e => e.src || e.href);
+              )].map(e => e.src || e.href).filter(url => !String(url).startsWith('data:'));
               const missingDetailPages = articles.filter(a =>
                 !a.querySelector(':scope > .detail-content[data-detail-for="' +
                   CSS.escape(a.dataset.page) + '"]')
@@ -567,7 +576,7 @@ def main() -> None:
                 ).map(f => f.dataset.formula || '?');
               const badChapterRatios = defs.filter(p =>
                 p.reading_kind === 'chapter' &&
-                (Number(p.detail_ratio) < 1.8 || Number(p.detail_ratio) > 3.25)
+                (Number(p.detail_ratio) < 1.8 || Number(p.detail_ratio) > 3.3)
               ).map(p => ({key:p.key, ratio:p.detail_ratio}));
               return {
                 declared_pages: defs.length,

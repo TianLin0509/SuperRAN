@@ -76,26 +76,34 @@
 
 ## TDD 的 CQI、BF Gain 与 OLLA
 
-用户要求 TDD MCS 或提到 CQI/BF Gain/OLLA 时，调用 `sr_tdd_mcs`，**不要在对话里
-手算**。固定顺序是：`内部 CQI → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标 BLER
+用户要求 TDD MCS 或提到 CQI/BF Gain/OLLA 时，调用 `sr_tdd_mcs`。固定顺序是：
+`内部 CQI → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标 BLER
 SINR 门限 → + BF Gain → 重映射 MCS → + OLLA → floor → 钳位 0..27`。
 
 - CQI 是 PMI 权测得的 **pre-BF** 索引，是**长期滤波的宽带量**；
   内部 CQI0 是最低可用档并映射 MCS0，不是 38.214 out-of-range
-- BF Gain 是**瞬时量**，逐 RB、逐流计算 `post-MMSE SINR_SVD - post-MMSE SINR_PMI`
+- BF Gain 是 gNB 侧预测量，在同一 `h_prec` 上计算
+  `post-MMSE SINR_SVD - post-MMSE SINR_PMI`；默认 SVD 方向施加 NEBF，因此物理
+  TX 分支写作 `SINR_NEBF`，PEBF/EBF 模式分别改名
 - 进入 MCS 的 BF Gain 只在 gNB 可见 `h_prec` 上计算；`h_true` 上的差只作事后审计，
   固定 `h_est` 时换 `h_true` 不得改变当次 `bf_gain_user_db`
 - 两条链路必须共用信道、CSI、rank、功率、噪声、干扰和经典 MMSE 接收机，
   只改变预编码权；**rank 不同不是 BF Gain**
-- 用户 SINR 对全部 RB×流在 **dB 域做算术平均**，不做线性域平均或 MIESM
+- RB 先在每个 RBG 内做线性功率平均，再对 RBG×流做 **dB 算术平均**；这是当前
+  单码字工程口径，不冒充 EESM/MIESM
 - OLLA 单位是连续 MCS 档位，不是 dB；正值更激进；先相加再严格向下取整
 - 内部表是 `[0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]`；当前曲线
   只有 MCS0..27，所以 CQI14 保留请求 MCS28 但在该 profile 上显式钳到27
-- 默认目标首传 BLER 10%，ACK +0.1、NACK -0.9；反馈只更新下一调度时刻
+- 默认目标首传 BLER 10%；系统仿真默认 ACK +0.01、NACK −0.09，独立诊断入口
+  `sr_tdd_mcs` 为兼容历史默认 +0.1/−0.9。反馈都只更新下一调度时刻
 
-**发送侧 SINR 是 `Γ(MCS(CQI)) + BFGain`，不是接收 SINR 的均值。** 后者是个
-事后诸葛亮的量——它已经包含了 SVD 的实际增益，等于假设基站预先知道波束打得准不准。
-开 CSI 老化后这个错会变致命：老化的全部代价就是"基站以为打准了其实没有"。
+`Γ(MCS(CQI)) + BFGain` 应叫 **`SINR_AMC_PRED`**，不是物理 `SINR_TX`，也不是
+接收 SINR。物理发送分支按约束叫 `SINR_NEBF/PEBF/EBF`（方向另记 SVD）；把同一个
+gNB 设计的物理 Q 作用到 `h_true` 后才得到 `SINR_*_RX`。最终 BLER 只允许使用
+`final MCS + SINR_*_RX` 查曲线。只有 CQI/BF/OLLA 标量时，BLER 必须返回 unknown，
+不能拿 `SINR_AMC_PRED` 查询一个看似精确的误块率。
 
-转述结果时至少给出初始 MCS/门限、逐流 BF Gain、用户 SINR、BF 后 MCS、
-OLLA offset 和最终 MCS；若 `clamped_low` / `mcs_clipped` 为真也必须说明。
+转述结果时至少给出初始 MCS/门限、`SINR_PMI`、`SINR_NEBF/PEBF/EBF`、逐流
+BF Gain、`SINR_AMC_PRED`、BF 后 MCS、OLLA offset、最终 MCS、真实接收 SINR 与
+BLER 来源；没有真实接收 SINR就明确说 BLER 未知。若 `clamped_low` /
+`mcs_clipped` 为真也必须说明。

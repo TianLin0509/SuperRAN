@@ -86,11 +86,15 @@ async def main() -> None:
                 "packet_size_cdf", "interarrival_cdf", "traffic_profiles",
                 "target_prb_utilization", "load_calibration_axis",
                 "load_calibration_formal_refinements",
-                "kpi_focus", "kpi_intent"}
+                "replication_workers", "kpi_focus", "kpi_intent"}
             check(traffic_kpi_args.issubset(sim_props),
                   "MCP schema 公开 CDF、多 profile、目标 PRB 校准与 Agent KPI 编排")
             check("harq_combining" in sim_props,
                   "MCP schema 公开一次重传的 IR/CC 合并选择")
+            worker_schema = json.dumps(
+                sim_props.get("replication_workers", {}), ensure_ascii=False)
+            check("integer" in worker_schema and "string" in worker_schema,
+                  "重复实验 workers 支持显式整数与 auto，而不是无效字符串旋钮")
 
             print("\n" + "=" * 68 + "\n1.5  表驱动 BLER 查询\n" + "=" * 68)
             curve = _payload(await session.call_tool(
@@ -243,9 +247,16 @@ async def main() -> None:
                   and tdd.get("bf_gain_enters_mcs") is True
                   and tdd.get("true_channel_bf_audit_enters_mcs") is False,
                   "MCP 明确 MCS 只消费 gNB CSI 上的 BF Gain，h_true 差值仅作审计")
+            check(tdd.get("power_constraint") == "nebf"
+                  and tdd.get("physical_tx_sinr_label") == "SINR_NEBF",
+                  "TDD 前门默认使用 NEBF，并把物理 TX SINR 明确命名")
+            check(abs(tdd.get("sinr_svd_gnb_db", 0.0)
+                      - tdd.get("sinr_pmi_gnb_db", 0.0)
+                      - tdd.get("bf_gain_user_db", 0.0)) < 2e-4,
+                  "SINR_NEBF/SVD 与 SINR_PMI 的 gNB 视角差闭合到 BF Gain")
             check(abs(tdd.get("user_sinr_db", 0.0) -
                       (tdd.get("cqi_mcs_sinr_db", 0.0) + tdd.get("bf_gain_user_db", 0.0))) < 2e-4,
-                  "用户 SINR 等于 CQI 门限与 BF Gain 的 dB 域叠加")
+                  "历史 user_sinr 字段等于 SINR_AMC_PRED，不冒充接收真值")
             check(tdd.get("final_mcs") == max(
                       0, min(27, int((tdd.get("mcs_after_bf", 0) - 0.2) // 1))),
                   "MCP 最终 MCS 遵循加 OLLA、floor、钳位顺序")
@@ -254,6 +265,15 @@ async def main() -> None:
                   "MCP 结果钉住 MMSE 与同工况预编码对照")
             check(abs(tdd.get("olla_next_offset_mcs", 0.0) + 1.1) < 1e-12,
                   "NACK 只更新下一时刻 OLLA 状态")
+            check(tdd.get("actual_bler_available") is True
+                  and isinstance(tdd.get("actual_receive_sinr_db"), (int, float))
+                  and 0.0 <= tdd.get("final_mcs_newtx_bler", -1.0) <= 1.0
+                  and "h_true" in tdd.get("bler_sinr_source", ""),
+                  "最终 BLER 只使用同一物理 NEBF 权在 h_true 上的接收 SINR")
+            check("predicted_final_mcs_newtx_bler" not in tdd
+                  and tdd.get("sinr_views", {}).get("amc_prediction", {}).get("name")
+                  == "SINR_AMC_PRED",
+                  "MCP 不返回伪精确预测 BLER，并把 AMC 预测与真实判错分栏")
 
             cqi0 = _payload(await session.call_tool(
                 "sr_tdd_mcs", {"dataset_id": ds_id, "cqi": 0},

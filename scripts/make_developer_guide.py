@@ -11,7 +11,9 @@ backslashes stay in module-level constants instead of f-string expressions.
 from __future__ import annotations
 
 import ast
+import base64
 import cmath
+import hashlib
 import html
 import json
 import math
@@ -43,6 +45,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "superran"
 OUT = ROOT / "docs" / "index.html"
 GITHUB = "https://github.com/TianLin0509/superran/blob/main/"
+UI_ASSETS = ROOT / "docs" / "assets" / "ui"
 sys.path.insert(0, str(ROOT / "src"))
 
 # These files are deliberately carried by the generated API atlas rather than
@@ -60,6 +63,25 @@ from superran import mathml as mm  # noqa: E402
 def M(tex: str, *, block: bool = True) -> str:
     """KaTeX-upgradable formula with MathML fallback."""
     return kx.wrap(tex, mm.render(tex, block=block), display=block)
+
+
+def real_ui_screenshot(name: str, alt: str, caption: str) -> str:
+    """Embed a browser-captured product screenshot into the offline guide."""
+    path = UI_ASSETS / name
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"缺少真实 UI 截图 {path}；先运行 run_spec_browser_qa.py / "
+            "run_kpi_browser_qa.py")
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    encoded = base64.b64encode(raw).decode("ascii")
+    return (
+        '<figure class="product-shot" data-real-ui-screenshot="true" '
+        f'data-source="{html.escape(name, quote=True)}" data-sha256="{digest}">'
+        f'<img src="data:image/png;base64,{encoded}" alt="{html.escape(alt, quote=True)}" '
+        'loading="lazy" decoding="async">'
+        f'<figcaption>{html.escape(caption)}</figcaption></figure>'
+    )
 
 
 # Keep LaTeX outside f-string expression parts for Python < 3.12.
@@ -230,10 +252,34 @@ F_RANK = M(
     r"r^\star=\arg\max_{r\in\{1,2,3,4\}}\ r\cdot\eta\!\left("
     r"\gamma_{\mathrm{eff}}(r)\right)",
 )
+F_SVD_DIRECTION = M(
+    r"R_{\mathrm{tx},f}=\frac{1}{T}\sum_{t=1}^{T}H^{\mathrm{code}}_{t,f}"
+    r"\left(H^{\mathrm{code}}_{t,f}\right)^{H}=V_f\Lambda_fV_f^{H},\qquad "
+    r"W_{\mathrm{SVD},f}=V_f[:,1{:}r]",
+)
+F_PMI_CODEBOOK = M(
+    r"\begin{aligned}"
+    r"a_h(i)&=\frac{1}{\sqrt{N_1}}\left[e^{-j2\pi ni/(N_1O_1)}\right]_{n=0}^{N_1-1},\quad "
+    r"a_v(j)=\frac{1}{\sqrt{N_2}}\left[e^{-j2\pi mj/(N_2O_2)}\right]_{m=0}^{N_2-1}\\[4pt]"
+    r"v_{i,j}&=a_v(j)\otimes a_h(i),\quad "
+    r"c_{i,j,p}=\frac{1}{\sqrt2}\begin{bmatrix}v_{i,j}\\e^{jp\pi/2}v_{i,j}\end{bmatrix},\quad p\in\{0,1,2,3\}\\[4pt]"
+    r"q_\ell&=\arg\max_q c_q^H R_{\mathrm{res},\ell}c_q,\quad "
+    r"R_{\mathrm{res},\ell+1}=(I-c_{q_\ell}c_{q_\ell}^H)R_{\mathrm{res},\ell}(I-c_{q_\ell}c_{q_\ell}^H)"
+    r"\end{aligned}",
+)
+F_SPATIAL_POWER = M(
+    r"\begin{aligned}"
+    r"Q_0&=W_{\mathrm{dir}}\sqrt{P/r},\quad p_m^{(0)}=\sum_{k=1}^{r}|Q_{0,mk}|^2,\quad P_m^{\max}=P/M\\[4pt]"
+    r"Q_{\mathrm{EBF}}&=Q_0,\quad Q_{\mathrm{PEBF}}=\alpha Q_0,\quad "
+    r"\alpha=\min\!\left(1,\sqrt{\frac{P/M}{\max_m p_m^{(0)}}}\right)\\[4pt]"
+    r"Q_{\mathrm{NEBF}}&=DQ_0,\quad D_{mm}=\sqrt{\frac{P/M}{p_m^{(0)}}}"
+    r"\end{aligned}",
+)
 F_BF_STREAM = M(
-    r"\gamma_{f,k}^{(x)}=\frac{1}{\left[\left(I_r+\frac{P}{r}"
+    r"\gamma_{f,k}^{(x)}=\frac{1}{\left[\left(I_r+"
     r"G_{x,f}^{H}R_{n,f}^{-1}G_{x,f}\right)^{-1}\right]_{kk}}-1,\qquad "
-    r"G_{x,f}=H_{\mathrm{gNB},f}W_{x,f},\ x\in\{\mathrm{TX},\mathrm{PMI}\}",
+    r"G_{x,f}=\left(H^{\mathrm{code}}_{\mathrm{gNB},f}\right)^H Q_{x,f},\ "
+    r"x\in\{\mathrm{SVD}{+}C,\mathrm{PMI}{+}C\}",
 )
 F_BF_RBG = M(
     r"\bar\gamma_{b,k}^{(x)}=\frac{1}{|\mathcal F_b|}\sum_{f\in\mathcal F_b}"
@@ -245,9 +291,14 @@ F_BF_GAIN = M(
     r"\left(\Gamma_{b,k}^{(\mathrm{TX})}-\Gamma_{b,k}^{(\mathrm{PMI})}\right),"
     r"\qquad G_{\mathrm{BF}}=\frac{1}{B}\sum_{b=1}^{B}G_{\mathrm{BF},b}",
 )
-F_TX_SINR = M(
-    r"\gamma_{\mathrm{tx,SU}}=\Gamma(\mathrm{MCS}(\mathrm{CQI}))"
+F_AMC_PRED = M(
+    r"\gamma_{\mathrm{AMC,pred}}=\Gamma(\mathrm{MCS}(\mathrm{CQI}))"
     r"+G_{\mathrm{BF}}\qquad[\mathrm{dB}]",
+)
+F_RX_BLER = M(
+    r"\gamma_{\mathrm{RX}}=\mathcal A_{\mathrm{RBG,stream}}\!\left("
+    r"\gamma(H_{\mathrm{true}},Q_{\mathrm{SVD}+C})\right),\qquad "
+    r"P_{\mathrm{TB,error}}=\mathcal C_{m_{\mathrm{final}}}(\gamma_{\mathrm{RX}})",
 )
 F_MU_SINR = M(
     r"\gamma_{\mathrm{tx,MU}}=\Gamma(\mathrm{MCS}(\mathrm{CQI}))+G_{\mathrm{BF}}"
@@ -1427,7 +1478,7 @@ def bler_curve_summary_table() -> str:
         ["MCS", "调制", "Qm", "R New/Re", "10%门限 New/Re dB",
          "横向间距 dB", "源 SINR 范围 New/Re", "点数 New/Re"],
         rows,
-    )
+    ).replace("<table>", '<table data-bler-curve-summary="true">', 1)
 
 
 def bler_mcs_profile_table() -> str:
@@ -1756,13 +1807,13 @@ def bler_detail_atlas() -> str:
 
 def bf_gain_svg() -> str:
     body = svg_box(22, 92, 180, 76, "gNB 可见 CSI", "h_prec / 可能陈旧", "accent")
-    body += svg_box(258, 24, 190, 72, "PMI 参照权", "Type-I-style 宽带", "b")
-    body += svg_box(258, 166, 190, 72, "TX 实际权", "SVD / Type-I", "b")
-    body += svg_box(500, 24, 190, 72, "同功率约束", "EBF / PEBF / NEBF", "warn")
-    body += svg_box(500, 166, 190, 72, "同功率约束", "EBF / PEBF / NEBF", "warn")
+    body += svg_box(258, 24, 190, 72, "PMI 参照方向", "Type-I-style 宽带", "b")
+    body += svg_box(258, 166, 190, 72, "TX 发送方向", "默认 SVD", "b")
+    body += svg_box(500, 24, 190, 72, "同功率约束 C", "默认 NEBF", "warn")
+    body += svg_box(500, 166, 190, 72, "同功率约束 C", "默认 NEBF", "warn")
     body += svg_box(744, 24, 176, 72, "post-MMSE", "逐 RB × 逐流", "good")
     body += svg_box(744, 166, 176, 72, "post-MMSE", "逐 RB × 逐流", "good")
-    body += svg_box(970, 92, 150, 76, "TX − PMI", "RBG/流 dB 聚合", "accent")
+    body += svg_box(970, 92, 150, 76, "物理 TX − PMI", "RBG/流 dB 聚合", "accent")
     body += arrow(202, 116, 258, 60)
     body += arrow(202, 144, 258, 202)
     body += arrow(448, 60, 500, 60)
@@ -1773,7 +1824,7 @@ def bf_gain_svg() -> str:
     body += arrow(920, 202, 970, 148, "TX")
     return svg_wrap(
         body, 1140, 270,
-        "同一 gNB CSI、rank、功率约束与接收机；唯一改变预编码权",
+        "同一 gNB CSI、rank、功率约束与接收机；唯一改变预编码方向",
     )
 
 
@@ -1896,16 +1947,27 @@ def skill_flow_svg() -> str:
 
 
 def product_surfaces_showcase() -> str:
-    """Code-native preview of the two flagship user-facing surfaces."""
+    """Real browser captures of the two flagship user-facing surfaces."""
 
+    spec_shot = real_ui_screenshot(
+        "spec-workbench-overview.png",
+        "SuperRAN 运行前交互配置工作台，包含多站拓扑、配置来源和导出分享操作栏",
+        "真实 Edge/Chromium 截图 · 1440×900 · 7 站 21 小区 64T 运行前说明书",
+    )
+    kpi_shot = real_ui_screenshot(
+        "kpi-workbench-cell.png",
+        "SuperRAN 系统仿真 KPI 工作台小区级页面，包含 Agent 关注标签、置信区间和下载分享操作栏",
+        "真实 Edge/Chromium 截图 · 1440×900 · experience_v2 小区级证据首屏",
+    )
     return """
 <section class="product-showcase" aria-labelledby="product-surfaces-title">
   <div class="product-showcase-head">
     <span>FLAGSHIP PRODUCT SURFACES</span>
     <h2 id="product-surfaces-title">运行前看清配置，运行后读懂证据</h2>
     <p>SuperRAN 不要求用户盯着 YAML 和长 JSON。Agent 把同一份 resolved config 画成可回传的
-    交互配置 Mock；体验仿真结束后，再把同一份 Result contract 变成会按问题调整首屏重点的 KPI 工作台。
-    两张页面都自包含、可离线打开，而且不会成为第二份配置或指标真相源。</p>
+    交互配置工作台；体验仿真结束后，再把 Result contract 变成会按问题调整首屏重点的 KPI 工作台。
+    两页都自包含、可离线打开，并提供 JSON/CSV 下载、摘要复制、页面截图、系统分享与打印/PDF。
+    下方不是概念效果图，而是本仓 QA 脚本刚刚驱动真实 Chromium 得到的产品截图。</p>
   </div>
   <div class="surface-grid">
     <div class="surface-card" data-product-surface="spec">
@@ -1913,60 +1975,21 @@ def product_surfaces_showcase() -> str:
         <span class="surface-stage">RUN · BEFORE</span>
         <h3>交互配置 Mock · 仿真说明书</h3>
         <p>拓扑、阵列、频域、TDD、PDP、SRS/PMI 与算法链集中核对；用户改动白名单控件后点击
-        “应用到仿真”，delta 经 loopback bridge 回到原 Draft。</p>
+        “应用到仿真”，delta 经 loopback bridge 回到原 Draft。页面同时显示改动会重算信道、
+        链路表、TTI 主循环还是仅重绘 KPI。</p>
         <a href="#/agentloop">查看配置闭环与安全边界 →</a>
       </div>
-      <div class="mock-window mock-spec" aria-label="交互仿真说明书界面示意">
-        <div class="mock-toolbar"><i></i><i></i><i></i><code>127.0.0.1/spec/&lt;id&gt;</code></div>
-        <div class="mock-canvas">
-          <div class="mock-title"><small>仿真说明书 · 运行前</small><b>64T4R · SRS 权 vs PMI 权</b></div>
-          <div class="mock-tabs"><span class="on">拓扑</span><span>阵列</span><span>频域</span><span>PDP</span><span>算法</span></div>
-          <div class="mock-spec-grid">
-            <div class="mock-topology" aria-hidden="true">
-              <span class="mock-site s0">gNB</span><span class="mock-site s1">1</span>
-              <span class="mock-site s2">2</span><span class="mock-site s3">3</span>
-              <i class="mock-ue u0"></i><i class="mock-ue u1"></i><i class="mock-ue u2"></i><i class="mock-ue u3"></i>
-            </div>
-            <div class="mock-controls">
-              <label><span>信道估计</span><b>ls_mmse</b></label>
-              <label><span>SRS 周期</span><b>10 ms</b></label>
-              <label><span>端口顺序</span><b>pol_h_v</b></label>
-              <label><span>用户指定 / 默认</span><b>可追溯</b></label>
-            </div>
-          </div>
-          <div class="mock-action"><span>界面示意 · 参数仍以 Draft 为真相源</span><b>应用到仿真</b></div>
-        </div>
-      </div>
+      """ + spec_shot + """
     </div>
     <div class="surface-card" data-product-surface="kpi">
       <div class="surface-copy">
         <span class="surface-stage">RUN · AFTER</span>
         <h3>Agent 自适应 KPI 工作台</h3>
         <p>26 项小区 KPI、24 项用户 KPI、逐 UE 图与经验 CDF、0..17 RBG 分布和 MU/HARQ 资源对账同页呈现；
-        Agent 只重排关注项，所有数值与完整排序证据仍保留。</p>
+        Agent 只重排关注项，所有数值、告警与完整排序证据仍保留并可下载。</p>
         <a href="#/kpi">查看 KPI 口径与工作台合同 →</a>
       </div>
-      <div class="mock-window mock-kpi" aria-label="系统仿真 KPI 工作台界面示意">
-        <div class="mock-toolbar"><i></i><i></i><i></i><code>127.0.0.1/kpi/&lt;id&gt;</code></div>
-        <div class="mock-canvas">
-          <div class="mock-priority"><small>AGENT KPI 编排</small><b>体验 · 时延 · 资源</b><span>排序有证据，数值不重算</span></div>
-          <div class="mock-tabs"><span class="on">小区级</span><span>用户级</span></div>
-          <div class="mock-kpi-grid">
-            <div><small>含头体验速率</small><b>实测值</b><em>95% CI</em></div>
-            <div><small>首包时延 P95</small><b>实测值</b><em>覆盖率</em></div>
-            <div><small>PRB 利用率</small><b>实测值</b><em>目标≠结果</em></div>
-          </div>
-          <div class="mock-rbg" aria-label="0 到 17 RBG 占用分布示意">
-            <span style="--h:82%"></span><span style="--h:55%"></span><span style="--h:35%"></span>
-            <span style="--h:23%"></span><span style="--h:17%"></span><span style="--h:13%"></span>
-            <span style="--h:11%"></span><span style="--h:9%"></span><span style="--h:8%"></span>
-            <span style="--h:8%"></span><span style="--h:9%"></span><span style="--h:10%"></span>
-            <span style="--h:13%"></span><span style="--h:18%"></span><span style="--h:27%"></span>
-            <span style="--h:42%"></span><span style="--h:64%"></span><span style="--h:91%"></span>
-          </div>
-          <div class="mock-axis"><span>0</span><b>逐 TTI 占用 RBG 数 · 界面示意</b><span>17</span></div>
-        </div>
-      </div>
+      """ + kpi_shot + """
     </div>
   </div>
 </section>
@@ -2328,6 +2351,11 @@ resolved config 解释成拓扑、阵列、频域、TDD、PDP 与算法链，下
 <code>spec._EDITABLE</code> 登记过的控件。用户点击“应用到仿真”后，Agent 收到的是带
 <code>spec_id</code> 与 nonce 的 delta，不是浏览器直接启动的一次旁路仿真。</p>
 """
+    body += real_ui_screenshot(
+        "spec-workbench-config.png",
+        "SuperRAN 交互配置页签真实截图，展示白名单控件、实时拓扑、重算影响和一键回传操作栏",
+        "真实交互态：把 ISD 从 500 m 改为 600 m 后，四层重算影响立即点亮；尚未旁路执行仿真。",
+    )
     body += table(
         ["界面能力", "用户看到什么", "执行侧怎样保证真实"],
         [
@@ -3387,7 +3415,9 @@ SINR 高 14 dB；拿 σ₁² 反标噪声会把这 14 dB 人为抵消。</p>
         [
             ("se / best_se", "h_est 设计、h_true 评估", "真实接收 SINR → 单码字 MCS → rank×SE；用于结果/legacy 实发记账"),
             ("se_gnb / best_se_gnb", "全在 gNB 当前可见 CSI 上", "调度器估计的可达谱效；避免偷看未来/真实信道"),
-            ("sinr_tx", "CQI 门限 + gNB BF Gain", "先反折无 OLLA MCS；OLLA 在 TTI 循环以 MCS offset 再加"),
+            ("SINR_AMC_PRED", "CQI 门限 + gNB BF Gain", "先反折无 OLLA MCS；不是物理 TX/RX SINR，不查 BLER"),
+            ("sinr_tx_db（历史字段）", "同 SINR_AMC_PRED", "仅为 API 兼容保留；新文档和结果解释不得简称 SINR_TX"),
+            ("SINR_NEBF/PEBF/EBF_RX", "h_true + 实际物理 Q", "最终 MCS 的 BLER 查询输入；默认 NEBF"),
             ("TBS(17)", "slot、MCS、rank、17 RBG", "experience PF 排序的 fullband potential，单位 bytes"),
             ("grant TBS(n)", "实际 grant bitmap", "experience 实发与 PF credit；功控时对 subset 重聚合/重选 MCS"),
         ],
@@ -3417,11 +3447,37 @@ def bfgain_page() -> Page:
     body += """
 <h2>BF Gain 究竟是什么</h2>
 <p>SuperRAN 中的 BF Gain 不是天线口径增益、不是奇异值比，也不是用真实接收
-SINR 事后反推的余量。它的定义是：<strong>基站当前可见 CSI 上，实际 TX 预编码权
-相对 PMI 参照权的 post-MMSE SINR dB 差</strong>。两套权的 rank、功率、损伤、接收机和
-频域聚合完全相同，唯一改变的是权。</p>
+SINR 事后反推的余量。它的定义是：<strong>基站当前可见 CSI 上，实际发送方向
+相对 PMI 参照方向的 post-MMSE SINR dB 差</strong>。方向与功率约束是两个轴：默认
+发送方向为 SVD，默认功率约束为 NEBF，所以物理 TX 分支称 <code>SINR_NEBF</code>；
+显式选择 PEBF/EBF 时分别称 <code>SINR_PEBF</code>/<code>SINR_EBF</code>。PMI 分支使用
+同一个约束，但业务名保持 <code>SINR_PMI</code>。</p>
+<h2>先复现两套方向，再复现物理功率</h2>
+<p>代码信道记为 <code>Hcode[time,frequency,BS-port,UE-port]</code>。常见教科书的下行
+矩阵是 <code>Hmath=(Hcode)ᴴ</code>；下面所有矩阵维度都据此确定。SVD 路径取发射协方差
+主特征方向；PMI 路径生成过采样二维 DFT + 双极化共相位列，并在宽带残余协方差上逐层
+贪心选列。后者是明确标注的 Type-I-style 工程近似，不是完整 38.214 多层矩阵码本。</p>
 """
+    body += F_SVD_DIRECTION + F_PMI_CODEBOOK + F_SPATIAL_POWER
+    body += callout(
+        "good", "“每天线列归一”在代码里为什么写成行范数",
+        "<p>代码的物理矩阵是 <code>Q[frequency, antenna, stream]</code>，所以第 m 根天线功率是 "
+        "<code>sum_k |Q[m,k]|²</code>，即 Q 的<strong>第 m 行</strong>范数平方。现场若把权写成 "
+        "<code>[stream,antenna]</code>，同一件事就是每根天线对应的<strong>列</strong>范数归一；"
+        "只是矩阵转置约定不同，不是算法不同。</p>",
+    )
+    body += "<h2>SINR_PMI 与 SINR_NEBF/PEBF/EBF 的精确算法</h2>"
     body += F_BF_STREAM + F_BF_RBG + F_BF_GAIN
+    body += table(
+        ["名称", "信道与物理 Q", "用途", "能否直接查 BLER"],
+        [
+            ("SINR_PMI,gNB", "h_prec + Q(PMI,C)", "BF Gain 参照；与实际 TX 同 rank/约束", "不能"),
+            ("SINR_NEBF/PEBF/EBF,gNB", "h_prec + Q(SVD,C)", "减 SINR_PMI 得 gNB 可见 BF Gain", "不能"),
+            ("SINR_AMC_PRED", "Γ(MCS(CQI)) + BF Gain", "反折无 OLLA MCS；不是物理接收测量", "不能"),
+            ("SINR_NEBF/PEBF/EBF,RX", "h_true + 同一个 gNB 设计 Q(SVD,C)", "与最终发送 MCS 一起查 NewTx 曲线", "能"),
+        ],
+    )
+    body += F_AMC_PRED + F_RX_BLER
     body += table(
         ["量", "使用的信道视角", "是否进入当次 MCS", "用途"],
         [
@@ -3429,6 +3485,7 @@ SINR 事后反推的余量。它的定义是：<strong>基站当前可见 CSI �
             ("bf_gain_rbg", "h_prec / gNB 可见 CSI", "是（频率感知路径）", "逐 RBG grant 聚合"),
             ("bf_gain_true_user_db", "当前 h_true", "否", "事后审计实际波束命中情况"),
             ("bf_gain_prediction_error_db", "true 审计 − gNB 预测", "否", "观察 CSI 估计/老化误差，由后续 OLLA 闭环吸收"),
+            ("actual_receive_sinr_db", "h_true + 实际 Q", "否（发送决策已完成）", "final MCS 的唯一 BLER 查询 SINR"),
         ],
     )
     body += """
@@ -3436,11 +3493,12 @@ SINR 事后反推的余量。它的定义是：<strong>基站当前可见 CSI �
 """
     body += steps((
         ("取 gNB CSI", "<p>系统仿真使用当前可用的 <code>h_prec</code>；打开 SRS 老化后它可能来自较早快照。</p>"),
-        ("构造两套权", "<p>PMI 权由 Type-I-style 宽带码本搜索得到；TX 权默认为 SVD。<code>precoder=type1</code> 时两者相同。</p>"),
-        ("锁死公平条件", "<p>两边强制同 rank，每流 <code>P/r</code>，同时经过同一 EBF/PEBF/NEBF 功率约束。</p>"),
-        ("算 post-MMSE SINR", "<p>在同一 gNB CSI 和总损伤上分别计算 TX/PMI 的逐 RB×流线性 SINR。</p>"),
+        ("构造两套方向", "<p>PMI 由 Type-I-style 宽带码本搜索得到；发送方向默认为 SVD。<code>precoder=type1</code> 时两方向相同。</p>"),
+        ("形成两套物理 Q", "<p>两边强制同 rank、每流 P/r，并经过同一 C。默认 NEBF 将每根天线功率强制到 P/M。</p>"),
+        ("算 gNB post-MMSE SINR", "<p>在同一 h_prec 和总损伤上分别计算 SINR_NEBF/PEBF/EBF 与 SINR_PMI 的逐 RB×流线性值。</p>"),
         ("RB → RBG → 宽带", "<p>RBG 内先线性平均 RB，转 dB 后对流平均；最后对全带 RBG 平均并作 TX−PMI。</p>"),
-        ("进入 AMC", "<p><code>Γ(MCS(CQI))+G_BF</code> 得到发送侧预测 SINR，再反折无 OLLA MCS。</p>"),
+        ("进入 AMC", "<p><code>Γ(MCS(CQI))+G_BF</code> 得到 SINR_AMC_PRED，再反折无 OLLA MCS；它不用于 BLER。</p>"),
+        ("真实判错", "<p>把同一个发送 Q 作用到 h_true，聚合得到 SINR_*_RX，再用最终 MCS 查 NewTx 曲线。</p>"),
     ))
     body += callout(
         "danger", "h_true 不能进当次 BF Gain",
@@ -3452,6 +3510,15 @@ SINR 事后反推的余量。它的定义是：<strong>基站当前可见 CSI �
         "warn", "BF Gain 不保证非负",
         "<p>EBF 下、完美 CSI 且同 rank 时，SVD 通常不会输给量化 PMI。但陈旧 CSI、"
         "NEBF 破坏正交性、码本/rank 边界或数值工作点都可使差值为负。代码不把它静默钳到0。</p>",
+    )
+    body += callout(
+        "danger", "13.3272 dB 这个例子为什么不能报 BLER=1",
+        "<p>CQI5→MCS9，其 10% 门限为 8.3272 dB；BF Gain=5 dB 只得到 "
+        "<code>SINR_AMC_PRED=13.3272 dB</code>，反折 MCS14，再加 OLLA +2 得最终 MCS16。"
+        "MCS16 的 10% 门限 14.8955 dB 高于这个预测坐标，只说明 OLLA 把发送档位推到"
+        "名义门限之上；<strong>不说明真实 TB 一定误块</strong>。没有 "
+        "<code>SINR_NEBF_RX/actual_receive_sinr_db</code> 时 BLER 必须写 unknown；有数据集时"
+        "只把该接收端 SINR 与 MCS16 送入预置曲线。</p>",
     )
     body += table(
         ["边界情形", "预期结果", "原因"],
@@ -3477,14 +3544,16 @@ SINR 事后反推的余量。它的定义是：<strong>基站当前可见 CSI �
 def linkadapt_page() -> Page:
     body = link_flow_svg()
     body += """
-<h2>发送侧不是接收侧长期均值</h2>
-""" + F_TX_SINR
+<h2>SINR_AMC_PRED 不是物理发送 SINR，更不是接收真值</h2>
+""" + F_AMC_PRED + F_RX_BLER
     body += """
 <p>CQI 是终端用 Type-I/PMI 参照权在真实信道上测得并按报告周期更新的长期宽带量；先查内部
 离散表 <code>[0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]</code> 映射
 初始 MCS，再取该 MCS 的 10% BLER SINR 门限 Γ。BF Gain 则是 gNB 在自己可见的（可能陈旧）
-SRS CSI 上，实际发送权相对 PMI 权的 post-MMSE SINR差。两者相加后重选 MCS，最后由用户级
-MCS-domain SU OLLA 调整。内部 CQI0 映射 MCS0，不是 out-of-range。</p>
+SRS CSI 上，实际发送方向相对 PMI 方向的 post-MMSE SINR 差；默认两边都施加 NEBF。
+两者相加形成 <code>SINR_AMC_PRED</code> 后重选 MCS，最后由用户级 MCS-domain SU OLLA
+调整。物理发射分支叫 <code>SINR_NEBF/PEBF/EBF</code>，同一个 Q 打到 h_true 后得到的
+<code>SINR_*_RX</code> 才能查最终 BLER。内部 CQI0 映射 MCS0，不是 out-of-range。</p>
 """
     mapping_rows = la.internal_cqi_mapping_rows(mcs_table=3)
     body += table(
@@ -3960,14 +4029,20 @@ HTML 工作台，并把 <code>html_path</code>、可用时的 loopback <code>url
 因此交付者不能在没有页面的情况下假装工作台已经生成。</p>
 </section>
 """
+    body += real_ui_screenshot(
+        "kpi-workbench-user.png",
+        "SuperRAN KPI 工作台用户级真实截图，左侧逐 UE 误差棒，右侧跨 UE 经验 CDF",
+        "真实用户级页签：每个指标同时给逐 UE 95% 区间和跨 UE 经验 CDF，颜色区分 video/XR profile。",
+    )
     body += callout(
         "good", "真实工作台浏览器烟测已通过",
         "<p><code>scripts/run_kpi_browser_qa.py</code> 用合成 6 UE video/XR CDF 运行 8 次重复，"
-        "把 50% 目标校准到实测 <strong>52.61%</strong>（容差 ±4%），再生成真正的双 Tab 工作台。"
+        "把 50% 目标校准到实测 <strong>49.79%</strong>（容差 ±4%），再生成真正的双 Tab 工作台。"
         "隔离 Chromium 在 1440×900 与 375×812 下均为 0 px 页面级溢出、0 个控制台错误；"
-        "默认小区级，点击用户级后面板互斥切换正确，并检测到 19 个有数据的用户指标面板。"
+        "默认小区级，点击用户级后面板互斥切换正确，并检测到 23 个有数据的用户指标面板；"
+        "完整 JSON、两份 CSV 与整页 SVG 截图均由浏览器实际下载并解析。"
         "完整页面、截图、校准轨迹与逐项检查写在 "
-        "<code>output/kpi-browser-qa.json</code>。该烟测证明呈现与统计合同，不代表公司 CDF 或现场收益。</p>",
+        "<code>output/kpi-browser-qa.json</code>。该烟测证明呈现与统计合同，不代表生产话务 CDF 或现场收益。</p>",
     )
     body += table(
         ["工作台区域", "默认承载", "为什么不能只看小区均值"],
@@ -4117,12 +4192,23 @@ comparison = rng.compare_replications(run_a, run_b, books_a=books, books_b=books
         "否则 A/B 调度路径一分叉，后续随机数立即错位，公共随机数名存实亡。</p>",
     )
     body += """
-<h2>workers 只能改变调度，不能改变样本</h2>
+<h2>两类 workers：生成样本与重复实验</h2>
 <p>static <code>internal_sim</code> 的所有 worker 共享同一个 seed，并用不重叠的
 <code>sample_index_offset</code> 切全局事件流；串行/并行的复信道、SINR、LSP 和 SRS 时序必须
 逐样本逐位相同。旧做法给每个 worker 用不同 seed，会把一个固定 UE 几何的数据集变成多个
 几何的混合分布，不能称为“统计等价”。移动轨迹、拒绝采样及尚无全局 index 的 source 当前
 显式回退串行，摘要同时记录 requested/effective workers 和原因。</p>
+<p><code>sr_system_sim</code> 的 <code>replication_workers</code> 是另一条轴：链路表先建一次，
+随后把独立 RngRun 分给进程。默认 <code>auto</code> 以 <code>n_rep×TTI×UE</code> 粗工作量判断；
+短任务串行，长任务最多 4 进程，用户也可显式设 1/2/4/8。2026-08-23 本机同一 6 UE、8 次
+重复的冻结基准中，5 s 由 1.60 s 降到 0.99 s（1.61×），50 s 由 14.20 s 降到
+4.49 s（3.16×）；有限 KPI exact、非有限类别一致且差异路径为空。4 线程只有 0.72~0.74×，
+所以产品没有提供一个会让任务变慢的线程旋钮。</p>
+<h3>先向量化，再并行</h3>
+<p>逐 RB post-MMSE/IRC/ZF 原先在 Python 中循环 8×272 个小矩阵；现在把损伤协方差、
+有效信道和逆矩阵交给 NumPy 批量内核。固定 rank4/4R 基准的 MMSE、IRC、ZF 分别约
+9.83×、11.44×、11.34×，输出逐位一致；MRC 约 102.6×且最大绝对误差
+1.34e−15。完整原始记录在 <code>artifacts/results/performance_audit.json</code>。</p>
 <h3>耗时估计只用于调度，不是 SLA</h3>
 <p>20-ray CDL 落地后，旧的 24 ms/样本标定失效。2026-08-11 热态锚点为：
 1 cell/32T/20 MHz 约 0.158 s，1 cell/64T/100 MHz 约 1.074 s，
@@ -4807,7 +4893,7 @@ button,input{font:inherit}.skip{position:fixed;left:12px;top:-60px;z-index:99;pa
 h2{font-size:27px;line-height:1.3;letter-spacing:-.025em;margin:55px 0 16px;scroll-margin-top:84px}h3{font-size:20px;margin:34px 0 11px;scroll-margin-top:84px}h4{font-size:15px;margin:24px 0 9px}p{margin:10px 0 18px}a{color:var(--brand2);text-underline-offset:3px}strong{font-weight:750}code{font-family:"Cascadia Code",Consolas,monospace;font-size:.88em;background:var(--soft);border:1px solid color-mix(in srgb,var(--line) 70%,transparent);padding:.1em .32em;border-radius:5px;word-break:break-word}
 .heading-link{border:0;background:transparent;color:var(--muted);font-size:.7em;opacity:0;margin-left:8px;cursor:pointer}.doc-page h2:hover .heading-link,.doc-page h3:hover .heading-link,.heading-link:focus{opacity:1}
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:25px 0 34px}.metric{background:var(--paper);border:1px solid var(--line);border-radius:13px;padding:16px;box-shadow:0 4px 18px rgba(20,45,36,.035)}.metric span{display:block;color:var(--muted);font-size:12px}.metric b{display:block;font-size:25px;line-height:1.2;margin:5px 0;color:var(--brand)}.metric small{color:var(--muted)}
-.product-showcase{margin:34px 0 48px;padding:28px;border:1px solid color-mix(in srgb,var(--brand) 28%,var(--line));border-radius:20px;background:linear-gradient(145deg,color-mix(in srgb,var(--brand) 8%,var(--paper)),color-mix(in srgb,var(--brand2) 6%,var(--paper)));box-shadow:var(--shadow)}.product-showcase-head>span,.hello-world>span{display:block;color:var(--brand);font-size:10px;font-weight:850;letter-spacing:.18em}.product-showcase-head h2{margin:7px 0 10px;font-size:31px}.product-showcase-head p{max-width:800px;color:var(--muted);margin:0 0 22px}.surface-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.surface-card{min-width:0;padding:18px;border:1px solid var(--line);border-radius:16px;background:var(--paper);box-shadow:0 10px 30px rgba(20,45,36,.07)}.surface-copy{min-height:192px}.surface-copy h3{margin:6px 0 8px;font-size:20px}.surface-copy p{font-size:13px;line-height:1.68;color:var(--muted);margin:0 0 10px}.surface-copy a{font-size:12px;font-weight:750;text-decoration:none}.surface-stage{font-size:9px;font-weight:850;letter-spacing:.14em;color:var(--warm)}.mock-window{overflow:hidden;border:1px solid #263b4b;border-radius:12px;background:#f3f6f8;color:#172331;box-shadow:0 13px 28px rgba(14,34,45,.18);font-size:10px;line-height:1.35}.mock-toolbar{height:27px;display:flex;align-items:center;gap:5px;padding:0 9px;background:#172430;color:#a8bac5}.mock-toolbar i{display:block;width:7px;height:7px;border-radius:50%;background:#ef6a5b}.mock-toolbar i:nth-child(2){background:#e7b849}.mock-toolbar i:nth-child(3){background:#5fbe77}.mock-toolbar code{margin-left:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:none;color:#a8bac5;padding:0;font-size:8px}.mock-canvas{padding:12px}.mock-title{display:flex;flex-direction:column;margin-bottom:8px}.mock-title small{color:#65758b}.mock-title b{font-size:13px}.mock-tabs{display:flex;gap:4px;margin:5px 0 10px}.mock-tabs span{padding:4px 7px;border:1px solid #d9e1e8;border-radius:5px;background:#e8edf1;color:#667685}.mock-tabs span.on{border-color:#218c87;background:#e0f4f1;color:#076c64;font-weight:800}.mock-spec-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:9px}.mock-topology{position:relative;min-height:138px;overflow:hidden;border:1px solid #d9e1e8;border-radius:8px;background:radial-gradient(circle at 50% 50%,#f7fbfc 0 19%,#e9f1f3 20% 21%,#f7fbfc 22% 43%,#e9f1f3 44% 45%,#f7fbfc 46%)}.mock-site{position:absolute;width:29px;height:29px;border:2px solid #18847b;border-radius:50%;display:grid;place-items:center;background:#e0f4f1;color:#076c64;font-size:8px;font-weight:800}.mock-site.s0{left:42%;top:40%}.mock-site.s1{left:12%;top:17%}.mock-site.s2{right:12%;top:17%}.mock-site.s3{right:14%;bottom:10%}.mock-ue{position:absolute;width:6px;height:6px;border-radius:50%;background:#d97d24;box-shadow:0 0 0 3px rgba(217,125,36,.15)}.mock-ue.u0{left:31%;top:24%}.mock-ue.u1{right:28%;top:39%}.mock-ue.u2{left:25%;bottom:21%}.mock-ue.u3{right:37%;bottom:13%}.mock-controls{display:flex;flex-direction:column;gap:5px}.mock-controls label{display:flex;justify-content:space-between;gap:5px;padding:6px 7px;border:1px solid #dce4ea;border-radius:6px;background:white}.mock-controls span{color:#687889}.mock-controls b{font-size:9px;color:#116e68}.mock-action{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:9px;padding-top:9px;border-top:1px solid #dce4ea}.mock-action span{color:#6c7c89;font-size:8px}.mock-action b{white-space:nowrap;padding:5px 8px;border-radius:5px;background:#087f79;color:white}.mock-priority{display:grid;grid-template-columns:1fr auto;gap:2px 8px;padding:8px;border-left:4px solid #299da4;border-radius:5px;background:#e4f4f5}.mock-priority small{color:#40727a;font-size:7px;font-weight:850}.mock-priority b{grid-column:1;font-size:11px}.mock-priority span{grid-column:2;grid-row:1/3;align-self:center;color:#53717a;font-size:7px}.mock-kpi-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px}.mock-kpi-grid>div{min-width:0;padding:7px;border:1px solid #dce4ea;border-radius:6px;background:white}.mock-kpi-grid small,.mock-kpi-grid b,.mock-kpi-grid em{display:block}.mock-kpi-grid small{min-height:24px;color:#65758b}.mock-kpi-grid b{margin:3px 0;color:#1769aa;font-size:11px}.mock-kpi-grid em{color:#8a98a7;font-size:7px;font-style:normal}.mock-rbg{height:87px;display:grid;grid-template-columns:repeat(18,minmax(3px,1fr));align-items:end;gap:2px;margin:10px 0 0;padding:7px 5px 0;border-bottom:1px solid #233646;background:#f9fbfc}.mock-rbg span{height:var(--h);min-height:3px;border-radius:2px 2px 0 0;background:linear-gradient(#43b3bf,#1769aa)}.mock-axis{display:flex;justify-content:space-between;gap:5px;padding:3px 5px 0;color:#788795;font-size:7px}.mock-axis b{font-weight:650}.hello-world{margin:0 0 24px;padding:27px 29px;border:1px solid color-mix(in srgb,var(--brand) 34%,var(--line));border-radius:17px;background:linear-gradient(135deg,color-mix(in srgb,var(--brand) 13%,var(--paper)),color-mix(in srgb,var(--brand2) 8%,var(--paper)));box-shadow:var(--shadow)}.hello-world h2{margin:7px 0 10px;font-size:31px}.hello-world p{margin:0;color:var(--muted);font-size:15px}.paths-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:18px 0 34px}.paths-grid a{display:flex;min-width:0;min-height:78px;flex-direction:column;justify-content:space-between;gap:7px;padding:14px 15px;border:1px solid var(--line);border-radius:12px;background:var(--paper);color:var(--ink);text-decoration:none;box-shadow:0 4px 16px rgba(20,45,36,.04);transition:border-color .2s ease,box-shadow .2s ease,background-color .2s ease}.paths-grid a b{font-size:14px;line-height:1.35;color:var(--brand)}.paths-grid a span{color:var(--muted);font-size:12px;line-height:1.5}.paths-grid a:hover{border-color:color-mix(in srgb,var(--brand) 55%,var(--line));background:color-mix(in srgb,var(--brand) 4%,var(--paper));box-shadow:0 9px 24px rgba(20,45,36,.09)}.paths-grid a:focus-visible{outline:3px solid color-mix(in srgb,var(--brand2) 55%,transparent);outline-offset:2px}.hello-actions{margin-bottom:0}.hello-actions a{background:color-mix(in srgb,var(--paper) 86%,transparent)}
+.product-showcase{margin:34px 0 48px;padding:28px;border:1px solid color-mix(in srgb,var(--brand) 28%,var(--line));border-radius:20px;background:linear-gradient(145deg,color-mix(in srgb,var(--brand) 8%,var(--paper)),color-mix(in srgb,var(--brand2) 6%,var(--paper)));box-shadow:var(--shadow)}.product-showcase-head>span,.hello-world>span{display:block;color:var(--brand);font-size:10px;font-weight:850;letter-spacing:.18em}.product-showcase-head h2{margin:7px 0 10px;font-size:31px}.product-showcase-head p{max-width:800px;color:var(--muted);margin:0 0 22px}.surface-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.surface-card{min-width:0;padding:18px;border:1px solid var(--line);border-radius:16px;background:var(--paper);box-shadow:0 10px 30px rgba(20,45,36,.07)}.surface-copy{min-height:192px}.surface-copy h3{margin:6px 0 8px;font-size:20px}.surface-copy p{font-size:13px;line-height:1.68;color:var(--muted);margin:0 0 10px}.surface-copy a{font-size:12px;font-weight:750;text-decoration:none}.surface-stage{font-size:9px;font-weight:850;letter-spacing:.14em;color:var(--warm)}.product-shot{margin:16px 0 24px;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--paper);box-shadow:0 13px 30px rgba(14,34,45,.12)}.product-shot img{display:block;width:100%;height:auto}.product-shot figcaption{padding:9px 12px;border-top:1px solid var(--line);color:var(--muted);font-size:11px;line-height:1.45}.hello-world{margin:0 0 24px;padding:27px 29px;border:1px solid color-mix(in srgb,var(--brand) 34%,var(--line));border-radius:17px;background:linear-gradient(135deg,color-mix(in srgb,var(--brand) 13%,var(--paper)),color-mix(in srgb,var(--brand2) 8%,var(--paper)));box-shadow:var(--shadow)}.hello-world h2{margin:7px 0 10px;font-size:31px}.hello-world p{margin:0;color:var(--muted);font-size:15px}.paths-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:18px 0 34px}.paths-grid a{display:flex;min-width:0;min-height:78px;flex-direction:column;justify-content:space-between;gap:7px;padding:14px 15px;border:1px solid var(--line);border-radius:12px;background:var(--paper);color:var(--ink);text-decoration:none;box-shadow:0 4px 16px rgba(20,45,36,.04);transition:border-color .2s ease,box-shadow .2s ease,background-color .2s ease}.paths-grid a b{font-size:14px;line-height:1.35;color:var(--brand)}.paths-grid a span{color:var(--muted);font-size:12px;line-height:1.5}.paths-grid a:hover{border-color:color-mix(in srgb,var(--brand) 55%,var(--line));background:color-mix(in srgb,var(--brand) 4%,var(--paper));box-shadow:0 9px 24px rgba(20,45,36,.09)}.paths-grid a:focus-visible{outline:3px solid color-mix(in srgb,var(--brand2) 55%,transparent);outline-offset:2px}.hello-actions{margin-bottom:0}.hello-actions a{background:color-mix(in srgb,var(--paper) 86%,transparent)}
 .callout{display:grid;grid-template-columns:31px 1fr;gap:12px;margin:24px 0;padding:17px 18px;border:1px solid var(--line);border-left:4px solid var(--brand2);background:color-mix(in srgb,var(--brand2) 5%,var(--paper));border-radius:10px}.callout p{margin:5px 0 0}.callout-icon{width:27px;height:27px;display:grid;place-items:center;border-radius:50%;background:var(--brand2);color:#fff;font-weight:800}.callout.good{border-left-color:var(--ok);background:color-mix(in srgb,var(--ok) 6%,var(--paper))}.callout.good .callout-icon{background:var(--ok)}.callout.warn,.callout.decision{border-left-color:var(--warm);background:color-mix(in srgb,var(--warm) 7%,var(--paper))}.callout.warn .callout-icon,.callout.decision .callout-icon{background:var(--warm)}.callout.danger{border-left-color:var(--danger);background:color-mix(in srgb,var(--danger) 6%,var(--paper))}.callout.danger .callout-icon{background:var(--danger)}
 .steps{list-style:none;padding:0;margin:25px 0}.steps li{display:grid;grid-template-columns:38px 1fr;gap:13px;position:relative;padding:0 0 25px}.steps li:not(:last-child):before{content:"";position:absolute;left:18px;top:36px;bottom:0;border-left:1px solid var(--line)}.step-no{width:37px;height:37px;border-radius:50%;background:var(--brand);color:#fff;display:grid;place-items:center;font-weight:800}.steps p{margin:4px 0}
 .table-wrap{overflow:auto;margin:20px 0 28px;border:1px solid var(--line);border-radius:11px;background:var(--paper)}table{border-collapse:collapse;width:100%;font-size:13px;line-height:1.5}th{text-align:left;background:var(--soft);font-size:11px;letter-spacing:.04em;color:var(--muted);position:sticky;top:0}th,td{padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}tr:last-child td{border-bottom:0}tbody tr:hover{background:color-mix(in srgb,var(--brand) 3%,transparent)}

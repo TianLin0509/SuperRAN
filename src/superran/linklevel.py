@@ -398,51 +398,51 @@ def post_equalizer_sinr(
 
     if not np.isfinite(noise_power) or float(noise_power) < 0:
         raise ValueError(f"noise_power 必须是有限非负数，收到 {noise_power}")
-    out_tf = np.zeros((n_t, rb, rank), dtype=np.float64)
-    for t in range(n_t):
-        for f in range(rb):
-            g = h_tf[t, f].conj().T  # [UE, rank]
-            r_n = np.eye(ue, dtype=np.complex128) * max(float(noise_power), _EPS)
-            if interference_cov is not None:
-                ic = np.asarray(interference_cov)
-                r_uu = ic[f] if ic.ndim == 3 else ic
-                if receiver == "irc":
-                    r_n = r_n + r_uu            # 保留空间结构，才能打零陷
-                else:
-                    # **非 IRC 的接收机把干扰当白噪声。** 只取总功率摊到各天线，
-                    # 丢掉方向信息——这正是 IRC 要赢的那个基线。
-                    r_n = r_n + np.eye(ue, dtype=np.complex128) * (
-                        float(np.real(np.trace(r_uu))) / max(ue, 1)
-                    )
+    # ``R_n`` has no time axis, while G does.  Build one [RB,UE,UE] stack and let
+    # NumPy's batched LAPACK/einsum kernels process every T×RB matrix at once.
+    # The previous Python double loop performed 2,176 tiny inversions for an
+    # 8-snapshot/272-RB link and dominated link-table construction overhead.
+    eye_ue = np.eye(ue, dtype=np.complex128)
+    r_n = np.broadcast_to(
+        eye_ue * max(float(noise_power), _EPS), (rb, ue, ue)).copy()
+    if interference_cov is not None:
+        ic = np.asarray(interference_cov)
+        if ic.ndim == 2:
+            r_uu = np.broadcast_to(ic, (rb, ue, ue))
+        elif ic.ndim == 3 and ic.shape == (rb, ue, ue):
+            r_uu = ic
+        else:
+            raise ValueError(
+                "interference_cov 应为 [UE,UE] 或 [RB,UE,UE]，"
+                f"收到 {ic.shape}")
+        if receiver == "irc":
+            r_n += r_uu
+        else:
+            # Non-IRC receivers preserve only total interference power and lose
+            # directionality; broadcasting the scalar over identity keeps that
+            # baseline identical to the former per-RB implementation.
+            white = np.real(np.trace(r_uu, axis1=-2, axis2=-1)) / max(ue, 1)
+            r_n += white[:, None, None] * eye_ue[None]
 
-            r_inv = np.linalg.pinv(r_n)
-            a = g.conj().T @ r_inv @ g  # [rank, rank]
+    r_inv = np.linalg.pinv(r_n)                         # [RB,UE,UE]
+    g = np.conj(np.swapaxes(h_tf, -1, -2))             # [T,RB,UE,rank]
+    a = np.swapaxes(g.conj(), -1, -2) @ r_inv[None] @ g  # [T,RB,rank,rank]
 
-            if receiver in ("mmse", "irc"):
-                m = np.eye(rank, dtype=np.complex128) + p_per_layer * a
-                m_inv = np.linalg.pinv(m)
-                diag = np.real(np.diag(m_inv))
-                out_tf[t, f] = np.maximum(
-                    1.0 / np.maximum(diag, _EPS) - 1.0, 0.0)
-            elif receiver == "zf":
-                a_inv = np.linalg.pinv(a)
-                out_tf[t, f] = p_per_layer / np.maximum(
-                    np.real(np.diag(a_inv)), _EPS)
-            elif receiver == "mrc":
-                for k in range(rank):
-                    gk = g[:, k]
-                    sig = p_per_layer * float(np.real(gk.conj() @ r_inv @ gk)) ** 2
-                    # 层间干扰：其余层经同一 MRC 权后的泄漏
-                    leak = 0.0
-                    for j in range(rank):
-                        if j == k:
-                            continue
-                        leak += p_per_layer * abs(
-                            complex(gk.conj() @ r_inv @ g[:, j])) ** 2
-                    nz = float(np.real(gk.conj() @ r_inv @ gk))
-                    out_tf[t, f, k] = sig / max(leak + nz, _EPS)
-            else:
-                raise ValueError(f"未知接收机 {receiver!r}")
+    if receiver in ("mmse", "irc"):
+        m = np.eye(rank, dtype=np.complex128) + p_per_layer * a
+        diag = np.real(np.diagonal(np.linalg.pinv(m), axis1=-2, axis2=-1))
+        out_tf = np.maximum(1.0 / np.maximum(diag, _EPS) - 1.0, 0.0)
+    elif receiver == "zf":
+        diag = np.real(np.diagonal(np.linalg.pinv(a), axis1=-2, axis2=-1))
+        out_tf = p_per_layer / np.maximum(diag, _EPS)
+    elif receiver == "mrc":
+        diagonal = np.real(np.diagonal(a, axis1=-2, axis2=-1))
+        signal = p_per_layer * diagonal ** 2
+        total = p_per_layer * np.sum(np.abs(a) ** 2, axis=-1)
+        leakage = np.maximum(total - p_per_layer * np.abs(diagonal) ** 2, 0.0)
+        out_tf = signal / np.maximum(leakage + diagonal, _EPS)
+    else:
+        raise ValueError(f"未知接收机 {receiver!r}")
 
     if n_t == 1:
         return out_tf[0]

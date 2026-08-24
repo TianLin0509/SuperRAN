@@ -292,8 +292,10 @@ TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sr_tdd_mcs` 实现：
 `内部 CQI index → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标 BLER SINR 门限
 → + BF Gain → 按 SINR 重映射 MCS → + OLLA MCS offset → floor → 最终 MCS`。
 CQI 是 PMI 权测得的 pre-BF 值。BF Gain 逐 RB、逐流计算为同一信道、CSI、rank、
-功率、噪声、干扰与经典 MMSE 接收机下 `SINR_SVD - SINR_PMI`；用户 SINR 对全部
-RB×流在 dB 域做算术平均。内部 CQI0 映射 MCS0，不是 out-of-range。OLLA 的
+功率、噪声、干扰与经典 MMSE 接收机下 `SINR_SVD - SINR_PMI`；默认物理发送权为
+SVD 方向叠加 NEBF 每天线约束，因此也记为 `SINR_NEBF`。RB 先在每个 RBG 内做
+线性功率平均，再对 RBG×流做 dB 算术平均。内部 CQI0 映射 MCS0，不是
+out-of-range。OLLA 的
 单位是连续 MCS 档位，不是 dB；正值更激进，
 最终结果严格向下取整并钳位到 0..27。默认 10% 首传 BLER 下 ACK +0.1、NACK -0.9，
 反馈只作用于下一调度时刻。所有中间量与口径必须保留在结果中，不能只返回最终 MCS。
@@ -782,7 +784,7 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 
 测 MU 必须给各用户不同的路损（`test_csi_aging` 用 0 ~ −18 dB 的梯度）。
 
-### 发送侧 SINR 是 CQI 门限 + BF Gain，不是接收 SINR 的均值
+### SINR_AMC_PRED 是 CQI 门限 + BF Gain，不是物理发送/接收 SINR
 
 现场口径（用户 2026-08-03 确认）：`Γ(MCS(CQI)) + BFGain`。
 **CQI 是长期滤波的宽带量**（终端在真实信道上用 Type I 宽带 PMI 权测），
@@ -792,14 +794,21 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 实际增益，等于假设基站预先知道波束打得准不准。开 CSI 老化后这个错变得致命：
 老化的全部代价就是"基站以为打准了其实没有"，而那个口径直接把它抹平。
 
-两个实现细节：宽带 PMI 是慢时间尺度的量，逐 UE 逐 rank 在时间平均信道上搜一次
-码本就够（逐快照重搜既慢又不符合物理）；内部 **CQI=0 映射 MCS0**，
+两个实现细节：宽带 PMI 按 CSI report 周期更新并在周期内保持，不是每个 TTI 重搜；
+每次更新只能使用该时刻可见的 CSI，不能跨完整仿真时间先平均后偷看未来。内部
+**CQI=0 映射 MCS0**，
 是最低可用档，不再借用 38.214 out-of-range 语义。
 
 `Dataset.tdd_mcs` / `sr_tdd_mcs` 也必须遵守同一因果边界：进入 MCS 的
 `bf_gain_user_db` 只能在 gNB 可见的 `h_prec` 上计算。同一权打到
 `h_true` 得到的 `bf_gain_true_user_db` 与 prediction error 只作事后审计，
 不得回填当次 MCS。固定 `h_est` 只改 `h_true`，发送决策 BF Gain 必须逐位不变。
+
+`Gamma(MCS(CQI))+BF Gain` 只是 `SINR_AMC_PRED`，不是物理 `SINR_TX`，也不是
+接收端真值。实际发射分支应按方向与功率约束命名为 `SINR_NEBF/PEBF/EBF`
+（默认 NEBF；方向另记为 SVD），并把同一个 gNB 设计出的物理 Q 作用到 `h_true`
+得到 `SINR_*_RX`。最终 TB BLER 只能用 `final MCS + SINR_*_RX` 查表；仅有
+CQI/BF/OLLA 标量时 BLER 必须是 unknown，不能拿 AMC 预测坐标查出一个伪 BLER。
 
 ### OLLA 是 MCS-domain 状态，步长比由目标 BLER 反解
 
@@ -1090,6 +1099,26 @@ ChannelHub 的 `doppler_hz` 明确定义为最大 Doppler
 而 `full_report` 从第一版（f44b46a）起就只有 16 项——数字凭印象写的，从没对过账。
 `test_interference` 第 10 节现在用正则从四份文档里抽计数，与
 `len(full_report(ds).checks)` 和 `sr_` 工具数比对。加检查/加工具时会红。
+
+### 先批量线性代数，再谈 workers
+
+`linklevel.post_equalizer_sinr` 的 `[T,RB]` 小矩阵必须走 NumPy batch，不能恢复
+Python 双循环。固定 `[8,272,rank4,4R]` 交错审计中 MMSE/IRC/ZF 为 9.8~11.4×，
+逐值完全一致；MRC 为 102.6×、最大误差 1.34e-15。机制记录在
+`artifacts/results/performance_audit.json`。
+
+系统重复实验与信道生成是两套并行轴。`replication_workers="auto"` 只并行独立
+RngRun，链路表通过 initializer 每进程传一次，结果按 replication index 还原；
+5 s/50 s 固定基准分别为 1.61×/3.16×；有限 KPI exact、非有限类别一致、差异路径为空。
+不要加线程后端：4 线程实测只有 0.72~0.74×。库函数默认 1 保护 REPL/脚本；MCP 前门默认 auto。
+显式 worker 失败或超过安全上限必须报错，只有 auto 可带明示原因回退串行。
+
+### 自包含页面的截图不是天然可转 PNG
+
+Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML 上
+`canvas.toBlob()` 可抛 SecurityError。`webui` 先尝试 PNG，失败后下载完整 SVG
+截图并在回执写明格式；不能显示“PNG 已成功”却没有文件。JSON/CSV 下载、复制、
+分享与截图都要用真实浏览器 `expect_download`/文件头验证，不只搜按钮文案。
 
 ### YAML 里以 `*` 开头的值是别名
 

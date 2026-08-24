@@ -35,6 +35,36 @@ sample ID 都能直接核对。
 - `sr_probe_scenario` —— 只看场景特征时用。20-ray 的一组 21 小区对照约
   1.80×，具体看返回的 `elapsed_s`；它给不了谱效与吞吐。
 
+## 系统重复实验 `replication_workers`
+
+`sr_system_sim` 默认 `replication_workers="auto"`。它与生成信道的 `workers`
+不是一个旋钮：链路表仍只建一次，随后把独立 RngRun 的 TTI 主循环分给进程。
+自动策略用 `num_replications × num_tti × num_ues` 判断是否值得支付 Windows spawn
+与链路表序列化成本；小于 300,000 work units 保持串行，否则最多 4 进程。
+用户也可显式设 1/2/4/8；超出安全上限或显式并行失败会硬报错，不静默降级。
+
+2026-08-23 本机 Python 3.12 / NumPy 2.3.5、6 UE、8 次重复的冻结机制基准：
+
+| 时长 | 串行 | 4 进程 | 加速 | 4 线程 |
+|---|---:|---:|---:|---:|
+| 5 s / 10,000 TTI | 1.601 s | 0.994 s | 1.61× | 2.147 s（0.72×） |
+| 50 s / 100,000 TTI | 14.197 s | 4.495 s | 3.16× | 19.223 s（0.74×） |
+
+有限 KPI 精确相同，NaN/±Inf 类别相同且差异路径为空。线程更慢是因为 TTI 状态机以 Python 事件处理
+为主；NumPy 官方只承诺低层运算释放 GIL 时线程可能并行，不代表任意 Python 循环会加速。
+原始记录：`artifacts/results/performance_audit.json`。
+
+## 批量 post-MMSE/IRC/ZF
+
+链路表原来按 snapshot×RB 双循环做成千次小矩阵求逆。当前把 `[T,RB]` 作为 batch
+一次性交给 NumPy：固定 `[8,272,rank4,4R]` 输入下 MMSE/IRC/ZF 约 9.8~11.4×，
+逐值完全一致；MRC 约 102.6×，最大绝对误差 1.34e-15。它不改变 rank、功率或 SINR
+公式，只删除 Python 调度开销。
+
+256T PMI 当前约 0.17 s/次（8192 个候选列）。一次尝试把残余协方差投影从 O(N³)
+改为 O(N²) 后总时间没有下降，说明瓶颈在码本列打分；该无收益改动已撤回。下一步若
+继续优化，应针对 Kronecker/DFT 结构化搜索或 GPU batch，而不是继续微调投影式。
+
 ## 计时纪律
 
 **不要靠“看着变快了”下结论。** 冷态单样本与热态批量这次相差一个数量级。

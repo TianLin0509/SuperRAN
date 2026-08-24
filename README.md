@@ -147,7 +147,8 @@ OLLA -0.2 MCS 计算最终 MCS，并解释逐流 BF Gain。”Agent 会调用 MC
 下一时刻 OLLA，当前决策不回写。映射表为
 `[0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]`。当前预置曲线只覆盖
 `MCS0..27`，所以 `CQI14→MCS28` 保留为原始表项，但在该 profile 上显式钳到 27。
-诊断和系统仿真统一使用 MCS-domain OLLA：先由发送侧 SINR 反折无 OLLA MCS，
+诊断和系统仿真统一使用 MCS-domain OLLA：先由 `SINR_AMC_PRED`（CQI 门限 +
+gNB 可见 BF Gain，不是物理发送/接收 SINR）反折无 OLLA MCS，
 再加连续 MCS offset、`floor` 并钳到当前 profile。系统 API 中历史 `*_db` 参数名
 暂为兼容保留，其值不再解释为 dB。
 
@@ -180,6 +181,13 @@ static internal_sim 用同 seed + 全局 sample index 分块，worker 数变化�
 20-ray 内核的热态历史锚点是：单小区 32T/20MHz 约 0.158 s/样本、单小区
 64T/100MHz 约 1.074 s/样本、21 小区 16T/20MHz 约 7.48 s/样本；24 样本同一
 多小区配置实测串行 179.5s、4 进程 49.3s。大批轻配置现在也可能值得并行。
+
+系统级还有独立的 `replication_workers="auto"`：链路表只建一次，把 8 个 RngRun
+的 TTI 主循环分给进程。本机 6 UE 固定基准中，5 s 为 1.60→0.99 s（1.61×），
+50 s 为 14.20→4.49 s（3.16×）；有限 KPI 精确相同，非有限值类别相同。4 线程只有
+0.72~0.74×，所以不提供线程旋钮。逐 RB post-MMSE/IRC/ZF 又通过批量线性代数得到
+约 9.8~11.4×，固定输入逐值一致。原始机制记录在
+`artifacts/results/performance_audit.json`。
 
 `collect_ssb=False` 会减少工作量，但旧 30% 标定属于 20-ray 之前的版本，不再当作
 当前承诺。**比较耗时必须交错重测**；顺序跑变体会把预热效应读成“加速”，而冷态
@@ -229,9 +237,9 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 - **[接入自研算法 `EXTERNAL_ALGO.html`](EXTERNAL_ALGO.html)** —— 让你自己的算法进门 2/门 3、预注册分析口径、边界与局限
 - **[从 SINR 到真实吞吐 `LINK_ADAPTATION.html`](LINK_ADAPTATION.html)** —— L1 链路自适应、38.214 MCS/CQI、SNR 扫描曲线、并行生成
 - **[测试体系历史说明 `TESTS.html`](TESTS.html)** —— 2026-07-31 的历史快照，用于理解测试理念与事故案例；当前文件/接口清单以开发者文档为准
-- **仿真说明书** —— `sr_spec_sheet` 出的 HTML，默认只返回 URL、不打断用户；明确传 `open_browser=True` 才弹浏览器。页面以拓扑图打头，其余折进页签，还能改参数点「应用到仿真」把改动送回 agent（`sr_await_config` 接）。落在 `artifacts/specs/`，拷走用 `file://` 打开时自动退回复制粘贴
+- **仿真说明书 / 运行前工作台** —— `sr_spec_sheet` 出的 HTML，默认只返回 URL、不打断用户；明确传 `open_browser=True` 才弹浏览器。页面以真实拓扑与用户/默认来源打头，其余折进 7 个页签；改参数时会标出信道/链路表/TTI/KPI 哪些层需要重算，点「应用到仿真」把 delta 送回 agent（`sr_await_config` 接）。同时支持说明书/Resolved config JSON 下载、摘要复制、页面截图、系统分享与打印/PDF；拷走用 `file://` 打开时自动退回复制粘贴
 - **CDF 话务与目标负载校准** —— 包大小/包间隔各读一份 `value,cdf`，支持全局×profile 双标量、多 profile 与 `ue_ids` 显式用户映射；`target_prb_utilization=0.30` 用公共随机数调话务，最后另跑正式重复实验，未达容差绝不回填目标值。内置 synthetic CDF 只用于接口演示，后续可直接替换现场 CDF
-- **Agent 自适应 KPI 结果页** —— `sr_system_sim(evaluation_mode="experience")` 自动返回 `kpi_view.html_path/url`，顶层为“小区级 / 用户级”；用户级指标同时支持按 UE 图、跨 UE 经验 CDF 和明细表。调用 Agent 可传 `kpi_focus` 优先展示相关 KPI，其余折叠且不丢失，选择理由完整回传。页面含首包时延、含头速率、本小区 PRB 利用率、0..17 RBG 分布、MU 配对比例与用户级 PRB 归因，离线打开不依赖外部资源
+- **Agent 自适应 KPI 工作台** —— `sr_system_sim(evaluation_mode="experience")` 自动返回 `kpi_view.html_path/url`，顶层为“小区级 / 用户级”；用户级指标同时支持按 UE 图、跨 UE 经验 CDF 和明细表。调用 Agent 可传 `kpi_focus` 优先展示相关 KPI，其余折叠且不丢失，选择理由完整回传。页面含首包时延、含头速率、本小区 PRB 利用率、0..17 RBG 分布、MU 配对比例与用户级 PRB 归因，并可一键下载完整 JSON、小区 CSV、用户长表 CSV，复制摘要、导出页面截图、系统分享或打印/PDF；所有动作离线可用且只读结果
 - **体验仿真的冻结合同** —— 当前 TDD 系统只接受 100 MHz @ 30 kHz、272 RB = 17×16，标准 273 RB 在生成前明确舍去 1 RB；SRS hopping 只接受本地版本化的 C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0 17-hop profile。`experience_v2` 只用 `preset_20b_256qam / MCS table 3` 预置表；OLLA 默认由 `target_bler` 与 ACK 步长反解 NACK 步长，仍允许显式 override，结果会标注来源。通用载波/MCS 接口保留给链路级与未来扩展，不会静默混入当前体验结果
 - **[MU-MIMO 算法流程 `MU_MIMO.html`](MU_MIMO.html)** —— 配对/预编码/功率分配逐步展开，含六个待确认的设计选择与实测数字
 - **[通宵成果与待审 `TONIGHT.html`](TONIGHT.html)** —— 6 个 bug、5 个新需求提案、8 个待拍板的决策点

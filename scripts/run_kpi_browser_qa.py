@@ -21,6 +21,7 @@ from superran import kpi_view  # noqa: E402
 from superran import system as sy  # noqa: E402
 
 OUT = ROOT / "output" / "kpi-browser-qa.json"
+DOC_ASSET_DIR = ROOT / "docs" / "assets" / "ui"
 SIZE_CDF = ROOT / "presets" / "traffic" / "synthetic_packet_size.csv"
 INTERVAL_CDF = ROOT / "presets" / "traffic" / "synthetic_interarrival_ms.csv"
 
@@ -28,6 +29,7 @@ INTERVAL_CDF = ROOT / "presets" / "traffic" / "synthetic_interarrival_ms.csv"
 def _browser_qa(html_path: str) -> dict:
     """Exercise both KPI tabs in isolated Chromium at desktop/mobile widths."""
     report: dict = {"viewports": {}, "errors": [], "browser_backend": ""}
+    DOC_ASSET_DIR.mkdir(parents=True, exist_ok=True)
     target = Path(html_path).resolve().as_uri()
     with sync_playwright() as pw:
         try:
@@ -65,13 +67,24 @@ def _browser_qa(html_path: str) -> dict:
             cell_visible = page.locator("#cell-panel").is_visible()
             user_hidden_before = not page.locator("#user-panel").is_visible()
             priority_visible = page.locator(".priority").is_visible()
+            priority_compact = (
+                not page.locator(".priority details").evaluate("el=>el.open")
+                and page.locator(".priority").bounding_box()["height"]
+                < (180 if name == "desktop" else 260)
+            )
             tab_count = page.locator('.scope-tabs label[for^="scope-"]').count()
+            action_count = page.locator(
+                ".page-actions .action-btn,.page-actions .download-menu>summary").count()
+            download_count = page.locator(".page-actions [data-download]").count()
             cell_text = page.locator("#cell-panel").inner_text()
             overflow_before = page.evaluate(
                 "document.documentElement.scrollWidth - document.documentElement.clientWidth"
             )
             cell_shot = ROOT / "artifacts" / "kpi" / f"kpi-browser-qa-{name}-cell.png"
             page.screenshot(path=str(cell_shot), full_page=False)
+            if name == "desktop":
+                page.screenshot(
+                    path=str(DOC_ASSET_DIR / "kpi-workbench-cell.png"), full_page=False)
 
             page.locator('label[for="scope-user"]').click()
             page.wait_for_function("document.querySelector('#scope-user').checked")
@@ -85,12 +98,58 @@ def _browser_qa(html_path: str) -> dict:
             )
             user_shot = ROOT / "artifacts" / "kpi" / f"kpi-browser-qa-{name}-user.png"
             page.screenshot(path=str(user_shot), full_page=False)
+            if name == "desktop":
+                page.screenshot(
+                    path=str(DOC_ASSET_DIR / "kpi-workbench-user.png"), full_page=False)
+
+            action_checks = {
+                "action_button_count": action_count,
+                "download_option_count": download_count,
+                "json_download_valid": True,
+                "cell_csv_download_valid": True,
+                "screenshot_download_valid": True,
+            }
+            if name == "desktop":
+                downloads = ROOT / "output" / "kpi-browser-downloads"
+                downloads.mkdir(parents=True, exist_ok=True)
+                page.locator(".download-menu>summary").click()
+                with page.expect_download() as event:
+                    page.locator('[data-download="result.json"]').click()
+                json_path = downloads / "result.json"
+                event.value.save_as(json_path)
+                payload = json.loads(json_path.read_text(encoding="utf-8"))
+                action_checks["json_download_valid"] = bool(
+                    payload.get("schema") == "superran_kpi_export_v1"
+                    and payload.get("result", {}).get("cell")
+                )
+                page.locator(".download-menu>summary").click()
+                with page.expect_download() as event:
+                    page.locator('[data-download="cell.csv"]').click()
+                csv_path = downloads / "cell.csv"
+                event.value.save_as(csv_path)
+                csv_text = csv_path.read_text(encoding="utf-8-sig")
+                action_checks["cell_csv_download_valid"] = bool(
+                    "scope,key,label,mean" in csv_text
+                    and "serving_cell_prb_utilization" in csv_text
+                )
+                with page.expect_download(timeout=30_000) as event:
+                    page.locator('[data-action="screenshot"]').click()
+                image_path = downloads / event.value.suggested_filename
+                event.value.save_as(image_path)
+                image_bytes = image_path.read_bytes()
+                action_checks["screenshot_format"] = image_path.suffix.lower()
+                action_checks["screenshot_download_valid"] = bool(
+                    image_path.stat().st_size > 20_000
+                    and (image_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+                         or b"<svg" in image_bytes[:500])
+                )
 
             checks = {
                 "cell_checked_initially": cell_checked,
                 "cell_visible_initially": cell_visible,
                 "user_hidden_initially": user_hidden_before,
                 "agent_priority_visible": priority_visible,
+                "agent_priority_compact": priority_compact,
                 "scope_tab_count": tab_count,
                 "cell_has_prb_utilization": "本小区 PRB 利用率" in cell_text,
                 "cell_has_mu_share": "MU 配对占已用 PRB" in cell_text,
@@ -101,13 +160,17 @@ def _browser_qa(html_path: str) -> dict:
                 "horizontal_overflow_px": max(overflow_before, overflow_after),
                 "cell_screenshot": str(cell_shot),
                 "user_screenshot": str(user_shot),
+                **action_checks,
             }
             checks["pass"] = bool(
                 cell_checked
                 and cell_visible
                 and user_hidden_before
                 and priority_visible
+                and priority_compact
                 and tab_count == 2
+                and action_count == 5
+                and download_count == 3
                 and checks["cell_has_prb_utilization"]
                 and checks["cell_has_mu_share"]
                 and user_checked
@@ -115,6 +178,9 @@ def _browser_qa(html_path: str) -> dict:
                 and cell_hidden_after
                 and user_metric_panels > 0
                 and checks["horizontal_overflow_px"] <= 0
+                and checks["json_download_valid"]
+                and checks["cell_csv_download_valid"]
+                and checks["screenshot_download_valid"]
             )
             report["viewports"][name] = checks
             page.close()
@@ -141,7 +207,7 @@ def _synthetic_tables() -> list[sy.UeLinkTable]:
         [22.0, 19.0, 16.0, 12.0, 8.0, 4.0],
         max_rank=4,
         rb_per_rbg=16,
-        power_constraint="ebf",
+        power_constraint="nebf",
         mu_enabled=True,
         mu_rank_per_user=2,
         mu_precoder="zf",

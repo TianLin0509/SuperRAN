@@ -63,6 +63,7 @@ import numpy as np
 from . import bridge as br
 from . import carrier as carrier_grid
 from . import katex as _kx
+from . import webui
 from .paths import artifacts_root
 
 # ---------------------------------------------------------------------------
@@ -661,6 +662,8 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
     # --- 系统级仿真旋钮（sr_system_sim 用，不进 ChannelHub 的信道生成）---
     ("evaluation_mode", "系统评估模式", "select", ["capacity", "experience"],
      "capacity=历史全带调度；experience=DRB burst + 按需 RBG，多 UE/TTI"),
+    ("replication_workers", "重复实验进程", "select", ["auto", "1", "2", "4", "8"],
+     "auto 按 TTI×UE×重复数决定；短任务串行，长任务最多 4 进程；显式值会严格执行或报错"),
     ("traffic_model", "系统话务", "select",
      ["ftp3", "mixed", "full_buffer", "cbr", "bimodal"],
      "experience 推荐 mixed；bimodal 是按目标 RBG 反推包长的 legacy 模型"),
@@ -708,8 +711,8 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "留空=按 target BLER 自动反解；10% 且 up=0.01 时为 0.09"),
     ("precoder", "实际发射权", "select", ["svd", "type1"],
      "SVD 或 Type-I-style 工程码本基线；两者都只使用基站可见 CSI"),
-    ("power_constraint", "发射功率约束", "select", ["ebf", "pebf", "nebf"],
-     "EBF=总功率；PEBF=受最强天线限制的全局缩放；NEBF=逐天线 P/M 强制归一"),
+    ("power_constraint", "发射功率约束", "select", ["nebf", "ebf", "pebf"],
+     "默认 NEBF=逐天线 P/M 强制归一并用满功率；EBF=总功率；PEBF=受最强天线限制的全局缩放"),
     ("rb_power_control_enabled", "逐 RB 功控", "select", ["off", "on"],
      "默认关=每 RB 1x；开启后每小区总功率仍固定，最终倍率限 0.1x..4x"),
     ("rb_power_overrides", "RB 功率 override JSON", "json", None,
@@ -744,6 +747,7 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
 #: 两处漂了的话页面显示的就不是实际会跑的值，而这种不一致没有任何提示。
 _SIM_DEFAULTS: dict[str, Any] = {
     "evaluation_mode": "capacity",
+    "replication_workers": "auto",
     "traffic_model": "ftp3",
     "small_ue_share": 0.5,
     "small_file_bytes": 1_500,
@@ -767,7 +771,7 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "mu_olla_step_up_db": 0.01,
     "mu_olla_step_down_db": None,
     "precoder": "svd",
-    "power_constraint": "ebf",
+    "power_constraint": "nebf",
     "rb_power_control_enabled": "off",
     "rb_power_overrides": "",
     "neighbor_prb_util": 0.3,
@@ -852,6 +856,15 @@ def _interactive(spec: dict[str, Any], *, apply_url: str = "",
         "title": spec["title"],
         "post": apply_url,
         "id": spec_id,
+        "impact": {
+            "channel": ["num_samples", "num_sites", "sectors_per_site", "isd_m",
+                        "num_ues", "ue_speed_kmh"],
+            "link": ["precoder", "power_constraint", "neighbor_prb_util",
+                     "neighbor_load_jitter", "csi_aging", "srs_period_ms",
+                     "srs_hopping", "csi_processing_delay_ms",
+                     "csi_report_period_ms", "rb_power_control_enabled",
+                     "rb_power_overrides", "mu_precoder", "mu_csi_error_variance"],
+        },
     }
     return f"""
 <p class="lead">改完点<b>应用到仿真</b>，改动直接回到 agent——不用复制、不用切窗口。
@@ -862,6 +875,9 @@ RB 数与 RBG 配置不在这里开放修改；若用其他带宽生成链路级
 <code>sr_system_sim</code> 会明确拒绝，不会自动猜一套新格栅。</p>
 <div class="ctls">{"".join(rows)}</div>
 <div class="hero" id="prev"></div>
+<div class="impact" id="impact"><b>重算影响</b><span class="impact-chip" data-impact="channel">信道数据</span>
+  <span class="impact-chip" data-impact="link">链路表</span><span class="impact-chip" data-impact="tti">TTI 主循环</span>
+  <span class="impact-chip" data-impact="kpi">KPI 页面</span><span id="change-count">0 项改动</span></div>
 <div class="pvbar">
   <button class="btn" id="ap" hidden>应用到仿真</button>
   <button class="btn" id="cp">复制配置改动</button>
@@ -948,7 +964,15 @@ function sync(){{
   draw();
   const d=diff(), ks=Object.keys(d);
   const t=document.getElementById('pl');
-  AP.disabled=!ks.length;
+  const invalid=document.querySelectorAll('.ctls [data-k]:invalid').length;
+  AP.disabled=!ks.length||!!invalid;
+  document.getElementById('change-count').textContent=ks.length+' 项改动';
+  const stages=new Set();
+  if(ks.some(k=>ST.impact.channel.includes(k))){{stages.add('channel');stages.add('link');stages.add('tti');stages.add('kpi');}}
+  else if(ks.some(k=>ST.impact.link.includes(k))){{stages.add('link');stages.add('tti');stages.add('kpi');}}
+  else if(ks.length){{stages.add('tti');stages.add('kpi');}}
+  document.querySelectorAll('[data-impact]').forEach(x=>x.classList.toggle('on',stages.has(x.dataset.impact)));
+  if(invalid){{t.value='有 '+invalid+' 个参数超出允许范围，请先修正红框字段。';return;}}
   if(!ks.length){{t.value='（还没有改动。调上面的参数后这里会出现可粘贴的内容。）';return;}}
   let s='【仿真配置调整】基于 '+ST.title+NL+'改动 '+ks.length+' 项：'+NL;
   for(const k of ks)s+='  '+k+': '+F(k,ST.init[k])+' -> '+F(k,d[k])+NL;
@@ -1285,6 +1309,7 @@ def _svg_pdp(spec: dict[str, Any]) -> str:
 _CSS = """
 :root{--bg:#fafafa;--card:#fff;--ink:#1d1d1f;--ink-soft:#6e6e73;--border:#d2d2d7;
  --accent:#0071e3;--tint:#f2f2f4;--tint-blue:#eef5fd;--tint-blue-ink:#0055b3;
+ --line:var(--border);--panel:var(--card);--muted:var(--ink-soft);--blue:var(--accent);--cyan:#38a3c4;
  --tint-amber:#fdf5e8;--tint-amber-ink:#8a5a00;--tint-red:#fdeeed;--tint-red-ink:#a32620;}
 @media(prefers-color-scheme:dark){:root{--bg:#1d1d1f;--card:#2c2c2e;--ink:#f5f5f7;
  --ink-soft:#aeaeb2;--border:#38383a;--accent:#0a84ff;--tint:#333336;
@@ -1295,7 +1320,15 @@ body{margin:0;padding:36px 20px;background:var(--bg);color:var(--ink);
  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
  font-size:15px;line-height:1.7}
 .wrap{max-width:1000px;margin:0 auto}
-h1{font-size:29px;font-weight:700;letter-spacing:-.03em;margin:0 0 6px}
+.skip-link{position:fixed;left:14px;top:-80px;z-index:200;background:#fff;color:#0055b3;
+ padding:10px 14px;border-radius:8px;font-weight:700}.skip-link:focus{top:14px}
+.spec-head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;padding:24px 26px;
+ background:linear-gradient(125deg,var(--card),var(--tint-blue));border:1px solid var(--border);
+ border-radius:16px;margin-bottom:14px}.spec-head-copy{min-width:0}.spec-head .eyebrow{font-size:10.5px;
+ letter-spacing:.15em;color:var(--tint-blue-ink);font-weight:800}.spec-badges{display:flex;gap:6px;
+ flex-wrap:wrap;justify-content:flex-end}.spec-badges span{border:1px solid var(--border);background:var(--card);
+ border-radius:999px;padding:4px 8px;font-size:10.5px;white-space:nowrap}
+h1{font-size:29px;font-weight:700;letter-spacing:-.03em;margin:4px 0 6px}
 h2{font-size:20px;font-weight:700;margin:40px 0 6px;padding-top:18px;border-top:1px solid var(--border)}
 .meta{color:var(--ink-soft);font-size:12.5px;font-family:ui-monospace,Consolas,monospace;margin:0 0 6px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:13px;padding:20px;margin:16px 0}
@@ -1400,7 +1433,9 @@ h3{font-size:15.5px;font-weight:600;margin:22px 0 4px}
 .flb{stroke:var(--accent);stroke-width:1.3;fill:none;stroke-dasharray:5 3}
 .fbt{font:600 10.5px ui-monospace,Consolas,monospace;fill:#8a5a00}
 .fbd{font:10px -apple-system,system-ui,sans-serif;fill:var(--ink-soft)}
-.pvbar{display:flex;align-items:center;gap:10px;margin:14px 0 8px;flex-wrap:wrap}
+.pvbar{position:sticky;bottom:10px;z-index:12;display:flex;align-items:center;gap:10px;margin:14px 0 8px;
+ flex-wrap:wrap;background:var(--card);border:1px solid var(--border);border-radius:11px;padding:10px;
+ box-shadow:0 10px 28px rgba(15,23,42,.12)}
 /* 回执分两种状态：agent 正等着（绿）vs 已入收件箱、等它下次动作（琥珀）。
    对用户是完全不同的两件事，不能都用一样的灰字。 */
 #msg{font-size:13px;line-height:1.5}
@@ -1413,7 +1448,17 @@ h3{font-size:15.5px;font-weight:600;margin:22px 0 4px}
 .pl{width:100%;font:12.5px ui-monospace,Consolas,monospace;padding:12px 14px;
  border:1px solid var(--border);border-radius:10px;background:var(--tint);
  color:var(--ink);resize:vertical}
+.impact{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:10px 0 2px;color:var(--ink-soft);
+ font-size:12px}.impact b{color:var(--ink)}.impact-chip{border:1px solid var(--border);border-radius:999px;
+ padding:3px 8px;background:var(--card)}.impact-chip.on{border-color:var(--accent);color:var(--tint-blue-ink);
+ background:var(--tint-blue);font-weight:650}
+@media(max-width:720px){body{padding:12px 9px}.spec-head{display:block;padding:19px}.spec-badges{
+ justify-content:flex-start;margin-top:10px}.tabs>label{padding:8px 10px;font-size:12px}.facts{grid-template-columns:repeat(2,1fr)}
+ .pvbar{bottom:5px}.btn{padding:8px 11px}}
+@media(prefers-reduced-motion:reduce){.panels>section{animation:none}}
 """
+
+_CSS += webui.action_css()
 
 
 def _facts(spec: dict[str, Any], highlight: list[str] | None = None) -> list[dict[str, Any]]:
@@ -1561,16 +1606,64 @@ def render_html(
 
     meta_ds = f' · 数据集 {_esc(spec["dataset_id"])}' if spec.get("dataset_id") else ""
     meta_n = f' · {spec["num_samples"]} 个样本' if spec.get("num_samples") else ""
+    summary_text = "\n".join([
+        "SuperRAN 运行前仿真说明书",
+        f"标题: {spec['title']}",
+        f"摘要: {headline(spec)}",
+        f"配置来源: 用户指定 {n_user}/{n_all} 项，其余由系统补全",
+        f"阵列: {spec['panel'][0]}H x {spec['panel'][1]}V x {spec['panel'][2]}pol",
+        f"载波: {fq['bandwidth_hz'] / 1e6:g} MHz / {fq['num_rb']} RB / {fq['num_rbg']} RBG",
+        f"需要确认的提示: {len(spec['notes'])} 条",
+        "说明: 页面改动只形成 delta，最终仍由原 Draft 重新解析后执行。",
+    ])
+    export_envelope = {
+        "schema": "superran_spec_export_v1",
+        "spec_id": spec_id,
+        "spec": spec,
+    }
+    resolved_page_config = dict(spec["config"])
+    for key, _label, kind, _range_or_options, _hint in _EDITABLE:
+        if key == "num_samples":
+            if spec.get("num_samples") is not None:
+                resolved_page_config[key] = spec["num_samples"]
+        elif key not in resolved_page_config and key in _SIM_DEFAULTS:
+            value = _SIM_DEFAULTS[key]
+            if value is not None or kind == "auto_number":
+                resolved_page_config[key] = value
+    actions = webui.render_actions(
+        title=f"SuperRAN 仿真说明书 · {spec['title']}",
+        context=f"RUN BEFORE · 用户指定 {n_user}/{n_all} 项",
+        summary_text=summary_text,
+        root_selector="#share-surface",
+        base_filename=f"superran-spec-{spec_id or 'configuration'}",
+        downloads={
+            "spec.json": (
+                "完整说明书 JSON", "application/json;charset=utf-8",
+                json.dumps(export_envelope, ensure_ascii=False, indent=2,
+                           default=str, allow_nan=False),
+            ),
+            "config.json": (
+                "Resolved page config JSON", "application/json;charset=utf-8",
+                json.dumps(resolved_page_config, ensure_ascii=False, indent=2,
+                           default=str, allow_nan=False),
+            ),
+        },
+    )
+    writeback_badge = "可一键回传 Agent" if apply_url else "离线复制回传"
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{_esc(spec["title"])}</title><style>{_CSS}</style>
+<link rel="icon" href="data:,"><title>{_esc(spec["title"])}</title><style>{_CSS}</style>
 {_kx.head_assets()}</head>
-<body><div class="wrap">
+<body><a class="skip-link" href="#main">跳到说明书</a><div class="wrap" id="share-surface">
 
-<h1>{_esc(spec["title"])}</h1>
-<p class="meta">{_esc(spec["created_at"])} · 引擎 {_esc(spec["source"])}{meta_ds}{meta_n}</p>
+<header class="spec-head"><div class="spec-head-copy"><span class="eyebrow">SUPERRAN · RUN-BEFORE CONTRACT</span><h1>{_esc(spec["title"])}</h1>
+<p class="meta">{_esc(spec["created_at"])} · 引擎 {_esc(spec["source"])}{meta_ds}{meta_n}</p></div>
+<div class="spec-badges"><span>{writeback_badge}</span><span>{n_user}/{n_all} 用户指定</span><span>{fq['num_rbg']} RBG</span><span>{len(spec['notes'])} 条提示</span></div></header>
+
+{actions}
+<main id="main">
 
 {notes}
 
@@ -1640,6 +1733,7 @@ def render_html(
 </section>
 
 </div></div>
+</main>
 
 <footer>superran 仿真说明书 · 图与数均由本次配置生成，未经手工编辑{_kx_credit()}</footer>
 </div>

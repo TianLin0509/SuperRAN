@@ -653,7 +653,7 @@ async def sr_link_performance(
     methods: list[str] | None = None,
     receiver: str = "mmse",
     use_estimated_csi: bool = False,
-    power_constraint: str = "ebf",
+    power_constraint: str = "nebf",
 ) -> dict[str, Any]:
     """算谱效：预编码 → 逐层 SINR → 频谱效率，并横向对比多种预编码方案。
 
@@ -669,7 +669,7 @@ async def sr_link_performance(
     use_estimated_csi : True 时用估计信道计算预编码、用理想信道评估性能，
         得到的是"CSI 有误差时的实际代价"——CSI 反馈类课题的核心对比。
     receiver : ``mmse``（默认）/ ``zf`` / ``mrc``。
-    power_constraint : ``ebf`` / ``pebf`` / ``nebf``。矩阵约定是
+    power_constraint : ``nebf``（默认）/ ``ebf`` / ``pebf``。矩阵约定是
         ``Q[frequency, antenna, stream]``，所以每天线功率对应 antenna 行范数。
     """
     return await anyio.to_thread.run_sync(
@@ -1230,6 +1230,7 @@ async def sr_tdd_mcs(
     use_estimated_csi: bool = True,
     feedback_ack: bool | None = None,
     olla_ack_step_mcs: float = 0.1,
+    power_constraint: str = "nebf",
 ) -> dict[str, Any]:
     """TDD 下按 CQI、SVD-vs-PMI BF Gain 和 OLLA 选择最终 MCS。
 
@@ -1248,8 +1249,10 @@ async def sr_tdd_mcs(
     BLER 更新下一时刻的 OLLA；10% 默认对应 ACK +0.1、NACK -0.9 MCS。当前时刻
     使用传入的 OLLA，反馈只影响返回的 `olla_next_offset_mcs`。
 
-    返回每个中间量，包括初始 MCS/门限、逐流 PMI/SVD SINR、BF Gain、用户 SINR、
-    BF 后 MCS、OLLA 取整前后值和最终 BLER，便于 Agent 逐步审计。
+    默认 ``power_constraint=nebf``。返回的 gNB 预测量与真实接收量分开：
+    ``SINR_NEBF/PEBF/EBF`` 和 ``SINR_PMI`` 在 gNB CSI 上形成 BF Gain；最终
+    BLER 只使用同一物理权打到 ``h_true`` 后的实际 post-MMSE SINR 查表。
+    只有 CQI/BF/OLLA 标量而没有实际接收 SINR 时，BLER 必须返回未知。
     """
     return await anyio.to_thread.run_sync(
         functools.partial(
@@ -1263,6 +1266,7 @@ async def sr_tdd_mcs(
             use_estimated_csi=use_estimated_csi,
             feedback_ack=feedback_ack,
             olla_ack_step_mcs=olla_ack_step_mcs,
+            power_constraint=power_constraint,
         )
     )
 
@@ -1278,6 +1282,7 @@ def _tdd_mcs_sync(
     use_estimated_csi: bool,
     feedback_ack: bool | None,
     olla_ack_step_mcs: float,
+    power_constraint: str,
 ) -> dict[str, Any]:
     from . import loader as ld
 
@@ -1291,6 +1296,7 @@ def _tdd_mcs_sync(
         use_estimated_csi=use_estimated_csi,
         feedback_ack=feedback_ack,
         olla_ack_step_mcs=olla_ack_step_mcs,
+        power_constraint=power_constraint,
     ))
 
 
@@ -1776,11 +1782,12 @@ def sr_system_sim(
     olla_speedup: float = 1.0,
     olla_warmup_speedup: float = 1.0,
     precoder: str = "svd",
-    power_constraint: str = "ebf",
+    power_constraint: str = "nebf",
     rb_power_control_enabled: bool | str = False,
     rb_power_overrides: list[dict[str, Any]] | str | None = "",
     seed: int = 0,
     num_replications: int = 8,
+    replication_workers: int | str = "auto",
     kpi_focus: list[str] | None = None,
     kpi_intent: str = "",
 ) -> dict[str, Any]:
@@ -1904,8 +1911,9 @@ def sr_system_sim(
         单面板宽带列码本近似当发射权，多层采用增量贪心而非完整矩阵码本枚举。
         码本自由度少，**在 CSI 老化下反而可能更耐受**——能算错的地方也少。
         ``type1`` 时 BF Gain 恒为 0（发射权就是 CQI 的参照权）。
-    power_constraint : ``ebf`` 总功率；``pebf`` 对 EBF 权做全局缩放满足每天线 P/M；
-        ``nebf`` 逐天线强制 P/M、用满总功率但可能破坏 MU 零陷。
+    power_constraint : ``nebf``（默认）逐天线强制 P/M、用满总功率但可能破坏 MU
+        零陷；``ebf`` 是总功率约束；``pebf`` 对 EBF 权做全局缩放、受最大发射
+        天线限制而满足每天线 P/M。
     rb_power_control_enabled : 默认关闭，关闭时每个 RB 都是 1x。开启后按
         ``rb_power_overrides`` 连续调节，并对每个小区强制 ``sum(q)=N_RB``。
     rb_power_overrides : JSON/对象数组。每项用 ``cell_index``（整数或 ``all``）、
@@ -1935,6 +1943,10 @@ def sr_system_sim(
           8 是拐点——再翻倍只多拿 2.6 个百分点，却要多一倍墙钟。
 
         设成 1 会退回"单次运行、无区间"，并在 ``notes`` 里明确告警。
+    replication_workers : 重复实验的进程数，默认 ``auto``。短任务保持串行；
+        工作量足以覆盖 Windows spawn 与链路表序列化成本时自动用最多 4 个进程。
+        也可显式设 1/2/4/8；结果 ``parallel`` 会返回实际进程数、阈值与降级原因。
+        线程后端不提供，因为 TTI Python 事件循环实测 4 线程反而更慢。
     kpi_focus : 调用本工具的 Agent/LLM 依据用户问题显式传入的 KPI key 或关注词。
         页面会保存选择来源和理由、优先展示相关 KPI，其余折叠；不在仿真库内部
         暗调另一个模型。
@@ -2208,15 +2220,17 @@ def sr_system_sim(
                 num_replications=num_replications, master_seed=seed,
                 sys_cfg=system_cfg, traffic=traffic_cfg, sched=scheduler_cfg,
                 kpi=kpi_cfg, mu_se_ratio=float(mu_gain["ratio"]),
-                build_elapsed_s=build_s)
+                build_elapsed_s=build_s,
+                replication_workers=replication_workers)
             res = calibration.result
         else:
             res = sysm.simulate_replications(
                 tables, num_replications=num_replications, master_seed=seed,
                 sys_cfg=system_cfg, traffic=traffic_cfg, sched=scheduler_cfg,
                 kpi=kpi_cfg, mu_se_ratio=float(mu_gain["ratio"]),
-                build_elapsed_s=build_s)
-    except ValueError as exc:
+                build_elapsed_s=build_s,
+                replication_workers=replication_workers)
+    except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}
     out = res.as_dict()
     out.update(_system_adaptation_contract(

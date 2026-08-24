@@ -31,7 +31,7 @@ sr_system_sim(
     csi_aging=True, srs_period_ms=10.0, srs_hopping=True,
     csi_processing_delay_ms=2.0, csi_report_period_ms=20.0,
     warmup_s=1.0, olla_speedup=1.0, olla_warmup_speedup=1.0,
-    precoder="svd", power_constraint="ebf", seed=0, num_replications=8,
+    precoder="svd", power_constraint="nebf", seed=0, num_replications=8,
     kpi_focus=None, kpi_intent="",
 )
 ```
@@ -77,6 +77,19 @@ sr_system_sim(
 
 **`seed` 是实验批次的主种子（`RngSeed`），重复实验不要靠改它**——改它等于换一整个
 宇宙，两批之间没有"流不重叠"的保证。要重复就调 `num_replications`。
+
+### 重复实验进程 `replication_workers`
+
+MCP 默认 `"auto"`：以 `n_rep × num_tti × num_ues` 判断是否值得支付 Windows spawn
+和链路表序列化成本，小任务串行，长任务最多 4 进程；用户可显式设 1/2/4/8。
+库函数 `simulate_replications` 默认仍为 1，保护 REPL 和没有安全 `__main__` 的脚本。
+显式值失败或超过 CPU/重复数/内存安全上限时硬报错；只有 auto 可带明确
+`fallback_reason` 回退。结果的 `parallel` 字段记录 requested/actual/backend/阈值。
+
+本机交错三轮中位基准（6 UE、8 次重复）：5 s 为 1.601→0.994 s（1.61×），50 s 为
+14.197→4.495 s（3.16×）；有限 KPI exact、非有限类别一致。4 线程为 0.72~0.74×，
+因此不提供线程后端。该数字只说明当前版本的调度开销，实际任务仍以返回的
+`elapsed_s` 为准。
 
 ### 随机流是分开的
 
@@ -397,7 +410,9 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 
 OLLA 默认只要求用户给 `target_bler`。ACK 步长默认 **+0.01 MCS**，NACK 步长为
 `None` 时按 `down=up*(1-target)/target` 自动反解；目标 10% 时才得到 **−0.09 MCS**。
-顺序是先由发送侧 SINR 反折无 OLLA MCS，再加连续 MCS offset、floor 并钳位。
+顺序是先由 `SINR_AMC_PRED`（CQI 门限 + gNB 可见 BF Gain，不是物理 TX/RX
+SINR）反折无 OLLA MCS，再加连续 MCS offset、floor 并钳位；BLER 只查真实接收
+`SINR_NEBF/PEBF/EBF_RX`。
 用户显式填写 SU/MU down 步长时保留该值并在结果标为 override；SU 与 MU 各自反解、
 状态仍按用户独立维护。（现网口头常说的 −0.1 对应 9.09%。）
 历史 `*_db` 参数名仅为 API 兼容保留，值的单位不是 dB。

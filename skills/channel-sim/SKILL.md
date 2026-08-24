@@ -220,6 +220,7 @@ SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且�
 
 **最容易出错的默认值**：`evaluation_mode="capacity"`（要研究按需 RBG 必须显式改成
 `experience`）、`num_replications=8`（**别调到 6 以下**，见上）、
+`replication_workers="auto"`（短任务串行，长任务用进程；实际值看结果 `parallel`）、
 `neighbor_prb_util=0.3`、`csi_aging=True`、`olla_speedup=1.0`、`mu_enabled=False`。
 `experience_v2` 当前支持两用户、每用户 rank2 的数据受限 SU/MU 自适应；开 MU 时必须有
 完整 pair 链路表，缺失会硬报错，不再按 1.0 静默降级。队列积压就调低到达率，burst 太少

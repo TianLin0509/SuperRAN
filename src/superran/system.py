@@ -4,7 +4,7 @@
 系统级问"**这个小区里的用户实际体验到多快**"——后者要把话务的到达与结束、
 调度器在多用户间的取舍与缓冲区排空算进去。两个模式都把一次用户 grant
 视为一个单码字 TB，并只允许一次 IR/CC 重传：空口 MCS/RBG 数/rank/TBS 冻结，
-BLER 从预置 NewTx 曲线推导。当前不展开 RV、LLR、并行 process 或标准时序。
+BLER 从预置 NewTx 曲线推导。当前不展开 RV、LLR、并行 HARQ process 或标准时序。
 
 本文件保留历史 ``legacy_v1`` 口径以复现旧结果；它的 ``tail/head_tail`` 是
 项目早期的近似实现，不能再冒充 28.552。标准化的 DRB busy-period、首传起点、
@@ -23,7 +23,9 @@ BLER 从预置 NewTx 曲线推导。当前不展开 RV、LLR、并行 process �
 """
 from __future__ import annotations
 
+import os
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -37,6 +39,7 @@ from . import power_control as pc
 from . import rng as rg
 
 _EPS = 1e-12
+_REPLICATION_PROCESS_STATE: dict[str, Any] = {}
 
 
 def _finite_real(value: Any) -> bool:
@@ -790,8 +793,9 @@ class SystemConfig:
     # 验证方法：Jakes 的 ρ(τ)=|J0(2π·fd·τ)| 首零点在 τ=2.405/(2π·fd)，
     # 3 km/h 时是 53 ms；实测极小值落在第 10 个快照 → 每快照 5.3 ms，对上。
     snapshot_update_ms: float = 5.0
-    # 发射权功率约束：EBF 总功率；PEBF/NEBF 每天线 P/M，定义见 beamforming.py。
-    power_constraint: str = "ebf"
+    # 发射权功率约束：系统/TDD 默认 NEBF（每天线 P/M 且用满总功率）；
+    # EBF/PEBF 仍可显式选择，定义见 beamforming.py。
+    power_constraint: str = "nebf"
     # 与上面的空间约束正交：逐 RB 连续功率倍率，默认关闭/均匀分配。
     rb_power_control: pc.RbPowerControlConfig = field(
         default_factory=pc.RbPowerControlConfig)
@@ -979,15 +983,15 @@ class UeLinkTable:
     iot_db: float = float("nan")         # 干扰抬升：(I+N)/N，>20 dB 算高干扰
     iot_sample_valid: float = 1.0        # 这个 UE 有多少比例的**快照**算得出 IoT
     sir_db: float = float("nan")
-    # **发送侧与接收侧是两个 SINR。** 发送端一开始不知道干扰，
-    # 按无干扰（或 CQI 反馈的粗略统计）选 MCS；接收端实打实吃着干扰。
-    # 两者的差通过误码由 OLLA 收敛回来——这是干扰影响吞吐的第一性路径。
-    sinr_tx_db: np.ndarray | None = None  # [snapshot, rank] CQI 门限 + BF Gain
+    # 这是历史字段名，不是物理 ``SINR_NEBF/PEBF/EBF``。它保存
+    # ``Gamma(MCS(CQI))+BF Gain`` 这个 gNB 侧 AMC 预测坐标；真实接收 SINR 在
+    # ``sinr_db/sinr_rbg_db``，并且只有后者可以查 BLER。
+    sinr_tx_db: np.ndarray | None = None  # [snapshot, rank] legacy alias: AMC prediction
     mcs_tx: np.ndarray | None = None      # [snapshot, rank] 发送端据此定的 MCS
     # 逐 RBG 真值供实际 grant 的 BLER；功控打开时内部保留 272 RB 后再按
     # 16 RB 线性聚合，不能拿全带 SINR 代替一个 1-RBG 小包。
     sinr_rbg_db: np.ndarray | None = None     # [snapshot,rank,RBG]
-    sinr_tx_rbg_db: np.ndarray | None = None  # [snapshot,rank,RBG]
+    sinr_tx_rbg_db: np.ndarray | None = None  # legacy alias: per-RBG AMC prediction
     # --- 发送侧 SINR 的拆解，供审计与说明书引用 ---
     bf_gain_db: np.ndarray | None = None   # [snapshot, rank] SVD − PMI（基站自算）
     pmi_sinr_db: np.ndarray | None = None  # [snapshot, rank] Type I 权下的用户级 SINR
@@ -1004,7 +1008,7 @@ class UeLinkTable:
     # 否则 build_link_tables(target_bler=...) 选出来的 rank 和主循环选出来的 MCS
     # 是按两个不同判据来的，而这种不一致在结果里完全看不出来。
     target_bler: float = 0.1
-    power_constraint: str = "ebf"
+    power_constraint: str = "nebf"
     frequency_rows_per_rbg: int = 1
     frequency_rbg_boundaries: tuple[tuple[int, int], ...] | None = None
     serving_cell_index: int | None = None
@@ -1019,6 +1023,16 @@ class UeLinkTable:
     h_prec_rbg: np.ndarray | None = field(default=None, repr=False)  # [S,F,BS,UE]
     noise_power_by_snapshot: np.ndarray | None = field(default=None, repr=False)
     mu_links: dict[int, MuPairLink] = field(default_factory=dict, repr=False)
+
+    @property
+    def amc_predicted_sinr_db(self) -> np.ndarray | None:
+        """Preferred name for the legacy ``sinr_tx_db`` decision coordinate."""
+        return self.sinr_tx_db
+
+    @property
+    def amc_predicted_sinr_rbg_db(self) -> np.ndarray | None:
+        """Preferred name for the legacy ``sinr_tx_rbg_db`` decision coordinate."""
+        return self.sinr_tx_rbg_db
 
 
 def la_sel(sinr_db: float, table: int, target_bler: float) -> int:
@@ -1223,7 +1237,7 @@ def build_link_tables(
     load_jitter_rng: np.random.Generator | None = None,
     neighbor_load_jitter: float = 0.05,
     precoder: str = "svd",
-    power_constraint: str = "ebf",
+    power_constraint: str = "nebf",
     mu_enabled: bool = False,
     mu_rank_per_user: int = mu.MU_MAX_RANK,
     mu_precoder: str = "zf",
@@ -1807,7 +1821,7 @@ def build_link_tables(
 
 def build_mu_pair_tables(
     tables: list[UeLinkTable], *, rank_per_user: int = mu.MU_MAX_RANK,
-    precoder: str = "zf", power_constraint: str = "ebf",
+    precoder: str = "zf", power_constraint: str = "nebf",
     csi_error_variance: float = 0.0,
 ) -> dict[str, Any]:
     """预计算所有两用户 MU 链路及 ``CorrLoss + powerLoss`` 分解。
@@ -1967,7 +1981,7 @@ def measure_mu_gain(
     snapshot_ms: float = 5.0,
     rb_per_rbg: int = 16,
     rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
-    power_constraint: str = "ebf",
+    power_constraint: str = "nebf",
     mu_precoder: str = "zf",
     mu_csi_error_variance: float = 0.0,
 ) -> dict[str, Any]:
@@ -3047,6 +3061,89 @@ def simulate(
 # ---------------------------------------------------------------------------
 # 多次重复：所有 KPI 带置信区间
 # ---------------------------------------------------------------------------
+
+
+def _init_replication_process(
+    tables: list[UeLinkTable],
+    sys_cfg: SystemConfig | None,
+    traffic: TrafficConfig | None,
+    sched: SchedulerConfig | None,
+    kpi: KpiConfig | None,
+    mu_se_ratio: float,
+) -> None:
+    """Install read-only simulation state once in each spawned worker."""
+    _REPLICATION_PROCESS_STATE.clear()
+    _REPLICATION_PROCESS_STATE.update({
+        "tables": tables,
+        "sys_cfg": sys_cfg,
+        "traffic": traffic,
+        "sched": sched,
+        "kpi": kpi,
+        "mu_se_ratio": float(mu_se_ratio),
+    })
+
+
+def _run_replication_process(index: int, book: rg.RngBook) -> tuple[int, SystemResult]:
+    """ProcessPool target; stable index restores replication order exactly."""
+    state = _REPLICATION_PROCESS_STATE
+    return index, simulate(
+        state["tables"], sys_cfg=state["sys_cfg"], traffic=state["traffic"],
+        sched=state["sched"], kpi=state["kpi"],
+        mu_se_ratio=float(state["mu_se_ratio"]), rng=book)
+
+
+def _resolve_replication_workers(
+    requested: int | str,
+    *,
+    num_replications: int,
+    num_tti: int,
+    num_ues: int,
+) -> tuple[int, dict[str, Any]]:
+    """Choose process count from measured TTI work, never from sample count alone."""
+    if isinstance(requested, str):
+        text = requested.strip().lower()
+        if text == "auto":
+            mode = "auto"
+        elif text.isdigit() and int(text) >= 1:
+            requested = int(text)
+            mode = "explicit"
+        else:
+            raise ValueError("replication_workers 只支持正整数或 'auto'")
+    elif (isinstance(requested, (bool, np.bool_))
+          or not isinstance(requested, (int, np.integer))
+          or int(requested) < 1):
+        raise ValueError("replication_workers 只支持正整数或 'auto'")
+    else:
+        mode = "explicit"
+
+    cpu = max(int(os.cpu_count() or 1), 1)
+    cap = max(1, min(8, cpu, int(num_replications)))
+    work_units = int(num_replications) * int(num_tti) * max(int(num_ues), 1)
+    # Frozen on this workstation by scripts/run_performance_audit.py:
+    # 8 reps × 6 UE × 10k TTI gained 1.61x with four processes, while
+    # threads were 0.72x.  Stay serial for smaller jobs to avoid Windows spawn
+    # and table-pickle overhead; explicit user settings remain authoritative.
+    if mode == "auto":
+        workers = min(4, cap) if (num_replications >= 4 and work_units >= 300_000) else 1
+    else:
+        if int(requested) > cap:
+            raise ValueError(
+                f"replication_workers={int(requested)} 超过当前安全上限 {cap}"
+                "（受 CPU、重复次数与每进程链路表内存共同限制）")
+        workers = int(requested)
+    return workers, {
+        "requested": requested,
+        "policy": mode,
+        "workers": workers,
+        "worker_cap": cap,
+        "work_units_rep_tti_ue": work_units,
+        "auto_parallel_threshold": 300_000,
+        "backend": "process" if workers > 1 else "serial",
+        "thread_backend_disabled": (
+            "measured slower for Python event loop; see performance_audit.json"),
+    }
+
+
 @dataclass
 class ReplicationResult:
     """n 次重复的汇总。**每个 KPI 都是 mean / std / ci95 / n_rep，不是一个裸数。**"""
@@ -3058,6 +3155,7 @@ class ReplicationResult:
     config: dict[str, Any]
     elapsed_s: float
     build_elapsed_s: float = 0.0
+    parallel: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -3074,6 +3172,7 @@ class ReplicationResult:
                "replications": [b.as_dict()["replication"] for b in self.books],
                "elapsed_s": round(self.elapsed_s, 3),
                "build_tables_s": round(self.build_elapsed_s, 3),
+               "parallel": self.parallel,
                "notes": self.notes}
         if self.runs:
             definitions = self.runs[0].diagnostics.get("kpi_definitions")
@@ -3129,6 +3228,7 @@ def simulate_replications(
     kpi: KpiConfig | None = None,
     mu_se_ratio: float = 1.0,
     build_elapsed_s: float = 0.0,
+    replication_workers: int | str = 1,
     progress: Any = None,
 ) -> ReplicationResult:
     """跑 n 次独立重复，所有 KPI 报 ``mean / std / ci95 / n_rep``。
@@ -3144,6 +3244,12 @@ def simulate_replications(
     （对应 ``RngSeed``），理由见 :mod:`rng` 的模块文档。
     ``replication_start`` 可在同一主种子下选择一段不重叠的 RngRun；默认仍从 0
     开始。它用于把负载校准的 probe 与正式反馈样本隔离开。
+
+    ``replication_workers`` 默认 1 保持库/Notebook/脚本入口安全；MCP 前门默认
+    ``"auto"``，只在测得足以覆盖 Windows spawn 与链路表序列化成本时启用进程。
+    每个进程初始化时只接收一次只读链路表，任务只传 RngBook；结果按原 replication
+    index 还原，因此 1/4 workers 的 KPI 与随机身份逐位一致。线程后端不提供：当前
+    TTI 状态机以 Python 事件处理为主，实测 4 线程比串行更慢。
 
     **这个置信区间覆盖什么、不覆盖什么，必须说清楚。** 各次重复共用同一批信道
     与同一张链路表，所以区间反映的是**话务到达、HARQ 误码、调度决胜**这三条流。
@@ -3187,12 +3293,55 @@ def simulate_replications(
         raise ValueError(f"重复次数至少 1 次，收到 {n}")
     t0 = time.perf_counter()
     books = rg.replications(master_seed, n, start=replication_start)
-    runs: list[SystemResult] = []
-    for i, bk in enumerate(books):
-        runs.append(simulate(tables, sys_cfg=sys_cfg, traffic=traffic, sched=sched,
-                             kpi=kpi, mu_se_ratio=mu_se_ratio, rng=bk))
-        if progress:
-            progress(i + 1, n)
+    worker_cfg = sys_cfg or SystemConfig()
+    workers, parallel = _resolve_replication_workers(
+        replication_workers, num_replications=n, num_tti=worker_cfg.num_tti,
+        num_ues=len(tables))
+    runs: list[SystemResult]
+    if workers <= 1:
+        runs = []
+        for i, bk in enumerate(books):
+            runs.append(simulate(
+                tables, sys_cfg=sys_cfg, traffic=traffic, sched=sched,
+                kpi=kpi, mu_se_ratio=mu_se_ratio, rng=bk))
+            if progress:
+                progress(i + 1, n)
+    else:
+        ordered: list[SystemResult | None] = [None] * n
+        try:
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_init_replication_process,
+                initargs=(tables, sys_cfg, traffic, sched, kpi, float(mu_se_ratio)),
+            ) as pool:
+                futures = {
+                    pool.submit(_run_replication_process, i, bk): i
+                    for i, bk in enumerate(books)
+                }
+                complete = 0
+                for future in as_completed(futures):
+                    index, run = future.result()
+                    ordered[index] = run
+                    complete += 1
+                    if progress:
+                        progress(complete, n)
+            if any(run is None for run in ordered):
+                raise RuntimeError("并行重复实验缺少结果")
+            runs = [run for run in ordered if run is not None]
+        except Exception as exc:
+            if str(replication_workers).strip().lower() != "auto":
+                raise RuntimeError(
+                    f"显式 replication_workers={workers} 执行失败，未静默降级") from exc
+            parallel["fallback_reason"] = f"{type(exc).__name__}: {exc}"
+            parallel["workers"] = 1
+            parallel["backend"] = "serial_fallback"
+            runs = []
+            for i, bk in enumerate(books):
+                runs.append(simulate(
+                    tables, sys_cfg=sys_cfg, traffic=traffic, sched=sched,
+                    kpi=kpi, mu_se_ratio=mu_se_ratio, rng=bk))
+                if progress:
+                    progress(i + 1, n)
 
     cell = rg.summarize_runs([r.cell for r in runs])
     # TTI 占用分布不是一个可直接求均值的 scalar，不能被 summarize_runs 静默
@@ -3308,9 +3457,14 @@ def simulate_replications(
             f"{int(replication_start)}..{int(replication_start) + n - 1}"),
         "num_replications": n,
     }
+    cfg["execution"] = {"replication_parallelism": parallel}
+    if parallel.get("fallback_reason"):
+        notes.insert(
+            0, "**重复实验并行自动降级为串行**：" + str(parallel["fallback_reason"]))
     return ReplicationResult(
         runs=runs, books=books, cell=cell, users=users, config=cfg,
         elapsed_s=time.perf_counter() - t0, build_elapsed_s=float(build_elapsed_s),
+        parallel=parallel,
         notes=notes,
     )
 
@@ -3382,6 +3536,7 @@ def calibrate_traffic_to_prb(
     kpi: KpiConfig | None = None,
     mu_se_ratio: float = 1.0,
     build_elapsed_s: float = 0.0,
+    replication_workers: int | str = 1,
 ) -> TrafficCalibrationResult:
     """用话务双标量把实测 PRB 利用率校准到目标附近。
 
@@ -3445,7 +3600,8 @@ def calibrate_traffic_to_prb(
             tables, num_replications=int(probe_replications),
             master_seed=int(master_seed), replication_start=0,
             sys_cfg=sys_cfg, traffic=cfg,
-            sched=sched, kpi=kpi, mu_se_ratio=mu_se_ratio)
+            sched=sched, kpi=kpi, mu_se_ratio=mu_se_ratio,
+            replication_workers=replication_workers)
         stat = probe.cell.get("serving_cell_prb_utilization", {})
         util = float(stat.get("mean", 0.0))
         probe_results.append((factor, cfg, probe, util))
@@ -3495,7 +3651,8 @@ def calibrate_traffic_to_prb(
             replication_start=int(probe_replications),
             sys_cfg=sys_cfg, traffic=formal_cfg,
             sched=sched, kpi=kpi, mu_se_ratio=mu_se_ratio,
-            build_elapsed_s=float(build_elapsed_s))
+            build_elapsed_s=float(build_elapsed_s),
+            replication_workers=replication_workers)
         formal_stat = formal_result.cell.get(
             "serving_cell_prb_utilization", {})
         formal_util = float(formal_stat.get("mean", 0.0))

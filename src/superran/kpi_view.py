@@ -6,7 +6,10 @@
 """
 from __future__ import annotations
 
+import csv
 import html
+import io
+import json
 import math
 import time
 import uuid
@@ -15,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import bridge as br
+from . import webui
 from .paths import artifacts_root
 
 
@@ -156,6 +160,84 @@ def _strong(text: str) -> str:
         f"<strong>{part}</strong>" if i % 2 else part
         for i, part in enumerate(parts)
     )
+
+
+def _json_ready(value: Any) -> Any:
+    """Convert a result tree to strict JSON without inventing numeric values."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            return _json_ready(value.item())
+        except (TypeError, ValueError):
+            pass
+    return str(value)
+
+
+def _cell_csv(cell: dict[str, Any]) -> str:
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream, lineterminator="\n")
+    writer.writerow(("scope", "key", "label", "mean", "ci95_low", "ci95_high",
+                     "n_rep", "unit", "is_percent"))
+    for spec in CELL_KPIS:
+        mean, ci, n_rep = _stat(cell, spec.key)
+        if mean is None:
+            continue
+        writer.writerow(("cell", spec.key, spec.label, mean,
+                         "" if ci is None else ci[0], "" if ci is None else ci[1],
+                         "" if n_rep is None else n_rep,
+                         "%" if spec.percent else spec.unit, int(spec.percent)))
+    return "\ufeff" + stream.getvalue()
+
+
+def _user_csv(users: list[dict[str, Any]]) -> str:
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream, lineterminator="\n")
+    writer.writerow(("scope", "ue", "traffic_profile", "key", "label", "mean",
+                     "ci95_low", "ci95_high", "n_rep", "unit", "is_percent"))
+    for row in users:
+        for spec in USER_KPIS:
+            mean, ci, n_rep = _stat(row, spec.key)
+            if mean is None:
+                continue
+            writer.writerow(("user", row.get("ue", ""), row.get("traffic_class", "unknown"),
+                             spec.key, spec.label, mean,
+                             "" if ci is None else ci[0], "" if ci is None else ci[1],
+                             "" if n_rep is None else n_rep,
+                             "%" if spec.percent else spec.unit, int(spec.percent)))
+    return "\ufeff" + stream.getvalue()
+
+
+def _share_summary(result: dict[str, Any], dataset_id: str,
+                   selection: dict[str, Any]) -> str:
+    cell = result.get("cell") if isinstance(result.get("cell"), dict) else {}
+    specs = _spec_map(CELL_KPIS)
+    lines = [
+        "SuperRAN 系统仿真 KPI 摘要",
+        f"数据集: {dataset_id or result.get('dataset_id', '-')}",
+        f"重复实验: {result.get('n_rep', 1)}",
+    ]
+    for key in selection.get("cell", {}).get("prioritized", [])[:6]:
+        spec = specs.get(str(key))
+        if spec is None:
+            continue
+        mean, ci, _ = _stat(cell, spec.key)
+        if mean is None:
+            continue
+        text = f"- {spec.label}: {_fmt(mean, spec, include_unit=True)}"
+        if ci is not None:
+            text += f" (95% CI {_fmt(ci[0], spec, include_unit=True)} ~ {_fmt(ci[1], spec, include_unit=True)})"
+        lines.append(text)
+    notes = result.get("notes") if isinstance(result.get("notes"), list) else []
+    lines.append(f"必须转述的告警: {len(notes)} 条")
+    lines.append("说明: Agent 只调整展示顺序，不重算或删除 KPI。")
+    return "\n".join(lines)
 
 
 def _stat(container: dict[str, Any], key: str) -> tuple[
@@ -644,6 +726,31 @@ def _calibration(result: dict[str, Any]) -> str:
     )
 
 
+def _runtime_panel(result: dict[str, Any]) -> str:
+    """Explain where wall-clock time went and which worker policy actually ran."""
+    parallel = result.get("parallel") if isinstance(result.get("parallel"), dict) else {}
+    elapsed = result.get("elapsed_s")
+    build = result.get("build_tables_s")
+    if not parallel and not isinstance(elapsed, (int, float)):
+        return ""
+    rows = [
+        ("链路表构建", f"{float(build):.3f} s" if isinstance(build, (int, float)) else "n/a"),
+        ("重复实验与汇总", f"{float(elapsed):.3f} s" if isinstance(elapsed, (int, float)) else "n/a"),
+        ("并行后端", str(parallel.get("backend", "serial"))),
+        ("实际进程", str(parallel.get("workers", 1))),
+        ("用户请求", str(parallel.get("requested", 1))),
+        ("调度工作量", str(parallel.get("work_units_rep_tti_ue", "n/a"))),
+    ]
+    if parallel.get("fallback_reason"):
+        rows.append(("降级原因", str(parallel["fallback_reason"])))
+    return (
+        '<details><summary>运行耗时与并行调度</summary><dl class="runtime-grid">'
+        + "".join(f"<dt>{_esc(key)}</dt><dd>{_esc(value)}</dd>" for key, value in rows)
+        + "</dl><p class=\"axis\">进程数只改变执行调度，不改变 RngRun、样本或 KPI；"
+        "实际耗时以本页记录为准，估时不是 SLA。</p></details>"
+    )
+
+
 def render_html(result: dict[str, Any], *, dataset_id: str = "",
                 kpi_focus: list[str] | None = None, kpi_intent: str = "",
                 selection: dict[str, Any] | None = None) -> str:
@@ -676,13 +783,45 @@ def render_html(result: dict[str, Any], *, dataset_id: str = "",
         for name, row in definitions.items() if isinstance(row, dict)
     )
     reason_html = "".join(f"<li>{_esc(reason)}</li>" for reason in chosen["reasons"])
-    tags = " · ".join(chosen["resolved_tags"])
+    tag_chips = "".join(
+        f'<span class="focus-chip">{_esc(tag)}</span>'
+        for tag in chosen["resolved_tags"]
+    )
     resource_open = " open" if {"resource", "mu"} & set(chosen["resolved_tags"]) else ""
     traffic_open = " open" if "traffic" in chosen["resolved_tags"] else ""
     primary_user_panels = "".join(
         _metric_panel(users, spec, colours) for spec in user_primary)
     more_user_panels = "".join(
         _metric_panel(users, spec, colours) for spec in user_more)
+    export_payload = {
+        "schema": "superran_kpi_export_v1",
+        "dataset_id": dataset_id or result.get("dataset_id", ""),
+        "kpi_selection": chosen,
+        "result": _json_ready(result),
+    }
+    export_json = json.dumps(
+        export_payload, ensure_ascii=False, indent=2, allow_nan=False)
+    summary_text = _share_summary(result, dataset_id, chosen)
+    base_name = f"superran-kpi-{dataset_id or result.get('dataset_id', 'result')}"
+    actions = webui.render_actions(
+        title="SuperRAN 系统仿真 KPI 工作台",
+        context=("EVIDENCE PACK · "
+                 f"{len(chosen['cell']['ranked']) + len(chosen['user']['ranked'])} 项 KPI"),
+        summary_text=summary_text,
+        root_selector="#share-surface",
+        base_filename=base_name,
+        downloads={
+            "result.json": ("完整结果 JSON", "application/json;charset=utf-8", export_json),
+            "cell.csv": ("小区 KPI CSV", "text/csv;charset=utf-8", _cell_csv(cell)),
+            "users.csv": ("用户 KPI 长表 CSV", "text/csv;charset=utf-8", _user_csv(users)),
+        },
+    )
+    generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    parallel = result.get("parallel") if isinstance(result.get("parallel"), dict) else {}
+    runtime_badges = (
+        f'<span>{_esc(parallel.get("workers", 1))} process</span>'
+        f'<span>运行 {float(result.get("elapsed_s", 0.0)):.2f} s</span>'
+    )
     css = """
 :root{--ink:#162437;--muted:#65758b;--bg:#f3f6fa;--card:#fff;--line:#dce4ee;
 --blue:#1769aa;--cyan:#39a7c7;--green:#209567;--amber:#c88916;--red:#c84e4e;
@@ -696,36 +835,51 @@ def render_html(result: dict[str, Any], *, dataset_id: str = "",
 --panel:#1e242b;--tab:#272f38;--tint:#0f2833;--tint-ink:#a9e2f0;
 --warn:#2e2410;--warn-ink:#f3d79a;--th:#222932;--svg-bg:#181e24;
 --grid:#2c353f;--whisker:#c9d4e0}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
-font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif}.wrap{max-width:1460px;margin:auto;padding:28px}
-header{background:linear-gradient(125deg,#0c3e67,#087f91);color:white;padding:30px;border-radius:18px}
-h1{margin:0 0 8px;font-size:30px}.meta{opacity:.84;margin:0}.priority{background:var(--tint);color:var(--tint-ink);border-left:5px solid var(--cyan);padding:14px 18px;margin:20px 0;border-radius:8px}.priority ul{margin-bottom:4px}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);
+font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif}.wrap{max-width:1460px;margin:auto;padding:24px 28px 42px}
+.skip-link{position:fixed;left:14px;top:-80px;z-index:200;background:#fff;color:#0c3e67;padding:10px 14px;
+border-radius:8px;font-weight:750}.skip-link:focus{top:14px}.hero{background:linear-gradient(125deg,#0c3e67,#087f91);
+color:white;padding:28px 30px;border-radius:18px;display:flex;justify-content:space-between;align-items:flex-end;gap:28px}
+.hero-copy{min-width:0}.hero h1{margin:4px 0 8px;font-size:32px}.eyebrow{font-size:11px;letter-spacing:.16em;
+font-weight:800;color:#bdebf4}.meta{opacity:.86;margin:0;line-height:1.55}.run-badges{display:flex;gap:7px;flex-wrap:wrap;
+justify-content:flex-end}.run-badges span{border:1px solid rgba(255,255,255,.28);background:rgba(255,255,255,.1);
+border-radius:999px;padding:6px 9px;font-size:11px;white-space:nowrap}.priority{background:var(--tint);color:var(--tint-ink);
+border-left:5px solid var(--cyan);padding:12px 16px;margin:14px 0;border-radius:10px}.priority-head{display:flex;
+align-items:center;gap:10px;flex-wrap:wrap}.agent-badge{font-size:10px;font-weight:850;letter-spacing:.12em;color:var(--blue)}
+.focus-chips{display:flex;gap:6px;flex-wrap:wrap}.focus-chip{border:1px solid var(--line);border-color:color-mix(in srgb,var(--cyan) 42%,var(--line));
+background:var(--panel);border-radius:999px;padding:3px 7px;font-size:10px}.priority details{border:0;padding:0;margin:7px 0 0}
+.priority summary{padding:5px 0;font-size:12px;color:var(--blue)}.priority ul{margin:3px 0 4px;padding-left:20px;font-size:12px}
 .scope-tabs>input{position:absolute;opacity:0;width:1px;height:1px}.scope-tabs>label{display:inline-block;padding:12px 24px;background:var(--tab);color:var(--ink);border:1px solid var(--line);cursor:pointer;font-weight:750;font-size:16px}.scope-tabs>input:checked+label{background:var(--panel);color:var(--blue);border-bottom-color:var(--panel)}.scope-tabs>input:focus-visible+label{outline:3px solid var(--cyan);outline-offset:2px}.scope-panels>section{display:none;background:var(--panel);border:1px solid var(--line);padding:24px;border-radius:0 14px 14px 14px}#scope-cell:checked~.scope-panels>#cell-panel,#scope-user:checked~.scope-panels>#user-panel{display:block}
 .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.kpi{border:1px solid var(--line);border-radius:12px;padding:16px;min-height:138px}.kpi .label,.kpi .ci,.kpi .key{display:block}.kpi .label{font-weight:700}.kpi strong{font-size:27px;display:inline-block;margin:13px 4px 7px 0}.kpi .unit,.kpi .ci,.kpi .key,.axis,.metric-key{color:var(--muted)}.kpi .key,.metric-key{font-family:Consolas,monospace;font-size:11px;margin-top:8px}
 details{border:1px solid var(--line);border-radius:10px;padding:13px;margin:15px 0}summary{font-weight:750;cursor:pointer}h2{margin-top:28px}.rbg-chart{height:290px;display:grid;grid-template-columns:repeat(18,minmax(24px,1fr));align-items:end;gap:7px;border-bottom:2px solid var(--ink);padding:26px 8px 0;margin-top:18px;overflow-x:auto}
 /* 载波栅格由数据集推出，桶数不再恒为 18；实际列数由内联 style 覆盖。 */.bar-col{text-align:center;min-width:25px}.bar{background:linear-gradient(#39a7c7,#1769aa);border-radius:5px 5px 0 0}.bar-value{font-size:10px;color:var(--muted);display:block;white-space:nowrap}.bar-col b{font-size:12px}.gauge{margin:8px 0 24px}.track{height:22px;background:var(--tab);border-radius:11px;position:relative;margin:36px 0 10px}.fill{height:100%;border-radius:11px;background:linear-gradient(90deg,var(--green),var(--amber),var(--red))}.mark{position:absolute;top:-26px;font-size:12px;color:var(--muted);transform:translateX(-50%)}.m10{left:10%}.m30{left:30%}.m50{left:50%}.needle{position:absolute;top:-7px;width:3px;height:36px;background:var(--ink);transform:translateX(-1px)}
 .callout{padding:14px 16px;border-left:4px solid var(--amber);background:var(--warn);color:var(--warn-ink);margin:14px 0}.legend{display:flex;gap:14px;flex-wrap:wrap;margin:12px 0}.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px}.scope-panels,.scope-panels>section,.metric-panel,.plot-grid,.plot-grid>*{min-width:0}.metric-panel{border:1px solid var(--line);border-radius:14px;padding:18px;margin:18px 0}.metric-panel h3{margin:0}.metric-panel h4{margin:8px 0}.plot-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.svg-scroll,.table-scroll{width:100%;max-width:100%;min-width:0;overflow:auto}.user-svg{min-width:640px;background:var(--svg-bg);border:1px solid var(--line);border-radius:8px}.user-svg text{font-size:11px;fill:var(--muted)}.axisline{stroke:var(--ink);stroke-width:1.5}.gridline{stroke:var(--grid);stroke-width:1}.whisker{stroke:var(--whisker);stroke-width:1.5}.cdfline{fill:none;stroke:var(--blue);stroke-width:2.5}.axislabel{font-weight:700;fill:var(--ink)!important}table{border-collapse:collapse;min-width:100%;font-size:13px}th,td{border:1px solid var(--line);padding:8px 10px;text-align:right;white-space:nowrap}th{background:var(--th);text-align:left;position:sticky;top:0}dl{display:grid;grid-template-columns:220px 1fr;gap:7px}dt{font-weight:650}dd{margin:0;color:var(--muted)}li{margin:8px 0;line-height:1.5}.empty{padding:28px;color:var(--muted)}
 @media(max-width:1050px){.grid{grid-template-columns:repeat(2,1fr)}.plot-grid{grid-template-columns:1fr}}
-@media(max-width:560px){.wrap{padding:10px}.grid{grid-template-columns:1fr}header{padding:22px}h1{font-size:24px}.scope-panels>section{padding:13px}.scope-tabs>label{padding:10px 16px}.priority{padding:12px}.user-svg{min-width:600px}}
+@media(max-width:720px){.wrap{padding:10px}.hero{padding:22px;display:block}.hero h1{font-size:25px}.run-badges{justify-content:flex-start;margin-top:14px}.grid{grid-template-columns:1fr}.scope-panels>section{padding:13px}.scope-tabs>label{padding:10px 16px}.priority{padding:11px 12px}.user-svg{min-width:600px}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 """
+    css += webui.action_css()
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,">
-<title>系统仿真 KPI</title><style>{css}</style></head><body><div class="wrap">
-<header><h1>系统仿真 KPI</h1><p class="meta">数据集 {_esc(dataset_id or result.get('dataset_id','-'))} · {_esc(model)} · {_esc(result.get('n_rep',1))} 次重复 · {time.strftime('%Y-%m-%d %H:%M:%S')}</p></header>
-<div class="priority"><strong>Agent KPI 编排：{_esc(chosen['source'])}</strong><p>关注标签：{_esc(tags)}</p><ul>{reason_html}</ul><small>优先级只影响展示顺序；所有可用 KPI 仍保留在折叠区与结果 JSON。</small></div>
-<div class="scope-tabs"><input id="scope-cell" name="scope" type="radio" checked><label for="scope-cell">小区级</label><input id="scope-user" name="scope" type="radio"><label for="scope-user">用户级</label><div class="scope-panels">
+<title>系统仿真 KPI</title><style>{css}</style></head><body><a class="skip-link" href="#main">跳到 KPI</a>
+<div class="wrap" id="share-surface">
+<header class="hero"><div class="hero-copy"><span class="eyebrow">SUPERRAN · EVIDENCE WORKBENCH</span><h1>系统仿真 KPI</h1><p class="meta">数据集 {_esc(dataset_id or result.get('dataset_id','-'))} · {_esc(model)} · {generated_at}</p></div><div class="run-badges"><span>{_esc(result.get('n_rep',1))} 次重复</span>{runtime_badges}<span>{len(notes)} 条告警</span><span>{len(users)} UE</span><span>完整证据可下载</span></div></header>
+{actions}
+<aside class="priority"><div class="priority-head"><span class="agent-badge">AGENT FOCUS</span><strong>{_esc(chosen['source'])}</strong><div class="focus-chips">{tag_chips}</div></div><details><summary>为什么优先展示这些 KPI</summary><ul>{reason_html}</ul><small>优先级只影响展示顺序；所有可用 KPI 仍保留在折叠区与下载结果中。</small></details></aside>
+<main id="main"><div class="scope-tabs"><input id="scope-cell" name="scope" type="radio" checked><label for="scope-cell">小区级</label><input id="scope-user" name="scope" type="radio"><label for="scope-user">用户级</label><div class="scope-panels">
 <section id="cell-panel"><div class="callout"><strong>不要混淆：</strong>neighbor_prb_util 是邻区干扰输入；serving_cell_prb_utilization 是本小区正式仿真的实测结果。10%/30%/50% 只能通过话务校准接近。</div><h2>优先 KPI</h2><div class="grid">{''.join(_card(cell,spec) for spec in cell_primary)}</div>
 <details><summary>更多小区 KPI（{len(cell_more)}）</summary><div class="grid">{''.join(_card(cell,spec) for spec in cell_more)}</div></details>
 <details{resource_open}><summary>资源占用与 MU 画像</summary>{_load_gauge(cell)}<h3>{_esc(distribution_title(cell))}</h3>{_distribution(cell)}</details>
 <details{traffic_open}><summary>话务 profile 与 CDF 输入</summary>{_traffic_profiles(result)}</details>
 {_calibration(result)}
+{_runtime_panel(result)}
 <details><summary>KPI 定义与统计口径</summary>{definition_html or '<p class="empty">无定义元数据。</p>'}</details>
 <details><summary>必须随结果转述的告警（{len(notes)}）</summary><ul>{note_html or '<li>无告警。</li>'}</ul></details></section>
 <section id="user-panel"><h2>用户级优先分析</h2><p>每个指标同时给按 UE 图与跨 UE 经验 CDF；颜色表示话务 profile。</p>{_legend(colours)}{primary_user_panels}
 <details><summary>更多用户级图与 CDF（{len(user_more)}）</summary>{more_user_panels or '<p class="empty">没有更多可用指标。</p>'}</details>
 <details><summary>用户级全量明细表</summary>{_user_table(users, user_primary + user_more)}</details>
 <div class="callout"><strong>资源归因：</strong>grant PRB exposure 在共享 MU PRB 上对每个配对 UE 都计一次，不能跨 UE 相加；attributed PRB 将共享资源等分，跨 UE 求和严格等于小区已用 PRB。</div></section>
-</div></div></div></body></html>"""
+</div></div></main></div></body></html>"""
 
 
 def write_kpi_report(result: dict[str, Any], *, dataset_id: str = "",
@@ -754,6 +908,14 @@ def write_kpi_report(result: dict[str, Any], *, dataset_id: str = "",
         "url": url,
         "serve_error": serve_error,
         "tabs": ["小区级", "用户级"],
+        "actions": {
+            "download": ["完整结果 JSON", "小区 KPI CSV", "用户 KPI 长表 CSV"],
+            "copy_summary": True,
+            "screenshot": "PNG when canvas is origin-clean; full-page SVG fallback",
+            "web_share_with_copy_fallback": True,
+            "print_pdf": True,
+            "offline_safe": True,
+        },
         "kpi_selection": selection,
         "user_plot_contract": "per-UE plot + empirical CDF over UE replication means",
         "supported_cell_kpis": [spec.key for spec in CELL_KPIS],

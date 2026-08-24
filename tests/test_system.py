@@ -38,7 +38,8 @@ def sect(t: str) -> None:
     print("\n" + "=" * 70 + f"\n{t}\n" + "=" * 70)
 
 
-def fake_tables(n_ue=8, n_snap=8, sinr_lo=0.0, sinr_hi=25.0, seed=0):
+def fake_tables(n_ue=8, n_snap=8, sinr_lo=0.0, sinr_hi=25.0, seed=0,
+                power_constraint="nebf"):
     """造一批链路表，SINR 从近点到远点铺开，带时间起伏。"""
     rng = np.random.default_rng(seed)
     geo = np.linspace(sinr_hi, sinr_lo, n_ue)
@@ -47,7 +48,8 @@ def fake_tables(n_ue=8, n_snap=8, sinr_lo=0.0, sinr_hi=25.0, seed=0):
         h = ((rng.standard_normal((n_snap, 24, 16, 4))
               + 1j * rng.standard_normal((n_snap, 24, 16, 4))) / np.sqrt(2))
         hs.append(h)
-    return sysm.build_link_tables(hs, list(geo))
+    return sysm.build_link_tables(
+        hs, list(geo), power_constraint=power_constraint)
 
 
 # ---------------------------------------------------------------------------
@@ -284,11 +286,14 @@ check(bool(_g_bad.get("errors")), "MU 配对失败返回可审计错误，而不
 check("禁止用于仿真" in _g_bad["note"], "诊断占位 1.0 不冒充可用 MU 增益")
 
 # 比值 <= 1 时调度器不该切 MU（SU 无干扰且可到 rank4）
-_r_su = sysm.simulate(_T, sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=12),
+_T_legacy_ebf = fake_tables(power_constraint="ebf")
+_r_su = sysm.simulate(_T_legacy_ebf, sys_cfg=sysm.SystemConfig(
+                          duration_s=2.0, seed=12, power_constraint="ebf"),
                       traffic=sysm.TrafficConfig(model="full_buffer"),
                       sched=sysm.SchedulerConfig(mu_enabled=True), mu_se_ratio=0.8)
 check(_r_su.cell["mu_share"] == 0.0, "MU 不划算时（比值<1）自适应选 SU，不强行配对")
-_r_mu = sysm.simulate(_T, sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=12),
+_r_mu = sysm.simulate(_T_legacy_ebf, sys_cfg=sysm.SystemConfig(
+                          duration_s=2.0, seed=12, power_constraint="ebf"),
                       traffic=sysm.TrafficConfig(model="full_buffer"),
                       sched=sysm.SchedulerConfig(mu_enabled=True), mu_se_ratio=1.6)
 print(f"  比值 0.8 -> MU 占比 {_r_su.cell['mu_share']:.0%}；"
@@ -835,6 +840,8 @@ check((_pf_wrong.cell["small_queue_wait_ms_mean"]
 # legacy 路径保持独立；不允许跨模式参数静默退化。
 check(sysm.SystemConfig().as_dict()["model_version"] == "legacy_v1",
       "默认 capacity 路径仍标 legacy_v1，历史结果可复现")
+check(sysm.SystemConfig().power_constraint == "nebf",
+      "系统/TDD 默认空间约束为每天线 P/M 且用满总功率的 NEBF")
 try:
     sysm.simulate(
         _T, sys_cfg=sysm.SystemConfig(power_constraint="pebf"),
@@ -1135,6 +1142,14 @@ _expect_value_error(
     lambda: sysm.simulate_replications(_T, num_replications=1,
                                        replication_start=-1),
     "replication", "多次仿真入口拒绝负数 RngRun 起点")
+_expect_value_error(
+    lambda: sysm.simulate_replications(
+        _T, num_replications=1, replication_workers=0),
+    "replication_workers", "重复实验进程数拒绝 0 与静默串行降级")
+_expect_value_error(
+    lambda: sysm.simulate_replications(
+        _T, num_replications=1, replication_workers=2),
+    "安全上限", "显式进程数超过重复数时硬失败而不是静默收口")
 
 # ---------------------------------------------------------------------------
 sect("14  CDF 话务、双标量、显式用户映射与资源归因")

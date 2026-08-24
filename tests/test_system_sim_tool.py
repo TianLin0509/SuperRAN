@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -93,6 +94,14 @@ def test_experience_ok() -> None:
     assert "error" not in out, out.get("error")
     assert "cell_experienced_mbps" in out["cell"]
     assert out["kpi_format"]
+    view = out["kpi_view"]
+    assert view["actions"]["offline_safe"] is True
+    assert len(view["actions"]["download"]) == 3
+    page = Path(view["html_path"]).read_text(encoding="utf-8")
+    assert page.count("data-action=") == 4
+    assert page.count("data-download=") == 3
+    assert "superran_kpi_export_v1" in page
+    assert "为什么优先展示这些 KPI" in page
 
 
 def test_matching_dataset_and_runtime_provenance_is_reported() -> None:
@@ -105,6 +114,21 @@ def test_matching_dataset_and_runtime_provenance_is_reported() -> None:
     out = _run()
     assert "error" not in out, out.get("error")
     assert out["provenance"]["compatibility"]["status"] == "match"
+
+
+def test_replication_processes_preserve_results_and_report_actual_backend() -> None:
+    _write_dataset()
+    serial = _run(
+        evaluation_mode="capacity", duration_s=0.5,
+        num_replications=4, replication_workers=1)
+    parallel = _run(
+        evaluation_mode="capacity", duration_s=0.5,
+        num_replications=4, replication_workers=2)
+    assert "error" not in parallel, parallel.get("error")
+    assert parallel["cell"] == serial["cell"]
+    assert parallel["parallel"]["backend"] == "process"
+    assert parallel["parallel"]["workers"] == 2
+    assert parallel["replications"] == serial["replications"]
 
 
 def test_non_company_grid_hard_fails() -> None:

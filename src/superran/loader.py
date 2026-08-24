@@ -588,13 +588,17 @@ class Dataset:
         snr_db: float | None = None,
         n_h: int | None = None,
         n_v: int | None = None,
+        power_constraint: str = "nebf",
+        rb_per_rbg: int = 16,
     ) -> dict[str, Any]:
         """TDD CQI → PMI/SVD BF Gain → MCS → OLLA decision for one sample.
 
-        PMI and SVD use the same channel, CSI, scheduled rank, power allocation,
-        noise/interference and classic MMSE receiver. The only changed quantity is the
-        precoding weight. SINR aggregation is an arithmetic mean in the dB domain over
-        every RB and stream, matching the system-level convention requested for TDD.
+        PMI and SVD use the same gNB-visible CSI, scheduled rank, power allocation,
+        noise/interference and classic MMSE receiver.  The only changed quantity is
+        the precoding direction.  RB SINRs are first averaged linearly within each
+        RBG; RBG and stream values are then averaged arithmetically in dB.  The
+        gNB-side AMC prediction selects MCS, while the final BLER is queried only with
+        the same physical transmit weight evaluated on ``h_true``.
         """
         from . import linkadapt as la
         from . import linklevel as ll
@@ -609,6 +613,7 @@ class Dataset:
             "h_for_precoding": h_precoding,
             "n_h": n_h,
             "n_v": n_v,
+            "power_constraint": str(power_constraint).lower(),
         }
         self._inject_array_order(common)
         if snr_db is None:
@@ -621,7 +626,22 @@ class Dataset:
             physical_sinr = float(np.asarray(self.sinr_dB)[idx])
         else:
             physical_sinr = float(snr_db)
-            common["snr_db"] = physical_sinr
+            # Resolve the synthetic pre-beam SNR once on the physical evaluation
+            # channel.  Re-deriving N0 separately on h_prec and h_true would silently
+            # change the receiver operating point between the prediction and BLER
+            # paths, so they would no longer describe the same transmission.
+            fixed_noise = ll.prebeam_reference_power(h_eval) / max(
+                10.0 ** (physical_sinr / 10.0), 1e-30)
+            common.update({
+                "noise_power": float(fixed_noise),
+                "operating_point": {
+                    "mode": "synthetic_prebeam_snr",
+                    "snr_db": physical_sinr,
+                    "anchor": "h_true_prebeam_mean_coefficient_power",
+                    "noise_power": float(fixed_noise),
+                    "shared_by_prediction_and_receive_paths": True,
+                },
+            })
         if snr_db is not None and self.h_interferers is not None:
             common["h_interferers"] = self.h_interferers[idx]
 
@@ -638,7 +658,7 @@ class Dataset:
         )
         svd_pred = ll.link_performance(
             h_precoding, method="svd", max_rank=pmi_pred.rank,
-            rank_threshold=0.0, **common
+            rank_threshold=0.0, rank_selection="threshold", **common
         )
         if svd_pred.rank != pmi_pred.rank:
             raise ValueError(
@@ -647,12 +667,12 @@ class Dataset:
             )
 
         pmi_true = ll.link_performance(
-            h_eval, method="type1", max_rank=max_rank,
-            rank_threshold=0.1, **common
+            h_eval, method="type1", max_rank=pmi_pred.rank,
+            rank_threshold=0.0, rank_selection="threshold", **common
         )
         svd_true = ll.link_performance(
             h_eval, method="svd", max_rank=pmi_pred.rank,
-            rank_threshold=0.0, **common
+            rank_threshold=0.0, rank_selection="threshold", **common
         )
         if (pmi_true.rank != pmi_pred.rank
                 or svd_true.rank != svd_pred.rank):
@@ -670,7 +690,24 @@ class Dataset:
             target_bler=target_bler,
             feedback_ack=feedback_ack,
             olla_ack_step_mcs=olla_ack_step_mcs,
+            rb_per_rbg=rb_per_rbg,
         )
+        tx_true_agg = la.codeword_sinr_db(
+            svd_true.sinr_per_rb_db, rb_per_rbg=rb_per_rbg)
+        pmi_true_agg = la.codeword_sinr_db(
+            pmi_true.sinr_per_rb_db, rb_per_rbg=rb_per_rbg)
+        actual_rx_sinr = float(tx_true_agg["user_db"])
+        # The exact SINR consumed by the curve is returned verbatim (to 1e-6 dB)
+        # so a reader can reproduce the reported probability from the JSON alone.
+        bler_lookup_sinr = round(actual_rx_sinr, 6)
+        actual_bler = float(la.bc.get_curve(
+            int(out["final_mcs"]), "newtx").evaluate(bler_lookup_sinr)[0])
+        resolved_power = str(power_constraint).strip().lower()
+        physical_tx_label = {
+            "ebf": "SINR_EBF",
+            "pebf": "SINR_PEBF",
+            "nebf": "SINR_NEBF",
+        }[resolved_power]
         out.update({
             "dataset_id": self.dataset_id,
             "sample_index": idx,
@@ -678,21 +715,64 @@ class Dataset:
             "operating_point": pmi_pred.operating_point or {
                 "mode": "synthetic_prebeam_snr", "snr_db": physical_sinr},
             "csi_for_precoding": "estimated" if use_estimated_csi else "ideal",
+            "tx_precoder_direction": "svd",
+            "power_constraint": resolved_power,
+            "physical_tx_sinr_label": physical_tx_label,
+            "sinr_pmi_label": "SINR_PMI",
             "bf_gain_csi_view": "gnb_precoding_csi",
             "bf_gain_enters_mcs": True,
             "true_channel_bf_audit_enters_mcs": False,
             "pmi_indices": pmi_pred.precoder_indices,
             "pmi_true_stream_sinr_db": [
                 round(float(x), 4)
-                for x in np.mean(pmi_true.sinr_per_rb_db, axis=0)
+                for x in pmi_true_agg["stream_db"]
             ],
             "svd_true_stream_sinr_db": [
                 round(float(x), 4)
-                for x in np.mean(svd_true.sinr_per_rb_db, axis=0)
+                for x in tx_true_agg["stream_db"]
             ],
             "bf_gain_true_user_db": round(float(np.mean(
-                np.asarray(svd_true.sinr_per_rb_db, dtype=float)
-                - np.asarray(pmi_true.sinr_per_rb_db, dtype=float))), 4),
+                np.asarray(tx_true_agg["rbg_stream_db"], dtype=float)
+                - np.asarray(pmi_true_agg["rbg_stream_db"], dtype=float))), 4),
+            "sinr_svd_rx_db": bler_lookup_sinr,
+            "sinr_pmi_rx_db": round(float(pmi_true_agg["user_db"]), 4),
+            "actual_receive_sinr_db": bler_lookup_sinr,
+            "actual_receive_sinr_label": f"{physical_tx_label}_RX",
+            "bler_lookup_inputs": {
+                "mcs": int(out["final_mcs"]),
+                "codeword_effective_sinr_db": bler_lookup_sinr,
+                "tx_mode": "newtx",
+            },
+            "final_mcs_newtx_bler": round(actual_bler, 6),
+            "actual_bler_available": True,
+            "bler_status": "evaluated_on_true_receive_sinr",
+            "bler_sinr_source": (
+                f"{physical_tx_label}_RX on h_true with the gNB-designed physical weight"
+            ),
+            "sinr_views": {
+                "bf_reference": {
+                    "channel_view": "h_prec",
+                    "tx_name": physical_tx_label,
+                    "tx_direction": "svd",
+                    "tx_db": round(float(out["sinr_svd_gnb_db"]), 4),
+                    "pmi_name": "SINR_PMI",
+                    "pmi_db": round(float(out["sinr_pmi_gnb_db"]), 4),
+                    "bf_gain_db": round(float(out["bf_gain_user_db"]), 4),
+                },
+                "amc_prediction": {
+                    "name": "SINR_AMC_PRED",
+                    "channel_view": "gNB decision state",
+                    "db": round(float(out["gnb_predicted_amc_sinr_db"]), 4),
+                    "definition": "Gamma(MCS(CQI)) + BF Gain",
+                },
+                "bler_observation": {
+                    "name": f"{physical_tx_label}_RX",
+                    "channel_view": "h_true",
+                    "db": bler_lookup_sinr,
+                    "final_mcs": int(out["final_mcs"]),
+                    "newtx_bler": round(actual_bler, 6),
+                },
+            },
         })
         out["bf_gain_prediction_error_db"] = round(
             float(out["bf_gain_true_user_db"] - out["bf_gain_user_db"]), 4)

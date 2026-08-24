@@ -511,23 +511,23 @@ def _csi_aging() -> Family:
 def _tx_sinr() -> Family:
     return Family(
         key="tx_sinr",
-        name="发送侧 SINR（CQI + BF Gain）",
+        name="AMC 预测坐标（CQI + BF Gain）",
         stage="链路自适应",
         current="cqi_bf",
         config_key="",
-        intro="**发送侧和接收侧是两个 SINR。** 基站选 MCS 时手里只有 CQI 反馈和"
-              "它自己能算的 BF 增益；接收端实打实吃着干扰。两者的差由误码经 OLLA "
-              "收敛回来——这是干扰影响吞吐的第一性路径。",
-        formula=r"\mathrm{SINR}_{tx} = \underbrace{\Gamma\big(\mathrm{MCS}"
+        intro="**SINR_AMC_PRED 不是物理 SINR。** 基站选 MCS 时手里只有 CQI 反馈和"
+              "它自己能算的 BF 增益；真正的 SINR_NEBF/PEBF/EBF_RX 要等同一个 Q 打到"
+              "h_true 后才得到。两者的差由误码经 OLLA 闭环吸收。",
+        formula=r"\mathrm{SINR}_{AMC,pred} = \underbrace{\Gamma\big(\mathrm{MCS}"
                 r"(\mathrm{CQI})\big)}_{\text{长期滤波的宽带上报}} + "
                 r"\underbrace{\overline{\mathrm{SINR}_{SVD} - \mathrm{SINR}_{PMI}}}"
                 r"_{\text{基站自算，逐次调度}}",
-        caveat="**CQI 是长期滤波的宽带量，BF Gain 是瞬时量**——这个分工不能混。"
+        caveat="**CQI 是长期滤波的宽带量，BF Gain 是 gNB 可见 CSI 上的预测量**——这个分工不能混。"
                "CQI 由终端在真实信道上用 PMI 权测得、上报周期远长于一个 TTI；"
                "BF Gain 基站从自己的 SRS 信道算，所以开老化时它算的是"
                "<b>滞后那一刻</b>的增益，会系统性高估（以为预编码是匹配的），"
                "于是 MCS 点高了、误码上来、OLLA 再拉回去。"
-               "<br>早先版本把发送侧写成「接收 SINR 的长期均值」，"
+               "<br>早先版本把 AMC 预测写成「接收 SINR 的长期均值」，"
                "那是个<b>事后诸葛亮</b>的量：它已经包含了 SVD 的实际增益，"
                "等于假设基站预先知道自己波束打得准不准。"
                "<br><b>已核查的一处近似：</b>宽带 PMI 已改为在发射空间协方差 "
@@ -535,9 +535,10 @@ def _tx_sinr() -> Family:
                "当前仍是 Type-I-style 单面板<b>列码本子集</b>：多层采用增量"
                "贪心列选择，而非枚举 38.214 完整多层矩阵码本。"
                "另外 iid 瑞利信道上 BF 增益高达 13 dB <b>不是 bug 而是真实物理</b>："
-               "空间白信道没有结构，任何宽带码本波束都对不准；"
-               "换成有角度结构的多径信道后是 2.6 ~ 5 dB，正对得上现场量级。",
-        source="现场 TDD AMC 流程（用户 2026-08-03 确认）；38.214 §5.2.2",
+               "空间白信道没有结构，任何宽带码本波束都对不准。"
+               "<br><b>最终 BLER 只查 final MCS + actual_receive_sinr_db。</b>"
+               "拿 SINR_AMC_PRED 查曲线只能得到伪精确的预测值，不能当真实 TB BLER。",
+        source="已确认的 TDD AMC 流程；38.214 §5.2.2",
         options=[
             Option("cqi_bf", "CQI 门限 + BF Gain",
                    formula=r"\mathrm{CQI} \to \mathrm{MCS} \to \Gamma_{10\%} "
@@ -548,13 +549,13 @@ def _tx_sinr() -> Family:
                           "不是 38.214 CQI 编号。"
                           "PMI 走 <b>Type-I-style 宽带列码本近似</b>——全带共用一个权，"
                           "正对应现场的<b>全带 CQI</b>（不做子带 CQI、不做频选调度）。"
-                          "<br>宽带 PMI 是慢时间尺度的量，所以逐 UE 在完整时频样本的"
-                          "功率协方差上搜一次，不逐快照重搜，也不平均复信道。"
+                           "<br>宽带 PMI 是慢时间尺度的量，所以按 CSI report 周期在当时"
+                           "可见功率协方差上更新，并在周期内保持；不能跨完整仿真时域先搜一次。"
                            "<br><b>CQI=0 直接映射 MCS0</b>，是最低可用档，不是 out-of-range。",
                    when="默认",
                    cost="每 UE 每 rank 一次 Type I 码本搜索，约 40 ms"),
             Option("rx_longterm", "接收 SINR 的长期均值（已弃用）",
-                   summary="拿接收侧 SINR 在快照上取均值当发送侧",
+                   summary="拿接收侧 SINR 在快照上取均值当 AMC 预测",
                    detail="<b>事后诸葛亮</b>：这个量里已经含了 SVD 的实际增益，"
                           "等于让基站预知波束打得准不准。开 CSI 老化后它的问题变得致命——"
                           "老化的全部代价就是「基站以为打准了其实没有」，"
@@ -577,10 +578,10 @@ def _tx_sinr() -> Family:
             ("基站自算 BF Gain", "同一信道、同一 rank、同一功率、同一接收机下 "
                                  "SINR_SVD − SINR_PMI，逐 RBG 逐流在 dB 域平均；"
                                  "**开老化时算的是陈旧信道上的增益**"),
-            ("相加得发送侧 SINR", "Γ(MCS(CQI)) + BF Gain"),
-            ("重映射 MCS", "按发送侧 SINR 选满足目标 BLER 的最高 MCS"),
+            ("相加得 SINR_AMC_PRED", "Γ(MCS(CQI)) + BF Gain；它不是物理 SINR"),
+            ("重映射 MCS", "按 SINR_AMC_PRED 选满足目标 BLER 的最高基准 MCS"),
             ("加 OLLA 偏置", "在重映射 MCS 后加连续 MCS 偏置，再 floor/钳位"),
-            ("接收端判误码", "用**真实**接收 SINR 查 BLER 曲线——发送侧与接收侧的差就在这里变成误码"),
+            ("接收端判误码", "同一个 Q 作用到 h_true 得到 SINR_*_RX，只用 final MCS + 该真值查 BLER"),
         ], branches=[
             (1, "CQI = 0", "查表得 MCS0，继续完整 BF/OLLA 链"),
         ], loop_back=(8, 7, "ACK/NACK 反馈驱动 OLLA，下一次调度生效")),

@@ -407,10 +407,10 @@ h_future_b = np.zeros_like(h0)
 h_future_b[:, 1, 0], h_future_b[:, 0, 1] = 25.0, 18.0
 ta = sy.build_link_tables(
     [np.stack([h0, h_future_a])], [10.0], num_snapshots=2,
-    max_rank=2, rb_per_rbg=1)[0]
+    max_rank=2, rb_per_rbg=1, power_constraint="ebf")[0]
 tb = sy.build_link_tables(
     [np.stack([h0, h_future_b])], [10.0], num_snapshots=2,
-    max_rank=2, rb_per_rbg=1)[0]
+    max_rank=2, rb_per_rbg=1, power_constraint="ebf")[0]
 check(np.allclose(ta.bf_gain_db[0], tb.bf_gain_db[0], atol=1e-10)
       and np.allclose(ta.pmi_sinr_db[0], tb.pmi_sinr_db[0], atol=1e-10),
       "snapshot 0 的 PMI/BF gain 不读取未来信道")
