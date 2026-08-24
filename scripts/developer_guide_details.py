@@ -632,22 +632,25 @@ DETAIL_SPECS.update({
         source_paths=("src/superran/traffic.py", "src/superran/system.py", "src/superran/experience.py"),
     ),
     "kpi": DetailSpec(
-        promise="把体验 KPI 的对象、起止事件、分子分母和覆盖率逐一说清，并解释小区级/用户级、时间序列/CDF 与 Agent 自适应优先展示如何共存而不改变底层真值。",
+        promise="把体验 KPI 的对象、起止事件、分子分母和覆盖率逐一说清，并解释单臂小区/用户分析、2~5 算法比较、逐 TTI 钻取与 Agent 自适应优先展示如何共存而不改变底层真值。",
         principles=(
             "体验速率必须先定义一个 DRB busy period 和可计入包。掐头去尾速率从首包第一次调度开始，到倒数一个完整 ACK 包结束；含头速率使用相同 payload 和尾部排除，但分母从首包到达开始，因此明确包含首包等待。首包时延单独量每个包从 arrival 到 first scheduled，不把完整传输或重传时间混进来。",
             "任何带 eligibility 的指标都要同时给覆盖率。仿真结束时尚未第一次调度的包不能填 0；未形成足够完整包的短 burst 不能硬算无限/零速率。结果应给 observed count、eligible count、share 与排除原因。这样，算法通过让困难用户“没有样本”来美化均值时会立即暴露。",
             "PRB 利用率是本小区在测量窗口内已用物理资源/可用资源；0..17 RBG 直方图以每个 DL 等价 TTI 的唯一 used index 数计数。mixed 业务常呈两头高：空闲 TTI 落在 0，大包或积压落在 17，小包填在低 RBG；这是一种预期形态而非硬编码通过条件。MU 配对比例则是 MU PRB/已用 PRB，与 MU 用户传输次数不同。",
             "呈现分小区级和用户级两个 tab。小区级看整体负载、尾部分位和模式；用户级展示每 UE 的无线条件、业务、吞吐、首包时延、资源、MU/BLER，并支持散点、时间序列与跨 UE CDF。Agent 可以根据用户问题给 KPI relevance score，把更相关卡片前置、其他折叠，但所有原始 KPI、公式和选择理由仍可查看，不能让 LLM 在库内偷偷改数。",
             "工作台是 experience_v2 的标准结果面，而不是运行结束后手工挑几张图。当前登记 26 项小区 KPI 与 24 项用户 KPI；可用项取决于 Result 是否真的携带相应数据。页面同时保留 95% CI、replication 数、KPI key、定义、告警、话务 profile 与校准轨迹，使一张卡片能向下追到统计样本和公式。<code>url</code> 只是便利入口，UTF-8 自包含 <code>html_path</code> 才是稳定离线产物；loopback 服务失败必须显式呈现，不能导致数值结果丢失或被悄悄替换。",
+            "多算法页面不按算法分 tab：算法是贯穿总览、KPI 矩阵、用户 CDF、TTI 趋势和单 TTI 详情的固定颜色系列，基线不可隐藏；tab 表示读者正在回答的问题。每个算法臂必须携带同一 dataset 与逐位一致的 (master_seed, replication)，主 KPI 的候选对基线复用 Gate 3，并在 2~5 臂场景用 Holm step-down 收紧家族判决。只有 dataset 的生成前 prereg 同时匹配主 KPI 与基线标签时才允许产生 publishable winner；否则即使显著也保持 exploratory_unregistered。单 TTI 只能解释机制分叉，不能从一个事件外推算法收益。",
         ),
         implementation=(
-            ("事件级采集", "包对象记录 arrival、first_scheduled、ACK/completion；allocation 记录 TTI、RBG、模式、TBS、payload、ACK 与用户。"),
+            ("事件级采集", "包对象记录 arrival、first_scheduled、ACK/completion；allocation 记录 TTI、RBG、模式、TBS、payload、SINR/BLER/draw、ACK、OLLA 前后、PF metric 与用户。"),
             ("窗口与 eligibility", "warmup 后才累加正式资源；busy period、包和用户样本按明确跨界规则进入统计，并记录 coverage。"),
             ("双层聚合", "先生成每 UE 指标和原始分布，再在小区层汇总均值/分位/CDF；小区均值不替代用户表。"),
             ("自适应呈现", "kpi_view 根据 intent/relevance 元数据排序卡片、选择图形和折叠次要项；数值只读 Result contract。"),
             ("渲染标准工作台", "<code>render_html()</code> 用 selection 组装精简 Agent focus、26 项小区/24 项用户注册表、CI 卡片、RBG 直方图、负载 gauge、逐 UE 图、经验 CDF、明细和定义折叠区。缺失字段只使对应卡片不可用，不伪造零值。"),
             ("导出与分享", "共用 <code>webui</code> 操作栏下载完整 JSON/小区 CSV/用户长表 CSV、复制摘要、截取当前页签、调用 Web Share 或回退复制，并支持打印/PDF；所有动作只读 Result。"),
             ("落盘并提供入口", "<code>write_kpi_report()</code> 写入 artifacts/kpi 的 UTF-8 HTML，返回 html_path、url/serve_error、tabs、actions、完整 selection 和支持清单。<code>sr_system_sim</code> 捕获呈现层异常并显式返回 error，同时保留已经完成的仿真 Result。"),
+            ("保存可比较证据", "每个单臂页面同步保存严格 JSON sidecar：算法标签、逐 replication 小区 KPI、RngBook 与 sampled/full TTI trace。sampled 用一半预算放共同均匀锚点、一半放 MU/NACK/重传/多 UE/outage 事件。"),
+            ("构建比较工作台", "<code>kpi_compare</code> 先硬校验 dataset/模式/载波/TDD/话务/KPI/RngRun，再计算候选对基线的配对差值，渲染分组柱形图、KPI 矩阵、用户 CDF、TTI 折线和同 TTI grant 表；缺采样与真实 idle 用不同状态。"),
         ),
         example_title="均值更好但体验更差：覆盖率能把问题指出来",
         example=(
@@ -661,14 +664,19 @@ DETAIL_SPECS.update({
             ("展示不改真值", "Agent 排序前后 KPI JSON 完全相同，页面能展示推荐理由并展开全部指标。"),
             ("产物合同完整", "体验模式成功时 kpi_view 同时含 html_path、双 Tab、supported KPI 与排序证据；服务失败只改变 url/serve_error。"),
             ("导出逐值复算", "下载 JSON/CSV 可解析且与页面卡片同值；浏览器截图实际产生 PNG 或安全回退 SVG，离线 file:// 仍可用。"),
+            ("跨算法严格对齐", "不同 dataset、时长、话务、KPI 窗或 RngRun 任一不一致时比较页拒绝生成；算法配置差异完整展示。"),
+            ("TTI 诊断不越权", "趋势点可进入同一绝对 TTI；每个 grant 的 RBG/MCS/rank/SINR/BLER/draw/ACK/OLLA/PF 可复盘，但页面不从该点生成收益结论。"),
         ),
         pitfalls=(
             "只给小区均值，隐藏边缘用户、未观测包和用户间业务差异。",
             "把 MU 用户传输次数或 MU TTI 数当作 MU PRB/已用 PRB。",
             "LLM 为回答问题临时计算一个未进入 Result contract 的指标并与正式 KPI 混排。",
             "只截 KPI 首屏发报告，不同时保留折叠指标、告警、用户明细和 selection 理由。",
+            "给每个算法单独做一个 tab，迫使读者凭记忆比较，或让同一算法在不同图上随机换颜色。",
+            "把两根带单臂 CI 的柱子肉眼相减，绕过配对差值 CI、Wilcoxon 与多候选校正。",
+            "只保存发生调度的 TTI，再把没有记录的 TTI 当成 idle；sampled 缺失必须与真实零占用分开。",
         ),
-        source_paths=("src/superran/experience.py", "src/superran/kpi_view.py", "src/superran/webui.py", "src/superran/results.py"),
+        source_paths=("src/superran/experience.py", "src/superran/kpi_view.py", "src/superran/kpi_compare.py", "src/superran/webui.py", "src/superran/rng.py", "src/superran/results.py"),
     ),
     "interference": DetailSpec(
         promise="把 S、I、N、邻区负载与逐 RBG 功率控制放在同一公式中，解释为什么抬高 RBG0、压低其他 RBG 即使总功率不变也可能降低性能。",
@@ -802,7 +810,7 @@ DETAIL_SPECS.update({
         source_paths=("tests/", "scripts/run_developer_guide_qa.py", "tests/test_developer_guide.py", "src/superran/benchmarks.py"),
     ),
     "tools": DetailSpec(
-        promise="从 Agent 的任务意图而不是 34 个函数名理解 MCP 工具：如何发现能力、冻结计划、生成/校验数据、运行算法和系统仿真、注册外部结果并交付证据。",
+        promise="从 Agent 的任务意图而不是 35 个函数名理解 MCP 工具：如何发现能力、冻结计划、生成/校验数据、运行算法和系统仿真、注册外部结果并交付证据。",
         principles=(
             "MCP 工具是窄接口，不是让 LLM 随意拼底层函数。每个工具应有稳定输入 schema、明确副作用、结构化错误、产物标识与 lineage。返回摘要适合对话决策，大数组和长报告通过 artifact 路径交付。工具名是否友好不如合同是否能阻止错误角色、未知配置和静默降级重要。",
             "正确调用顺序通常是 discover→plan→generate→gate→run→analyze/deliver。能力发现告诉 Agent 哪些后端真实可用；计划把用户问题转成冻结实验；生成与 Gate 1 建立数据可信度；算法/系统工具只消费已通过的数据；统计和交付工具再形成结论。直接从自然语言跳到某个 throughput 工具，容易遗漏基线、公平条件和门。",
@@ -827,7 +835,7 @@ DETAIL_SPECS.update({
             ("全量清单同步", "页面工具数量与 server AST 一致，每个公开 sr_* 工具都有摘要、签名与分组。"),
         ),
         pitfalls=(
-            "把 34 个工具做成彼此平级菜单，Agent 不知道何时必须先过 Gate。",
+            "把 35 个工具做成彼此平级菜单，Agent 不知道何时必须先过 Gate。",
             "为了对话流畅捕获错误后返回空数组/默认结果，用户看不到降级。",
             "让 MCP 服务端直接执行外部任意 Python，以方便接自研算法。",
         ),

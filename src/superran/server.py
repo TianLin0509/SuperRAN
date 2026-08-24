@@ -1788,6 +1788,9 @@ def sr_system_sim(
     seed: int = 0,
     num_replications: int = 8,
     replication_workers: int | str = "auto",
+    algorithm_label: str = "",
+    tti_trace_mode: str = "sampled",
+    tti_trace_max_points: int = 256,
     kpi_focus: list[str] | None = None,
     kpi_intent: str = "",
 ) -> dict[str, Any]:
@@ -1947,6 +1950,13 @@ def sr_system_sim(
         工作量足以覆盖 Windows spawn 与链路表序列化成本时自动用最多 4 个进程。
         也可显式设 1/2/4/8；结果 ``parallel`` 会返回实际进程数、阈值与降级原因。
         线程后端不提供，因为 TTI Python 事件循环实测 4 线程反而更慢。
+    algorithm_label : 本次算法臂的可读名称。多算法 KPI 工作台用它固定颜色、图例与
+        基线差值；为空时从 scheduler/MU/precoder 自动生成，不影响仿真数值。
+    tti_trace_mode : ``sampled``（默认，等间隔锚点 + MU/NACK/重传等关键事件）、
+        ``full``（测量窗全部 DL TTI）或 ``off``。单 TTI 轨迹只用于解释机制，
+        不能替代跨 replication 的 Gate 3 判决。
+    tti_trace_max_points : sampled 模式的每次重复轨迹上限，默认 256；约一半保留给
+        跨算法严格对齐的均匀锚点，另一半保留关键事件。
     kpi_focus : 调用本工具的 Agent/LLM 依据用户问题显式传入的 KPI key 或关注词。
         页面会保存选择来源和理由、优先展示相关 KPI，其余折叠；不在仿真库内部
         暗调另一个模型。
@@ -2138,7 +2148,9 @@ def sr_system_sim(
             olla_warmup_speedup=float(olla_warmup_speedup))
         kpi_cfg = sysm.KpiConfig(
             trim=trim, small_burst_policy=small_burst_policy,
-            warmup_s=float(warmup_s))
+            warmup_s=float(warmup_s),
+            tti_trace_mode=str(tti_trace_mode),
+            tti_trace_max_points=tti_trace_max_points)
     except (TypeError, ValueError) as exc:
         return {"error": str(exc)}
     load_rng = load_book.generator("neighbor_load")
@@ -2246,6 +2258,20 @@ def sr_system_sim(
     if calibration is not None:
         out["traffic_calibration"] = calibration.as_dict()
     out["dataset_id"] = dataset_id
+    out["analysis_identity"] = ds.summary.get("prereg")
+    resolved_algorithm_label = str(algorithm_label).strip() or (
+        f"{str(scheduler).upper()}"
+        + (f" + MU-{str(mu_precoder).upper()}" if _flag(mu_enabled) else " + SU")
+        + f" · {str(precoder).upper()}/{str(power_constraint).upper()}"
+    )
+    out["algorithm"] = {
+        "label": resolved_algorithm_label,
+        "scheduler": str(scheduler),
+        "mu_enabled": _flag(mu_enabled),
+        "mu_precoder": str(mu_precoder),
+        "precoder": str(precoder),
+        "power_constraint": str(power_constraint),
+    }
     out["num_ues"] = len(tables)
     out["kpi_format"] = {
         "shape": "cell / users 里的每个 KPI 都是 {mean, std, ci95, n_rep, cv, "
@@ -2417,6 +2443,41 @@ def sr_system_sim(
                 "notice": "仿真数值仍完整返回；请先修复页面生成错误再交付结果。",
             }
     return serializable
+
+
+@tool()
+def sr_compare_system_results(
+    result_ids: list[str],
+    baseline_result_id: str | None = None,
+    primary_kpi: str = "cell_experienced_mbps",
+    title: str = "",
+) -> dict[str, Any]:
+    """生成 2..5 个系统算法臂的交互式 KPI 对比工作台。
+
+    每个输入 ID 来自一次 ``sr_system_sim(..., algorithm_label=...)`` 返回的
+    ``kpi_view.result_id``。工作台把算法保持为同屏固定颜色系列，顶层按“总览、
+    KPI 矩阵、用户分布、TTI 趋势、单 TTI、统计门禁”分 Tab；不会把每个算法藏在
+    单独 Tab 里。
+
+    生成前硬校验同一 dataset、体验模式、时长、载波、TDD、话务、KPI 口径和逐位
+    一致的 ``(master_seed, replication)``。主 KPI 复用 ``rng.compare_replications``
+    与 Gate 3；同时比较多个候选时再做 Holm step-down，只会收紧判决。逐 TTI 轨迹
+    只解释调度、RBG、MCS/Rank、SINR、BLER/ACK、OLLA 与 PF 状态差异，不能替代
+    跨 replication 结论。
+    """
+    if not isinstance(result_ids, list):
+        return {"error": "result_ids 必须是 2..5 个 KPI result_id 组成的数组"}
+    try:
+        from . import kpi_compare as _kpi_compare  # noqa: PLC0415
+
+        return _kpi_compare.write_comparison_report(
+            result_ids,
+            baseline_result_id=baseline_result_id,
+            primary_kpi=str(primary_kpi),
+            title=str(title),
+        )
+    except (FileNotFoundError, TypeError, ValueError) as exc:
+        return {"error": str(exc)}
 
 
 def main() -> None:

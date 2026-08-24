@@ -136,10 +136,19 @@ CRN 就是把那个协方差做正）。**两臂拿同一个 `rng.replications(m
 判据有两种等价说法，`verdict_text` 两句都写：**"95% 置信区间跨零"**与
 **"效应比置信区间还小"**——对称 t 区间下 `|mean| < h` 与"区间含 0"是充要的。
 
-**`rng.compare_replications` 目前只是库函数，没有对应的 MCP 工具。**
-要判决就写脚本导入它跑；**不要臆造 `sr_compare_system_arms` 这类不存在的工具**。
-另外 `sr_system_sim` 的返回里只有聚合后的 `KpiStat`，**没有逐次重复的原始值**，
-所以这条路必须在脚本里从 `simulate_replications` 拿 `runs` 才走得通。
+`sr_system_sim(..., algorithm_label=...)` 现在会把聚合 KPI 之外的比较证据保存进
+`kpi_view.result_id` 对应 JSON sidecar：逐 replication 小区 KPI、RngBook、算法标签和
+有界 TTI trace。2..5 个算法臂交给 `sr_compare_system_results`，由它复用
+`rng.compare_replications` / Gate 3；同一主 KPI 有多个候选时追加 Holm step-down。
+任何 dataset、模式、时长、载波、TDD、话务、KPI 或逐位 RngRun 不一致都会硬拒绝。
+
+TTI trace 默认 `sampled`：一半预算是跨算法共同的均匀 TTI 锚点，另一半是
+MU/NACK/重传/多 UE/outage 关键事件；`full` 显式保留测量窗全部 DL TTI，`off` 关闭。
+详情包括 RBG bitmap、候选/调度 UE、MCS/rank、预测与接收 SINR、BLER 与随机 draw、
+ACK、OLLA 前后、PF metric/平均速率及 SU/MU 选择原因。**单 TTI 是机制诊断，不是
+统计样本，绝不能替代跨 replication 的 Gate 3。**
+只有 dataset 的生成前 prereg 同时匹配主 KPI 与基线标签时才允许标 publishable winner；
+否则即使统计显著也保持 exploratory_unregistered。
 
 ### 区间覆盖什么、不覆盖什么
 

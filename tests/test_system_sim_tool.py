@@ -90,11 +90,18 @@ def test_capacity_ok() -> None:
 
 def test_experience_ok() -> None:
     _write_dataset()
-    out = _run(evaluation_mode="experience", traffic_model="ftp3")
+    out = _run(
+        evaluation_mode="experience", traffic_model="ftp3",
+        algorithm_label="PF 基线", tti_trace_mode="sampled",
+        tti_trace_max_points=32)
     assert "error" not in out, out.get("error")
     assert "cell_experienced_mbps" in out["cell"]
     assert out["kpi_format"]
     view = out["kpi_view"]
+    assert view["result_id"] and Path(view["result_json_path"]).is_file()
+    assert out["algorithm"]["label"] == "PF 基线"
+    assert out["tti_trace"]["mode"] == "sampled"
+    assert out["comparison_evidence"]["cell_samples_by_replication"]
     assert view["actions"]["offline_safe"] is True
     assert len(view["actions"]["download"]) == 3
     page = Path(view["html_path"]).read_text(encoding="utf-8")
@@ -102,6 +109,32 @@ def test_experience_ok() -> None:
     assert page.count("data-download=") == 3
     assert "superran_kpi_export_v1" in page
     assert "为什么优先展示这些 KPI" in page
+
+
+def test_compare_two_system_results_generates_real_workbench() -> None:
+    _write_dataset()
+    baseline = _run(
+        evaluation_mode="experience", traffic_model="ftp3",
+        scheduler="pf", algorithm_label="PF 基线",
+        tti_trace_max_points=24)
+    candidate = _run(
+        evaluation_mode="experience", traffic_model="ftp3",
+        scheduler="rr", algorithm_label="RR 候选",
+        tti_trace_max_points=24)
+    out = srv.sr_compare_system_results(
+        [baseline["kpi_view"]["result_id"], candidate["kpi_view"]["result_id"]],
+        baseline_result_id=baseline["kpi_view"]["result_id"],
+        primary_kpi="cell_experienced_mbps",
+    )
+    assert "error" not in out, out.get("error")
+    assert out["algorithm_count"] == 2 and len(out["tabs"]) == 6
+    assert out["primary_lock"]["status"] == "exploratory_unregistered"
+    assert all(not row["publishable_winner"]
+               for row in out["primary_comparisons"].values())
+    page = Path(out["html_path"]).read_text(encoding="utf-8")
+    assert "superran_kpi_comparison_v1" in page
+    assert "同一 TTI 并排复盘" in page
+    assert "Holm" in page
 
 
 def test_matching_dataset_and_runtime_provenance_is_reported() -> None:

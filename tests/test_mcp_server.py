@@ -61,7 +61,7 @@ async def main() -> None:
                 "sr_capabilities", "sr_list_presets", "sr_list_scenes", "sr_plan",
                 "sr_revise", "sr_generate", "sr_deliver",
                 "sr_describe_dataset", "sr_list_datasets", "sr_mcs_info", "sr_bler_curve",
-                "sr_tdd_mcs",
+                "sr_tdd_mcs", "sr_compare_system_results",
             }
             check(expected.issubset(set(names)), f"12 个核心工具全部注册（实际 {len(names)} 个）")
             sim_tool = next((t for t in tools.tools if t.name == "sr_system_sim"), None)
@@ -86,15 +86,30 @@ async def main() -> None:
                 "packet_size_cdf", "interarrival_cdf", "traffic_profiles",
                 "target_prb_utilization", "load_calibration_axis",
                 "load_calibration_formal_refinements",
-                "replication_workers", "kpi_focus", "kpi_intent"}
+                "replication_workers", "algorithm_label", "tti_trace_mode",
+                "tti_trace_max_points", "kpi_focus", "kpi_intent"}
             check(traffic_kpi_args.issubset(sim_props),
-                  "MCP schema 公开 CDF、多 profile、目标 PRB 校准与 Agent KPI 编排")
+                  "MCP schema 公开 CDF、多 profile、目标 PRB 校准、算法标签、TTI trace 与 Agent KPI 编排")
             check("harq_combining" in sim_props,
                   "MCP schema 公开一次重传的 IR/CC 合并选择")
             worker_schema = json.dumps(
                 sim_props.get("replication_workers", {}), ensure_ascii=False)
             check("integer" in worker_schema and "string" in worker_schema,
                   "重复实验 workers 支持显式整数与 auto，而不是无效字符串旋钮")
+            compare_tool = next(
+                (tool for tool in tools.tools if tool.name == "sr_compare_system_results"),
+                None,
+            )
+            if compare_tool is None:
+                compare_props = {}
+            else:
+                compare_schema = getattr(
+                    compare_tool, "inputSchema", None) or compare_tool.input_schema
+                compare_props = compare_schema.get("properties", {})
+            check(compare_tool is not None
+                  and {"result_ids", "baseline_result_id", "primary_kpi"}
+                  .issubset(compare_props),
+                  "多算法 KPI 工具公开结果句柄、基线和预注册主 KPI")
 
             print("\n" + "=" * 68 + "\n1.5  表驱动 BLER 查询\n" + "=" * 68)
             curve = _payload(await session.call_tool(
@@ -366,9 +381,9 @@ async def main() -> None:
             check(True, f"非固定 TDD 格栅硬失败：{_cfg}, {_nrb} RB")
 
     print("\n" + "=" * 68 + "\n11  skill 的工具地图必须和代码对得上\n" + "=" * 68)
-    # SKILL.md 写着"34 个 sr_* 工具全在这张表里"。这句话曾经**同时**漏了
+    # SKILL.md 写着"35 个 sr_* 工具全在这张表里"。这句话曾经**同时**漏了
     # sr_system_scene 又把明令不存在的 sr_compare_system_arms 算了进去，
-    # 两个错误互相抵消，总数正好还是 34 —— 只数总数看不出来，必须逐个比名字。
+    # 两个错误互相抵消，总数正好仍可能对上 —— 只数总数看不出来，必须逐个比名字。
     # 后果是实打实的：sr_system_scene 是用来免掉"每次手拍八九个系统级参数"的，
     # 它不在表里，用 skill 的 agent 就永远发现不了。
     import re as _re  # noqa: PLC0415

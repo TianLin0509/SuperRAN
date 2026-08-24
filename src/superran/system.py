@@ -63,6 +63,7 @@ PriorityWeighting = Literal["none", "inverse_priority"]
 ThroughputTrim = Literal["none", "tail", "head_tail"]
 SmallBurstPolicy = Literal["fractional_slot", "exclude"]
 HarqCombining = Literal["ir", "cc"]
+TtiTraceMode = Literal["off", "sampled", "full"]
 
 
 # ---------------------------------------------------------------------------
@@ -639,6 +640,11 @@ class KpiConfig:
     warmup_tti: int | None = None
     warmup_s: float = 1.0
     small_burst_policy: SmallBurstPolicy = "fractional_slot"
+    # KPI 对比工作台默认保留一个可控大小的代表性 TTI 轨迹：一半均匀覆盖测量窗，
+    # 一半留给 MU/NACK/HARQ/多 UE 等关键事件。full 只在用户明确要求时开启，
+    # 否则 5 个算法 x 8 次重复 x 10000 TTI 会把结果合同膨胀到不可交付。
+    tti_trace_mode: TtiTraceMode = "sampled"
+    tti_trace_max_points: int = 256
 
     def __post_init__(self) -> None:
         if self.trim not in ("none", "tail", "head_tail"):
@@ -657,6 +663,14 @@ class KpiConfig:
             raise ValueError("warmup_s 必须是有限非负数")
         if self.small_burst_policy not in ("fractional_slot", "exclude"):
             raise ValueError("small_burst_policy 只支持 fractional_slot / exclude")
+        if self.tti_trace_mode not in ("off", "sampled", "full"):
+            raise ValueError("tti_trace_mode 只支持 off / sampled / full")
+        if (
+            isinstance(self.tti_trace_max_points, (bool, np.bool_))
+            or not isinstance(self.tti_trace_max_points, (int, np.integer))
+            or int(self.tti_trace_max_points) < 1
+        ):
+            raise ValueError("tti_trace_max_points 必须是至少为 1 的整数")
 
     def resolve_warmup_tti(self, tti_ms: float) -> int:
         if not np.isfinite(tti_ms) or float(tti_ms) <= 0:
@@ -670,6 +684,8 @@ class KpiConfig:
                 "warmup_s": self.warmup_s,
                 "warmup_tti_override": self.warmup_tti,
                 "small_burst_policy": self.small_burst_policy,
+                "tti_trace_mode": self.tti_trace_mode,
+                "tti_trace_max_points": int(self.tti_trace_max_points),
                 "experience_standard": "3GPP TS 28.552 Rel-19",
                 "trim_note": {
                     "none": "legacy：从到达算到清空，含最后一个 TTI",
@@ -3167,17 +3183,35 @@ class ReplicationResult:
         return rg.summarize([r.cell[key] for r in self.runs if key in r.cell], key)
 
     def as_dict(self) -> dict[str, Any]:
+        cell_samples: dict[str, list[float]] = {}
+        for key in sorted(self.cell):
+            values = [run.cell.get(key) for run in self.runs]
+            if values and all(_finite_real(value) for value in values):
+                cell_samples[key] = [float(value) for value in values]
         out = {"config": self.config, "cell": self.cell, "users": self.users,
                "n_rep": self.n_rep,
                "replications": [b.as_dict()["replication"] for b in self.books],
                "elapsed_s": round(self.elapsed_s, 3),
                "build_tables_s": round(self.build_elapsed_s, 3),
                "parallel": self.parallel,
-               "notes": self.notes}
+               "notes": self.notes,
+               "comparison_evidence": {
+                   "schema": "superran_system_comparison_evidence_v1",
+                   "rng_books": [book.as_dict() for book in self.books],
+                   "cell_samples_by_replication": cell_samples,
+                   "pairing_key": "(master_seed, replication)",
+                   "scope": (
+                       "paired KPI decisions use per-replication values; "
+                       "single-TTI trace is diagnostic and never replaces Gate 3"
+                   ),
+               }}
         if self.runs:
             definitions = self.runs[0].diagnostics.get("kpi_definitions")
             if definitions:
                 out["kpi_definitions"] = definitions
+            trace = self.runs[0].diagnostics.get("tti_trace")
+            if trace:
+                out["tti_trace"] = trace
             for key in ("traffic_profiles", "traffic_samples"):
                 value = self.runs[0].diagnostics.get(key)
                 if value is not None:

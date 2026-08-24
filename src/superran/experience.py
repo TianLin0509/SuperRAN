@@ -458,6 +458,7 @@ class Allocation:
     sinr_db: float
     bler: float
     ack: bool
+    harq_random_draw: float = 0.0
     transmission_mode: str = "SU"
     mu_group_id: int | None = None
     partner_ue: int | None = None
@@ -465,6 +466,8 @@ class Allocation:
     power_loss_db: float = 0.0
     su_olla_before_db: float = 0.0
     mu_olla_before_db: float = 0.0
+    su_olla_after_db: float = 0.0
+    mu_olla_after_db: float = 0.0
     pair_correlation: float | None = None
     plan_su_useful_bytes: int = 0
     plan_mu_useful_bytes: int = 0
@@ -487,13 +490,91 @@ class Allocation:
         d["olla_before_mcs"] = round(self.olla_before_db, 4)
         d["su_olla_before_mcs"] = round(self.su_olla_before_db, 4)
         d["mu_olla_before_mcs"] = round(self.mu_olla_before_db, 4)
+        d["su_olla_after_mcs"] = round(self.su_olla_after_db, 4)
+        d["mu_olla_after_mcs"] = round(self.mu_olla_after_db, 4)
         d["olla_domain"] = "continuous_mcs_index"
         d["pf_average_before_bytes"] = round(self.pf_average_before_bytes, 6)
         d["scheduler_metric"] = round(self.scheduler_metric, 6)
         d["bler"] = round(self.bler, 6)
+        d["harq_random_draw"] = round(self.harq_random_draw, 6)
         if self.bler_lookup_sinr_db is not None:
             d["bler_lookup_sinr_db"] = round(self.bler_lookup_sinr_db, 4)
         return d
+
+
+def _trace_sampling_plan(
+    *, mode: str, max_points: int, warmup: int, num_tti: int, pattern: str
+) -> tuple[set[int], int]:
+    """Return deterministic uniform TTI anchors and reserved event capacity.
+
+    ``sampled`` deliberately reserves roughly half the budget for events.  Uniform
+    anchors make different algorithms align on the same x coordinates; event rows
+    explain divergences such as MU selection, NACK or HARQ without pretending the
+    event sample is an unbiased time-series sample.
+    """
+    resolved = str(mode).lower()
+    if resolved == "off":
+        return set(), 0
+    eligible = [
+        tti
+        for tti in range(int(warmup), int(num_tti))
+        if pattern[tti % len(pattern)] in ("D", "S")
+    ]
+    if not eligible:
+        return set(), 0
+    if resolved == "full":
+        return set(eligible), 0
+    uniform_count = min(len(eligible), max(1, int(max_points) // 2))
+    positions = np.linspace(0, len(eligible) - 1, uniform_count, dtype=int)
+    uniform = {eligible[int(position)] for position in positions}
+    return uniform, max(0, int(max_points) - len(uniform))
+
+
+def _tti_trace_row(
+    *,
+    tti: int,
+    tti_ms: float,
+    slot: str,
+    snapshot: int,
+    sample_reasons: Sequence[str],
+    candidates: Sequence[int],
+    blocked_ues: int,
+    allocations: Sequence[Allocation],
+    backlog_bytes_after: int,
+    pf_average_after: np.ndarray,
+) -> dict[str, Any]:
+    """Collapse one scheduling opportunity while retaining every grant detail."""
+    grants = [allocation.as_dict() for allocation in allocations]
+    used = sorted({index for allocation in allocations for index in allocation.rbg_indices})
+    scheduled_ues = sorted({int(allocation.ue) for allocation in allocations})
+    modes = sorted({str(allocation.transmission_mode) for allocation in allocations})
+    return {
+        "tti": int(tti),
+        "time_ms": round(float(tti) * float(tti_ms), 6),
+        "slot": str(slot),
+        "snapshot": int(snapshot),
+        "sample_reasons": list(dict.fromkeys(str(reason) for reason in sample_reasons)),
+        "candidate_ues": [int(ue) for ue in candidates],
+        "blocked_outage_ues": int(blocked_ues),
+        "scheduled_ues": scheduled_ues,
+        "scheduled_user_count": len(scheduled_ues),
+        "transmission_modes": modes,
+        "has_mu": "MU" in modes,
+        "occupied_rbg": len(used),
+        "used_rbg_indices": used,
+        "newtx_count": sum(allocation.harq_tx_mode == "newtx" for allocation in allocations),
+        "retx_count": sum(allocation.harq_tx_mode == "retx" for allocation in allocations),
+        "nack_count": sum(not allocation.ack for allocation in allocations),
+        "scheduled_bytes": sum(int(allocation.scheduled_bytes) for allocation in allocations),
+        "payload_bytes": sum(int(allocation.payload_bytes) for allocation in allocations),
+        "acked_bytes": sum(int(allocation.acked_bytes) for allocation in allocations),
+        "padding_bytes": sum(int(allocation.padding_bytes) for allocation in allocations),
+        "backlog_bytes_after": int(backlog_bytes_after),
+        "pf_average_after_bytes": {
+            str(ue): round(float(pf_average_after[ue]), 6) for ue in scheduled_ues
+        },
+        "grants": grants,
+    }
 
 
 @dataclass(frozen=True)
@@ -1368,6 +1449,12 @@ def simulate_experience(
                          "acked_goodput / legacy_fullband")
 
     warmup = int(kpi.resolve_warmup_tti(sys_cfg.tti_ms))
+    trace_mode = str(getattr(kpi, "tti_trace_mode", "sampled")).lower()
+    trace_max_points = int(getattr(kpi, "tti_trace_max_points", 256))
+    if trace_mode not in ("off", "sampled", "full"):
+        raise ValueError("tti_trace_mode 只支持 off / sampled / full")
+    if trace_max_points < 1:
+        raise ValueError("tti_trace_max_points 必须至少为 1")
     if warmup >= int(sys_cfg.num_tti):
         raise ValueError(
             f"预启动 {warmup} TTI 不得覆盖全部仿真时长 {int(sys_cfg.num_tti)} TTI")
@@ -1527,6 +1614,15 @@ def simulate_experience(
     allocation_sample: list[Allocation] = []
     allocation_limit = 256
     allocation_recent: deque[Allocation] = deque(maxlen=allocation_limit)
+    trace_uniform_ttis, trace_event_limit = _trace_sampling_plan(
+        mode=trace_mode,
+        max_points=trace_max_points,
+        warmup=warmup,
+        num_tti=int(sys_cfg.num_tti),
+        pattern=pattern,
+    )
+    tti_trace_rows: dict[int, dict[str, Any]] = {}
+    trace_event_count = 0
     max_rbg_in_tti = overlap_violations = 0
     class_alloc_rbg: dict[str, int] = {}
     class_physical_rbg_share: dict[str, float] = {}
@@ -1562,15 +1658,44 @@ def simulate_experience(
         cand = [u for u in range(n_ue) if tr.has_data(u)
                 and (u not in harq_pending or harq_pending[u].slot == slot)
                 and not (tables[u].outage is not None and tables[u].outage[snap])]
+        blocked_this_tti = sum(
+            1
+            for u in range(n_ue)
+            if tr.has_data(u)
+            and tables[u].outage is not None
+            and tables[u].outage[snap]
+        )
         if in_measurement:
-            outage_skips += sum(1 for u in range(n_ue) if tr.has_data(u)
-                                and tables[u].outage is not None
-                                and tables[u].outage[snap])
+            outage_skips += blocked_this_tti
         a = 1.0 / max(int(sched.pf_window_tti), 1)
         if not cand:
             if in_measurement:
                 tti_occupied_rbg_counts[0] += 1
             r_avg *= 1.0 - a
+            trace_reasons: list[str] = []
+            if tti in trace_uniform_ttis:
+                trace_reasons.append("full" if trace_mode == "full" else "uniform")
+            if (
+                in_measurement
+                and blocked_this_tti
+                and (tti in trace_uniform_ttis or trace_event_count < trace_event_limit)
+            ):
+                trace_reasons.append("outage")
+                if tti not in trace_uniform_ttis:
+                    trace_event_count += 1
+            if in_measurement and trace_reasons:
+                tti_trace_rows[tti] = _tti_trace_row(
+                    tti=tti,
+                    tti_ms=float(sys_cfg.tti_ms),
+                    slot=slot,
+                    snapshot=snap,
+                    sample_reasons=trace_reasons,
+                    candidates=(),
+                    blocked_ues=blocked_this_tti,
+                    allocations=(),
+                    backlog_bytes_after=int(tr.backlog_bytes),
+                    pf_average_after=r_avg,
+                )
             continue
 
         rank_of: dict[int, int] = {}
@@ -1708,6 +1833,7 @@ def simulate_experience(
         used_indices: set[int] = set()
         inst = np.zeros(n_ue, dtype=float)
         users_this_tti = 0
+        tti_allocations: list[Allocation] = []
         for group_idx, grant in enumerate(selected_plan.grants):
             n_alloc = int(grant.n_rbg)
             indices = tuple(int(x) for x in grant.rbg_indices)
@@ -1882,6 +2008,7 @@ def simulate_experience(
                     olla_before_db=su_olla_before,
                     mcs_without_olla=int(grant.mcs_without_olla[side]),
                     sinr_db=sinr, bler=bler, ack=ack,
+                    harq_random_draw=float(harq_draw[tti, u]),
                     transmission_mode=grant.mode,
                     mu_group_id=(tti * 100 + group_idx if grant.mode == "MU" else None),
                     partner_ue=(grant.users[1 - side] if grant.mode == "MU" else None),
@@ -1889,6 +2016,8 @@ def simulate_experience(
                     power_loss_db=float(grant.power_loss_db),
                     su_olla_before_db=su_olla_before,
                     mu_olla_before_db=mu_olla_before,
+                    su_olla_after_db=float(olla_db[u]),
+                    mu_olla_after_db=float(mu_olla_db[u]),
                     pair_correlation=grant.pair_correlation,
                     plan_su_useful_bytes=su_plan.useful_bytes,
                     plan_mu_useful_bytes=mu_plan.useful_bytes,
@@ -1903,6 +2032,7 @@ def simulate_experience(
                     original_transmission_mode=(
                         str(pending_tb.first_mode)
                         if pending_tb is not None else str(grant.mode)))
+                tti_allocations.append(alloc)
                 if in_measurement:
                     if len(allocation_sample) < allocation_limit:
                         allocation_sample.append(alloc)
@@ -1928,6 +2058,44 @@ def simulate_experience(
         if in_measurement:
             tti_occupied_rbg_counts[len(used_indices)] += 1
         r_avg = (1.0 - a) * r_avg + a * inst
+        if in_measurement and trace_mode != "off":
+            event_reasons: list[str] = []
+            if any(allocation.transmission_mode == "MU" for allocation in tti_allocations):
+                event_reasons.append("mu")
+            if any(not allocation.ack for allocation in tti_allocations):
+                event_reasons.append("nack")
+            if any(allocation.harq_tx_mode == "retx" for allocation in tti_allocations):
+                event_reasons.append("retx")
+            if len({allocation.ue for allocation in tti_allocations}) > 1:
+                event_reasons.append("multi_ue")
+            if blocked_this_tti:
+                event_reasons.append("outage")
+            if not tti_allocations:
+                event_reasons.append("no_grant")
+
+            reasons: list[str] = []
+            if tti in trace_uniform_ttis:
+                reasons.append("full" if trace_mode == "full" else "uniform")
+            capture_event = bool(event_reasons) and (
+                tti in trace_uniform_ttis or trace_event_count < trace_event_limit
+            )
+            if capture_event:
+                reasons.extend(event_reasons)
+                if tti not in trace_uniform_ttis:
+                    trace_event_count += 1
+            if reasons:
+                tti_trace_rows[tti] = _tti_trace_row(
+                    tti=tti,
+                    tti_ms=float(sys_cfg.tti_ms),
+                    slot=slot,
+                    snapshot=snap,
+                    sample_reasons=reasons,
+                    candidates=cand,
+                    blocked_ues=blocked_this_tti,
+                    allocations=tti_allocations,
+                    backlog_bytes_after=int(tr.backlog_bytes),
+                    pf_average_after=r_avg,
+                )
         if progress and tti % 5000 == 0:
             progress(tti, int(sys_cfg.num_tti))
 
@@ -2613,6 +2781,29 @@ def simulate_experience(
         notes.append("**本小区 PRB 利用率超过 98%**，当前结果更接近容量上限而非稳态体验。")
     diagnostics = {
         "tbs_lookup": lookup.as_dict(),
+        "tti_trace": {
+            "schema": "superran_tti_trace_v1",
+            "mode": trace_mode,
+            "source_replication": int(book.replication),
+            "tti_ms": float(sys_cfg.tti_ms),
+            "warmup_tti": int(warmup),
+            "max_points": int(trace_max_points),
+            "uniform_anchor_count": len(trace_uniform_ttis),
+            "event_row_count": sum(
+                "uniform" not in row["sample_reasons"]
+                and "full" not in row["sample_reasons"]
+                for row in tti_trace_rows.values()
+            ),
+            "sampling_contract": (
+                "all measurement-window DL TTIs"
+                if trace_mode == "full"
+                else "deterministic uniform anchors plus bounded MU/NACK/retx/"
+                     "multi-UE/outage events"
+                if trace_mode == "sampled"
+                else "disabled"
+            ),
+            "rows": [tti_trace_rows[key] for key in sorted(tti_trace_rows)],
+        },
         "allocation_sample": [a.as_dict() for a in allocation_sample],
         "allocation_recent_sample": [a.as_dict() for a in allocation_recent],
         "allocation_sample_limit": allocation_limit,

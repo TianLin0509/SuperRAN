@@ -15,7 +15,7 @@ description: >
 
 # 无线信道仿真编排
 
-配合 `superran` MCP（34 个 `sr_*` 工具）使用。MCP 提供能力与数据，
+配合 `superran` MCP（35 个 `sr_*` 工具）使用。MCP 提供能力与数据，
 本 skill 负责把仿真条件定清楚、把实验做公平、把结论守住。
 
 <HARD-GATE>
@@ -240,8 +240,14 @@ SRS hopping 也不是通用旋钮：当前只有 272 RB 上的
 **CRN 区间半宽 3.49、独立随机数 13.69，窄 3.92 倍**；同一个真实效应 CRN 判显著
 （p=0.0078），独立种子判成 inconclusive（p=0.078）。种子对不上时 `check_pairable`
 **直接拒绝比较**——顺序错位在统计层面完全不可观测，错配数据照样算得出漂亮的 p 值。
-**它目前只是库函数，没有对应的 MCP 工具**：要判决就写脚本调它，
-**不要臆造 `sr_compare_system_arms` 之类不存在的工具**。
+现在每次 `sr_system_sim(..., algorithm_label=...)` 会返回 `kpi_view.result_id` 并保存逐
+replication KPI、RngBook 与 sampled/full TTI trace；把 2..5 个 result_id 交给
+`sr_compare_system_results`。它先硬校验 dataset/模式/时长/载波/TDD/话务/KPI 与逐位
+RngRun，再复用 `rng.compare_replications` / Gate 3；多个候选对同一基线时对主 KPI
+追加 Holm step-down，只会收紧判决。算法全程保持固定颜色，Tab 按总览/KPI 矩阵/用户
+分布/TTI 趋势/单 TTI/统计门禁划分，不按算法划分。单 TTI 只用于解释机制，不发布收益。
+只有 dataset 的生成前 `prereg` 同时匹配 `primary_kpi` 与基线算法标签时才允许标
+publishable winner；否则即使统计显著也必须保持 `exploratory_unregistered`。
 
 ## 常见的自我合理化
 
@@ -296,7 +302,7 @@ SRS hopping 也不是通用旋钮：当前只有 272 RB 上的
 
 ## 工具地图与参考文件
 
-**34 个 `sr_*` 工具全在这张表里。** 每份 reference 开头写了"什么时候读这一份"，低频细节需要时读那一份，**不要凭印象答**。压力测试记录见 `references/pressure-tests.md`。
+**35 个 `sr_*` 工具全在这张表里。** 每份 reference 开头写了"什么时候读这一份"，低频细节需要时读那一份，**不要凭印象答**。压力测试记录见 `references/pressure-tests.md`。
 
 | 在哪一步 | 工具 | 细节 |
 |---|---|---|
@@ -304,6 +310,6 @@ SRS hopping 也不是通用旋钮：当前只有 272 RB 上的
 | 1 对齐目标 | `sr_list_datasets` `sr_missing_slots` `sr_plan` `sr_revise` `sr_lock_analysis` `sr_spec_sheet` `sr_await_config` | `asking.md` `spec-sheet.md` |
 | 2 生成数据 | `sr_list_presets` `sr_list_scenes` `sr_probe_scenario` `sr_compare_scenarios` `sr_generate` `sr_gate` `sr_validate` `sr_calibrate` `sr_describe_dataset` `sr_deliver` | `scenarios-and-interference.md`（含射线追踪）`default-hardware.md` `performance.md` |
 | 3 对比 · 链路级 | `sr_sample_size` `sr_link_performance` `sr_compare_arms` `sr_throughput` `sr_sweep_snr` `sr_mcs_info` `sr_bler_curve` `sr_tdd_mcs` | `gates-and-stats.md`（**18 项体检**明细、Wilcoxon、预注册、「声称与证据」表）`link-adaptation.md` |
-| 3 对比 · 系统级 | `sr_system_scene` `sr_system_sim` | `system-sim.md` |
+| 3 对比 · 系统级 | `sr_system_scene` `sr_system_sim` `sr_compare_system_results` | `system-sim.md` |
 | 3 对比 · 外部算法 | `sr_export_eval_template` `sr_compare_results` `sr_list_results` | `gates-and-stats.md` |
 | 干扰画像 | `sr_interference_report` `sr_design_interference` `sr_iot_convert` | `scenarios-and-interference.md` |

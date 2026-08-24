@@ -62,7 +62,7 @@ pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` �
 要跑 test_interference（说明书与回传桥都在它第 9 节）；
 改动 `mumimo.py` / `beamforming.py` / `power_control.py` 要跑 test_mumimo +
 test_power_control + test_physics_invariants；
-改动 `system.py` / `experience.py` / `traffic.py` / `kpi_view.py` 要跑 test_system +
+改动 `system.py` / `experience.py` / `traffic.py` / `kpi_view.py` / `kpi_compare.py` 要跑 test_system +
 test_csi_aging + test_rng；
 改动 `csi_aging.py` 要跑 test_csi_aging；改动 `rng.py` 要跑 test_rng + test_system；
 改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）；
@@ -133,6 +133,21 @@ KaTeX 未必收，光看 Python 源码看不出来。
 `confidence|t_test|wilcoxon|paired` 命中数曾经是 0。现在 `simulate_replications`
 把每个 KPI 报成 `mean/std/ci95/n_rep`，`sr_system_sim` 默认 `num_replications=8`。
 **统计一律复用 `gates.paired_compare` / `gate_conclusion`，不另写一套。**
+
+### 多算法 KPI：算法不是 Tab，单 TTI 不是结论
+
+2~5 个算法比较时，算法必须是贯穿总览、KPI 矩阵、用户 CDF、TTI 趋势与详情的
+固定颜色系列；Tab 按读者问题划分，不能把每个算法藏进独立 Tab 逼用户凭记忆比较。
+基线不可隐藏。每个单臂结果保存严格 JSON sidecar，比较入口硬校验 dataset、模式、
+时长、载波、TDD、话务、KPI 口径和逐位 `(master_seed, replication)`；主 KPI 复用
+Gate 3，多候选对同一基线时 Holm 只收紧、不放宽判决。
+只有 dataset 的生成前 prereg 同时匹配主 KPI 与基线标签时才允许标 publishable winner；
+否则即使统计显著也保持 exploratory_unregistered。
+
+TTI trace 默认 `sampled`：一半预算保存跨算法共同的均匀锚点，一半保存
+MU/NACK/重传/多 UE/outage 事件；`full` 必须显式开启。缺采样与真实 idle 是两个状态。
+单 TTI 的 RBG/MCS/rank/SINR/BLER draw/ACK/OLLA/PF 只能解释机制分叉，绝不能从一个
+事件外推“算法提升”。
 
 四条不能忘的量级：
 

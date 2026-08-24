@@ -894,6 +894,11 @@ def write_kpi_report(result: dict[str, Any], *, dataset_id: str = "",
     stem = f"kpi-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
     path = out_dir / f"{stem}.html"
     path.write_text(html_text, encoding="utf-8")
+    result_path = out_dir / f"{stem}.result.json"
+    result_path.write_text(
+        json.dumps(_json_ready(result), ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
     url = None
     serve_error = None
     if serve:
@@ -905,6 +910,8 @@ def write_kpi_report(result: dict[str, Any], *, dataset_id: str = "",
                 serve_error = "环回服务启动失败；请直接打开 html_path"
     return {
         "html_path": str(path),
+        "result_id": stem,
+        "result_json_path": str(result_path),
         "url": url,
         "serve_error": serve_error,
         "tabs": ["小区级", "用户级"],

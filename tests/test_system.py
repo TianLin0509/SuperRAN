@@ -19,6 +19,8 @@ sys.stdout.reconfigure(errors="replace")
 from superran import bler_curves as bc  # noqa: E402
 from superran import carrier as cgrid  # noqa: E402
 from superran import experience as expm  # noqa: E402
+from superran import kpi_compare as kcmp  # noqa: E402
+from superran import kpi_view  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import mumimo as mu  # noqa: E402
 from superran import rng as rg  # noqa: E402
@@ -628,6 +630,21 @@ check(_ex.diagnostics["tbs_lookup"]["entries"] == 3808,
       "结果携带实际使用的 3808 项 TBS 表口径")
 check("[TTI,UE]" in _ex.diagnostics["crn_event_mapping"],
       "ACK/NACK 与 tie-break 随机数按 [TTI,UE] 固定映射，A/B 调度分叉不串流")
+_trace = _ex.diagnostics["tti_trace"]
+_trace_grants = [grant for row in _trace["rows"] for grant in row["grants"]]
+check(_trace["schema"] == "superran_tti_trace_v1"
+      and _trace["mode"] == "sampled"
+      and 0 < len(_trace["rows"]) <= 256,
+      "默认 TTI trace 有界采样，不把完整 5 秒轨迹塞进每个 replication")
+check(any("uniform" in row["sample_reasons"] for row in _trace["rows"])
+      and all(row["tti"] >= 0 for row in _trace["rows"]),
+      "TTI trace 含跨算法可对齐的均匀锚点并保留绝对 TTI")
+check(bool(_trace_grants)
+      and all("harq_random_draw" in grant
+              and "su_olla_after_mcs" in grant
+              and "pf_average_after_bytes" in row
+              for row in _trace["rows"] for grant in row["grants"]),
+      "单 TTI 证据足以复盘 BLER 抽签、OLLA 前后与 PF 更新后状态")
 check(_ex.diagnostics["rbg_overlap_violations"] == 0
       and _ex.diagnostics["max_rbg_in_any_tti"] <= 17,
       "同 TTI RBG 不重叠且总分配不超过 17")
@@ -1446,6 +1463,126 @@ check(_sched_src["olla_down_source"] == "auto_from_target_bler"
       .resolved_for_target(0.1).as_dict()["olla_down_source"]
       == "explicit_user_override",
       "OLLA down 步长来源在 Python API 结果里可区分（自动反解 vs 显式覆盖）")
+
+# ---------------------------------------------------------------------------
+sect("16  多算法 KPI 工作台：CRN、Holm 与 TTI 钻取")
+_old_kpi_root = kpi_view.artifacts_root
+_old_compare_root = kcmp.artifacts_root
+with tempfile.TemporaryDirectory() as _compare_tmp:
+    _compare_root = Path(_compare_tmp)
+    kpi_view.artifacts_root = lambda: _compare_root
+    kcmp.artifacts_root = lambda: _compare_root
+    try:
+        _books16 = rg.replications(20260823, 8)
+        _base16 = np.arange(100.0, 108.0)
+
+        def _comparison_result(label: str, scheduler: str, shift: float) -> dict:
+            _values = _base16 + shift
+            _user_values = _values / 10.0
+            return {
+                "dataset_id": "synthetic-compare-contract",
+                "analysis_identity": {
+                    "prereg_id": "pr_system_compare_test",
+                    "digest": "fixed-test-digest",
+                    "primary_metric": "cell_experienced_mbps",
+                    "baseline": "经典 PF",
+                },
+                "algorithm": {"label": label, "scheduler": scheduler},
+                "config": {
+                    "system": {
+                        "model_version": "experience_v2",
+                        "evaluation_mode": "experience",
+                        "duration_s": 0.8,
+                        "tti_ms": 0.5,
+                        "tdd_pattern": "DDDSU",
+                        "num_rb": 272,
+                        "num_rbg": 17,
+                        "rb_per_rbg": 16,
+                    },
+                    "traffic": {"model": "mixed", "arrival_rate_hz": 2.0},
+                    "kpi": {"warmup_s": 0.0, "tti_trace_mode": "sampled",
+                            "tti_trace_max_points": 256},
+                    "scheduler": {"algorithm": scheduler},
+                },
+                "cell": {
+                    "cell_experienced_mbps": rg.summarize(
+                        _values, "cell_experienced_mbps").as_dict(),
+                    "first_packet_delay_ms_p95": rg.summarize(
+                        30.0 - _values / 10.0, "first_packet_delay_ms_p95").as_dict(),
+                },
+                "users": [{
+                    "ue": 0,
+                    "traffic_class": "video",
+                    "experienced_mbps": rg.summarize(
+                        _user_values, "experienced_mbps").as_dict(),
+                }],
+                "n_rep": 8,
+                "replications": list(range(8)),
+                "comparison_evidence": {
+                    "schema": "superran_system_comparison_evidence_v1",
+                    "rng_books": [book.as_dict() for book in _books16],
+                    "cell_samples_by_replication": {
+                        "cell_experienced_mbps": _values.tolist(),
+                        "first_packet_delay_ms_p95": (30.0 - _values / 10.0).tolist(),
+                    },
+                },
+                "tti_trace": deepcopy(_trace),
+                "notes": [],
+            }
+
+        _reports16 = []
+        for _label, _scheduler16, _shift16 in (
+            ("经典 PF", "pf", 0.0),
+            ("候选 QoS-PF", "qos_pf", 10.0),
+            ("候选 Max-C/I", "max_ci", 20.0),
+        ):
+            _reports16.append(kpi_view.write_kpi_report(
+                _comparison_result(_label, _scheduler16, _shift16), serve=False))
+        _comparison16 = kcmp.build_comparison(
+            [report["result_id"] for report in _reports16],
+            baseline_result_id=_reports16[0]["result_id"],
+        )
+        check(len(_comparison16["arms"]) == 3
+              and _comparison16["fairness"]["pairable"],
+              "2..5 个算法结果按同一 RngRun 硬校验后进入同一比较合同")
+        check(all(row["holm_reject"] and row["publishable_winner"]
+                  for row in _comparison16["comparisons"]
+                  ["cell_experienced_mbps"].values()),
+              "主 KPI 的两个候选先过 Gate 3，再通过 Holm 家族校正")
+        check(all(arm["trace"].get("rows") for arm in _comparison16["arms"]),
+              "每个算法臂都带同一 TTI 可钻取的 sampled trace")
+        check(kcmp._holm_rejections({"a": 0.03, "b": 0.04})
+              == {"a": False, "b": False},
+              "Holm 首项不过时后续全部拒绝发布，不挑单个显著候选")
+        check(all(Path(report["result_json_path"]).is_file()
+                  for report in _reports16),
+              "单臂 KPI 页面同步落严格 JSON sidecar，供后续对比工具按句柄读取")
+        _five_reports16 = list(_reports16)
+        for _label, _scheduler16, _shift16 in (
+            ("候选 4", "pf", 30.0), ("候选 5", "pf", 40.0),
+        ):
+            _five_reports16.append(kpi_view.write_kpi_report(
+                _comparison_result(_label, _scheduler16, _shift16), serve=False))
+        check(len(kcmp.build_comparison(
+            [report["result_id"] for report in _five_reports16])
+            ["arms"]) == 5,
+              "工作台真实接受基线 + 4 个候选，共 5 个算法臂")
+        _expect_value_error(
+            lambda: kcmp.build_comparison(
+                [report["result_id"] for report in _five_reports16] + ["sixth"]),
+            "2..5",
+            "超过 5 个算法时硬拒绝，避免颜色、表格和多重比较失控")
+        _unfair16 = _comparison_result("错配话务候选", "pf", 5.0)
+        _unfair16["config"]["traffic"]["arrival_rate_hz"] = 9.0
+        _unfair_report16 = kpi_view.write_kpi_report(_unfair16, serve=False)
+        _expect_value_error(
+            lambda: kcmp.build_comparison([
+                _reports16[0]["result_id"], _unfair_report16["result_id"]]),
+            "不可公平比较",
+            "话务或 KPI 口径错配时拒绝生成漂亮但无意义的对比页")
+    finally:
+        kpi_view.artifacts_root = _old_kpi_root
+        kcmp.artifacts_root = _old_compare_root
 
 print("\n" + "=" * 70)
 if FAILED:

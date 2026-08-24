@@ -229,7 +229,7 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 
 ## 文档
 
-- **[SuperRAN 开发者文档 `docs/index.html`](docs/index.html)** —— 当前实现的主入口：无线物理、64T4R/192×64 阵列、SRS/LMMSE、EBF/PEBF/NEBF、独立 BF Gain 章节、SU/MU、capacity/experience、话务/PF/KPI、34 个 MCP 工具、Skill、全部公开 API 与本次审计修复；单文件离线可打开
+- **[SuperRAN 开发者文档 `docs/index.html`](docs/index.html)** —— 当前实现的主入口：无线物理、64T4R/192×64 阵列、SRS/LMMSE、EBF/PEBF/NEBF、独立 BF Gain 章节、SU/MU、capacity/experience、话务/PF/KPI、35 个 MCP 工具、Skill、全部公开 API 与本次审计修复；单文件离线可打开
 - **[安装说明 `SETUP.html`](SETUP.html)** —— 由哪几块拼成、要装什么、怎么装、装完先跑什么、排错
 - **[`INSTALL_AGENT.md`](INSTALL_AGENT.md)** —— 写给 AI agent 看的安装步骤，丢给它自己装
 - **[能力手册 `CAPABILITIES.html`](CAPABILITIES.html)** —— 能产生哪些信道、能拿到哪些观察量（含形状与单位）、参数全表、能力边界
@@ -240,6 +240,7 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 - **仿真说明书 / 运行前工作台** —— `sr_spec_sheet` 出的 HTML，默认只返回 URL、不打断用户；明确传 `open_browser=True` 才弹浏览器。页面以真实拓扑与用户/默认来源打头，其余折进 7 个页签；改参数时会标出信道/链路表/TTI/KPI 哪些层需要重算，点「应用到仿真」把 delta 送回 agent（`sr_await_config` 接）。同时支持说明书/Resolved config JSON 下载、摘要复制、页面截图、系统分享与打印/PDF；拷走用 `file://` 打开时自动退回复制粘贴
 - **CDF 话务与目标负载校准** —— 包大小/包间隔各读一份 `value,cdf`，支持全局×profile 双标量、多 profile 与 `ue_ids` 显式用户映射；`target_prb_utilization=0.30` 用公共随机数调话务，最后另跑正式重复实验，未达容差绝不回填目标值。内置 synthetic CDF 只用于接口演示，后续可直接替换现场 CDF
 - **Agent 自适应 KPI 工作台** —— `sr_system_sim(evaluation_mode="experience")` 自动返回 `kpi_view.html_path/url`，顶层为“小区级 / 用户级”；用户级指标同时支持按 UE 图、跨 UE 经验 CDF 和明细表。调用 Agent 可传 `kpi_focus` 优先展示相关 KPI，其余折叠且不丢失，选择理由完整回传。页面含首包时延、含头速率、本小区 PRB 利用率、0..17 RBG 分布、MU 配对比例与用户级 PRB 归因，并可一键下载完整 JSON、小区 CSV、用户长表 CSV，复制摘要、导出页面截图、系统分享或打印/PDF；所有动作离线可用且只读结果
+- **2~5 算法对比与单 TTI 复盘** —— 每次 `sr_system_sim(..., algorithm_label=...)` 同步保存严格 JSON sidecar；`sr_compare_system_results` 将同一 dataset/话务/KPI/RngRun 的基线与候选放入同一工作台。算法保持固定颜色，六个 Tab 按“总览/KPI 矩阵/用户分布/TTI 趋势/单 TTI/统计门禁”分工；主 KPI 走配对 Gate 3 与多候选 Holm 校正，sampled trace 以均匀锚点加关键事件保存 RBG、MCS/rank、SINR、BLER/draw、ACK、OLLA 与 PF 证据。不同配置或 RngRun 会硬拒绝；没有生成前 prereg 时即使显著也保持 `exploratory_unregistered`
 - **体验仿真的冻结合同** —— 当前 TDD 系统只接受 100 MHz @ 30 kHz、272 RB = 17×16，标准 273 RB 在生成前明确舍去 1 RB；SRS hopping 只接受本地版本化的 C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0 17-hop profile。`experience_v2` 只用 `preset_20b_256qam / MCS table 3` 预置表；OLLA 默认由 `target_bler` 与 ACK 步长反解 NACK 步长，仍允许显式 override，结果会标注来源。通用载波/MCS 接口保留给链路级与未来扩展，不会静默混入当前体验结果
 - **[MU-MIMO 算法流程 `MU_MIMO.html`](MU_MIMO.html)** —— 配对/预编码/功率分配逐步展开，含六个待确认的设计选择与实测数字
 - **[通宵成果与待审 `TONIGHT.html`](TONIGHT.html)** —— 6 个 bug、5 个新需求提案、8 个待拍板的决策点
@@ -358,7 +359,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 （§7.8.2 指标3，Annex A.1 圆周定义）、PRB 奇异值最大/次大/比值三条 CDF
 （指标4，10log10 尺度）。参考曲线在 R1-165974 / R1-165975 / R1-1909704。
 
-## MCP 工具（34 个）
+## MCP 工具（35 个）
 
 | 工具 | 作用 |
 |---|---|
@@ -382,6 +383,7 @@ cp -r skills/channel-sim ~/.codex/skills/
 | `sr_bler_curve` | 查单档原始 BLER 曲线、10% 门限，并在任意 SINR 点做对数域插值 |
 | `sr_tdd_mcs` | **TDD AMC**：CQI → PMI/SVD BF Gain → MCS → OLLA，返回逐 RB/流审计链 |
 | `sr_system_sim` | **系统级仿真**：连续几秒 TTI + PF 调度 + 话务，出体验速率等现网 KPI |
+| `sr_compare_system_results` | **2~5 算法 KPI 对比**：CRN 配对、用户 CDF、TTI 趋势/钻取、Gate 3 + Holm |
 | `sr_spec_sheet` | **仿真说明书**：拓扑图 + 分级页签 + 调参面板；默认只返回 URL，`open_browser=True` 才弹浏览器 |
 | `sr_await_config` | 等用户在说明书上点「应用到仿真」，**改动直接回来**，免复制粘贴 |
 | `sr_describe_dataset` / `sr_list_datasets` | 数据集信息 |

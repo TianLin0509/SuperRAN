@@ -828,7 +828,7 @@ def svg_wrap(
 def architecture_svg() -> str:
     boxes = [
         (20, 34, 128, 64, "Agent / CLI", "自然语言目标"),
-        (178, 34, 128, 64, "MCP server", "34 个 sr_* 工具"),
+        (178, 34, 128, 64, "MCP server", "35 个 sr_* 工具"),
         (336, 34, 128, 64, "Plan / Spec", "冻结配置与说明书"),
         (494, 34, 128, 64, "Generate", "ChannelHub / Sionna"),
         (652, 34, 128, 64, "Dataset", "h_true / h_est"),
@@ -1955,9 +1955,9 @@ def product_surfaces_showcase() -> str:
         "真实 Edge/Chromium 截图 · 1440×900 · 7 站 21 小区 64T 运行前说明书",
     )
     kpi_shot = real_ui_screenshot(
-        "kpi-workbench-cell.png",
-        "SuperRAN 系统仿真 KPI 工作台小区级页面，包含 Agent 关注标签、置信区间和下载分享操作栏",
-        "真实 Edge/Chromium 截图 · 1440×900 · experience_v2 小区级证据首屏",
+        "kpi-workbench-comparison.png",
+        "SuperRAN 多算法 KPI 对比工作台，包含固定基线、候选算法系列、问题型 Tab 与置信区间柱形图",
+        "真实 Edge/Chromium 截图 · 1440×900 · 三算法 CRN 对比证据首屏",
     )
     return """
 <section class="product-showcase" aria-labelledby="product-surfaces-title">
@@ -1984,9 +1984,9 @@ def product_surfaces_showcase() -> str:
     <div class="surface-card" data-product-surface="kpi">
       <div class="surface-copy">
         <span class="surface-stage">RUN · AFTER</span>
-        <h3>Agent 自适应 KPI 工作台</h3>
-        <p>26 项小区 KPI、24 项用户 KPI、逐 UE 图与经验 CDF、0..17 RBG 分布和 MU/HARQ 资源对账同页呈现；
-        Agent 只重排关注项，所有数值、告警与完整排序证据仍保留并可下载。</p>
+        <h3>多算法 KPI 对比与单 TTI 复盘</h3>
+        <p>2~5 个算法同屏固定颜色，基线不可隐藏；总览、KPI 矩阵、用户 CDF、TTI 趋势、同 TTI grant 详情与
+        统计门禁形成一条钻取链。单臂工作台仍保留 26 项小区 KPI、24 项用户 KPI 和 Agent 自适应首屏。</p>
         <a href="#/kpi">查看 KPI 口径与工作台合同 →</a>
       </div>
       """ + kpi_shot + """
@@ -2314,7 +2314,7 @@ def agentloop_page() -> Page:
     body = agent_loop_svg()
     body += """
 <h2>代码里已经有一套完整的 Agent 仿真闭环</h2>
-<p>SuperRAN 不只是 34 个工具的集合。<code>decisions.py</code> 把无线领域判断编码成有限任务画像、
+<p>SuperRAN 不只是 35 个工具的集合。<code>decisions.py</code> 把无线领域判断编码成有限任务画像、
 实验设计问题、高影响参数、推荐选项、sweep 与物理 guard；<code>plan.py</code> 把自然语言意图变成
 可差分修改、可跨会话保存的 Draft；<code>algorithms.py</code> 与 <code>algo_defs*.py</code> 再把本次实际采用的
 算法、替代项、公式、适用边界和推导步骤交给说明书。此前这些能力只在 API 表里出现，本章把它们串成一条真实调用链。</p>
@@ -2391,7 +2391,7 @@ if submission["got"]:
 ''')
     body += "<p class=source-row>决策：" + source_ref("src/superran/decisions.py", "def next_round") + " · 计划：" + source_ref("src/superran/plan.py", "def build_proposal") + " · 说明书：" + source_ref("src/superran/spec.py", "def build_spec") + "</p>"
     return Page(
-        "agentloop", "决策引擎、算法目录与说明书闭环", "开始", "AGENTIC SIMULATION",
+        "agentloop", "决策引擎、交互配置工作台与说明书闭环", "开始", "AGENTIC SIMULATION",
         "自然语言如何收敛成可执行配置，以及算法清单与页面回传怎样保持同一真相源。", body,
         ("TaskProfile", "Decision", "Draft", "algorithm_list", "spec", "bridge"),
     )
@@ -4030,6 +4030,11 @@ HTML 工作台，并把 <code>html_path</code>、可用时的 loopback <code>url
 </section>
 """
     body += real_ui_screenshot(
+        "kpi-workbench-cell.png",
+        "SuperRAN 单算法 KPI 工作台小区级真实截图，包含 Agent 关注项、置信区间、PRB 与下载分享操作栏",
+        "真实单臂小区级页签：用于先判断一组结果自身是否可信，再进入多算法配对比较。",
+    )
+    body += real_ui_screenshot(
         "kpi-workbench-user.png",
         "SuperRAN KPI 工作台用户级真实截图，左侧逐 UE 误差棒，右侧跨 UE 经验 CDF",
         "真实用户级页签：每个指标同时给逐 UE 95% 区间和跨 UE 经验 CDF，颜色区分 video/XR profile。",
@@ -4043,6 +4048,71 @@ HTML 工作台，并把 <code>html_path</code>、可用时的 loopback <code>url
         "完整 JSON、两份 CSV 与整页 SVG 截图均由浏览器实际下载并解析。"
         "完整页面、截图、校准轨迹与逐项检查写在 "
         "<code>output/kpi-browser-qa.json</code>。该烟测证明呈现与统计合同，不代表生产话务 CDF 或现场收益。</p>",
+    )
+    body += """
+<h2>多算法对比是主场景：Tab 按问题分，不按算法分</h2>
+<p>典型实验同时包含 1 个基线和 1~4 个候选。若把每个算法放进独立 Tab，读者查看候选时看不到基线，
+只能凭记忆比较；因此算法在全页保持固定颜色与可见性开关，基线始终固定。顶层六个 Tab 回答不同问题：
+总览看绝对量和置信区间，KPI 矩阵看跨指标取舍，用户分布看边缘与公平，TTI 趋势找分叉时刻，单 TTI
+解释机制，统计门禁决定能否发布胜负结论。</p>
+<p class="source-row">交互取舍参考：
+<a class="src" href="https://docs.wandb.ai/models/runs/compare-runs" target="_blank" rel="noreferrer">W&amp;B baseline/pinned runs</a> ·
+<a class="src" href="https://docs.wandb.ai/models/app/features/panels/line-plot" target="_blank" rel="noreferrer">W&amp;B multi-run line plots</a> ·
+<a class="src" href="https://grafana.com/docs/grafana/latest/visualizations/dashboards/variables/" target="_blank" rel="noreferrer">Grafana shared variables</a> ·
+<a class="src" href="https://grafana.com/docs/grafana/latest/visualizations/explore/trace-integration/" target="_blank" rel="noreferrer">Grafana metric→trace drill-down</a> ·
+<a class="src" href="https://plotly.com/javascript/plotlyjs-events/" target="_blank" rel="noreferrer">Plot click/hover event contract</a>。
+SuperRAN 取其“固定基线、跨 panel 共用筛选、从趋势点进入明细”的结构，但统计判决仍使用本项目 Gate，而非照搬 ML 平台口径。</p>
+"""
+    body += real_ui_screenshot(
+        "kpi-workbench-comparison.png",
+        "SuperRAN 三算法 KPI 对比工作台真实截图，固定基线与候选颜色、六个问题型页签和带置信区间柱状图",
+        "真实 Edge/Chromium 截图：经典 PF、QoS-PF 与 RR 同屏；截图中的合成结果只验证 UI/证据合同，不代表算法收益。",
+    )
+    body += real_ui_screenshot(
+        "kpi-workbench-tti-drilldown.png",
+        "SuperRAN 同一 TTI 三算法并排复盘真实截图，展示 RBG、UE、MCS/rank、SINR、BLER 与 ACK",
+        "同一绝对 TTI 并排：未采样与真实 idle 严格区分；单 TTI 只解释算法为何分叉，不代替 Gate 3。",
+    )
+    body += table(
+        ["对比 Tab", "主要图形/控件", "回答的问题"],
+        [
+            ("总览", "算法 KPI 卡 + 分组柱形图 + 95% CI", "各算法绝对表现是多少；不能肉眼拿单臂 CI 判断差值"),
+            ("KPI 矩阵", "算法列 × KPI 行", "容量、体验、时延、资源、可靠性之间是否存在取舍"),
+            ("用户分布", "每算法一条跨 UE 经验 CDF", "优化是否只照顾均值，边缘 UE 是否恶化"),
+            ("TTI 趋势", "固定颜色折线 + 均匀锚点 + 关键事件点", "算法从哪个 TTI 开始分叉；点击点进入详情"),
+            ("单 TTI", "同一 TTI 算法卡 + grant 明细", "候选/调度、RBG、MCS/rank、SINR、BLER draw、OLLA/PF 到底哪里不同"),
+            ("统计门禁", "配对差值 CI + Wilcoxon + Holm", "在多候选场景下，哪条结论真的允许发布"),
+        ],
+    )
+    body += code(r'''# 必须在生成数据前锁主 KPI 与基线；否则页面只允许标“探索性”
+prereg = sr_lock_analysis(
+    primary_metric="cell_experienced_mbps", metric_unit="Mbps",
+    baseline="经典 PF", higher_is_better=True,
+)
+dataset = sr_generate(..., prereg_id=prereg["prereg_id"])
+
+# 每个算法臂用同一 dataset / seed / replication，只改变预注册的算法参数
+base = sr_system_sim(..., scheduler="pf", algorithm_label="经典 PF")
+qos  = sr_system_sim(..., scheduler="qos_pf", algorithm_label="QoS-PF 候选")
+rr   = sr_system_sim(..., scheduler="rr", algorithm_label="Round Robin")
+
+comparison = sr_compare_system_results(
+    result_ids=[base["kpi_view"]["result_id"],
+                qos["kpi_view"]["result_id"],
+                rr["kpi_view"]["result_id"]],
+    baseline_result_id=base["kpi_view"]["result_id"],
+    primary_kpi="cell_experienced_mbps",
+)
+print(comparison["url"] or comparison["html_path"])
+''', "MCP tool sequence")
+    body += callout(
+        "good", "三算法比较与 TTI 钻取已过真实浏览器 QA",
+        "<p><code>scripts/run_kpi_compare_browser_qa.py</code> 用同一合成信道、同一批 8 个 RngRun "
+        "运行 PF/QoS-PF/RR。桌面与 375 px 手机均检测到 6 个 Tab、3 条用户 CDF、3 条 TTI 轨迹、"
+        "同一 TTI 的 3 张算法卡与 grant 表；完整比较 JSON、算法×KPI CSV、TTI/grant CSV 均实际下载解析，"
+        "页面级横向溢出 0 px、控制台错误 0。该演示没有生成前预注册，因此统计页正确保持"
+        "<code>exploratory_unregistered</code>，不会因图好看而发布胜负。证据在 "
+        "<code>output/kpi-compare-browser-qa.json</code>。</p>",
     )
     body += table(
         ["工作台区域", "默认承载", "为什么不能只看小区均值"],
@@ -4084,8 +4154,8 @@ print(page["kpi_selection"])  # 优先/折叠顺序及其理由，完整可审�
         ],
     )
     body += """
-<h2>小区级与用户级两个 Tab</h2>
-<p>小区页展示体验/吞吐、首包/PDB、资源、MCS/rank/BLER 与负载；用户页提供按 UE 柱图、跨 UE
+<h2>单臂仍保留小区级与用户级两个 Tab</h2>
+<p>单次算法结果的小区页展示体验/吞吐、首包/PDB、资源、MCS/rank/BLER 与负载；用户页提供按 UE 柱图、跨 UE
 经验 CDF 和明细表。MU 资源同时提供 <em>grant exposure</em>（每个配对 UE 都看到完整共享 RBG）
 和 <em>attributed PRB</em>（配对 UE 等分，跨 UE 可加）以避免资源对账混乱。</p>
 <h2>Agent 自适应编排，不在库内暗调 LLM</h2>
@@ -4105,11 +4175,11 @@ KPI 仍保留在折叠区和结果 JSON。这保留 agent 式灵活性，也避�
 <code>first_packet_delay_observed_share</code>；未完成/过期 arrival 进入 PDB miss 分母，避免只统计
 成功样本的幸存者偏差。所有 KPI 都要标 warmup、测量窗和 replication 聚合方式。</p>
 """
-    body += "<p class=source-row>定义与页面：" + source_ref("src/superran/kpi_view.py", "CELL_KPIS") + " · 资源对账：" + source_ref("src/superran/experience.py", "TTI RBG occupancy") + "</p>"
+    body += "<p class=source-row>单臂页面：" + source_ref("src/superran/kpi_view.py", "CELL_KPIS") + " · 多算法比较：" + source_ref("src/superran/kpi_compare.py", "def build_comparison") + " · TTI 证据：" + source_ref("src/superran/experience.py", "class Allocation") + "</p>"
     return Page(
-        "kpi", "体验 KPI 与自适应呈现", "系统仿真", "KPI WORKBENCH",
-        "首包/含头速率、PRB/MU 口径、用户级 CDF 与 Agent 可审计编排。", body,
-        ("首包时延", "含头速率", "PRB利用率", "MU比例", "用户CDF", "KPI Tab"),
+        "kpi", "体验 KPI、多算法对比与 TTI 复盘", "系统仿真", "KPI WORKBENCH",
+        "单臂与 2~5 算法对比、首包/含头速率、用户 CDF、逐 TTI 钻取和配对统计门禁。", body,
+        ("多算法", "首包时延", "含头速率", "用户CDF", "TTI钻取", "Holm", "KPI Tab"),
     )
 
 
@@ -4325,7 +4395,7 @@ def tools_page(tools: list[SymbolDoc]) -> Page:
         ("链路与吞吐", ("sr_link_performance", "sr_throughput", "sr_mcs_info", "sr_bler_curve", "sr_tdd_mcs", "sr_sweep_snr")),
         ("干扰与场景", ("sr_interference_report", "sr_iot_convert", "sr_design_interference", "sr_probe_scenario", "sr_compare_scenarios")),
         ("外部算法", ("sr_export_eval_template", "sr_compare_results", "sr_list_results")),
-        ("系统仿真", ("sr_system_sim",)),
+        ("系统仿真", ("sr_system_sim", "sr_compare_system_results")),
     ]
     by_name = {t.name: t for t in tools}
     seen: set[str] = set()
@@ -4357,7 +4427,7 @@ def tools_page(tools: list[SymbolDoc]) -> Page:
         "KPI 结果页同样应把路径/URL作为可审计产物，而不是依赖当前桌面焦点。</p>",
     )
     return Page(
-        "tools", "34 个 MCP 工具", "平台接口", "MCP TOOL REFERENCE",
+        "tools", f"{len(tools)} 个 MCP 工具", "平台接口", "MCP TOOL REFERENCE",
         "按工作流分组的全部 sr_* 签名、职责与源码入口。", body,
         tuple(t.name for t in tools),
     )

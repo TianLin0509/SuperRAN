@@ -112,18 +112,23 @@ def test_guide_is_offline_utf8_hash_routed_and_accessible() -> None:
     assert 'data-product-surface="kpi"' in text
     assert 'data-kpi-workbench="standard-output"' in text
     assert "交互配置 Mock · 仿真说明书" in text
-    assert "Agent 自适应 KPI 工作台" in text
+    assert "Agent 自适应编排" in text
     assert "26 项小区 KPI、24 项用户 KPI" in text
     assert "应用到仿真" in text
-    assert text.count('data-real-ui-screenshot="true"') >= 4
+    assert "多算法 KPI 对比与单 TTI 复盘" in text
+    assert "sr_compare_system_results" in text
+    assert "Holm step-down" in text
+    assert "决策引擎、交互配置工作台与说明书闭环" in text
+    assert text.count('data-real-ui-screenshot="true"') >= 6
     for name in (
         "spec-workbench-overview.png", "spec-workbench-config.png",
         "kpi-workbench-cell.png", "kpi-workbench-user.png",
+        "kpi-workbench-comparison.png", "kpi-workbench-tti-drilldown.png",
     ):
         assert f'data-source="{name}"' in text
         raw = (ROOT / "docs" / "assets" / "ui" / name).read_bytes()
         assert raw[:8] == b"\x89PNG\r\n\x1a\n" and len(raw) > 20_000
-    assert text.count("data:image/png;base64,") >= 4
+    assert text.count("data:image/png;base64,") >= 6
     assert "JSON/CSV 下载、摘要复制、页面截图、系统分享与打印/PDF" in text
     assert 'python -u scripts\\run_srs_pmi_hello_world.py' in text
     assert "主实验点估计" in text and "+0.7%" in text
@@ -308,7 +313,7 @@ def test_every_module_public_symbol_tool_test_skill_and_preset_is_carried() -> N
     for name in detailed_exemptions:
         assert f'<code>{name}.py</code>' in text
     assert meta["public_symbols"] == len(public_symbols)
-    assert meta["mcp_tools"] == len(tools) == 34
+    assert meta["mcp_tools"] == len(tools) == 35
     assert meta["test_files"] == len(test_files)
     assert meta["skill_files"] == len(skill_files)
     assert preset_count > 0
