@@ -350,8 +350,8 @@ def main() -> None:
                              mcs_table=3, harq_combining="ir")
     check(tab.mcs_index == 15, "表 3 在 14.2 dB 选择 MCS15")
     check(tab.bler_source == "preset_20b_256qam", "结果显式标出预置表 BLER 来源")
-    check(0 <= tab.cqi <= 13 and tab.cqi_source == la.INTERNAL_CQI_SOURCE,
-          "预置表端到端返回内部 CQI，不混用 38.214 CQI 编号")
+    check(0 <= tab.cqi <= 15 and tab.cqi_source == la.INTERNAL_CQI_SOURCE,
+          "预置表端到端返回上报4-bit CQI 0..15，不混用历史表行")
     check(tab.retx_bler is not None and tab.retx_bler < tab.bler,
           "HARQ 首传后按半谱效 IR 抽象从 NewTx 曲线推导重传 BLER")
     check(tab.harq_model == "one_retransmission_ir_derived_from_newtx",
@@ -362,26 +362,40 @@ def main() -> None:
     # -----------------------------------------------------------------------
     sect("6.6  TDD CQI → BF Gain → MCS → OLLA")
 
-    expected_internal = (0, 1, 3, 5, 7, 9, 12, 14, 16, 19, 21, 23, 25, 27, 28)
+    expected_internal = (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28)
     mapped_internal = tuple(
         la.internal_cqi_to_mcs(i, mcs_table=1)["mcs"]
         for i in range(len(expected_internal))
     )
     check(mapped_internal == expected_internal,
-          "内部 CQI0..14 逐项映射到已确认的 MCS 离散表")
+          "256QAM CQI 表行 0..14 逐项映射到版本化 MCS 离散表")
 
     cqi0 = la.internal_cqi_to_mcs(0)
-    check(cqi0["scheduled"] is True and cqi0["mcs"] == 0,
-          "内部 CQI0 是最低可用档并映射 MCS0")
+    check(cqi0["scheduled"] is True and cqi0["mcs"] == 0
+          and cqi0["reported_cqi_codepoint"] == 1,
+          "内部表行0映射MCS0，并明确对应上报CQI codepoint 1")
+
+    reported0 = la.reported_cqi_to_mcs(0)
+    check(reported0["scheduled"] is False and reported0["mcs"] is None,
+          "上报4-bit CQI codepoint 0明确表示out-of-range")
+    first_threshold = la.bc.get_curve(0, "newtx").required_sinr_db(0.1)
+    check(la.select_reported_cqi(first_threshold - 0.01) == 0
+          and la.select_reported_cqi(first_threshold) == 1,
+          "低于首档门限上报CQI0，到达首档门限上报CQI1")
 
     cqi9 = la.internal_cqi_to_mcs(9)
-    check(cqi9["mcs"] == 19 and cqi9["mcs_clipped_to_profile"] is False,
-          "内部 CQI9 查离散表得到 MCS19")
+    check(cqi9["mcs"] == 18 and cqi9["reported_cqi_codepoint"] == 10
+          and cqi9["mcs_clipped_to_profile"] is False,
+          "256QAM表行9映射MCS18，并对应上报CQI codepoint 10")
 
     cqi14 = la.internal_cqi_to_mcs(14)
     check(cqi14["requested_mcs"] == 28 and cqi14["mcs"] == 27
           and cqi14["mcs_clipped_to_profile"] is True,
-          "CQI14 保留 MCS28 合同，当前 0..27 曲线 profile 显式钳位")
+          "最高表行保留MCS28请求，当前0..27曲线profile显式钳位")
+    mcs27_threshold = la.bc.get_curve(27, "newtx").required_sinr_db(0.1)
+    check(la.select_reported_cqi(mcs27_threshold - 0.01) == 14
+          and la.select_reported_cqi(mcs27_threshold) == 15,
+          "映射切换后上报CQI15可达：它使用显式钳位的MCS27门限")
     for bad_cqi in (15, -1, 2.5, True):
         try:
             la.internal_cqi_to_mcs(bad_cqi)  # type: ignore[arg-type]
@@ -399,20 +413,20 @@ def main() -> None:
     )
     check(tdd["scheduled"] is True and tdd["rank"] == 2 and tdd["n_rb"] == 2,
           "TDD 决策保留逐 RB、逐流维度")
-    check(abs(tdd["cqi_mcs_sinr_db"] - 17.6419) < 1e-3,
-          "初始 MCS19 转成 NewTx 10% BLER SINR 门限")
+    check(abs(tdd["cqi_mcs_sinr_db"] - 16.8323) < 1e-3,
+          "初始 MCS18 转成 NewTx 10% BLER SINR 门限")
     check(tdd["bf_gain_per_stream_db"] == [3.0, 2.0],
           "BF Gain 逐流等于 SVD post-MMSE SINR 减 PMI post-MMSE SINR")
     check(abs(tdd["bf_gain_user_db"] - 2.5) < 1e-12,
           "用户 BF Gain 在所有 RB×流上做 dB 域算术平均")
-    check(abs(tdd["user_sinr_db"] - 20.1419) < 1e-3,
+    check(abs(tdd["user_sinr_db"] - 19.3323) < 1e-3,
           "用户 SINR 等于初始门限叠加逐 RB/流 BF Gain 后的 dB 域平均")
     check("dB domain" in tdd["sinr_aggregation"],
           "结果显式声明 dB 域平均口径")
-    check(tdd["mcs_after_bf"] == 21,
-          "叠加 BF Gain 后按 NewTx 门限重映射到 MCS21")
-    check(abs(tdd["mcs_before_floor"] - 20.8) < 1e-12 and
-          tdd["mcs_after_floor"] == 20 and tdd["final_mcs"] == 20,
+    check(tdd["mcs_after_bf"] == 20,
+          "叠加 BF Gain 后按 NewTx 门限重映射到 MCS20")
+    check(abs(tdd["mcs_before_floor"] - 19.8) < 1e-12 and
+          tdd["mcs_after_floor"] == 19 and tdd["final_mcs"] == 19,
           "OLLA 在 MCS 域相加后严格向下取整并钳位")
     check(tdd["final_mcs_newtx_bler"] is None
           and tdd["actual_bler_available"] is False
@@ -426,18 +440,18 @@ def main() -> None:
     check(tdd["receiver"] == "classic MMSE" and
           "only precoding weight changes" in tdd["fairness_contract"],
           "结果钉住经典 MMSE 与只改变预编码权的公平对照")
-    check(abs(tdd["olla_update"]["delta_mcs"] + 0.9) < 1e-12 and
-          abs(tdd["olla_next_offset_mcs"] + 1.1) < 1e-12,
-          "10% 目标下 NACK 令下一时刻 OLLA 减 0.9 MCS")
+    check(abs(tdd["olla_update"]["delta_mcs"] + 0.09) < 1e-12 and
+          abs(tdd["olla_next_offset_mcs"] + 0.29) < 1e-12,
+          "10% 目标下 NACK 令下一时刻 OLLA 减 0.09 MCS")
 
     ack = la.update_olla_mcs(0.3, True)
-    check(abs(ack["next_offset_mcs"] - 0.4) < 1e-12,
-          "ACK 令下一时刻 OLLA 加 0.1 MCS")
+    check(abs(ack["next_offset_mcs"] - 0.31) < 1e-12,
+          "ACK 令下一时刻 OLLA 加 0.01 MCS")
 
     floor_edge = la.tdd_mcs_adaptation(
         9, [[14.0]], [[14.0]], olla_mcs_offset=-0.01,
     )
-    check(floor_edge["mcs_after_bf"] == 19 and floor_edge["final_mcs"] == 18,
+    check(floor_edge["mcs_after_bf"] == 18 and floor_edge["final_mcs"] == 17,
           "极小负 OLLA 也按数学 floor 降一档，不做截零取整")
 
     try:
@@ -505,6 +519,8 @@ def main() -> None:
     res = [la.link_adaptation(rng.normal(12, 8) + rng.normal(0, 3, 273), n_prb=273)
            for _ in range(40)]
     st = la.throughput_stats(res)
+    check(all(r.bler_source == "preset_20b_256qam" for r in res),
+          "link_adaptation默认走预置256QAM表3，不静默回落64QAM")
     print(st.text())
     check(st.n == 40, "样本数正确")
     check(st.cell_edge_mbps <= st.median_mbps <= st.peak_mbps, "5% ≤ 中位 ≤ 95%")
@@ -607,9 +623,13 @@ def main() -> None:
     r = d1.link_adaptation(0)
     print(f"  {r.text().splitlines()[0]}")
     check(r.n_re > 0 and r.tbs_bits > 0, "单样本链路自适应可用")
+    check(r.bler_source == "preset_20b_256qam",
+          "Dataset.link_adaptation继承默认256QAM表3")
     st = d1.throughput(max_samples=12)
     print(f"  {st.text().splitlines()[0]}")
     check(st.n == 12, "整批吞吐统计可用")
+    check(st.bler_source == "preset_20b_256qam",
+          "Dataset.throughput默认全批使用256QAM表3")
     check(st.mean_mbps > 0, "吞吐为正")
 
     # -----------------------------------------------------------------------

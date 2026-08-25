@@ -1011,8 +1011,12 @@ class UeLinkTable:
     # --- 发送侧 SINR 的拆解，供审计与说明书引用 ---
     bf_gain_db: np.ndarray | None = None   # [snapshot, rank] SVD − PMI（基站自算）
     pmi_sinr_db: np.ndarray | None = None  # [snapshot, rank] Type I 权下的用户级 SINR
-    cqi_index: np.ndarray | None = None    # [rank] 最后一个快照的因果滤波 CQI
-    cqi_index_per_snapshot: np.ndarray | None = None  # [snapshot,rank] 因果滤波 CQI
+    # 历史字段保存 0..14 的映射表行；标准上报 codepoint 另存 0..15，
+    # 其中 codepoint 0 为 out-of-range、表行 0 对应 codepoint 1。
+    cqi_index: np.ndarray | None = None    # [rank] legacy internal row
+    cqi_index_per_snapshot: np.ndarray | None = None  # [snapshot,rank] legacy row
+    reported_cqi_codepoint: np.ndarray | None = None  # [rank] 4-bit CQI 0..15
+    reported_cqi_codepoint_per_snapshot: np.ndarray | None = None  # [snapshot,rank]
     csi_lag_snapshots: np.ndarray | None = None  # [snapshot] 平均 CSI 滞后（快照数）
     # **基站以为的谱效**：rank 自适应与 PF 调度都只能看它，不能看真实值。
     # 拿真实谱效去调度等于让基站预知信道，老化损失会被凭空抹掉一大半。
@@ -1121,15 +1125,11 @@ def _type1_precoder(
     ).w
 
 
-def _cqi_of(sinr_db: float, target_bler: float) -> int:
-    """用户级 PMI-SINR → 内部 CQI 0..14。
-
-    内部 CQI0 是最低可用档并映射 MCS0，不是 38.214 的 out-of-range。
-    量化门限由“内部 CQI→MCS 离散表 + 预置 NewTx BLER 曲线”共同确定。
-    """
+def _reported_cqi_of(sinr_db: float, target_bler: float) -> int:
+    """用户级 PMI-SINR → 上报 4-bit CQI codepoint 0..15。"""
     from . import linkadapt as la  # noqa: PLC0415
 
-    return int(la.select_internal_cqi(
+    return int(la.select_reported_cqi(
         float(sinr_db), target_bler=float(target_bler), mcs_table=3))
 
 
@@ -1751,20 +1751,27 @@ def build_link_tables(
         # 早先版本把发送侧写成"接收 SINR 的长期均值"，那是个事后诸葛亮的量——
         # 它已经包含了 SVD 的增益，等于假设基站预先知道自己波束打得准不准。
         cqi_by_snapshot = np.zeros((n_s, max_rank), dtype=int)
+        reported_cqi_by_snapshot = np.zeros((n_s, max_rank), dtype=int)
         for _r in range(max_rank):
             report_observations: list[float] = []
             held_cqi = 0
+            held_reported_cqi = 0
             for _s in range(n_s):
                 if _s == int(report_source[_s]):
                     report_observations.append(float(pmi_sinr[_s, _r]))
                     filtered_pmi = _nan_safe(np.mean, report_observations)
-                    held_cqi = _cqi_of(filtered_pmi, target_bler)
+                    held_reported_cqi = _reported_cqi_of(filtered_pmi, target_bler)
+                    # 物理 out-of-range codepoint 0 没有可映射 MCS。Phase-A 表仍用
+                    # 最低行作为防御占位，真实可用性由 outage/BLER 路径硬判。
+                    held_cqi = max(held_reported_cqi - 1, 0)
                 else:
                     filtered_pmi = _nan_safe(np.mean, report_observations)
                 cqi_by_snapshot[_s, _r] = held_cqi
+                reported_cqi_by_snapshot[_s, _r] = held_reported_cqi
                 thr = _cqi_threshold_sinr(
                     int(cqi_by_snapshot[_s, _r]), target_bler)
-                # 内部 CQI0 本身就是 MCS0 的有效低档；只有输入不可用时才走下面的防御回退。
+                # 表行 0 对应最低可用 MCS；上报 codepoint 0 时这里只保留防御占位，
+                # 真实调度可用性仍由接收侧 outage/BLER 判定。
                 if not np.isfinite(thr):
                     thr = filtered_pmi if np.isfinite(filtered_pmi) else -20.0
                 gain = bf_gain[_s, _r] if np.isfinite(bf_gain[_s, _r]) else 0.0
@@ -1775,14 +1782,19 @@ def build_link_tables(
                 sinr_tx_rbg[_s, _r] = thr + gain_rbg
                 mcs_tx[_s, _r] = la_sel(sinr_tx[_s, _r], table, target_bler)
         cqi_idx = cqi_by_snapshot[-1].copy()
+        reported_cqi = reported_cqi_by_snapshot[-1].copy()
         # **rank 由基站按自己的 CSI 挑**（零时延时 se_gnb 与 se 逐位相同）
         best = rank_gnb - 1
         # **覆盖判定。** 用户级 SINR 连 MCS 0 的 10% BLER 门限都够不到时，
         # 这个快照下他根本调度不动——发了也是白发。必须显式标出来：
         # PF 的度量是 R_inst/R_avg，一个永远发不成功的用户 R_avg 会趋近 0，
         # 度量发散，调度器于是死盯着他，把整个小区拖垮。这是 PF 的经典病理。
+        # 上报 CQI0 是协议语义的 out-of-range，必须比“当前真实 SINR
+        # 恰好能否解 MCS0”更早拦截。否则 PMI 测得 CQI0、SVD 增益偶然
+        # 较大时仍会被调度，与已选定的 4-bit CQI 合同矛盾。
         outage = np.array([
-            _bler_lookup(int(mcs[t, best[t]]), float(sinr[t, best[t]])) > 0.5
+            bool(reported_cqi_by_snapshot[t, best[t]] == 0)
+            or _bler_lookup(int(mcs[t, best[t]]), float(sinr[t, best[t]])) > 0.5
             for t in range(n_s)
         ])
         out.append(UeLinkTable(
@@ -1808,6 +1820,8 @@ def build_link_tables(
             sinr_rbg_db=sinr_rbg, sinr_tx_rbg_db=sinr_tx_rbg,
             bf_gain_db=bf_gain, pmi_sinr_db=pmi_sinr, cqi_index=cqi_idx,
             cqi_index_per_snapshot=cqi_by_snapshot,
+            reported_cqi_codepoint=reported_cqi,
+            reported_cqi_codepoint_per_snapshot=reported_cqi_by_snapshot,
             csi_lag_snapshots=lag_used, se_gnb=se_gnb,
             best_se_gnb=se_gnb[np.arange(n_s), best], mcs_table=int(table),
             target_bler=float(target_bler),

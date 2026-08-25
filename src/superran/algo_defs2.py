@@ -544,14 +544,15 @@ def _tx_sinr() -> Family:
                    formula=r"\mathrm{CQI} \to \mathrm{MCS} \to \Gamma_{10\%} "
                            r"\to +\,\mathrm{BFGain} \to \mathrm{MCS}' \to "
                            r"+\,\mathrm{OLLA} \to \lfloor \cdot \rfloor",
-                   summary="现场口径：内部 CQI 查离散表得 MCS，取该 MCS 的目标 BLER SINR 门限，加 BF 增益",
-                   detail="内部 CQI0..14 表为 [0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]，"
-                          "不是 38.214 CQI 编号。"
+                   summary="256QAM CQI查版本化离散表得MCS，取该MCS的目标BLER SINR门限，加BF增益",
+                   detail="历史表行0..14为 [0,2,4,6,8,10,12,14,16,18,20,22,24,26,28]；"
+                          "对应上报4-bit CQI1..15。"
                           "PMI 走 <b>Type-I-style 宽带列码本近似</b>——全带共用一个权，"
                           "正对应现场的<b>全带 CQI</b>（不做子带 CQI、不做频选调度）。"
                            "<br>宽带 PMI 是慢时间尺度的量，所以按 CSI report 周期在当时"
                            "可见功率协方差上更新，并在周期内保持；不能跨完整仿真时域先搜一次。"
-                           "<br><b>CQI=0 直接映射 MCS0</b>，是最低可用档，不是 out-of-range。",
+                           "<br><b>上报CQI=0是out-of-range</b>；历史API的row0映射MCS0，"
+                           "并明确回传reported_cqi_codepoint=1。",
                    when="默认",
                    cost="每 UE 每 rank 一次 Type I 码本搜索，约 40 ms"),
             Option("rx_longterm", "接收 SINR 的长期均值（已弃用）",

@@ -278,11 +278,21 @@ check(all(np.allclose(t.best_se, t.best_se_gnb) for t in tb0),
 
 # 发送侧 SINR = CQI 门限 + BF Gain，必须是有限值
 allfin = all(np.isfinite(t.sinr_tx_db).all() for t in tb)
-check(allfin, "发送侧 SINR 全部有限（内部 CQI0 查 MCS0 门限，不是 -inf）")
+check(allfin, "发送侧 SINR 全部有限（out-of-range 时使用最低表行作防御占位）")
 check(all(t.bf_gain_db is not None and (t.bf_gain_db > 0).mean() > 0.9 for t in tb),
       "BF Gain 绝大多数为正（SVD 本就该赢过 Type I 码本）")
 check(all(t.cqi_index is not None and ((t.cqi_index >= 0) & (t.cqi_index <= 14)).all()
-          for t in tb), "内部 CQI index 落在 0..14")
+          for t in tb), "历史 CQI 表行落在 0..14")
+check(all(t.reported_cqi_codepoint is not None
+          and ((t.reported_cqi_codepoint >= 0)
+               & (t.reported_cqi_codepoint <= 15)).all()
+          for t in tb), "标准上报 CQI codepoint 落在 0..15，0 为out-of-range")
+for _table in tb:
+    _chosen = _table.best_rank - 1
+    _reported_chosen = _table.reported_cqi_codepoint_per_snapshot[
+        np.arange(len(_chosen)), _chosen]
+    check(np.all(_table.outage[_reported_chosen == 0]),
+          "选中rank上报CQI0时必须标记outage，不能借BF增益偷渡调度")
 
 # ---------------------------------------------------------------------------
 section("6  配置校验与告警")

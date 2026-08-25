@@ -191,9 +191,14 @@ def _system_adaptation_contract(
             "profile": "preset_20b_256qam",
             "cqi_profile": la.INTERNAL_CQI_PROFILE_ID,
             "cqi_to_mcs": list(la.INTERNAL_CQI_TO_MCS),
-            "cqi_zero_semantics": "lowest usable entry maps to MCS0",
+            "cqi_numbering": {
+                "legacy_internal_row": "0..14; row 0 maps to MCS0",
+                "reported_4bit": "0..15; codepoint 0 is out-of-range; 1..15 map to rows 0..14",
+            },
+            "reported_cqi_zero_semantics": "out_of_range",
             "top_mapping_limit": (
-                "CQI14 requests MCS28; current MCS0..27 curve profile clips to 27"
+                "internal row14 / reported CQI15 requests MCS28; current MCS0..27 "
+                "curve profile clips to 27"
             ),
             "scope": (
                 "experience_v2 fixed preset table"
@@ -1078,7 +1083,7 @@ def sr_list_results(dataset_id: str | None = None) -> dict[str, Any]:
 @tool()
 async def sr_throughput(
     dataset_id: str,
-    mcs_table: int = 1,
+    mcs_table: int = 3,
     target_bler: float = 0.1,
     max_samples: int = 200,
     method: str = "svd",
@@ -1089,24 +1094,23 @@ async def sr_throughput(
     任何真实系统都达不到的上界。这个工具走业界做系统级仿真的标准路径
     （链路到系统映射），把三项真实损失算进来：
 
-    1. **调制受限** —— 20 dB 时香农说 6.66 bit/s/Hz，64QAM 最多给 5.80
+    1. **调制受限** —— 显式选表1时，20 dB下64QAM会早于256QAM封顶
     2. **码率离散** —— MCS 只有 29 档
     3. **有限码长 + 实现损失** —— LDPC 距容量 1~2 dB
 
     返回吞吐的均值/中位/**5% 边缘用户**/95% 峰值、谱效、MCS 分布、平均 BLER。
     边缘用户吞吐是 3GPP 评估里的公平性指标，比均值更能说明问题。
 
-    `mcs_table`：1 = 最高 64QAM（38.214 Table 5.1.3.1-1），
-    2 = 含 256QAM（Table 5.1.3.1-2），3 = 内置的 20B 256QAM MCS +
-    NewTx/ReTx 解调曲线。**MCS 分布里大量样本压在最高档时，
-    说明限制来自 MCS 表而不是信道**，换表 2 通常能明显提升。
+    `mcs_table`默认为3：预置256QAM MCS + NewTx/ReTx解调曲线。1 = 最高64QAM
+    （38.214 Table 5.1.3.1-1），2 = 含256QAM的标准表（Table 5.1.3.1-2）；
+    两者均为显式可选分支，64QAM不会被默认路径触发。
 
     表 1/2 的 BLER 是有限码长分析模型，不是实测。表 3 的 BLER 来自预置的
     解调曲线，也不是 3GPP 标准曲线；源标签 Es/No 表示经典 MMSE 接收机 SINR。
     表 3 的 HARQ 只允许一次重传：默认 IR 用半谱效等效 MCS，可选 CC 用原 MCS
     的码字 SINR +3.0103 dB；两者都只查询 NewTx 曲线，空口 MCS 不会被等效档改写。
-    表 3 使用已确认的内部 CQI0..14 离散映射，CQI0→MCS0；它不是
-    38.214 CQI 表。
+    表 3 使用版本化256QAM映射。历史内部表行0..14对应上报4-bit CQI1..15；
+    上报CQI0是out-of-range，不调度。
     """
     return await anyio.to_thread.run_sync(
         functools.partial(
@@ -1145,7 +1149,7 @@ def _throughput_sync(*, dataset_id: str, mcs_table: int, target_bler: float,
 
 @tool()
 def sr_mcs_info(
-    table: int = 1,
+    table: int = 3,
     show_bler_anchors: bool = False,
 ) -> dict[str, Any]:
     """查 MCS / CQI 表，以及分析模型或表驱动 BLER 的门限。
@@ -1159,8 +1163,9 @@ def sr_mcs_info(
     10% BLER 门限和数据哈希自检。它不是 3GPP 标准表；源标签 Es/No 表示
     经典 MMSE 的单码字有效 SINR。系统按已确认合同只用 MCS+SINR 查询通用
     NewTx 曲线；TBS/RE/rank/场景不作为 BLER 查询轴，ReTx 行仅保留审计。
-    其 `cqi_table` 字段是内部 CQI0..14 → MCS 离散表，不是 38.214 CQI 表；
-    CQI14 的 `requested_mcs=28` 在当前 MCS0..27 profile 上会显式标记钳位。
+    其 `cqi_table` 同时给历史表行0..14和上报4-bit CQI1..15；上报CQI0是
+    out-of-range。表行14/上报CQI15的 `requested_mcs=28` 在当前MCS0..27
+    profile上会显式标记钳位。
     """
     from . import linkadapt as la
 
@@ -1180,6 +1185,7 @@ def sr_mcs_info(
         ]
     )
     out: dict[str, Any] = {
+        "table": int(table),
         "mcs_table": mcs_rows,
         "cqi_table": cqi_rows,
         "verify": la.bc.verify_curves() if table == 3 else la.verify_tables(),
@@ -1223,18 +1229,19 @@ def sr_bler_curve(
 async def sr_tdd_mcs(
     dataset_id: str,
     cqi: int,
+    cqi_numbering: str = "internal_row",
     sample_index: int = 0,
     olla_mcs_offset: float = 0.0,
     target_bler: float = 0.1,
     max_rank: int = 4,
     use_estimated_csi: bool = True,
     feedback_ack: bool | None = None,
-    olla_ack_step_mcs: float = 0.1,
+    olla_ack_step_mcs: float = 0.01,
     power_constraint: str = "nebf",
 ) -> dict[str, Any]:
     """TDD 下按 CQI、SVD-vs-PMI BF Gain 和 OLLA 选择最终 MCS。
 
-    真实调用链是：内部 CQI → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标
+    真实调用链是：256QAM CQI → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标
     BLER SINR 门限 → 在同一信道/CSI/rank/功率/干扰/MMSE 接收机下逐 RB、逐流计算
     ``SINR_SVD - SINR_PMI`` → 在 dB 域对全部 RB×流求算术平均 → 按表 3 重映射
     MCS → 加连续的 ``olla_mcs_offset`` → ``floor`` → 钳位到 0..27。
@@ -1244,9 +1251,13 @@ async def sr_tdd_mcs(
     用户级 MCS-domain OLLA、floor 并钳位。系统 API 的 ``*_db`` 参数名
     仅为历史兼容保留，值不再解释为 dB。
 
-    `CQI=0` 是最低可用档并映射 MCS0，不是 out-of-range。`feedback_ack` 可选：
-    给出时按目标首传
-    BLER 更新下一时刻的 OLLA；10% 默认对应 ACK +0.1、NACK -0.9 MCS。当前时刻
+    ``cqi_numbering="internal_row"`` 保留历史脚本的 0..14 数组行编号，其中 row 0
+    对应上报 4-bit CQI 1；``reported_4bit`` 接受标准 codepoint 0..15，其中 0 明确
+    表示 out-of-range、不调度。返回会同时给出 ``cqi_row`` 与
+    ``reported_cqi_codepoint``，避免再把数组第 0 行误称为上报 CQI 0。
+
+    `feedback_ack` 可选：给出时按目标首传 BLER 更新下一时刻的 OLLA；10% 默认对应
+    ACK +0.01、NACK -0.09 MCS。当前时刻
     使用传入的 OLLA，反馈只影响返回的 `olla_next_offset_mcs`。
 
     默认 ``power_constraint=nebf``。返回的 gNB 预测量与真实接收量分开：
@@ -1259,6 +1270,7 @@ async def sr_tdd_mcs(
             _tdd_mcs_sync,
             dataset_id=dataset_id,
             cqi=cqi,
+            cqi_numbering=cqi_numbering,
             sample_index=sample_index,
             olla_mcs_offset=olla_mcs_offset,
             target_bler=target_bler,
@@ -1275,6 +1287,7 @@ def _tdd_mcs_sync(
     *,
     dataset_id: str,
     cqi: int,
+    cqi_numbering: str,
     sample_index: int,
     olla_mcs_offset: float,
     target_bler: float,
@@ -1284,12 +1297,40 @@ def _tdd_mcs_sync(
     olla_ack_step_mcs: float,
     power_constraint: str,
 ) -> dict[str, Any]:
+    from . import linkadapt as la
     from . import loader as ld
 
+    numbering = str(cqi_numbering).strip().lower()
+    if numbering not in ("internal_row", "reported_4bit"):
+        return {"error": "cqi_numbering 只支持 internal_row / reported_4bit"}
+    # Validate the dataset/sample identity even when reported CQI0 causes an early
+    # no-schedule return.  Otherwise a typo in dataset_id would look like a valid
+    # out-of-range decision and silently bypass the normal Dataset.tdd_mcs checks.
     ds = ld.load(dataset_id)
-    return _jsonable(ds.tdd_mcs(
-        sample_index,
-        cqi_index=cqi,
+    sample = int(sample_index)
+    if sample < 0 or sample >= ds.n:
+        raise IndexError(
+            f"sample index must be 0..{ds.n - 1}, got {sample_index}")
+    if numbering == "reported_4bit":
+        mapping = la.reported_cqi_to_mcs(cqi, mcs_table=3)
+        if not mapping["scheduled"]:
+            return _jsonable({
+                **mapping,
+                "dataset_id": dataset_id,
+                "sample_index": sample,
+                "cqi_input": int(cqi),
+                "cqi_input_numbering": numbering,
+                "reason": "reported_cqi_out_of_range",
+                "actual_bler_available": False,
+                "bler_status": "not_scheduled_out_of_range",
+            })
+        cqi_row = int(mapping["cqi_row"])
+    else:
+        mapping = la.internal_cqi_to_mcs(cqi, mcs_table=3)
+        cqi_row = int(mapping["cqi_row"])
+    result = ds.tdd_mcs(
+        sample,
+        cqi_index=cqi_row,
         olla_mcs_offset=olla_mcs_offset,
         target_bler=target_bler,
         max_rank=max_rank,
@@ -1297,14 +1338,19 @@ def _tdd_mcs_sync(
         feedback_ack=feedback_ack,
         olla_ack_step_mcs=olla_ack_step_mcs,
         power_constraint=power_constraint,
-    ))
+    )
+    result.update({
+        "cqi_input": int(cqi),
+        "cqi_input_numbering": numbering,
+    })
+    return _jsonable(result)
 
 
 @tool()
 async def sr_sweep_snr(
     dataset_id: str,
     snr_db_list: list[float] | None = None,
-    mcs_table: int = 1,
+    mcs_table: int = 3,
     max_samples: int = 60,
 ) -> dict[str, Any]:
     """扫信噪比，出**谱效/吞吐 vs SNR 曲线** —— 无线论文里最标准的那张图。
@@ -1313,7 +1359,8 @@ async def sr_sweep_snr(
     吞吐、选中的 MCS。**同一批信道**意味着各点之间是配对的，曲线不会被
     信道抽样噪声搅乱。
 
-    默认扫 -5 ~ 35 dB。返回里 `efficiency_vs_shannon` 的走势最有信息量：
+    默认用预置256QAM profile扫 -5 ~ 35 dB。表1的64QAM只在显式指定时使用。
+    返回里 `efficiency_vs_shannon` 的走势最有信息量：
     低信噪比处接近 1（受噪声限），高信噪比处掉下来（受 MCS 表封顶限）。
     """
     return await anyio.to_thread.run_sync(

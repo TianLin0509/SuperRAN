@@ -584,7 +584,7 @@ class Dataset:
         max_rank: int = 4,
         use_estimated_csi: bool = True,
         feedback_ack: bool | None = None,
-        olla_ack_step_mcs: float = 0.1,
+        olla_ack_step_mcs: float = 0.01,
         snr_db: float | None = None,
         n_h: int | None = None,
         n_v: int | None = None,

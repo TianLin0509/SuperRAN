@@ -99,36 +99,31 @@ sr_compare_results(art_a.result_id, art_b.result_id)
 一个看起来很显著的 p 值**。
 
 **六、香农谱效不是吞吐。** 上面的 `se_mean` 是上界，真实系统达不到。
-走 38.214 的链路到系统映射，把三项真实损失算进来：
+链路到系统映射默认使用预置256QAM profile（`mcs_table=3`）：
 
 ```python
-st = ds.throughput(mcs_table=1)
+st = ds.throughput()  # 默认 mcs_table=3，64QAM 只在显式指定 table=1 时使用
 print(st.text())
-# 吞吐（n=60）：均值 1373.11 / 中位 1474.69 / 边缘用户(5%) 833.48 / 峰值(95%) 1606.61 Mbps
-#   谱效 均值 19.052，边缘 11.565 bit/s/Hz
-#   平均 BLER 0.38%，中断比例 0.00%
-#   MCS 分布 {18: 1, 20: 1, ..., 28: 34}    ← 34/60 压在最高档 = 表封顶
+# 输出均值/中位/边缘用户吞吐、谱效、MCS分布、BLER与HARQ摘要
 ```
 
-三项损失：**调制受限**（20 dB 时香农 6.66，64QAM 只给 5.80）、**码率离散**
-（MCS 只有 29 档）、**有限码长 + 实现损失**（LDPC 距容量 1~2 dB）。
-QAM 约束容量用 Gauss-Hermite 求积**精确算**，表 1/2 的 MCS/CQI 与 TBS 按
-38.214 精确复刻；默认 BLER 是有限码长分析模型（没有 3GPP 参考曲线兜底）。
-
-现在另有显式可选的 `mcs_table=3`：28 档预置 MCS profile + 56 条 NewTx/ReTx
-原始解调曲线（1824 点）。系统只消费 28 条 NewTx 曲线；ReTx 行用于审计。HARQ
+三项损失：**调制与表封顶**、**MCS码率离散**、**有限码长与实现损失**。
+默认表3含28档预置MCS profile + 56条NewTx/ReTx原始解调曲线（1824点）。
+系统只消费28条NewTx曲线；ReTx行用于审计。HARQ
 最多一次重传，默认 IR（半谱效等效 MCS），可选 CC（原 MCS、SINR +3.0103 dB）：
 
 ```python
-st = ds.throughput(mcs_table=3)
+st = ds.throughput()
 sr_bler_curve(mcs=15, tx_mode="newtx", sinr_db_list=[14.0, 14.05])
 # BLER = [0.132, 0.0949]，10% 门限 14.042 dB
 ```
 
-表 3 **不是 3GPP 标准表**；预置 profile 将源标签 `Es/No` 解释为经典 MMSE 的单码字
+表1 **64QAM**和表2 **标准256QAM**仍可显式选择，它们使用38.214表和有限码长
+分析BLER模型；不会被默认路径静默触发。表3 **不是3GPP标准表**；预置profile将
+源标签`Es/No`解释为经典MMSE的单码字
 有效 SINR。每个用户 grant/TTI 是一个独立单码字 TB，不另算 CBLER；曲线按预置
 口径跨 TBS/RE/rank/场景通用，只用 MCS+SINR 查询。
-`sr_mcs_info(table=3, show_bler_anchors=true)` 可查看全部门限、码率和哈希自检。
+`sr_mcs_info(show_bler_anchors=true)`默认查表3，可查看全部门限、码率和哈希自检。
 
 TDD AMC 已支持完整的 `内部 CQI 离散表 → 初始 MCS → NewTx SINR 门限 → BF Gain →
 重映射 MCS → OLLA → floor` 链路。BF Gain 是同一信道、CSI、rank、功率、
@@ -143,10 +138,11 @@ sr_tdd_mcs(dataset_id="ds_xxxxxxxx", cqi=9, olla_mcs_offset=-0.2,
 在 Claude Code / Codex CLI 里不需要自己写 Python，直接告诉 Agent：
 “请调用 superran 的 `sr_tdd_mcs`，对数据集 `ds_xxxxxxxx`、CQI 9、
 OLLA -0.2 MCS 计算最终 MCS，并解释逐流 BF Gain。”Agent 会调用 MCP 并返回
-完整中间量。内部 `CQI=0` 是最低可用档并映射 `MCS0`；反馈只更新
-下一时刻 OLLA，当前决策不回写。映射表为
-`[0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]`。当前预置曲线只覆盖
-`MCS0..27`，所以 `CQI14→MCS28` 保留为原始表项，但在该 profile 上显式钳到 27。
+完整中间量。默认 `cqi_numbering="internal_row"` 保留历史0..14数组行；需要解析
+真实上报日志时传 `reported_4bit`，此时CQI0明确为out-of-range、CQI1..15映射表行为
+`[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28]`。当前预置曲线只覆盖
+`MCS0..27`，所以最高行请求MCS28时会显式钳到27。反馈只更新下一时刻OLLA；
+10%目标下诊断与系统默认统一为ACK +0.01、NACK -0.09 MCS。
 诊断和系统仿真统一使用 MCS-domain OLLA：先由 `SINR_AMC_PRED`（CQI 门限 +
 gNB 可见 BF Gain，不是物理发送/接收 SINR）反折无 OLLA MCS，
 再加连续 MCS offset、`floor` 并钳到当前 profile。系统 API 中历史 `*_db` 参数名

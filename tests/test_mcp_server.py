@@ -135,10 +135,14 @@ async def main() -> None:
                   "MCP 表 3 覆盖 28 档且完整性自检通过")
             cqi_rows = mcs3.get("cqi_table", [])
             check([row.get("requested_mcs") for row in cqi_rows]
-                  == [0, 1, 3, 5, 7, 9, 12, 14, 16, 19, 21, 23, 25, 27, 28]
+                  == [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28]
                   and cqi_rows[-1].get("mcs") == 27
                   and cqi_rows[-1].get("mcs_clipped_to_profile") is True,
-                  "MCP 表 3 显式返回内部 CQI 离散表与 MCS28 曲线缺口")
+                  "MCP 表 3 显式返回256QAM CQI离散表与MCS28曲线缺口")
+            mcs_default = _payload(await session.call_tool("sr_mcs_info", {}))
+            check(mcs_default.get("table") == 3
+                  and mcs_default.get("source") == mcs3.get("source"),
+                  "sr_mcs_info默认查预置256QAM表3")
 
             print("\n" + "=" * 68 + "\n2  sr_capabilities\n" + "=" * 68)
             caps = _payload(await session.call_tool("sr_capabilities", {}))
@@ -251,9 +255,10 @@ async def main() -> None:
             ))
             check(tdd.get("scheduled") is True and tdd.get("rank", 0) >= 1,
                   "真实数据上完成 TDD MCS 决策并保留 rank")
-            check(tdd.get("cqi_initial_mcs") == 19 and
-                  abs(tdd.get("cqi_mcs_sinr_db", 0.0) - 17.6419) < 1e-3,
-                  "MCP 将内部 CQI9 映射到 MCS19 NewTx 门限")
+            check(tdd.get("cqi_initial_mcs") == 18 and
+                  tdd.get("reported_cqi_codepoint") == 10 and
+                  abs(tdd.get("cqi_mcs_sinr_db", 0.0) - 16.8323) < 1e-3,
+                  "MCP 将256QAM表行9映射到MCS18并返回上报CQI10")
             check(len(tdd.get("pmi_stream_sinr_db", [])) == tdd.get("rank") and
                   len(tdd.get("svd_stream_sinr_db", [])) == tdd.get("rank") and
                   len(tdd.get("bf_gain_per_stream_db", [])) == tdd.get("rank"),
@@ -278,7 +283,7 @@ async def main() -> None:
             check(tdd.get("receiver") == "classic MMSE" and
                   "only precoding weight changes" in tdd.get("fairness_contract", ""),
                   "MCP 结果钉住 MMSE 与同工况预编码对照")
-            check(abs(tdd.get("olla_next_offset_mcs", 0.0) + 1.1) < 1e-12,
+            check(abs(tdd.get("olla_next_offset_mcs", 0.0) + 0.29) < 1e-12,
                   "NACK 只更新下一时刻 OLLA 状态")
             check(tdd.get("actual_bler_available") is True
                   and isinstance(tdd.get("actual_receive_sinr_db"), (int, float))
@@ -293,8 +298,18 @@ async def main() -> None:
             cqi0 = _payload(await session.call_tool(
                 "sr_tdd_mcs", {"dataset_id": ds_id, "cqi": 0},
             ))
-            check(cqi0.get("scheduled") is True and cqi0.get("cqi_initial_mcs") == 0,
-                  "MCP 对内部 CQI0 从 MCS0 开始完整 BF/OLLA 决策")
+            check(cqi0.get("scheduled") is True and cqi0.get("cqi_initial_mcs") == 0
+                  and cqi0.get("reported_cqi_codepoint") == 1,
+                  "MCP 历史表行0从MCS0开始，并明确对应上报CQI1")
+            reported0 = _payload(await session.call_tool(
+                "sr_tdd_mcs", {
+                    "dataset_id": ds_id, "cqi": 0,
+                    "cqi_numbering": "reported_4bit",
+                },
+            ))
+            check(reported0.get("scheduled") is False
+                  and reported0.get("reason") == "reported_cqi_out_of_range",
+                  "MCP 上报4-bit CQI0直接返回out-of-range且不调度")
 
             print("\n" + "=" * 68 + "\n6  sr_deliver —— 取货代码\n" + "=" * 68)
             d1 = _payload(await session.call_tool("sr_deliver", {"dataset_id": ds_id, "want": "信道"}))

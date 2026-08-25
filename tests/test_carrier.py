@@ -149,7 +149,7 @@ def test_system_adaptation_metadata_distinguishes_auto_and_override() -> None:
     assert out["mcs_profile"]["table"] == 3
     assert out["mcs_profile"]["profile"] == "preset_20b_256qam"
     assert out["mcs_profile"]["cqi_to_mcs"] == [
-        0, 1, 3, 5, 7, 9, 12, 14, 16, 19, 21, 23, 25, 27, 28]
+        0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28]
     assert out["mcs_profile"]["scope"] == "experience_v2 fixed preset table"
 
 

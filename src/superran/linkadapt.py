@@ -672,16 +672,15 @@ def harq_retransmission_bler(
 # ---------------------------------------------------------------------------
 
 
-# 预置链路的内部 CQI → MCS 离散表。这不是 38.214 CQI 表，也不能
-# 用一条线性公式重算：调制切换处的 5→6、8→9 都跨了 3 个 MCS 档。
-# 数据所有者 2026-08-23 逐项确认了 0..14 的完整映射。最后一项
-# CQI14→MCS28 是映射合同；当前 preset_20b_256qam 只有 MCS0..27，
-# 调用方必须显式看到 profile 上界钳位，不得伪造 MCS28 BLER 曲线。
+# 预置链路的 256QAM CQI 行 → MCS 离散表。``cqi_index`` 是历史 API 使用的
+# 0..14 表行；对外 4-bit CQI codepoint 则是 1..15，codepoint 0 表示 out-of-range。
+# 两个编号必须同时返回，避免把“数组第 0 行”误写成“上报 CQI=0”。最后一行
+# 请求 MCS28；当前 preset_20b_256qam 只有 MCS0..27，因此必须显式标出钳位。
 INTERNAL_CQI_TO_MCS: tuple[int, ...] = (
-    0, 1, 3, 5, 7, 9, 12, 14, 16, 19, 21, 23, 25, 27, 28,
+    0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28,
 )
-INTERNAL_CQI_PROFILE_ID = "internal_cqi_to_mcs_v1"
-INTERNAL_CQI_SOURCE = "confirmed internal discrete CQI-to-MCS mapping"
+INTERNAL_CQI_PROFILE_ID = "internal_256qam_cqi_to_mcs_v2"
+INTERNAL_CQI_SOURCE = "versioned 256QAM CQI-row-to-MCS mapping"
 
 
 def internal_cqi_to_mcs(
@@ -691,10 +690,10 @@ def internal_cqi_to_mcs(
 ) -> dict[str, Any]:
     """Resolve the confirmed internal CQI index through its explicit MCS table.
 
-    Internal CQI 0 is the lowest usable entry and maps to MCS0; it is **not** the
-    38.214 ``out of range`` value.  The requested mapping is preserved separately
-    from the MCS supported by the selected profile so a missing top-end curve can
-    never be hidden by clipping.
+    ``cqi_index`` is the legacy internal table row 0..14, not the reported 4-bit
+    codepoint. Row 0 corresponds to reported CQI 1; reported CQI 0 is out-of-range
+    and is handled by :func:`reported_cqi_to_mcs`. The requested mapping is preserved
+    separately from the active profile so a missing top-end curve cannot be hidden.
     """
     if mcs_table not in MCS_TABLES:
         raise ValueError(f"mcs table must be one of {sorted(MCS_TABLES)}, got {mcs_table}")
@@ -720,6 +719,10 @@ def internal_cqi_to_mcs(
         "scheduled": True,
         "cqi": idx,
         "index": idx,
+        "cqi_row": idx,
+        "reported_cqi_codepoint": idx + 1,
+        "reported_cqi_zero_semantics": "out_of_range",
+        "cqi_numbering": "internal_row",
         "cqi_profile": INTERNAL_CQI_PROFILE_ID,
         "cqi_source": INTERNAL_CQI_SOURCE,
         "mcs_table": int(mcs_table),
@@ -732,6 +735,51 @@ def internal_cqi_to_mcs(
         "mcs_profile_max": hi,
         "mcs_clipped_to_profile": clipped,
         "mapping": "explicit internal CQI-to-MCS lookup table",
+    }
+
+
+def reported_cqi_to_mcs(
+    cqi_codepoint: int,
+    *,
+    mcs_table: int = 3,
+) -> dict[str, Any]:
+    """Resolve a reported 4-bit CQI codepoint 0..15 through the 256QAM profile.
+
+    Codepoint 0 is an explicit out-of-range state and schedules no MCS. Codepoints
+    1..15 map to legacy internal rows 0..14. Keeping this adapter separate avoids a
+    silent off-by-one change for scripts that historically passed table-row indices.
+    """
+    if mcs_table not in MCS_TABLES:
+        raise ValueError(f"mcs table must be one of {sorted(MCS_TABLES)}, got {mcs_table}")
+    if (isinstance(cqi_codepoint, (bool, np.bool_))
+            or not isinstance(cqi_codepoint, (int, np.integer))):
+        raise ValueError(f"reported CQI must be an integer in 0..15, got {cqi_codepoint!r}")
+    codepoint = int(cqi_codepoint)
+    if not 0 <= codepoint <= 15:
+        raise ValueError(f"reported CQI must be 0..15, got {cqi_codepoint}")
+    if codepoint == 0:
+        return {
+            "scheduled": False,
+            "cqi": 0,
+            "reported_cqi_codepoint": 0,
+            "reported_cqi_zero_semantics": "out_of_range",
+            "cqi_row": None,
+            "cqi_numbering": "reported_4bit",
+            "cqi_profile": INTERNAL_CQI_PROFILE_ID,
+            "cqi_source": INTERNAL_CQI_SOURCE,
+            "mcs_table": int(mcs_table),
+            "requested_mcs": None,
+            "mcs": None,
+            "mapping": "reported 4-bit CQI 0 means out-of-range",
+        }
+    row = internal_cqi_to_mcs(codepoint - 1, mcs_table=mcs_table)
+    return {
+        **row,
+        # ``cqi`` follows this adapter's input convention.  The legacy row remains
+        # available as ``cqi_row`` / ``index`` so neither numbering is implicit.
+        "cqi": codepoint,
+        "cqi_numbering": "reported_4bit",
+        "mapping": "reported 4-bit CQI codepoint to versioned 256QAM MCS table",
     }
 
 
@@ -750,22 +798,26 @@ def _internal_cqi_thresholds(
 ) -> tuple[float, ...]:
     """NewTx target-BLER thresholds for selectable internal CQI entries.
 
-    An entry whose requested MCS is absent from the selected profile is assigned
-    ``+inf`` rather than duplicated at the clipped MCS.  Consequently the current
-    MCS0..27 curve pack can report CQI14 as a requested/clipped diagnostic input,
-    but automatic CQI generation cannot invent a distinguishable MCS28 state.
+    A requested MCS outside the active profile uses the explicitly clipped MCS.  In
+    the current mapping the highest row requests MCS28 and resolves to the otherwise
+    unused MCS27, so reported CQI15 remains reachable at the MCS27 threshold.  If a
+    future mapping clips two adjacent rows to the same MCS, only the first codepoint
+    is reachable; the duplicate row is assigned ``+inf``.
     """
     if mcs_table != 3:
         raise ValueError("internal CQI threshold lookup currently requires mcs_table=3")
     out: list[float] = []
+    previous_resolved_mcs: int | None = None
     for cqi in range(len(INTERNAL_CQI_TO_MCS)):
         row = internal_cqi_to_mcs(cqi, mcs_table=mcs_table)
-        if row["mcs_clipped_to_profile"]:
+        resolved_mcs = int(row["mcs"])
+        if resolved_mcs == previous_resolved_mcs:
             out.append(float("inf"))
         else:
             out.append(float(
-                bc.get_curve(int(row["mcs"]), "newtx").required_sinr_db(target_bler)
+                bc.get_curve(resolved_mcs, "newtx").required_sinr_db(target_bler)
             ))
+        previous_resolved_mcs = resolved_mcs
     return tuple(out)
 
 
@@ -777,9 +829,9 @@ def select_internal_cqi(
 ) -> int:
     """Quantise PMI-SINR to the confirmed internal CQI scale.
 
-    CQI0 is the floor state.  Below its target-BLER threshold the function still
-    returns 0; the subsequent real BLER trial and outage accounting retain the fact
-    that even MCS0 may fail.
+    The return value is a legacy table row 0..14. Below the first row's target-BLER
+    threshold it still returns row 0; callers that need a reported 4-bit codepoint
+    must use :func:`select_reported_cqi`, which returns out-of-range codepoint 0.
     """
     target = float(target_bler)
     if not (math.isfinite(target) and 0.0 < target < 1.0):
@@ -792,6 +844,26 @@ def select_internal_cqi(
         if threshold <= value:
             best = cqi
     return int(best)
+
+
+def select_reported_cqi(
+    sinr_eff_db: float,
+    *,
+    target_bler: float = 0.1,
+    mcs_table: int = 3,
+) -> int:
+    """Quantise SINR to a reported 4-bit CQI codepoint 0..15."""
+    target = float(target_bler)
+    if not (math.isfinite(target) and 0.0 < target < 1.0):
+        raise ValueError(f"target_bler must be in (0,1), got {target_bler!r}")
+    value = float(sinr_eff_db)
+    if not math.isfinite(value):
+        return 0
+    thresholds = _internal_cqi_thresholds(target, int(mcs_table))
+    if value < thresholds[0]:
+        return 0
+    return select_internal_cqi(
+        value, target_bler=target, mcs_table=mcs_table) + 1
 
 
 def cqi_to_mcs_by_se(
@@ -846,7 +918,7 @@ def update_olla_mcs(
     feedback_ack: bool,
     *,
     target_bler: float = 0.1,
-    ack_step_mcs: float = 0.1,
+    ack_step_mcs: float = 0.01,
 ) -> dict[str, float | str | bool]:
     """Advance an OLLA state expressed in continuous MCS-index units.
 
@@ -983,7 +1055,7 @@ def tdd_mcs_adaptation(
     cqi_table: int | None = None,
     mcs_table: int = 3,
     feedback_ack: bool | None = None,
-    olla_ack_step_mcs: float = 0.1,
+    olla_ack_step_mcs: float = 0.01,
     rb_per_rbg: int = 1,
     rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
 ) -> dict[str, Any]:
@@ -1368,7 +1440,7 @@ def link_adaptation(
     *,
     n_prb: int = 273,
     layers: int = 1,
-    mcs_table: int = 1,
+    mcs_table: int = 3,
     cqi_table: int | None = None,
     target_bler: float = 0.1,
     slot_duration_s: float = 0.5e-3,
@@ -1384,6 +1456,9 @@ def link_adaptation(
     步骤：逐 RB SINR → 有效 SINR（MIESM）→ 选 MCS（满足目标 BLER）→
     算 TBS（38.214 §5.1.3.2）→ 计入 BLER 与 HARQ 得有效吞吐。
 
+    默认使用预置 256QAM profile（表 3）。表 1 的 64QAM 与表 2 的标准
+    256QAM 仍可显式选择，但不会被默认路径静默触发。
+
     表 1/2 的 HARQ 沿用 i.i.d. BLER 简化。表 3 只允许一次重传，且所有
     BLER 都从 NewTx 曲线推导：CC 把码字 SINR 抬升 10log10(2) dB；IR（默认）
     把原 MCS 谱效减半后映射到等效低档 MCS，在不变 SINR 上查曲线。
@@ -1392,8 +1467,8 @@ def link_adaptation(
         raise ValueError(f"target_bler 必须在 (0,1) 内，收到 {target_bler!r}")
     use_preset_harq = model is None and retx_model is None and mcs_table == 3
     mdl = model or _default_bler_model(mcs_table)
-    # The preset curve profile uses the confirmed internal CQI0..14 scale.  Standard
-    # MCS tables retain the 38.214 CQI family selected here.
+    # The preset curve profile uses the versioned 256QAM CQI-row mapping; the result
+    # exposes reported 4-bit codepoints. Standard MCS tables retain their 38.214 family.
     resolved_cqi_table: int | None
     if mcs_table == 3:
         resolved_cqi_table = None
@@ -1479,7 +1554,7 @@ def link_adaptation(
     )
     cqi_source = INTERNAL_CQI_SOURCE if mcs_table == 3 else bler_source
     cqi_value = (
-        select_internal_cqi(eff, target_bler=target_bler, mcs_table=3)
+        select_reported_cqi(eff, target_bler=target_bler, mcs_table=3)
         if mcs_table == 3
         else select_cqi(
             eff, table=int(resolved_cqi_table), target_bler=target_bler,

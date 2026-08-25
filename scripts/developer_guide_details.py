@@ -479,7 +479,7 @@ DETAIL_SPECS.update({
             "BLER 与 HARQ 的边界要写清。当前体验仿真在 NACK 后冻结 MCS、RBG 数、rank 与 TBS，并只给一次 IR/CC 重传机会；IR/CC 是基于 NewTx 曲线的系统级 BLER 抽象。它仍不等同于完整 NR HARQ 进程：RV、LLR、并行 process 与标准时序没有展开。",
         ),
         implementation=(
-            ("形成发送侧预测", "链路表保存内部 CQI/基础门限与 BF gain；先由 SINR 反折无 OLLA 基准 MCS，再加用户级 MCS-domain OLLA。MU 先在 SINR 域加 CorrLoss/powerLoss 反折基准 MCS，再加 SU/MU OLLA。"),
+            ("形成发送侧预测", "链路表同时保存历史CQI表行和上报4-bit codepoint、基础门限与BF gain；先由SINR反折无OLLA基准MCS，再加用户级MCS-domain OLLA。MU先在SINR域加CorrLoss/powerLoss反折基准MCS，再加SU/MU OLLA。"),
             ("查询真实 TBS", "TbsLookup 对 slot 类型、MCS table 3、rank 与 RBG 前缀建表，构建时验证每一行单调不减。"),
             ("执行真实传输", "按实际分配 RBG 查 TB bytes，用码字级有效 SINR+最终发送 MCS 查预置 BLER 曲线并从独立 BLER 随机流抽 ACK/NACK；NACK 后只允许一次 IR/CC 重传。"),
             ("闭环更新", "ACK/NACK 只更新对应用户、对应 SU/MU 状态；PF credit 按配置使用 scheduled_tbs 或 acked_goodput，绝不回到全带估计。"),

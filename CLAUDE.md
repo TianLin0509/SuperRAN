@@ -298,21 +298,23 @@ ReTx 行保留作来源审计。CC 保持原 MCS 并把查询 SINR 增加 `10log
 IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在不变 SINR 上查表。
 等效 MCS 只用于 BLER lookup；空口 MCS、RBG 数、rank 与 TBS 必须和初传完全一致。
 重传失败后结束本次 HARQ，payload 留队并在后续成为新 TB；不得再挂第二次重传。
-表 3 使用已确认的内部 CQI0..14 离散映射：
-`[0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]`。它不是 38.214 CQI 表；
-自动 CQI 量化用各映射 MCS 的 NewTx 目标 BLER 门限。当前预置曲线仅
-有 MCS0..27，CQI14 原始请求 MCS28 但必须显式钳到27，不得伪造 MCS28 曲线。
+表 3 使用版本化256QAM映射：历史内部表行0..14为
+`[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28]`，对应上报4-bit CQI1..15；
+上报CQI0是out-of-range。自动量化用各映射MCS的NewTx目标BLER门限。当前曲线仅
+有MCS0..27，最高行请求MCS28但必须显式钳到27，不得伪造MCS28曲线。
+所有高层链路/吞吐/SNR扫频接口默认都用表3的256QAM profile；
+表1的64QAM和表2的标准256QAM只在调用方显式指定时使用。
 
 TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sr_tdd_mcs` 实现：
-`内部 CQI index → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标 BLER SINR 门限
+`CQI表行/上报codepoint → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标 BLER SINR 门限
 → + BF Gain → 按 SINR 重映射 MCS → + OLLA MCS offset → floor → 最终 MCS`。
 CQI 是 PMI 权测得的 pre-BF 值。BF Gain 逐 RB、逐流计算为同一信道、CSI、rank、
 功率、噪声、干扰与经典 MMSE 接收机下 `SINR_SVD - SINR_PMI`；默认物理发送权为
 SVD 方向叠加 NEBF 每天线约束，因此也记为 `SINR_NEBF`。RB 先在每个 RBG 内做
-线性功率平均，再对 RBG×流做 dB 算术平均。内部 CQI0 映射 MCS0，不是
-out-of-range。OLLA 的
+线性功率平均，再对RBG×流做dB算术平均。历史row0映射MCS0并对应上报CQI1；
+上报CQI0不调度。OLLA的
 单位是连续 MCS 档位，不是 dB；正值更激进，
-最终结果严格向下取整并钳位到 0..27。默认 10% 首传 BLER 下 ACK +0.1、NACK -0.9，
+最终结果严格向下取整并钳位到0..27。默认10%首传BLER下ACK +0.01、NACK -0.09，
 反馈只作用于下一调度时刻。所有中间量与口径必须保留在结果中，不能只返回最终 MCS。
 
 `anchor_check` 的单调性**只能在同一调制阶数内部要求**：标准表在调制切换点上
@@ -810,9 +812,8 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 老化的全部代价就是"基站以为打准了其实没有"，而那个口径直接把它抹平。
 
 两个实现细节：宽带 PMI 按 CSI report 周期更新并在周期内保持，不是每个 TTI 重搜；
-每次更新只能使用该时刻可见的 CSI，不能跨完整仿真时间先平均后偷看未来。内部
-**CQI=0 映射 MCS0**，
-是最低可用档，不再借用 38.214 out-of-range 语义。
+每次更新只能使用该时刻可见的CSI，不能跨完整仿真时间先平均后偷看未来。历史
+API的表行0映射MCS0、对应上报CQI1；真实上报**CQI=0是out-of-range**。
 
 `Dataset.tdd_mcs` / `sr_tdd_mcs` 也必须遵守同一因果边界：进入 MCS 的
 `bf_gain_user_db` 只能在 gNB 可见的 `h_prec` 上计算。同一权打到

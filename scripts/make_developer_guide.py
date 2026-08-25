@@ -3547,20 +3547,23 @@ def linkadapt_page() -> Page:
 <h2>SINR_AMC_PRED 不是物理发送 SINR，更不是接收真值</h2>
 """ + F_AMC_PRED + F_RX_BLER
     body += """
-<p>CQI 是终端用 Type-I/PMI 参照权在真实信道上测得并按报告周期更新的长期宽带量；先查内部
-离散表 <code>[0,1,3,5,7,9,12,14,16,19,21,23,25,27,28]</code> 映射
+<p>CQI 是终端用Type-I/PMI参照权在真实信道上测得并按报告周期更新的长期宽带量；历史API使用
+表行0..14，对应上报4-bit CQI1..15，256QAM映射为
+<code>[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28]</code>。先映射
 初始 MCS，再取该 MCS 的 10% BLER SINR 门限 Γ。BF Gain 则是 gNB 在自己可见的（可能陈旧）
 SRS CSI 上，实际发送方向相对 PMI 方向的 post-MMSE SINR 差；默认两边都施加 NEBF。
 两者相加形成 <code>SINR_AMC_PRED</code> 后重选 MCS，最后由用户级 MCS-domain SU OLLA
 调整。物理发射分支叫 <code>SINR_NEBF/PEBF/EBF</code>，同一个 Q 打到 h_true 后得到的
-<code>SINR_*_RX</code> 才能查最终 BLER。内部 CQI0 映射 MCS0，不是 out-of-range。</p>
+<code>SINR_*_RX</code> 才能查最终BLER。真实上报CQI0是out-of-range；历史row0映射MCS0
+并明确对应reported codepoint 1。</p>
 """
     mapping_rows = la.internal_cqi_mapping_rows(mcs_table=3)
     body += table(
-        ["内部 CQI", "原始映射 MCS", "当前曲线 profile 实际 MCS", "状态"],
+        ["历史表行", "上报4-bit CQI", "原始映射 MCS", "当前曲线实际 MCS", "状态"],
         [
             (
-                str(row["cqi"]), str(row["requested_mcs"]), str(row["mcs"]),
+                str(row["cqi_row"]), str(row["reported_cqi_codepoint"]),
+                str(row["requested_mcs"]), str(row["mcs"]),
                 "上界钳位：缺 MCS28 BLER 曲线"
                 if row["mcs_clipped_to_profile"] else "逐项精确映射",
             )
@@ -3568,10 +3571,11 @@ SRS CSI 上，实际发送方向相对 PMI 方向的 post-MMSE SINR 差；默认
         ],
     )
     body += callout(
-        "warn", "CQI14 的映射合同与当前曲线覆盖不同",
-        "<p>内部表确认为 CQI14→MCS28，但 <code>preset_20b_256qam</code> "
-        "只有 MCS0..27。代码保留 <code>requested_mcs=28</code> 并显式钳到27；"
-        "获得 MCS28 的码率与 NewTx BLER 曲线前，不做外推或复制 MCS27。</p>",
+        "warn", "最高CQI行的原始编号与当前曲线覆盖不同",
+        "<p>历史表行14（上报CQI15）请求MCS28，但 "
+        "<code>preset_20b_256qam</code>只有MCS0..27。代码保留"
+        "<code>requested_mcs=28</code>并显式钳到27；自动CQI15使用MCS27的"
+        "NewTx门限，不伪造MCS28曲线。</p>",
     )
     body += callout(
         "danger", "禁止 oracle",
@@ -3735,7 +3739,8 @@ Qm 内检查。这个分析后端用于表 1/2，不描述预置表 3 的运行�
             ("横轴", "源标签 Es/No；预置表解释为单码字经典 MMSE 有效 SINR", "跨 RBG/rank 采用已确认的 dB 平均，不是原始天线前 SNR"),
             ("插值", "log10(BLER) 域线性；范围外保守钳位", "不外推未测量的低 BLER 尾部"),
             ("完整性", "SHA-256、28 MCS 覆盖、横轴/BLER 单调、10% crossing", "hash 一致只证明数据没漂，不证明现场代表性"),
-            ("CQI", "仍使用 38.214 CQI Table 2 + 分析 BLER", "不能声称 CQI 也来自预置 BLER 曲线"),
+            ("CQI", "默认表3使用版本化256QAM离散映射 + 预置NewTx目标BLER门限",
+             "表1/2的38.214 CQI分支只在显式选择时使用；不能把预置映射说成3GPP标准"),
         ],
     )
     body += "<h2>只允许一次重传：默认 IR，可选 CC</h2>" + F_HARQ_CC + F_HARQ_IR

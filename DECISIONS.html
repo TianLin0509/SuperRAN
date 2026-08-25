@@ -390,10 +390,10 @@ Type I 的 IBLER 普遍低于目标 10%（0.043~0.081），是 MCS 整数档卡�
 <td><code>measure_mu_gain</code> 里老化走 RBG、完美走 RB</td>
 <td>算出来的「老化损失」里混着粒度差。两条路径必须同粒度，否则比的不是老化。</td></tr>
 
-<tr><td><b>CQI=0 让发送侧 SINR 变成 −inf</b></td>
-<td>整列 <code>sinr_tx</code> 是 −inf</td>
-<td>CQI=0 的意思是「低于 CQI 表下界」，不是「这个用户不存在」——
-真实接收 SINR 可能还有几个 dB。现在退回实测 PMI SINR，OLLA 还能在它上面工作。</td></tr>
+<tr><td><b>把历史表行0和上报4-bit CQI0混为一谈</b></td>
+<td>低信道样本可能被当成MCS0可调度用户</td>
+<td>现在同时保留两套编号：历史表行0..14用于兼容，上报codepoint 0..15
+用于协议语义。表行0对应上报CQI1并映射MCS0；上报CQI0是out-of-range，必须不调度。</td></tr>
 
 <tr><td><b>页面 select 回传字符串，<code>bool()</code> 失灵</b></td>
 <td>开关关不掉</td>

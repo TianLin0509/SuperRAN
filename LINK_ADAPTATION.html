@@ -298,22 +298,22 @@ NewTx R=0.650 的 10% BLER 门限为 <strong>14.042 dB</strong>，ReTx R=0.333
 </div>
 
 <div class="callout c-blue">
-<p><strong>TDD AMC 已切换到已确认的内部 CQI 离散表。</strong>输入 CQI 后，先逐项查表得初始 MCS，
+<p><strong>TDD AMC 已切换到版本化256QAM CQI离散表。</strong>输入CQI后，先逐项查表得初始MCS，
 再取该 MCS 的 NewTx 目标 BLER SINR 门限。BF Gain 逐 RB、逐流定义为同一信道、
 CSI、rank、功率、干扰和经典 MMSE 接收机下
 <code>SINR_SVD - SINR_PMI</code>；叠加后对全部 RB×流在 dB 域做算术平均，
 重新映射 MCS，最后在 MCS 域加 OLLA、严格 <code>floor</code> 并钳位到 0..27。</p>
 <div class="tbl-wrap" style="margin:10px 0;"><table>
-<thead><tr><th>内部 CQI</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th></tr></thead>
-<tbody><tr><td><strong>原始映射 MCS</strong></td><td>0</td><td>1</td><td>3</td><td>5</td><td>7</td><td>9</td><td>12</td><td>14</td><td>16</td><td>19</td><td>21</td><td>23</td><td>25</td><td>27</td><td>28*</td></tr></tbody>
+<thead><tr><th>历史表行</th><th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>11</th><th>12</th><th>13</th><th>14</th></tr></thead>
+<tbody><tr><td><strong>上报4-bit CQI</strong></td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>11</td><td>12</td><td>13</td><td>14</td><td>15</td></tr>
+<tr><td><strong>原始映射MCS</strong></td><td>0</td><td>2</td><td>4</td><td>6</td><td>8</td><td>10</td><td>12</td><td>14</td><td>16</td><td>18</td><td>20</td><td>22</td><td>24</td><td>26</td><td>28*</td></tr></tbody>
 </table></div>
-<p style="margin-top:8px;"><code>CQI=0</code> 是最低可用档并映射 MCS0，不是 out-of-range。
-默认 10% 目标下 ACK +0.1、
-NACK -0.9 MCS，反馈只改变下一时刻 OLLA。接口返回初始门限、逐流 PMI/SVD SINR、
+<p style="margin-top:8px;">历史表行0映射MCS0、对应上报CQI1；真实上报<code>CQI=0</code>是out-of-range，不调度。
+默认10%目标下ACK +0.01、NACK -0.09 MCS，反馈只改变下一时刻OLLA。接口返回初始门限、逐流PMI/SVD SINR、
 BF Gain、用户 SINR、取整前后 MCS 和最终 BLER，不隐藏中间口径。</p>
-<p style="margin-top:8px;"><small>* 内部表合同为 CQI14→MCS28，但当前
+<p style="margin-top:8px;"><small>* 最高表行14（上报CQI15）请求MCS28，但当前
 <code>preset_20b_256qam</code> 只有 MCS0..27 曲线；实现保留
-<code>requested_mcs=28</code> 并显式钳到27，不伪造 MCS28 BLER 曲线。</small></p>
+<code>requested_mcs=28</code>并显式钳到27，自动CQI15使用MCS27门限，不伪造MCS28 BLER曲线。</small></p>
 </div>
 
 <h2 id="s4">四、实测：吞吐、边缘用户、MCS 分布</h2>
@@ -463,9 +463,9 @@ bler_curve(mcs, tx_mode)          <span class="cm"># 用户原始曲线与插值
 <code>bler_curves.py</code> 负责哈希、完整性检查、插值和范围钳位。</p>
 
 <h3>Dataset 上的新方法</h3>
-<pre><code>ds.link_adaptation(i, mcs_table=1)   <span class="cm"># 单样本：MCS/CQI/TBS/BLER/吞吐</span>
-ds.throughput(max_samples=200)       <span class="cm"># 整批：分布 + 5% 边缘用户</span>
-ds.throughput(mcs_table=3)           <span class="cm"># 用户 NewTx/ReTx 曲线后端</span></code></pre>
+<pre><code>ds.link_adaptation(i)                <span class="cm"># 单样本：默认预置256QAM表3</span>
+ds.throughput(max_samples=200)       <span class="cm"># 整批：默认表3 + 5%边缘用户</span>
+ds.throughput(mcs_table=1)           <span class="cm"># 显式可选的64QAM对照</span></code></pre>
 <pre><code>ds.tdd_mcs(i, cqi_index=9, olla_mcs_offset=-0.2) <span class="cm"># 单样本 TDD 最终 MCS</span></code></pre>
 
 <h2 id="s8">八、已知局限</h2>
