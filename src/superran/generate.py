@@ -247,7 +247,7 @@ def _ensure_ue_panel(cfg: dict[str, Any]) -> tuple[list[int], bool]:
     """确保 4R 等 UE 端口数有明确的阵列几何。
 
     没写 ``ue_panel`` 时按与端口数一致的双极化面板推导；例如 4R 得到
-    ``[2, 1, 2]``。这是可覆盖的工程假设，不是公司终端天线实测值。
+    ``[2, 1, 2]``。这是可覆盖的工程假设，不是终端天线实测值。
     与 BS 一样不把面板写死在 preset 里，才能让用户覆盖端口数时同步生效。
     """
     raw = cfg.get("ue_panel")
@@ -1015,7 +1015,7 @@ def generate(
         "ue_panel_derived": bool(ue_panel_derived),
         "ue_panel_note": (
             "未显式配置时按端口数推导；4R 默认 2H x 1V x 2pol。"
-            "这是可覆盖的工程假设，不是公司终端阵列实测值。"
+            "这是可覆盖的工程假设，不是终端阵列实测值。"
         ),
         "antenna_model": array_block,
         # static internal_sim uses one seed and a global sample index, so worker

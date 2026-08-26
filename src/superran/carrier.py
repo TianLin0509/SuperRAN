@@ -57,7 +57,7 @@ def nominal_rbg_size(num_rb: int, *, size_config: int = 2) -> int:
     """返回 38.214 Type-0 RBG 名义大小 ``P``。
 
     ``size_config`` 对应 Table 5.1.2.2.1-1 的 Configuration 1/2。项目默认
-    Configuration 2；272 RB 时两列都是 16，因此公司主场景结果不变。
+    Configuration 2；272 RB 时两列都是 16，因此预置主场景结果不变。
     """
     n = _strict_int("num_rb", num_rb)
     if not 1 <= n <= 275:

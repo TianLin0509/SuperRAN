@@ -61,7 +61,7 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
         antenna_choice = f"legacy_64（{n_bs} 个独立阵元）"
         antenna_why = (
             "显式历史兼容/对照模式：每个数字端口被当成一个独立阵元。"
-            "它不代表已确认的公司 64T/256T 馈电结构。")
+            "它不代表已确认的预置 64T/256T 馈电结构。")
     else:
         m = 3 if profile == "64t" else 6 if profile == "256t" else int(
             ((cfg.get("bs_antenna") or {}).get("fixed_vertical_subarray") or {}).get(

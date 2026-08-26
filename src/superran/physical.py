@@ -122,7 +122,7 @@ def srs_config(
 ) -> dict[str, Any]:
     """SRS 资源配置与跳频参数（38.211 §6.4.1.4）。
 
-    跳频当前只支持公司 100 MHz profile：272 RB、C_SRS=63、B_SRS=1、
+    跳频当前只支持预置 100 MHz profile：272 RB、C_SRS=63、B_SRS=1、
     b_hop=0、n_RRC=0，每次 16 RB、17 跳覆盖全带。其他跳频组合直接拒绝，
     避免看似成功却套用了未验证的资源映射。非跳频配置仍保留为链路级工具。
     返回里的 ``hopping_cycle_length`` 是跳完整个带宽所需的 SRS 发送次数——

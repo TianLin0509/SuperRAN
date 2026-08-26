@@ -92,15 +92,15 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
     <div class="card metric"><div class="value">192</div><div class="label">BS 物理天线阵子 AE</div><div class="note">8H × 12V × 2pol</div></div>
     <div class="card metric"><div class="value">64</div><div class="label">BS RF / 数字端口</div><div class="note">8H × 4V × 2pol；每端口 1 驱 3</div></div>
     <div class="card metric"><div class="value">4</div><div class="label">UE 下行接收端口</div><div class="note">当前工程假设 2H × 1V × 2pol</div></div>
-    <div class="card metric"><div class="value">4</div><div class="label">UE 默认上行 SRS 端口</div><div class="note">公司 BOTH preset 与 4R 对齐</div></div>
+    <div class="card metric"><div class="value">4</div><div class="label">UE 默认上行 SRS 端口</div><div class="note">预置 BOTH preset 与 4R 对齐</div></div>
   </div>
-  <div class="callout green" style="margin-top:16px"><h3>当前公司默认</h3><code>company_64t4r</code> 使用 <code>link=BOTH</code>、UE Tx/Rx 都为 4：<code>H_DL</code> 是 64×4，配对的真实 <code>H_UL</code> 和 SRS 估计也都是 64×4；两者物理角色仍须分开。</div>
+  <div class="callout green" style="margin-top:16px"><h3>当前预置默认</h3><code>company_64t4r</code> 使用 <code>link=BOTH</code>、UE Tx/Rx 都为 4：<code>H_DL</code> 是 64×4，配对的真实 <code>H_UL</code> 和 SRS 估计也都是 64×4；两者物理角色仍须分开。</div>
   <div class="table-wrap" style="margin-top:16px"><table>
     <thead><tr><th>对象</th><th>配置条件</th><th>单 RB 矩阵</th><th>语义</th></tr></thead>
     <tbody>
       <tr><td>默认下行真值 / CSI-RS</td><td><code>BS_tx=64, UE_rx=4</code></td><td><span class="dimtag">64×4</span></td><td>从 64 个 BS 发射端口到 4 个 UE 接收端口</td></tr>
       <tr><td>默认上行真值 / SRS</td><td><code>BS_rx=64, UE_tx=4</code></td><td><span class="dimtag">64×4</span></td><td>从 4 个 UE 发射端口到 64 个 BS 接收端口；对外存储仍为 BS×UE</td></tr>
-      <tr><td>公司配对数据</td><td><code>link=BOTH</code></td><td><span class="dimtag">[1,1,272,64,4]</span></td><td>DL 真值用于评估，UL SRS 估计用于 gNB 预编码</td></tr>
+      <tr><td>预置配对数据</td><td><code>link=BOTH</code></td><td><span class="dimtag">[1,1,272,64,4]</span></td><td>DL 真值用于评估，UL SRS 估计用于 gNB 预编码</td></tr>
       <tr><td>目标物理恢复门</td><td>4 port、64 BS、无噪声</td><td><span class="dimtag">Y[64,L] → Ĥ[64,4]</span></td><td>待实现：满秩精确恢复、总 pilot 功率固定；rank 不足必须拒绝</td></tr>
     </tbody>
   </table></div>
@@ -163,12 +163,12 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
   <p class="intro">当前实现有三层极化表达：端口索引中的两种极化、理想 ±45° Jones 基、以及每条 CDL ray 的 2×2 交叉极化耦合。三者的成熟度并不相同。</p>
   <div class="grid g3">
     <div class="card"><h3>① 端口极化索引</h3><p>BS 的每个 <code>(h,v)</code> 位置有 <code>p=0,1</code> 两个端口；UE 假设的 2H×1V×2pol 同样有两类。CDL 用布尔 mask 把 steering 向量拆成 pol-0 / pol-1 两组。</p><div class="eq">__EQ_POL_MASK__</div></div>
-    <div class="card"><h3>② 理想 ±45° Jones 基</h3><div class="eq">__EQ_JONES__</div><p>这定义了理想斜极化方向。当前没有公司实测 Jones pattern；<code>parametric_temporary</code> 只是共同的标量幅度方向图。</p></div>
+    <div class="card"><h3>② 理想 ±45° Jones 基</h3><div class="eq">__EQ_JONES__</div><p>这定义了理想斜极化方向。当前没有实测 Jones pattern；<code>parametric_temporary</code> 只是共同的标量幅度方向图。</p></div>
     <div class="card"><h3>③ 每条 ray 的交叉极化</h3><div class="eq">__EQ_GPOL__</div><p><span class="mono">κ=10^(XPR/10)</span>。同极化幅度为 1，交叉极化幅度为 <span class="mono">κ^-1/2</span>，四项各自有随机相位。</p></div>
   </div>
   <h3 style="margin-top:23px">阵元标量方向图</h3>
   <div class="eq">__EQ_PATTERN__</div>
-  <div class="callout blue"><h3>当前实现边界：理想 ±45° 已贯通，实测复 Jones/XPD 尚未导入</h3>公司 <code>effective_subarray / physical_reference</code> 的 InternalSim CDL 路径会调用 <code>element_jones()</code>，把理想 ±45° 基与每条 ray 的 2×2 coupling matrix 收缩；legacy 面板仍按 V/H 基兼容。元素配置里的 <code>xpd_db=8</code> 不是公司实测的方向相关 XPD：CDL profile 自带 XPR 时优先使用 profile XPR。也就是说：<b>理想双极化方向和随机交叉极化已经进入 H，但公司 (az,el,f) 方向相关复 Jones/XPD 仍是明确缺口。</b></div>
+  <div class="callout blue"><h3>当前实现边界：理想 ±45° 已贯通，实测复 Jones/XPD 尚未导入</h3>预置 <code>effective_subarray / physical_reference</code> 的 InternalSim CDL 路径会调用 <code>element_jones()</code>，把理想 ±45° 基与每条 ray 的 2×2 coupling matrix 收缩；legacy 面板仍按 V/H 基兼容。元素配置里的 <code>xpd_db=8</code> 不是实测的方向相关 XPD：CDL profile 自带 XPR 时优先使用 profile XPR。也就是说：<b>理想双极化方向和随机交叉极化已经进入 H，但预置 (az,el,f) 方向相关复 Jones/XPD 仍是明确缺口。</b></div>
 </section>
 
 <section id="cdl" class="section">
@@ -200,7 +200,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
     <div class="card"><h3>存储 H 是归一化小尺度信道</h3><div class="eq">__EQ_NORM__</div><p>服务小区 H 的生成块均方元素功率归一到约 1。绝对路径损耗、阴影衰落、接收功率分别写在元数据中，不直接乘进服务 H。</p></div>
     <div class="card"><h3>相对方向增益留在 H，绝对增益进链路预算</h3><p>所有 ray/cluster 合成后，服务 H 只做一次整体小尺度归一；因此不同 ray 之间的元素方向图和固定子阵相对权重仍在 H 中。阵元与子阵的绝对端口增益则由 conducted-power long-term link budget 单独带入，避免和数字 BF 重复计算。</p><div class="eq">__EQ_RAY_NORM__</div></div>
   </div>
-  <div class="callout blue" style="margin-top:15px"><h3>这对 6° 固定下倾的解释很重要</h3>6° 馈电相位进入 <code>F</code> 与每条 ray 的 steering；由于逐 ray 归一已移除，不同到离角 ray 会保留不同的子阵增益，所以下倾能改变簇/ray 的相对接收功率。仍未完成的是公司实测复 Jones pattern，而不是“下倾完全被归一掉”。</div>
+  <div class="callout blue" style="margin-top:15px"><h3>这对 6° 固定下倾的解释很重要</h3>6° 馈电相位进入 <code>F</code> 与每条 ray 的 steering；由于逐 ray 归一已移除，不同到离角 ray 会保留不同的子阵增益，所以下倾能改变簇/ray 的相对接收功率。仍未完成的是实测复 Jones pattern，而不是“下倾完全被归一掉”。</div>
 </section>
 
 <section id="reciprocity" class="section">
@@ -209,7 +209,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
   <div class="eq">__EQ_RECIP__</div>
   <div class="grid g3">
     <div class="card"><h3>若 UE 上行 4 端口</h3><div class="eq">__EQ_UL4__</div><p>物理运算轴是 UE×BS；对外再转置成 BS×UE，于是得到熟悉的 64×4。</p></div>
-    <div class="card"><h3>非公司 2Tx 场景</h3><div class="eq">__EQ_UL2__</div><p>通用配置仍可显式使用 2 个 UE Tx 端口；但 <code>link=BOTH</code> 必须使 Tx/Rx 端口合同一致，不能在配对数据中静默截列。</p></div>
+    <div class="card"><h3>非预置 2Tx 场景</h3><div class="eq">__EQ_UL2__</div><p>通用配置仍可显式使用 2 个 UE Tx 端口；但 <code>link=BOTH</code> 必须使 Tx/Rx 端口合同一致，不能在配对数据中静默截列。</p></div>
     <div class="card"><h3>统一存储约定</h3><div class="eq">__EQ_STORE__</div><p>因此消费者始终看到最后两轴 <code>[BS_port, UE_port]</code>，但不能据此误以为上下行端口数天然相同。</p></div>
   </div>
 </section>
@@ -243,7 +243,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
       <tr><td>192 AE → 64 RF</td><td><span class="status ok">已实现</span></td><td>1 驱 3、0.5λ/0.67λ、F 耦合、64 端口输出</td><td>实测阵元方向图已校准</td></tr>
       <tr><td>CDL 多径 MIMO</td><td><span class="status ok">已实现</span></td><td>20 rays、角度、Doppler、时延、极化耦合</td><td>完整 §7.5 场景簇生成</td></tr>
       <tr><td>双极化</td><td><span class="status warn">结构已实现</span></td><td>pol mask + XPR 2×2 ray coupling</td><td>实测 Jones/XPD 已贯通</td></tr>
-      <tr><td>64×4 UL 真值</td><td><span class="status ok">已实现</span></td><td>公司 BOTH preset 固定 4Tx/4Rx</td><td>任意 Tx/Rx 错配仍可配对</td></tr>
+      <tr><td>64×4 UL 真值</td><td><span class="status ok">已实现</span></td><td>预置 BOTH preset 固定 4Tx/4Rx</td><td>任意 Tx/Rx 错配仍可配对</td></tr>
       <tr><td>四端口 SRS 估计</td><td><span class="status warn">接口有、物理观测待补</span></td><td>1/2/4-port 序列参数与 LS/频域 LMMSE 基线</td><td>物理端口叠加/污染已被真实建模</td></tr>
     </tbody>
   </table></div>
@@ -261,7 +261,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
     <div class="card"><h3>无噪声精确恢复</h3><p>随机 64×4 H 与满秩 X，断言 LS 误差接近机器精度；把 X 改成 rank 3，必须拒绝或明确报不可辨识。</p></div>
     <div class="card"><h3>端口交换等变</h3><p>同时置换 H 的列与 X 的行，估计结果只应做同样列置换，不能改变物理值。</p></div>
     <div class="card"><h3>污染反例</h3><p>让邻区复用完全相同 X，NMSE 必须显著恶化；换成正交 X 后恢复。若无差异，说明干扰没有真实进入观测。</p></div>
-    <div class="card"><h3>2Tx / 4Tx 维度</h3><p>公司 BOTH 默认输出 64×4；通用 2Tx 仅用于非配对或 Tx/Rx 同为 2 的合同。禁止静默截列。</p></div>
+    <div class="card"><h3>2Tx / 4Tx 维度</h3><p>预置 BOTH 默认输出 64×4；通用 2Tx 仅用于非配对或 Tx/Rx 同为 2 的合同。禁止静默截列。</p></div>
     <div class="card"><h3>功率守恒</h3><p>端口数改变时总 SRS 功率口径必须固定并写清楚，避免 4 端口相当于凭空增加 6 dB 发射功率。</p></div>
     <div class="card"><h3>Gram 条件数</h3><p>落盘 <code>rank(X)</code>、<code>cond(XXᴴ)</code>、端口相关性；条件数异常必须告警。</p></div>
   </div>
@@ -270,7 +270,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
 
 <section id="tdl" class="section">
   <div class="kicker">10 · Alternative model</div><h2>补充：若不用 CDL，TDL 路径怎样构造 H</h2>
-  <p class="intro">默认公司场景走 CDL，因此主推导以上节为准。TDL fallback 没有逐径角度，而是先生成 iid 复高斯 tap，再用 Kronecker 空间相关矩阵着色。</p>
+  <p class="intro">默认预置场景走 CDL，因此主推导以上节为准。TDL fallback 没有逐径角度，而是先生成 iid 复高斯 tap，再用 Kronecker 空间相关矩阵着色。</p>
   <div class="grid g2">
     <div class="card"><h3>空间相关与着色</h3><div class="eq">__EQ_TDL_CORR__</div><p><code>R_H</code>、<code>R_V</code> 按指数距离相关；<code>R_P</code> 用极化相关系数 μ。每个 tap 的 iid 高斯矩阵由左右 Cholesky 因子着色。</p></div>
     <div class="card"><h3>tap 到 RB 频响</h3><div class="eq">__EQ_TDL_FREQ__</div><p>TDL 能形成 64×4 频域矩阵，但空间结构是相关矩阵模型，不包含 CDL 的显式 AOD/AOA/ZOD/ZOA 与 20-ray 几何。</p></div>
@@ -282,7 +282,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
   <div class="table-wrap"><table>
     <thead><tr><th>主题</th><th>文件与行</th><th>关键事实</th></tr></thead>
     <tbody>
-      <tr><td>公司硬件默认</td><td><div class="path">C:\Vibe\Wireless\SuperRAN\src\superran\hardware.py</div></td><td>8×4×2 RF、1 驱 3、192 AE、UE 4Tx/4Rx、±45°、canonical 端口合同</td></tr>
+      <tr><td>预置硬件默认</td><td><div class="path">C:\Vibe\Wireless\SuperRAN\src\superran\hardware.py</div></td><td>8×4×2 RF、1 驱 3、192 AE、UE 4Tx/4Rx、±45°、canonical 端口合同</td></tr>
       <tr><td>默认 preset</td><td><div class="path">C:\Vibe\Wireless\SuperRAN\presets\presets.yaml</div></td><td><code>company_64t4r</code> 是 BOTH，UE Tx/Rx 均为 4</td></tr>
       <tr><td>F 与 steering</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\phy_sim\effective_array.py</div></td><td>端口索引、馈电归一、位置、192×64 coupling、Jones 基、Fᴴ/Fᵀ</td></tr>
       <tr><td>CDL H / 链路维度</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\data\sources\internal_sim.py</div></td><td>20 rays、极化矩阵、Doppler、簇求和、时延 DFT；DL/UL 天线轴选择</td></tr>

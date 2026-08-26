@@ -250,7 +250,7 @@ def _apply_dependent_overrides(
 ) -> list[str]:
     """应用 override，并清掉已经失效的载波/SRS 派生量。
 
-    典型陷阱是从 100 MHz 公司 preset 起步，只改 ``bandwidth_hz=20e6``，
+    典型陷阱是从 100 MHz 预置 preset 起步，只改 ``bandwidth_hz=20e6``，
     却把 preset 里的 ``num_rb=272`` 一起带过去。ChannelHub 会忠实生成 272 RB，
     所以带宽字段看着是 20 MHz，实际系统仍按 100 MHz 跑，而且不会报错。
 

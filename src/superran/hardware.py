@@ -5,7 +5,7 @@
 间距一律 0.5λ。真实硬件不是这样：
 
 ===============================  ==========================================
-项                                已确认公司 AAU
+项                                已确认预置 AAU
 ===============================  ==========================================
 RF / 数字端口                      64T: 8H x 4V x 2pol；256T: 16H x 8V x 2pol
 物理阵子                           64T: 192；256T: 1536
@@ -93,11 +93,11 @@ COMPANY_SC_PER_RB = 12            # 只作记录，仿真到 RB 为止
 NR_TABLE_NUM_RB_100M_30K = 273    # 38.104 标准表值，与上面的 272 口径不同
 # 系统/体验层的 TDD 资源格栅是项目合同，不是页面参数。
 # 链路级仍可生成 10/20 MHz 等数据用于算法实验；但这些数据
-# 不能直接送入当前的 TDD 系统仿真并冒充公司 100 MHz 基线。
+# 不能直接送入当前的 TDD 系统仿真并冒充预置 100 MHz 基线。
 SUPERRAN_TDD_CARRIER_PROFILE_ID = "superran-tdd-100m-30khz-272rb-17x16-v1"
 
 # 当前唯一受支持的 SRS hopping 产品合同。参数来自 38.211
-# Table 6.4.1.4.3-1 的 C_SRS=63 行；SuperRAN 只承载公司 100 MHz
+# Table 6.4.1.4.3-1 的 C_SRS=63 行；SuperRAN 只承载预置 100 MHz
 # 载波上 B_SRS=1、b_hop=0、n_RRC=0 这一档。未来扩展其他带宽时必须
 # 新增独立 profile，而不是复用这条 17-hop 顺序。
 COMPANY_SRS_C_SRS = 63
@@ -113,12 +113,12 @@ SUPERRAN_SRS_HOPPING_PROFILE_ID = "superran-srs-c63-b1-17hop-v1"
 
 COMPANY_UE_RX_ANT = 4             # 默认 4R 接收
 # 体验仿真的下行预编码来自 TDD SRS。若这里只给 2Tx，SRS 只能估到 64x2，
-# 却拿它去设计 64x4 下行权，维度与物理端口都对不上。公司 64T4R 基线因此
+# 却拿它去设计 64x4 下行权，维度与物理端口都对不上。预置 64T4R 基线因此
 # 明确采用 4Tx/4Rx UE；只有显式做 2Tx 终端课题时才覆盖成 2。
 COMPANY_UE_TX_ANT = 4
 COMPANY_LINK = "BOTH"             # DL 真值 + UL SRS 估计，TDD 成对生成
 
-# 公司面板采用交叉极化 +45/-45 度。即便 ChannelHub 当前也把它作为双极化
+# 预置面板采用交叉极化 +45/-45 度。即便 ChannelHub 当前也把它作为双极化
 # 默认值，这里仍要显式落盘：硬件真相不能依赖下游库某个可能漂移的默认参数。
 COMPANY_POLARIZATION_SLANTS_DEG: list[float] = [45.0, -45.0]
 
@@ -272,7 +272,7 @@ def company_antenna_block(
 
 
 def is_company_panel(panel: Any) -> bool:
-    """这个面板是不是已确认物理结构的公司 64T 或 256T。
+    """这个面板是不是已确认物理结构的预置 64T 或 256T。
 
     64T 使用 1 驱 3、256T 使用 1 驱 6；二者统一采用图示
     ``pol_h_v + top_to_bottom``。其他端口数不推断馈电结构。
@@ -359,7 +359,7 @@ def array_summary(cfg: dict[str, Any], applied: str | None) -> dict[str, Any]:
         out["port_layout_contract_version"] = "explicit-legacy-layout-v1"
         out["note"] = (
             f"{n_ports} 个端口按**独立阵元**建模、间距一律 0.5λ。"
-            "这是显式历史兼容/对照模式，不是已确认的公司 64T/256T 馈电结构。"
+            "这是显式历史兼容/对照模式，不是已确认的预置 64T/256T 馈电结构。"
         )
         return out
     ant = cfg.get("bs_antenna") or {}
@@ -435,7 +435,7 @@ def company_carrier_defaults() -> dict[str, Any]:
         "num_ue_tx_ant": COMPANY_UE_TX_ANT,
         "bs_panel": list(COMPANY_RF_PANEL),
         # 这里只是把原先隐式的 4 阵元 ULA 改成明确且可覆盖的工程假设。
-        # 尚无公司终端阵列实测参数，不能把它描述成真实手机天线。
+        # 尚无终端阵列实测参数，不能把它描述成真实手机天线。
         "ue_panel": list(COMPANY_UE_PANEL),
         "link": COMPANY_LINK,
     }
@@ -504,7 +504,7 @@ def describe() -> dict[str, Any]:
             "ue_panel": list(COMPANY_UE_PANEL),
             "ue_panel_assumption": (
                 "暂按 2H x 1V x 2pol 的 4R 面板建模；这是可配置的工程假设，"
-                "不是公司终端阵列实测值"
+                "不是终端阵列实测值"
             ),
         },
     }

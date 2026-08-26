@@ -287,7 +287,7 @@ def test_system_config_rejects_fractional_or_boolean_prb_sizes() -> None:
 
 
 def test_srs_hopping_blocks_unverified_non_company_grid() -> None:
-    with pytest.raises(ValueError, match="只验证了公司 272 PRB"):
+    with pytest.raises(ValueError, match="只验证了预置 272 PRB"):
         ca.validate_hopping_grid(ca.CsiConfig(hopping=True), (8, 8, 8, 8, 8, 8, 3))
     with pytest.raises(ValueError, match="必须全部是正整数"):
         ca.validate_hopping_grid(ca.CsiConfig(hopping=True), (16.9,) * 17)

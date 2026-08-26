@@ -274,6 +274,8 @@ def main() -> None:
                 "referencesignals": 3,
                 "bler": 6,
                 "externalresults": 4,
+                "srsallocation": 1,
+                "schedulerp0": 3,
             }
             new_chapter_checks = {}
             for chapter_key, minimum_formulas in chapter_expectations.items():

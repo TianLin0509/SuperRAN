@@ -32,7 +32,7 @@
 某个 RBG 的 CSI 陈旧时长在 0 ~ 160 ms 之间轮转，**平均 80 ms**。
 2.6 GHz、30 km/h 的相干时间只有约 6 ms——CSI 早就过期了。
 
-当前只支持上述一个公司口径，因此 SuperRAN 直接固化并版本化
+当前只支持上述一个预置口径，因此 SuperRAN 直接固化并版本化
 C_SRS=63 / B_SRS=1 / b_hop=0 的 17 跳顺序：
 RBG 0 → 8 → 16 → 7 → … → 1 → 9；奇数 ``N_b=17`` 的步长 8 来自标准的
 ``floor(N_b/2)`` 镜像跳频公式，并非顺序扫描。它不依赖外部库的
@@ -119,6 +119,9 @@ class CsiConfig:
     processing_delay_ms: float = 2.0
     #: 宽带 CQI/PMI 报告周期；与 5 ms 信道快照生成间隔是两个独立量
     csi_report_period_ms: float = 20.0
+    #: 为每个 UE 分配独立的周期/符号/comb/循环移位资源，并把周期 offset
+    #: 接入 CSI 老化。关闭仅用于复现旧的“所有 UE offset=0”上界。
+    srs_resource_allocation: bool = True
     #: 重放有限信道 trace 时，是否把上一轮 trace 当作预启动阶段的因果历史
     periodic_trace_history: bool = False
 
@@ -137,6 +140,8 @@ class CsiConfig:
         if (not np.isfinite(self.csi_report_period_ms)
                 or self.csi_report_period_ms <= 0):
             raise ValueError("csi_report_period_ms 必须是有限正数")
+        if not isinstance(self.srs_resource_allocation, (bool, np.bool_)):
+            raise ValueError("srs_resource_allocation 必须是布尔值")
 
     @property
     def full_sweep_ms(self) -> float:
@@ -168,6 +173,7 @@ class CsiConfig:
             "hop_factor": self.hop_factor if self.hopping else 1,
             "processing_delay_ms": self.processing_delay_ms,
             "csi_report_period_ms": self.csi_report_period_ms,
+            "srs_resource_allocation": bool(self.srs_resource_allocation),
             "csi_report_period_basis": (
                 "engineering_default_20ms; 38.331 configures periodicity in slots, "
                 "not a universal 5ms PMI period"),
@@ -197,7 +203,7 @@ def validate_hopping_grid(
     cfg: CsiConfig,
     rbg_prb_sizes: tuple[int, ...] | list[int],
 ) -> None:
-    """拦住尚未建立资源映射的非公司栅格 SRS 跳频老化。
+    """拦住尚未建立资源映射的非预置栅格 SRS 跳频老化。
 
     当前生产模型把 38.211 的 ``C_SRS=63/B_SRS=1`` 映射为 17 次、每次
     16 PRB。对 51/106/273 RB 直接套同一 ``hop_factor=17`` 并不代表标准
@@ -217,7 +223,7 @@ def validate_hopping_grid(
     sizes = tuple(int(value) for value in raw_sizes)
     if sizes != (16,) * 17 or int(cfg.hop_factor) != 17:
         raise ValueError(
-            "SRS 跳频老化当前只验证了公司 272 PRB = 17×16 配置"
+            "SRS 跳频老化当前只验证了预置 272 PRB = 17×16 配置"
             "（C_SRS=63, B_SRS=1, b_hop=0）。本载波 RBG 大小为 "
             f"{list(sizes)}，禁止静默套用 17-hop/恒等扫描。"
             "请关闭 srs_hopping（显式的全带 SRS 工程上界），或补充该载波的 "
@@ -253,7 +259,7 @@ def hop_order(num_rbg: int, *, rb_per_rbg: int = 16,
     """第 j 次 SRS 机会探的是哪个 RBG。返回 ``(order, source)``。
 
     结果是 SuperRAN 自己固化的 C_SRS=63 / B_SRS=1 / b_hop=0
-    公司 profile；只接受 17×16 参数。返回的 order 是共享只读数组。
+    预置 profile；只接受 17×16 参数。返回的 order 是共享只读数组。
     """
     for name, value in (("num_rbg", num_rbg), ("rb_per_rbg", rb_per_rbg),
                         ("hop_factor", hop_factor)):
@@ -267,7 +273,8 @@ def hop_order(num_rbg: int, *, rb_per_rbg: int = 16,
 
 
 def rbg_csi_staleness_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
-                         rb_per_rbg: int = 16) -> np.ndarray:
+                         rb_per_rbg: int = 16,
+                         opportunity_offset_ms: float = 0.0) -> np.ndarray:
     """时刻 ``t_ms`` 上，每个 RBG 的 CSI 陈旧时长（ms）。返回 ``[num_rbg]``。
 
     这里不是“SRS 年龄”：SRS 的配置量是周期。返回值指“距最近一次覆盖该 RBG
@@ -280,18 +287,24 @@ def rbg_csi_staleness_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
         raise ValueError("num_rbg 必须是至少为 1 的整数")
     if not np.isfinite(t_ms):
         raise ValueError("t_ms 必须是有限数")
-    if not cfg.enabled:
-        return np.zeros(num_rbg)
     t = float(t_ms)
     per = cfg.srs_period_ms
+    offset = float(opportunity_offset_ms)
+    if (not np.isfinite(offset) or offset < 0.0 or offset >= per):
+        raise ValueError(
+            "opportunity_offset_ms 必须是 [0, srs_period_ms) 内的有限数"
+        )
+    if not cfg.enabled:
+        return np.zeros(num_rbg)
     # 处理时延不是“给最新一次 SRS 的年龄机械加一个常数”。时刻 t 真正可用的
     # 是 measurement_time <= t-processing_delay 的最近一次机会；尤其在周期边界
     # t=nT 上，本次 SRS 仍在处理，绝不能立即拿来预编码。旧写法先按 t 选机会、
     # 再把 processing_delay 加到年龄上，会把这个尚不可用的机会错当成可用，并且
     # 在跳频场景选错 RBG phase。
     usable_measurement_time = t - float(cfg.processing_delay_ms)
-    n = int(np.floor(usable_measurement_time / per + 1e-9))
-    within = t - n * per                         # 距真正可用的那次机会过了多久
+    n = int(np.floor((usable_measurement_time - offset) / per + 1e-9))
+    measurement_time = offset + n * per
+    within = t - measurement_time               # 距真正可用的那次机会过了多久
     if not cfg.hopping:
         return np.full(num_rbg, within)
 
@@ -306,14 +319,17 @@ def rbg_csi_staleness_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
 
 
 def rbg_age_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
-               rb_per_rbg: int = 16) -> np.ndarray:
+               rb_per_rbg: int = 16,
+               opportunity_offset_ms: float = 0.0) -> np.ndarray:
     """兼容旧 API；新代码请用 :func:`rbg_csi_staleness_ms`。"""
     return rbg_csi_staleness_ms(
-        cfg, num_rbg, t_ms, rb_per_rbg=rb_per_rbg)
+        cfg, num_rbg, t_ms, rb_per_rbg=rb_per_rbg,
+        opportunity_offset_ms=opportunity_offset_ms)
 
 
 def rbg_lag_snapshots(cfg: CsiConfig, num_rbg: int, *, snapshot_ms: float,
-                      snapshot_index: int, rb_per_rbg: int = 16) -> np.ndarray:
+                      snapshot_index: int, rb_per_rbg: int = 16,
+                      opportunity_offset_ms: float = 0.0) -> np.ndarray:
     """把每个 RBG 的 CSI 陈旧时长折成**整数个信道快照**。
 
     信道快照之间隔 ``snapshot_ms``（由 :func:`system.snapshot_interval_ms` 算出，
@@ -334,7 +350,8 @@ def rbg_lag_snapshots(cfg: CsiConfig, num_rbg: int, *, snapshot_ms: float,
         return np.zeros(num_rbg, dtype=int)
     staleness = rbg_csi_staleness_ms(
         cfg, num_rbg, snapshot_index * float(snapshot_ms),
-        rb_per_rbg=rb_per_rbg)
+        rb_per_rbg=rb_per_rbg,
+        opportunity_offset_ms=opportunity_offset_ms)
     # 必须向上取整。四舍五入会把 2 ms / 5 ms 量化成 0，等于在测量已经发生
     # 之前使用当前信道；例如 7 ms 还会被缩成 5 ms。离散快照无法表示精确时长
     # 时，只能取“不新于真实测量”的最近快照，才能守住因果性。

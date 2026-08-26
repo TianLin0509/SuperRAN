@@ -243,7 +243,7 @@ offered_load ∝ effective_size_scale / effective_interval_scale
 绑定到用户；显式 ID 先分配，剩余 UE 再按 `ue_share` 分配。跨 replication 随机分配的
 profile 会在用户级显示 `varies_across_replications` 与逐类计数，绝不拿第 1 轮标签冒充固定。
 
-项目提供的 `presets/traffic/synthetic_*.csv` 只用于跑通接口与校准流程，**不是公司话务、
+项目提供的 `presets/traffic/synthetic_*.csv` 只用于跑通接口与校准流程，**不是实测话务、
 不是 3GPP 标准 CDF，也不能拿它下现场结论**。
 
 ### 目标 PRB 利用率校准
@@ -395,6 +395,14 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
   0~160 ms 之间轮转（平均 80 ms），而 2.6 GHz、30 km/h 的相干时间只有约 3 ms。
   实测 MU/SU 比值 0.816 → 0.449（−45%），SU 谱效 −27%
 - `csi_processing_delay_ms=2.0` 是信道估计 + 预编码计算 + 调度下发的固定时延
+- `srs_resource_allocation` 默认开：固定 profile 为每个 UE 分配 period offset、
+  symbol 10..13、comb 0/1 与连续循环移位块。PCI mod3 只控制候选优先顺序；
+  资源不足允许跨颜色溢出，不承诺重载时绝对无碰撞
+- `srs_pci_mod3=0/1/2` 选择当前单小区的候选颜色；不同小区实验应显式给各自值
+- 分配结果不是 metadata-only：`offset_ms` 会进入 `rbg_lag_snapshots()`，用户级
+  结果保存完整 assignment。10 ms/4-port 同小区基础池容量 32，第 33 个硬失败
+- P-H/F、BWP2、intra-slot antenna switching、根序列规划和波形级跨小区污染
+  当前未建模。`scheduler_p0_validation.json` 中的 PCI 模3结论是等功率 LS-NMSE proxy
 
 返回里的 `csi_aging` 块给出 `full_sweep_ms` 与 `mean_age_ms`，可以直接转述。
 
@@ -436,11 +444,32 @@ SINR）反折无 OLLA MCS，再加连续 MCS offset、floor 并钳位；BLER 只
 传入后硬失败。代码保留显式 `mcs_table/profile` 边界与带数据指纹的 BLER cache key，
 但必须等下一套 MCS、TBLER/TBS 元数据完整接入后才允许扩展。
 
+## 调度 P0：资源账、逐 RBG 频选与统一 FinalGrant
+
+`frequency_selective` 与 RB 功控相互独立：`auto` 在 17 个逐 RBG predicted/receive
+SINR 字段完整时开启，`on` 缺字段硬失败，`off` 是宽带/轮转基线。质量排序前缀和
+顺序前缀同时评估；能清空队列时取最少 RBG，否则取 predicted useful bytes 最大者。
+一个 grant 跨 RBG 的有效 SINR 仍按已确认的 dB 算术平均，再选一个单码字 MCS/TBS。
+
+每套 SU/MU plan 在比较前都通过 `ResourceLedger`：
+
+- 物理 RBG/PRB 一个 TTI 只能被一个 grant 占用；MU 共享 bitmap 只扣一次
+- 每 RBG 总层数默认最多 4；rank2+rank2 正好占满
+- 逻辑资源按 `sum(rank) × physical PRB` 记账，默认预算 `272×4=1088 layer-PRB`
+- reserve/commit/rollback 不修改队列、HARQ、OLLA 或随机流
+- PDCCH/CCE、最大 grant/UE 数按已确认范围暂不建模，结果会显式标注
+
+选中计划统一进入 `GrantFinalizer`，重算 predicted SINR 输入、OLLA 后 MCS、实际
+bitmap TBS、payload/padding/useful bytes，并与 planner 估值逐值硬比较。SU/MU/NewTx/ReTx
+都带 `finalizer_version` 和 `reservation_id`；HARQ 的 MCS/RBG数/rank/TBS 仍冻结。
+
 ## MU `mu_enabled`
 
 默认 **False**，先看清 SU 基线。`legacy_v1` 仍保留历史聚合 `mu_gain` 近似；
 `experience_v2` 不再用标量比值回乘，而是在建表阶段预计算所有两用户、每用户 rank2
-的 pair 链路，TTI 主循环按 PF 顺序查表并构造 SU/MU 两套数据受限计划。
+的 pair 链路。TTI 主循环先固定 PF anchor，再枚举全部伙伴；缺 pair、相关性超门限、
+总层数超限或 predicted BLER > 0.5 都留下明确 rejection reason。可行伙伴按
+`sum(min(queue,TBS))/shared_RBG` 评分，不再取 PF 顺序里的第一个可行者。
 
 MU MCS 口径是 `CQI + BF + SU-OLLA + CorrLoss + powerLoss + MU-OLLA`：两个 rank2 UE
 相对 SU rank2 的等流功率损失固定为 `−10log10(2)=−3.0103 dB`；CorrLoss 来自 pair
@@ -450,6 +479,11 @@ MU MCS 口径是 `CQI + BF + SU-OLLA + CorrLoss + powerLoss + MU-OLLA`：两个 
 useful payload bytes，只有 MU 不小于 SU 才选 MU。接收端用 per-user LMMSE，预编码只看
 `h_est`，BLER 用 `h_true`。当前工程边界仍是两用户 rank2、ZF/RZF；更一般的 MU 配对与
 现场算法待后续接入。
+
+方向性证据（固定合成反例，不是一般现场收益承诺）：互补 8/9-RBG 两用户在相同 CRN 下，
+频选 on/off 的 ACK 吞吐为 486.52/148.71 Mbps；MU 例中 UE1 虽是更早伙伴，但 −5 dB
+CorrLoss 只得 3315.8 useful B/RBG，后到 UE2 的 −1 dB CorrLoss 得 4701.6 B/RBG，
+最终选择 UE2。完整逐 TTI 证据在 `artifacts/results/scheduler_p0_validation.json`。
 
 ## 发射权 `precoder`
 

@@ -145,9 +145,9 @@ def expand(text: str, values: dict[str, str]) -> str:
 SRS_BODY = r"""
 <section class="section" id="verdict"><div class="kicker">00 · Executive verdict</div>
 <h2>结论：修复前不是最符合需求；修复后，在系统级体验仿真目标下是三者中最合适的组合</h2>
-<div class="verdict"><b>“最优”不是最高 RE 级保真度。</b>它指公司 64T/4R 硬件、1 驱 3、±45°、真实上下行 CSI 因果、SRS 干扰、LMMSE、CSI 陈旧与系统调度由一份可审计合同贯通。Sionna 更适合通用可微链路级研究；ChannelHub 是传播与参考信号引擎；SuperRAN 负责公司硬件、系统 KPI 和硬失败边界。</div>
-<div class="grid g3" style="margin-top:16px"><div class="card compare bad"><h3>修复前的硬伤</h3><ul class="list"><li>DL CSI-RS 估计被误当 SRS 预编码 CSI。</li><li>标量 pilot 广播到每个 H 系数，等价 oracle 观测。</li><li>公司 preset 4R/2T，配对 64×4 合同不成立。</li></ul></div>
-<div class="card compare"><h3>已经落地</h3><ul class="list"><li>h_true、UL h_est、DL h_dl_est 三路分离。</li><li>Y 中先叠加端口、干扰和噪声，再 cyclic-shift 解扩。</li><li>公司 BOTH preset 统一 4Tx/4Rx；LS/LMMSE 可选。</li></ul></div>
+<div class="verdict"><b>“最优”不是最高 RE 级保真度。</b>它指预置 64T/4R 硬件、1 驱 3、±45°、真实上下行 CSI 因果、SRS 干扰、LMMSE、CSI 陈旧与系统调度由一份可审计合同贯通。Sionna 更适合通用可微链路级研究；ChannelHub 是传播与参考信号引擎；SuperRAN 负责预置硬件、系统 KPI 和硬失败边界。</div>
+<div class="grid g3" style="margin-top:16px"><div class="card compare bad"><h3>修复前的硬伤</h3><ul class="list"><li>DL CSI-RS 估计被误当 SRS 预编码 CSI。</li><li>标量 pilot 广播到每个 H 系数，等价 oracle 观测。</li><li>预置 preset 4R/2T，配对 64×4 合同不成立。</li></ul></div>
+<div class="card compare"><h3>已经落地</h3><ul class="list"><li>h_true、UL h_est、DL h_dl_est 三路分离。</li><li>Y 中先叠加端口、干扰和噪声，再 cyclic-shift 解扩。</li><li>预置 BOTH preset 统一 4Tx/4Rx；LS/LMMSE 可选。</li></ul></div>
 <div class="card compare warn"><h3>仍需声明</h3><ul class="list"><li>RB 中心系统抽象，不是全 RE 接收机。</li><li>实现 1/2/4 port；Rel-18 8-port TDM 未做。</li><li>LMMSE 当前频域协方差 + 时间线性，无空间平滑。</li></ul></div></div></section>
 
 <section class="section" id="map"><div class="kicker">01 · Module map</div><h2>从传播状态到调度可见 CSI：每层只承担一件事</h2>
@@ -161,9 +161,9 @@ SRS_BODY = r"""
 <div class="eq">@@H64@@</div><div class="flow"><div class="step"><span class="n">1</span><b>BS 物理阵子</b><small>8H×12V×2pol = 192</small></div><div class="arrow">→</div><div class="step"><span class="n">2</span><b>1 驱 3 馈电</b><small>每列 F 三个非零</small></div><div class="arrow">→</div><div class="step"><span class="n">3</span><b>BS 数字端口</b><small>8H×4V×2pol = 64</small></div><div class="arrow">↔</div><div class="step"><span class="n">4</span><b>UE SRS 端口</b><small>2H×1V×2pol = 4</small></div></div>
 <div class="grid g2" style="margin-top:16px"><div class="card"><h3>F 为什么是 192×64</h3><div class="eq">@@F@@</div><p>行是 AE，列是 RF port；列支持集互不重叠且列范数归一。审计得到 <code>max|FᴴF−I|=@@FERR@@</code>，而非数值碰巧。</p></div>
 <div class="card"><h3>6° 是用户可配 preset</h3><p>馈电相位按 <code>exp(j2πzq sin θtilt)</code> 生成。与 65° 临时垂直阵元图叠加后，本轮单端口复合主瓣 <b>@@LOBE@@°</b>；不恰等于 −6° 是离散 1 驱 3 与元素图共同作用。</p></div>
-<div class="card"><h3>+45° / −45° 不是数量×2</h3><div class="eq">@@JONES@@</div><p>公司端口顺序固定 [+45,−45]；CDL 每条 ray 另有 2×2 极化耦合、XPR 和随机相位。Jones Gram 非对角误差约 4.27e−17。</p></div>
+<div class="card"><h3>+45° / −45° 不是数量×2</h3><div class="eq">@@JONES@@</div><p>预置端口顺序固定 [+45,−45]；CDL 每条 ray 另有 2×2 极化耦合、XPR 和随机相位。Jones Gram 非对角误差约 4.27e−17。</p></div>
 <div class="card"><h3>宽带双极化 H</h3><div class="eq">@@RAY@@</div><p>steering、时延、Doppler、20 rays 与极化都进入复数 H。路径损耗单独落盘，避免 CSI 算法把大尺度功率误当空间结构。</p></div></div>
-<div class="callout bad" style="margin-top:15px"><h3>方向图边界</h3>水平 110°、垂直 65°、峰值 8 dBi 是 <code>parametric_temporary</code>，不是公司实测复 Jones 图。最终校准应替换为实测二维复方向图。</div></section>
+<div class="callout bad" style="margin-top:15px"><h3>方向图边界</h3>水平 110°、垂直 65°、峰值 8 dBi 是 <code>parametric_temporary</code>，不是实测复 Jones 图。最终校准应替换为实测二维复方向图。</div></section>
 
 <section class="section" id="srs"><div class="kicker">03 · SRS observation and estimation</div><h2>先形成真实接收 Y，再做 LS/LMMSE</h2>
 <div class="grid g2"><div class="card"><h3>物理观测</h3><div class="eq">@@SRSOBS@@</div><p>UE 端口和邻区 UE 在每根 BS 接收天线上先叠加；噪声与干扰只加到 Y。端口分离靠 38.211 cyclic shift 延迟窗。</p></div>
@@ -176,14 +176,14 @@ SRS_BODY = r"""
 <div class="grid g2"><div class="card"><h3>典型系统级抽象</h3><p>ChannelHub 按 normal-CP 平均 symbol 时刻生成 14 个 symbol，取中间 symbol 作 slot 快照，不做复数平均。体验速率/PF/OLLA 每 slot 一个 H 足够；高速 symbol 级跟踪/ICI 才暴露完整轴。</p></div>
 <div class="card"><h3>术语</h3><p><b>SRS 周期</b>是发送配置；最近估计到当前调度的间隔叫<b>CSI 陈旧时长</b>，不叫“SRS 年龄”。</p></div>
 <div class="card"><h3>联合周期</h3><div class="eq">@@TDD@@</div><p>DDDSU、T_SRS=2 的机会 0/2/4… 在 slot 4 才遇到 UL。旧代码只看 0..T_SRS−1 会漏判；现按 LCM 搜索。</p></div>
-<div class="card"><h3>公司 E2E</h3><p>DL 真值 slot <b>@@DLSLOT@@</b>，UL SRS slot <b>@@ULSLOT@@</b>，首个 UL 机会 slot <b>@@FIRSTUL@@</b>；<code>[1,1,272,64,4]</code>，h_est 来源 <code>ul_srs_estimate</code>。</p></div></div></section>
+<div class="card"><h3>预置 E2E</h3><p>DL 真值 slot <b>@@DLSLOT@@</b>，UL SRS slot <b>@@ULSLOT@@</b>，首个 UL 机会 slot <b>@@FIRSTUL@@</b>；<code>[1,1,272,64,4]</code>，h_est 来源 <code>ul_srs_estimate</code>。</p></div></div></section>
 
 <section class="section" id="compare"><div class="kicker">05 · Trilateral comparison</div><h2>三者是三个层级，不是互斥的三套实现</h2>
 <div class="table-wrap"><table><thead><tr><th>维度</th><th>SuperRAN</th><th>ChannelHub</th><th>Sionna 2.0.1</th><th>取舍</th></tr></thead><tbody>
-<tr><td>定位</td><td>公司硬件 + 数据合同 + 系统体验/KPI</td><td>传播、CDL/TDL、RS、干扰、估计</td><td>通用张量化/可微链路级 PHY 与 RT</td><td>SW 收口系统目标，CH 做 PHY，Sionna 作基线</td></tr>
+<tr><td>定位</td><td>预置硬件 + 数据合同 + 系统体验/KPI</td><td>传播、CDL/TDL、RS、干扰、估计</td><td>通用张量化/可微链路级 PHY 与 RT</td><td>SW 收口系统目标，CH 做 PHY，Sionna 作基线</td></tr>
 <tr><td>SRS</td><td>h_true/h_est/h_dl_est 角色和硬失败</td><td>38.211 1/2/4-port，Y=ΣHX+I+N</td><td>通用 OFDM pilot/estimator 接口</td><td>采用 CH 协议化 SRS，不重写第二套</td></tr>
 <tr><td>LMMSE</td><td>配置与 prior/噪声元数据</td><td>频率 covariance + 真实 pilot，时间线性</td><td>f/t/s 分步 LMMSE，传播 err_var</td><td>已吸收频域；空间/时间 covariance 下一阶段</td></tr>
-<tr><td>双极化</td><td>公司 [+45,−45]、110°、1驱3</td><td>192×64 F、Jones、CDL XPR coupling</td><td>cross 与 TR38.901 pattern</td><td>公司顺序优先，公式与 Sionna/38.901 核对</td></tr>
+<tr><td>双极化</td><td>预置 [+45,−45]、110°、1驱3</td><td>192×64 F、Jones、CDL XPR coupling</td><td>cross 与 TR38.901 pattern</td><td>预置顺序优先，公式与 Sionna/38.901 核对</td></tr>
 <tr><td>时间</td><td>slot 快照 + CSI 陈旧</td><td>内部 14 symbol，slot 中点降维</td><td>完整 resource grid</td><td>体验选 slot，symbol 级按课题开启</td></tr>
 </tbody></table></div></section>
 
@@ -200,10 +200,10 @@ SRS_BODY = r"""
 </tbody></table></div></section>
 
 <section class="section" id="limits"><div class="kicker">07 · Boundaries and decisions</div><h2>当前可发结论，但不能删掉这些边界</h2>
-<details open><summary>P0 · 保持的默认</summary><ul class="list"><li>公司 BOTH、4Tx/4Rx、+45/−45、SRS 10 ms、LS/LMMSE 可选、系统每 slot 一个 H。</li><li>h_true 只评估；h_est 只来自 UL SRS；缺估计硬失败。</li><li>正式结果记录 estimator、prior、RS opportunity 和 CSI 陈旧时长。</li></ul></details>
-<details><summary>P1 · 需要你提供数据</summary><ul class="list"><li>公司实测二维复 Jones 图，替换 110° 参数化临时模型。</li><li>真实 SRS resource/comb/port/hopping 和接收机协方差。</li><li>若产品用 Rel-18 8 port，再实现 TDM port 组。</li></ul></details>
+<details open><summary>P0 · 保持的默认</summary><ul class="list"><li>预置 BOTH、4Tx/4Rx、+45/−45、SRS 10 ms、LS/LMMSE 可选、系统每 slot 一个 H。</li><li>h_true 只评估；h_est 只来自 UL SRS；缺估计硬失败。</li><li>正式结果记录 estimator、prior、RS opportunity 和 CSI 陈旧时长。</li></ul></details>
+<details><summary>P1 · 需要你提供数据</summary><ul class="list"><li>实测二维复 Jones 图，替换 110° 参数化临时模型。</li><li>真实 SRS resource/comb/port/hopping 和接收机协方差。</li><li>若产品用 Rel-18 8 port，再实现 TDM port 组。</li></ul></details>
 <details><summary>P2 · 何时保留 14 symbol</summary><p>仅在 symbol 内 channel variation、ICI、symbol 级波束切换或 SRS TDM 课题中完整保留；体验仿真不应无条件承担 14 倍内存。</p></details>
-<div class="callout ok" style="margin-top:15px"><h3>最终判断</h3>SuperRAN 不是“比 Sionna 更强的通用 PHY 库”，而是<b>更符合公司硬件与系统体验口径的集成层</b>；依据是适配度和可审计性，不是单个性能样本。</div></section>
+<div class="callout ok" style="margin-top:15px"><h3>最终判断</h3>SuperRAN 不是“比 Sionna 更强的通用 PHY 库”，而是<b>更符合预置硬件与系统体验口径的集成层</b>；依据是适配度和可审计性，不是单个性能样本。</div></section>
 
 <section class="section" id="sources"><div class="kicker">08 · Sources</div><h2>一手依据与源码锚点</h2>
 <div class="grid g2"><div class="card"><h3>外部一手来源</h3><ul class="list source">

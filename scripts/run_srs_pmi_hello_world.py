@@ -57,7 +57,7 @@ def _write_json(payload: dict) -> None:
 def main() -> int:
     warmup = channelhub.warmup()
     draft, profile = plan.create_draft(
-        "在单小区公司 64T4R 全带场景，先用同一批上行 SRS 估计信道诊断"
+        "在单小区预置 64T4R 全带场景，先用同一批上行 SRS 估计信道诊断"
         "逐 RBG 协方差/SVD 与 Type-I-style 码本的构造差异；再比较"
         "UL-SRS/SVD 与 DL-CSI-RS/PMI 两套真实方案的谱效",
         preset="company_64t4r",

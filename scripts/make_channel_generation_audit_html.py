@@ -117,7 +117,7 @@ code{background:#eaf1f2;border-radius:5px;padding:2px 5px;font-family:Consolas,m
   <h3 style="margin-top:22px">统计 CDL 的核心构造</h3>
   <div class="equation"><span class="hi">H[k,t]</span> = Σ<sub>n=1…N<sub>cl</sub></sub> Σ<sub>m=1…20</sub> √(P<sub>n</sub>/20) · a<sub>BS</sub>(φ<sub>n,m</sub>,θ<sub>n,m</sub>) · a<sub>UE</sub><sup>H</sup>(φ′<sub>n,m</sub>,θ′<sub>n,m</sub>) · G<sub>pol</sub> · e<sup>−j2πf<sub>k</sub>τ<sub>n</sub></sup> · e<sup>j2πν<sub>n,m</sub>t</sup></div>
   <div class="grid g2">
-    <div class="callout blue"><h3>空间维度为什么是 64×4</h3>每条 ray 先生成 64 维 BS 有效端口 steering 与 4 维 UE steering，再做外积；20 rays 聚成 cluster，clusters 经时延相位相加。64T 公司面板走 192 物理阵子经 1 驱 3 耦合投影到 64 RF 端口；4R 默认 <code>2H×1V×2pol</code>。</div>
+    <div class="callout blue"><h3>空间维度为什么是 64×4</h3>每条 ray 先生成 64 维 BS 有效端口 steering 与 4 维 UE steering，再做外积；20 rays 聚成 cluster，clusters 经时延相位相加。64T 预置面板走 192 物理阵子经 1 驱 3 耦合投影到 64 RF 端口；4R 默认 <code>2H×1V×2pol</code>。</div>
     <div class="callout blue"><h3>时间维为什么存 1 但不是平均</h3>内部生成 14 个 normal-CP symbol（或明确标记的 speed-only 子网格），Doppler 时间步含 CP，存盘取中间 symbol 快照。禁止对复数 symbol 直接平均，因为相位旋转会虚假抵消功率。</div>
   </div>
 </section>
@@ -235,14 +235,14 @@ code{background:#eaf1f2;border-radius:5px;padding:2px 5px;font-family:Consolas,m
   <div class="table-wrap"><table>
     <thead><tr><th>模块</th><th>当前判定</th><th>本轮可证依据</th><th>仍可推翻它的边界</th></tr></thead>
     <tbody>
-      <tr><td><b>拓扑 / LSP / 路损</b></td><td><span class="status ok">可用</span></td><td>同站共享、跨站残差；逐链路 LOS 公式；2站×3扇区固定反例</td><td>跨站相关权重 0.5 是工程值，尚未用公司测量校准</td></tr>
+      <tr><td><b>拓扑 / LSP / 路损</b></td><td><span class="status ok">可用</span></td><td>同站共享、跨站残差；逐链路 LOS 公式；2站×3扇区固定反例</td><td>跨站相关权重 0.5 是工程值，尚未用实测校准</td></tr>
       <tr><td><b>CDL A–E</b></td><td><span class="status ok">可用</span></td><td>标准表逐字段独立对账；20 rays、XPR、极化、geometry rotation；全 RB rank 4</td><td>geometry rotation 不是 §7.5 完整随机 cluster 生成</td></tr>
       <tr><td><b>TDL A–E</b></td><td><span class="status ok">可用</span></td><td>D/E tap 表、K 一次应用、MIMO K 恢复、25 seeds</td><td>TDL 无 path angles；相关矩阵是简化模型</td></tr>
-      <tr><td><b>64T / 4R 阵列</b></td><td><span class="status ok">当前公司默认可用</span></td><td>192 AE→64 port 的 1驱3；0.67λ 垂直；4R shape/rank 硬断言</td><td>UE 朝向固定 global +x；公司终端实测 panel 尚未输入</td></tr>
+      <tr><td><b>64T / 4R 阵列</b></td><td><span class="status ok">当前预置默认可用</span></td><td>192 AE→64 port 的 1驱3；0.67λ 垂直；4R shape/rank 硬断言</td><td>UE 朝向固定 global +x；终端实测 panel 尚未输入</td></tr>
       <tr><td><b>OFDM / Doppler</b></td><td><span class="status ok">RB级可用</span></td><td>CP-aware 时间步；中间快照；T=1/4/14 几何逐位一致</td><td>一 RB 一个系数，不是 12 子载波；CP 取平均 symbol 周期</td></tr>
       <tr><td><b>多小区干扰</b></td><td><span class="status ok">可用</span></td><td>5 条干扰矩阵落盘；相对功率缩放；SIR/SINR/IoT 解析反例</td><td>邻区业务负载与预编码仍是系统层输入，不由信道单独决定</td></tr>
       <tr><td><b>SRS / ZC</b></td><td><span class="status ok">资源与单端口估计可用</span></td><td>64 行×4 层、17 hop、恒模/自相关、非首跳 LS 反例</td><td>尚非 RE 级多端口 CDM；历史拼接在高速场景需再验证</td></tr>
-      <tr><td><b>H_est / 估计器</b></td><td><span class="status ok">LS/MMSE 窄腰可用</span></td><td>真实 observation、硬错误策略、同 H_true estimator A/B</td><td>LMMSE 统计先验与公司接收机实现尚未校准</td></tr>
+      <tr><td><b>H_est / 估计器</b></td><td><span class="status ok">LS/MMSE 窄腰可用</span></td><td>真实 observation、硬错误策略、同 H_true estimator A/B</td><td>LMMSE 统计先验与目标接收机实现尚未校准</td></tr>
       <tr><td><b>Loader / Gate / PDP</b></td><td><span class="status ok">可用</span></td><td>effective profile 贯通；Hann 周期矩；18 项 Gate 无 blocker</td><td>超出无混叠半窗的 DS 只标不可观测，不硬给数值</td></tr>
       <tr><td><b>Sionna RT / QuaDRiGa</b></td><td><span class="status caution">未同深度认证</span></td><td>共享窄腰可加载，已有基础回归</td><td>逐径几何、后端版本、场景资产与数值一致性未完成本轮压力</td></tr>
     </tbody>
@@ -254,7 +254,7 @@ code{background:#eaf1f2;border-radius:5px;padding:2px 5px;font-family:Consolas,m
   <div class="grid g3">
     <div class="card"><h3><span class="status ok">标准锚点</span></h3><ul><li>38.901 CDL/TDL A–E 表</li><li>CDL 每个非 specular component 的 20 ray offsets</li><li>§7.7.3 <code>τ_scaled=τ_model·DS_desired</code></li><li>38.211 SRS 64 行带宽配置与 hopping 公式</li><li>ZC/low-PAPR 恒模与周期相关</li></ul></div>
     <div class="card"><h3><span class="status caution">显式工程近似</span></h3><ul><li>CDL 固定 profile 旋转到链路几何</li><li>跨站 LSP common weight = 0.5</li><li>UE orientation 固定 +x</li><li>RB center 级频域，不是 RE 级</li><li>normal-CP 用平均 symbol period</li><li>固定链路允许代表性 RS observation</li></ul></div>
-    <div class="card"><h3><span class="status info">下一阶段</span></h3><ul><li>公司 UE panel / XPD / orientation 分布</li><li>RE 级多端口 SRS + CDM</li><li>真实 slot TDD/RS scheduler trace</li><li>Sionna / QuaDRiGa 同一门禁压力</li><li>公司 CDF 与系统话务校准</li><li>重传、BLER 与逐 RBG SINR 联动</li></ul></div>
+    <div class="card"><h3><span class="status info">下一阶段</span></h3><ul><li>预置 UE panel / XPD / orientation 分布</li><li>RE 级多端口 SRS + CDM</li><li>真实 slot TDD/RS scheduler trace</li><li>Sionna / QuaDRiGa 同一门禁压力</li><li>实测 CDF 与系统话务校准</li><li>重传、BLER 与逐 RBG SINR 联动</li></ul></div>
   </div>
   <div class="callout red" style="margin-top:16px"><h3>对系统体验仿真的直接影响</h3>本页只证明输入信道窄腰在所列范围内可信。PF 的 RU 更新、按需 RBG、SU/MU 自适应、EBF/NEBF/PEBF、MU OLLA、业务 CDF 和 KPI tab 属于上层系统仿真；它们必须继续使用自己的反向验证，不能借“信道 Gate 通过”替代。</div>
 </section>

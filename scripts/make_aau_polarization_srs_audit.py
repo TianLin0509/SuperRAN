@@ -80,7 +80,7 @@ def dual_polarization_svg() -> str:
 <path d="M675 214 L752 214" stroke="#52727c" stroke-width="2" marker-end="url(#pol-arr)"/>
 <rect x="762" y="92" width="400" height="245" rx="16" fill="#eef5fb" stroke="#8eb5ce"/>
 <text x="962" y="128" text-anchor="middle" font-size="16" font-weight="750" fill="#0c3140">进入每条 ray 的 MIMO 系数</text><text x="962" y="176" text-anchor="middle" font-family="Consolas,monospace" font-size="14" fill="#294a54">Hℓ ∝ √Pℓ · cℓ · aRX aTXᴴ</text><text x="962" y="208" text-anchor="middle" font-family="Consolas,monospace" font-size="14" fill="#294a54">· exp(−j2πfτℓ) · exp(j2πνℓt)</text><text x="962" y="258" text-anchor="middle" font-size="13" fill="#60737c">方向图决定复场幅相；F 形成有效端口；</text><text x="962" y="284" text-anchor="middle" font-size="13" fill="#60737c">数字 W 在端口域随后计算，不能重复加增益</text>
-<text x="600" y="385" text-anchor="middle" font-size="13" fill="#8b620f">当前 ±45° 与参数化包络是理想模型；公司 (az,el,f) 复 Jones、XPD 与馈电标定仍需实测输入</text>
+<text x="600" y="385" text-anchor="middle" font-size="13" fill="#8b620f">当前 ±45° 与参数化包络是理想模型；预置 (az,el,f) 复 Jones、XPD 与馈电标定仍需实测输入</text>
 </svg>'''
 
 
@@ -111,24 +111,24 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
   <div class="eyebrow">SuperRAN × ChannelHub × Sionna · physical-model audit</div>
   <h1>AAU 馈电矩阵、双极化、slot 采样与 SRS 估计深审</h1>
   <p class="lead">回答 6° 电下倾从哪来、192×64 的 F 为什么成立、+45° 信息还缺什么、14-symbol 是否必要，以及 LS/MMSE 会不会改变干扰方向性。结论严格区分“数学自洽”“当前代码行为”和“已由实物证明”。</p>
-  <div class="pills"><span class="pill">源码逐行对账</span><span class="pill">标准与 Sionna 2.0.1 对照</span><span class="pill">Internal / RT / QuaDRiGa 分层验证</span><span class="pill warn">公司实测标定仍待输入</span><span class="pill">2026-08-13</span></div>
+  <div class="pills"><span class="pill">源码逐行对账</span><span class="pill">标准与 Sionna 2.0.1 对照</span><span class="pill">Internal / RT / QuaDRiGa 分层验证</span><span class="pill warn">实测标定仍待输入</span><span class="pill">2026-08-13</span></div>
 </div></header>
 <nav class="nav"><div><a href="#answer">结论</a><a href="#tilt">6° 下倾</a><a href="#fmatrix">F 矩阵</a><a href="#polar">双极化</a><a href="#compare">三方对照</a><a href="#time">slot 采样</a><a href="#srs">SRS/估计</a><a href="#roadmap">落地路线</a><a href="#decisions">待决策</a><a href="#evidence">证据</a></div></nav>
 
 <main class="page">
 <section id="answer" class="section">
   <div class="kicker">00 · Direct answers</div><h2>先给结论：哪些成立，哪些只是“看上去成立”</h2>
-  <div class="verdict"><b>F 的拓扑和功率归一在数学上成立；参数化方向图、固定下倾与理想 ±45° 已贯通 InternalSim 和 Sionna RT，但公司实测复 Jones/馈电标定仍未闭环。</b> 旧版逐 ray Frobenius 归一已经移除，不同方向 ray 的相对阵元/子阵增益会保留。slot 级系统仿真只保留一个 H 是合理抽象，但 InternalSim 目前仍不能把 <code>num_ofdm_symbols</code> 直接改成 1，因为单点 Doppler 分支尚未在非零 slot midpoint 求相位。</div>
+  <div class="verdict"><b>F 的拓扑和功率归一在数学上成立；参数化方向图、固定下倾与理想 ±45° 已贯通 InternalSim 和 Sionna RT，但实测复 Jones/馈电标定仍未闭环。</b> 旧版逐 ray Frobenius 归一已经移除，不同方向 ray 的相对阵元/子阵增益会保留。slot 级系统仿真只保留一个 H 是合理抽象，但 InternalSim 目前仍不能把 <code>num_ofdm_symbols</code> 直接改成 1，因为单点 Doppler 分支尚未在非零 slot midpoint 求相位。</div>
   <div class="grid g4" style="margin-top:16px">
     <div class="card metric"><span class="status warn">参数未溯源</span><div class="big" style="margin-top:10px">6°</div><div class="lab">2026-08-01 提交时加入的默认值</div><div class="tiny">commit 说明没有给产品规格、测量或标准出处</div></div>
     <div class="card metric"><span class="status ok">数学通过</span><div class="big" style="margin-top:10px">192×64</div><div class="lab">F：64 个互不重叠的 1→3 馈电列</div><div class="tiny">rank=64；FᴴF=I；每列 3 非零</div></div>
-    <div class="card metric"><span class="status ok">后端已对齐</span><div class="big" style="margin-top:10px">±45°</div><div class="lab">p0=+45° / p1=−45°</div><div class="tiny">Internal Jones 与 Sionna 专用 slant registry 同序；仍非公司实测 Jones</div></div>
+    <div class="card metric"><span class="status ok">后端已对齐</span><div class="big" style="margin-top:10px">±45°</div><div class="lab">p0=+45° / p1=−45°</div><div class="tiny">Internal Jones 与 Sionna 专用 slant registry 同序；仍非实测 Jones</div></div>
     <div class="card metric"><span class="status warn">需改后降维</span><div class="big" style="margin-top:10px">14 → 1</div><div class="lab">系统级默认可降为 slot midpoint</div><div class="tiny">先修 T=1 Doppler 与 Sionna 采样频率</div></div>
   </div>
   <div class="table-wrap" style="margin-top:16px"><table><thead><tr><th>用户问题</th><th>明确回答</th><th>当前实现</th><th>建议</th></tr></thead><tbody>
     <tr><td>6° 从哪来？</td><td>仓库里找不到外部依据，是工程默认，不是已验证产品事实。</td><td>低层可传任意浮点数；普通用户面板未暴露。</td><td>暴露 <code>electrical_downtilt_deg</code>，机械下倾另设；未拿到标定前标记 assumed。</td></tr>
-    <tr><td>F 为什么对？</td><td>它精确编码“每个 RF 端口只驱动同位置、同极化的 3 个垂直阵子”；列支撑不相交且单位范数。</td><td>数值结构和功率守恒通过；产品幅相、互耦、端口序未实测闭环。</td><td>保留 F 拓扑，加载公司馈电幅相/互耦矩阵后再称产品级正确。</td></tr>
-    <tr><td>公司 +45° 信息够吗？</td><td>有用但不够。还需第二支路角度、端口顺序、XPD/XPR、方向/频率相关复 Jones、幅相校准。</td><td>当前临时合同为 p0=+45°、p1=−45°；Internal 与 Sionna RT 已同序执行并落盘。</td><td>拿到端口定义和实测 Jones 后替换临时模型，不改 canonical 端口编号。</td></tr>
+    <tr><td>F 为什么对？</td><td>它精确编码“每个 RF 端口只驱动同位置、同极化的 3 个垂直阵子”；列支撑不相交且单位范数。</td><td>数值结构和功率守恒通过；产品幅相、互耦、端口序未实测闭环。</td><td>保留 F 拓扑，加载预置馈电幅相/互耦矩阵后再称产品级正确。</td></tr>
+    <tr><td>预置 +45° 信息够吗？</td><td>有用但不够。还需第二支路角度、端口顺序、XPD/XPR、方向/频率相关复 Jones、幅相校准。</td><td>当前临时合同为 p0=+45°、p1=−45°；Internal 与 Sionna RT 已同序执行并落盘。</td><td>拿到端口定义和实测 Jones 后替换临时模型，不改 canonical 端口编号。</td></tr>
     <tr><td>一 slot 一个 H 行吗？</td><td>对 RBG/TTI 系统级仿真是典型且推荐的；对 DMRS 插值、ICI、symbol 波束切换不够。</td><td>Internal 先生成 symbol 网格再取中点；RT 已显式传 symbol sampling frequency 与 UE velocity。</td><td>先补 Internal 单点 midpoint Doppler，再把 <code>slot_midpoint</code> 作为系统默认。</td></tr>
     <tr><td>LS 会让干扰没方向吗？</td><td>不会。污染项仍包含干扰信道的空间向量；LS 只是不会利用协方差去抑制它。</td><td><code>ls_mmse</code> 只有频域 PDP LMMSE，不是时频空 MMSE；更大的问题是当前观测不是物理的 Y=HX。</td><td>先修多端口观测，再提供 LS、LMMSE-f/t/s、Kalman 等可选档。</td></tr>
   </tbody></table></div>
@@ -141,8 +141,8 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
     <div class="card"><h3>1→3 子阵的下倾相位</h3><div class="eq">__EQ_TILT__</div><p>对于 <code>z=[−0.67,0,+0.67]λ</code>、等幅馈电和 β=6°，三路附加相位约为 <b>[−25.21°, 0°, +25.21°]</b>。按当前符号约定，发射阵因子在水平面以下 6° 附近取峰值。</p></div>
     <div class="card"><h3>任意配置：低层已支持，产品层未支持</h3><ul class="tight"><li><b>支持：</b><code>FixedVerticalSubarrayConfig.fixed_downtilt_deg</code> 接受浮点值，<code>company_antenna_block(fixed_downtilt_deg=x)</code> 也能传入。</li><li><b>未支持：</b>普通用户的顶层可编辑参数没有该键，只能直接提供嵌套 <code>bs_antenna</code> 配置。</li><li><b>标签已修复：</b><code>calibration_id</code> 现在同时编码端口布局版本与下倾角，例如 <code>...pol-h-v-top-down-v2-dt6deg</code>；改下倾不会再沿用旧标签。</li><li><b>应区分：</b>电下倾改变馈电相位；机械下倾改变整个面板坐标系，不能共用一个参数。</li></ul></div>
   </div>
-  <div class="callout green" style="margin-top:15px"><h3>逐 ray 归一缺陷已修复，并有反向门</h3>当前 InternalSim 不再把每条 ray 除以自身 Frobenius 范数；只在所有簇/ray 合成后执行一次全信道小尺度归一。因此 HPBW、isotropic-vs-directional 与 0°/6°/10° 下倾会改变不同到离角 ray 的相对功率。单方向增益、multi-cluster 方向形状和绝对链路预算均有回归测试；尚未完成的是公司实测复 Jones/馈电数据，而不是“6° 完全不生效”。</div>
-  <div class="callout blue" style="margin-top:13px"><h3>推荐接口</h3><code>electrical_downtilt_deg</code>：用户可配置、按天线校准版本校验范围；<code>mechanical_downtilt_deg</code>：独立旋转面板；<code>downtilt_source</code>：<code>measured | product_spec | assumed</code>。在公司值未确认前，默认 6°可以保留以兼容，但结果页必须显示“假设值”。</div>
+  <div class="callout green" style="margin-top:15px"><h3>逐 ray 归一缺陷已修复，并有反向门</h3>当前 InternalSim 不再把每条 ray 除以自身 Frobenius 范数；只在所有簇/ray 合成后执行一次全信道小尺度归一。因此 HPBW、isotropic-vs-directional 与 0°/6°/10° 下倾会改变不同到离角 ray 的相对功率。单方向增益、multi-cluster 方向形状和绝对链路预算均有回归测试；尚未完成的是实测复 Jones/馈电数据，而不是“6° 完全不生效”。</div>
+  <div class="callout blue" style="margin-top:13px"><h3>推荐接口</h3><code>electrical_downtilt_deg</code>：用户可配置、按天线校准版本校验范围；<code>mechanical_downtilt_deg</code>：独立旋转面板；<code>downtilt_source</code>：<code>measured | product_spec | assumed</code>。在实测值未确认前，默认 6°可以保留以兼容，但结果页必须显示“假设值”。</div>
 </section>
 
 <section id="fmatrix" class="section">
@@ -163,15 +163,15 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
     <div class="card"><h3>阵元端口是复 Jones 向量</h3><div class="eq">__EQ_JONES__</div><p>±45°是阵元局部坐标里的 slant angle。只在波束中心、理想对称模型下，才可简写成 <code>[1,±1]/√2</code>。离开波束中心后，<code>Cθ</code>、<code>Cφ</code> 会随 θ、φ、频率变化并带复相位。</p></div>
     <div class="card"><h3>每条 ray 还有 2×2 传播耦合</h3><div class="eq">__EQ_POL_RAY__</div><p>κ 是 ray 的 XPR；四个 Φ 是传播相位。最终系数由接收 Jones、传播 G、发射 Jones、阵列几何相位共同决定。双极化增加的是两个共址可激励端口，不是两个独立空间位置。</p></div>
   </div>
-  <div class="callout" style="margin-top:14px"><h3>“公司用 +45°”是需要的信息，但还不能完成配置</h3>它至少确认了一条支路的斜角。还要确认：第二支路是否 −45°；<code>p=0/p=1</code> 的物理端口顺序；发射和接收端口是否同序；XPD/XPR 随方向、频率的定义；两支路相对幅相；1→3 馈电在两极化上是否同一标定。建议临时预设为 <code>p0=+45°, p1=−45°</code>，但元数据明确写 <code>provisional=true</code>。</div>
-  <div class="callout green" style="margin-top:13px"><h3>两条后端的临时极化合同已对齐</h3><b>InternalSim：</b><code>element_jones()</code> 的理想 +45°/−45° 会与每条 ray 的 2×2 XPR coupling 收缩。<b>Sionna RT：</b>没有误用内置 <code>cross</code>（其顺序是 −45°/+45°），而是按配置注册专用 <code>[+π/4,−π/4]</code> slant 列表，保持 p0/p1 与 canonical 端口一致。边界仍是：两者使用参数化/理想 Jones，尚未导入公司方向与频率相关的实测复场。</div>
+  <div class="callout" style="margin-top:14px"><h3>“预置用 +45°”是需要的信息，但还不能完成配置</h3>它至少确认了一条支路的斜角。还要确认：第二支路是否 −45°；<code>p=0/p=1</code> 的物理端口顺序；发射和接收端口是否同序；XPD/XPR 随方向、频率的定义；两支路相对幅相；1→3 馈电在两极化上是否同一标定。建议临时预设为 <code>p0=+45°, p1=−45°</code>，但元数据明确写 <code>provisional=true</code>。</div>
+  <div class="callout green" style="margin-top:13px"><h3>两条后端的临时极化合同已对齐</h3><b>InternalSim：</b><code>element_jones()</code> 的理想 +45°/−45° 会与每条 ray 的 2×2 XPR coupling 收缩。<b>Sionna RT：</b>没有误用内置 <code>cross</code>（其顺序是 −45°/+45°），而是按配置注册专用 <code>[+π/4,−π/4]</code> slant 列表，保持 p0/p1 与 canonical 端口一致。边界仍是：两者使用参数化/理想 Jones，尚未导入预置方向与频率相关的实测复场。</div>
 </section>
 
 <section id="compare" class="section">
   <div class="kicker">04 · ChannelHub vs Sionna</div><h2>取长补短：谁已经有哪块能力，谁又在哪些地方踩空</h2>
   <div class="table-wrap"><table><thead><tr><th>维度</th><th>ChannelHub internal</th><th>ChannelHub 的 Sionna RT 适配层</th><th>Sionna 原生能力</th><th>SuperRAN 目标</th></tr></thead><tbody>
     <tr><td>阵列/F</td><td>有 1→3 的 192×64 F、端口排列、相位中心与两条等价计算路径。</td><td>能用 64 有效端口或 192 AE 后投影 F。</td><td>双极化共址位置、一/双极化 pattern、任意自定义 pattern。</td><td>保留 F；补产品标定、互耦、统一端口语义。</td></tr>
-    <tr><td>方向图/下倾</td><td>3GPP 式抛物线标量 pattern；相对 ray 增益保留；measured_jones 尚未实现。</td><td>自定义 port/element pattern 已进入逐 path 响应。</td><td>pattern 返回复 <code>(Cθ,Cφ)</code>，可计算增益并注册自定义 pattern。</td><td>用同一份公司 Jones 数据替换两端临时模型，禁止后端口径漂移。</td></tr>
+    <tr><td>方向图/下倾</td><td>3GPP 式抛物线标量 pattern；相对 ray 增益保留；measured_jones 尚未实现。</td><td>自定义 port/element pattern 已进入逐 path 响应。</td><td>pattern 返回复 <code>(Cθ,Cφ)</code>，可计算增益并注册自定义 pattern。</td><td>用同一份预置 Jones 数据替换两端临时模型，禁止后端口径漂移。</td></tr>
     <tr><td>双极化</td><td>理想 +45/−45 Jones + 2×2 XPR 随机耦合。</td><td>专用 slant registry 保持 +45/−45 与 canonical 同序。</td><td><code>cross=[−π/4,+π/4]</code>，支持两种 38.901 极化模型。</td><td>临时合同已对齐；下一步导入实测复 Jones/XPD。</td></tr>
     <tr><td>时间采样</td><td>symbol 网格后取中点，能做逐 ray Doppler；T=1 时非零 offset 仍有缺口。</td><td>CFR 已显式传 symbol sampling frequency，Receiver 已设置 velocity。</td><td>CFR 支持指定采样频率、时间步数和 path Doppler。</td><td>补 Internal 单中点求值；系统默认单中点，PHY 研究才保留 14。</td></tr>
     <tr><td>SRS</td><td>comb 2/4/8、带宽表、跳频、长 ZC 与短低 PAPR 序列都较完整；默认生成端仍写死单端口。</td><td>复用了同一估计抽象。</td><td>PHY 提供通用资源栅格 LS 与时/频/空 LMMSE，但不是替代 NR SRS 资源生成器。</td><td>复用当前 38.211 SRS 生成器；重建物理多端口 Y=HX 观测。</td></tr>
@@ -229,19 +229,19 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
     <tr><td><span class="status bad">P0</span></td><td>把 SRS 观测改成物理矩阵 Y=HX，并保留 RE/port 结构。</td><td>SRS resource、pilot builder、channel_est pipeline</td><td>1/2/4（后续 8）端口无噪声精确恢复；非正交干扰产生可预测空间污染。</td></tr>
     <tr><td><span class="status info">P1</span></td><td>暴露电/机械下倾、时间采样模式、估计器与协方差来源。</td><td>SuperRAN spec/UI、ChannelHub config contract</td><td>结果元数据完整、非法组合早失败、旧配置可迁移。</td></tr>
     <tr><td><span class="status info">P1</span></td><td>实现 <code>lmmse_tf</code> 与 <code>lmmse_tfs</code>，接口对齐 Sionna 的 f/t/s 可组合思想。</td><td>channel_est</td><td>匹配先验的 Monte Carlo MSE/BLER 在置信区间内优于 LS；错配场景明确标注退化。</td></tr>
-    <tr><td><span class="status warn">P2</span></td><td>加载公司 measured Jones、馈电幅相、互耦与频率响应。</td><td>hardware calibration registry</td><td>方向图切面、端口 S 参数/幅相、空口或暗室测量闭环。</td></tr>
+    <tr><td><span class="status warn">P2</span></td><td>加载预置 measured Jones、馈电幅相、互耦与频率响应。</td><td>hardware calibration registry</td><td>方向图切面、端口 S 参数/幅相、空口或暗室测量闭环。</td></tr>
   </tbody></table></div>
   <div class="callout blue" style="margin-top:14px"><h3>复杂度收益怎么承诺</h3>把纯时间轴的 14 点改为 1 点，理论上能让该部分计算和临时张量最多缩小约 14 倍；端到端不会必然快 14 倍，因为 ray 几何、频率 DFT、路径损耗和文件 I/O 不随 T 等比减少。应在 P0 正确性回归通过后，用 internal/RT 两后端分别基准。</div>
 </section>
 
 <section id="decisions" class="section">
-  <div class="kicker">08 · Decisions</div><h2>需要你或公司数据拍板的 5 项</h2>
+  <div class="kicker">08 · Decisions</div><h2>需要外部数据拍板的 5 项</h2>
   <div class="grid g2">
-    <div class="card decision"><h3>D1 · 极化端口契约</h3><p>公司说“+45°”具体是端口 0，还是面板极化对的统称？另一支是否 −45°？发/收端口顺序是否一致？</p><div class="rec"><b>推荐：</b>暂定 p0=+45°、p1=−45°，但标记 provisional，拿端口定义表后冻结。</div></div>
+    <div class="card decision"><h3>D1 · 极化端口契约</h3><p>现有输入说明“+45°”具体是端口 0，还是面板极化对的统称？另一支是否 −45°？发/收端口顺序是否一致？</p><div class="rec"><b>推荐：</b>暂定 p0=+45°、p1=−45°，但标记 provisional，拿端口定义表后冻结。</div></div>
     <div class="card decision"><h3>D2 · 6° 的产品来源</h3><p>需要天线规格书/RET 默认、暗室方向图或网络规划配置，确认它是固定电下倾还是场景级 RET 值。</p><div class="rec"><b>推荐：</b>6°暂保留兼容；用户可改；电下倾与机械下倾分开；结果展示来源。</div></div>
     <div class="card decision"><h3>D3 · 系统时间抽象</h3><p>系统层是否将 slot midpoint 设为默认，symbol_grid 仅在明确研究 DMRS/ICI 时开启？</p><div class="rec"><b>推荐：</b>同意。体验速率/调度默认 1 点；CSI 老化场景优先使用 2 点 pilot_and_data。</div></div>
     <div class="card decision"><h3>D4 · 估计器默认档</h3><p>物理观测修好后，默认用透明的 LS+线性，还是直接用依赖先验的 LMMSE？</p><div class="rec"><b>推荐：</b>默认 LS；LMMSE-t/f/s 作为可配置算法与对照组。Sionna 的 PUSCH receiver 默认也采用 LS+线性。</div></div>
-    <div class="card decision"><h3>D5 · 公司标定输入格式</h3><p>能提供的是 2D/3D gain 切面、复 Jones 表、S 参数、三路馈电幅相，还是只有 HPBW/XPD 标量？</p><div class="rec"><b>推荐：</b>优先索要按频点、θ、φ、port 的复 <code>Eθ/Eφ</code>，以及每 RF 端口三路馈电幅相；标量只能作为临时模型。</div></div>
+    <div class="card decision"><h3>D5 · 实测标定输入格式</h3><p>能提供的是 2D/3D gain 切面、复 Jones 表、S 参数、三路馈电幅相，还是只有 HPBW/XPD 标量？</p><div class="rec"><b>推荐：</b>优先索要按频点、θ、φ、port 的复 <code>Eθ/Eφ</code>，以及每 RF 端口三路馈电幅相；标量只能作为临时模型。</div></div>
   </div>
 </section>
 
@@ -262,7 +262,7 @@ table{width:100%;border-collapse:separate;border-spacing:0;background:white;bord
     <li><a href="https://nvlabs.github.io/sionna/_modules/sionna/phy/nr/pusch_receiver.html">Sionna PHY · PUSCH receiver</a>：默认 PUSCH LS estimator + linear interpolation。</li>
     <li><a href="https://nvlabs.github.io/sionna/v2.0.0/sys/tutorials/notebooks/End-to-End_Example.html">Sionna SYS · end-to-end system example</a>：slot 级系统循环与 PHY resource-grid 抽象的分层。</li>
   </ul></div>
-  <div class="callout" style="margin-top:14px"><h3>结论边界</h3>本报告完成了代码行为、标准能力和确定性数学性质的审查，并给出了可实施路线；没有把缺失的公司端口定义、实测 Jones 方向图或馈电标定“猜成已知”。在这些输入到位前，F 可称为拓扑正确/功率正确，不能称为公司产品全物理正确。</div>
+  <div class="callout" style="margin-top:14px"><h3>结论边界</h3>本报告完成了代码行为、标准能力和确定性数学性质的审查，并给出了可实施路线；没有把缺失的预置端口定义、实测 Jones 方向图或馈电标定“猜成已知”。在这些输入到位前，F 可称为拓扑正确/功率正确，不能称为目标产品全物理正确。</div>
 </section>
 
 <footer class="foot"><b>SuperRAN · AAU/F/polarization/time/SRS audit</b><br>离线自包含 KaTeX：__KATEX_STATUS__；公式带原生 MathML 回退。生成脚本：<span class="mono">C:\Vibe\Wireless\SuperRAN\scripts\make_aau_polarization_srs_audit.py</span></footer>

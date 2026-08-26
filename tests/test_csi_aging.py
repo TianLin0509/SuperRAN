@@ -168,6 +168,43 @@ _hop_boundary = ca.rbg_csi_staleness_ms(
 check(int(np.argmin(_hop_boundary)) == 0 and float(np.min(_hop_boundary)) == 10.0,
       "跳频边界不提前切换 RBG phase（t=10 ms 时 phase-1 SRS 尚不可用）")
 
+# 资源分配后的周期偏移必须进入老化时间轴。两个 UE 即使周期相同，分在
+# offset 0/5 ms 后，在同一系统时刻能用到的最近一次 SRS 也不同。
+_phase_cfg = ca.CsiConfig(
+    srs_period_ms=10.0, hopping=False, processing_delay_ms=0.0)
+_phase0 = ca.rbg_csi_staleness_ms(
+    _phase_cfg, 1, 12.0, opportunity_offset_ms=0.0)
+_phase5 = ca.rbg_csi_staleness_ms(
+    _phase_cfg, 1, 12.0, opportunity_offset_ms=5.0)
+check(_phase0.tolist() == [2.0] and _phase5.tolist() == [7.0],
+      "同周期不同 SRS offset 产生不同 CSI 陈旧时长（2 ms vs 7 ms）")
+try:
+    ca.rbg_csi_staleness_ms(
+        _phase_cfg, 1, 0.0, opportunity_offset_ms=10.0)
+except ValueError:
+    _bad_phase_rejected = True
+else:
+    _bad_phase_rejected = False
+check(_bad_phase_rejected, "SRS offset 不在一个周期内时硬失败")
+
+# 系统建表必须真正消费分配结果，而不是只在 metadata 里挂一张表。七个 4-port
+# UE 会跨过同色优先池的第一个时域 offset；它们的 CSI lag trace 因而不同。
+_resource_trace = _seq(
+    np.random.default_rng(20260825), 3, 0.9, n_rb=272, bs=8, ue=4)
+_resource_tables = sy.build_link_tables(
+    [_resource_trace.copy() for _ in range(7)], [12.0] * 7,
+    max_rank=1, csi=ca.CsiConfig(
+        srs_period_ms=10.0, hopping=True, processing_delay_ms=2.0,
+        srs_resource_allocation=True), snapshot_ms=5.0)
+_resource_offsets = {
+    table.srs_resource_assignment.offset_ms for table in _resource_tables
+    if table.srs_resource_assignment is not None}
+_lag_traces = {tuple(table.csi_lag_snapshots.tolist()) for table in _resource_tables}
+check(all(table.srs_resource_assignment is not None for table in _resource_tables),
+      "每个 UE 都拿到可审计的 SRS 资源叶子")
+check(len(_resource_offsets) >= 2 and len(_lag_traces) >= 2,
+      "SRS 资源 offset 真正改变逐 UE CSI lag，而不是 metadata-only")
+
 off = ca.CsiConfig(enabled=False)
 check(ca.rbg_lag_snapshots(off, 17, snapshot_ms=5.0, snapshot_index=3).max() == 0,
       "enabled=False 时滞后恒为 0")

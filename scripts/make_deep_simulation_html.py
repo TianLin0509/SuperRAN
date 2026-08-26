@@ -422,7 +422,7 @@ def decision_cards() -> str:
         ("D6 · SRS 历史长度", "阻塞绝对标定", "体验数据只有 8×5ms=40ms 历史；10ms SRS ×17 RBG 跳频需要约170ms。超龄 RBG 会钳到最早快照，5s 主循环还周期回放8快照。", "相对 PF 记账对比可保留（两臂共用同一 trace）；上线绝对 KPI 前生成 ≥40 快照/UE，或本阶段明确改用全带 non-hopping SRS。"),
         ("D7 · 邻区真实波束", "阻塞空间干扰标定", "数据保存受害 UE 的交叉信道，但没有邻区被服务 UE 的信道/实际 W。当前默认 W 与交叉信道独立，并由几何 SIR 重标总功率。", "推荐下一版数据同时保存 neighbor served-UE channel 与 scheduler W；当前结果标注 spatial-shape approximation。"),
         ("D8 · PMI/CQI 周期", "建议确认", "当前 PMI 每5ms快照重搜，CQI 用 expanding mean；都因果，但不等于现场反馈周期/IIR。", "推荐由现场给 PMI/CQI 周期、滤波系数和反馈延迟；没有参数前不伪造标准值。"),
-        ("D9 · TBS RE 开销", "阻塞绝对容量标定", "TBS 量化遵循38.214，但 D slot 用12数据符号/RB，S slot乘0.7；未精确建 DMRS/PTRS/CORESET。MCS 用公司20B profile。", "推荐把实际 slot format、DMRS type/ports、PTRS、CORESET overhead 做成 profile 并回归 TBS 表。"),
+        ("D9 · TBS RE 开销", "阻塞绝对容量标定", "TBS 量化遵循38.214，但 D slot 用12数据符号/RB，S slot乘0.7；未精确建 DMRS/PTRS/CORESET。MCS 用预置 20B profile。", "推荐把实际 slot format、DMRS type/ports、PTRS、CORESET overhead 做成 profile 并回归 TBS 表。"),
         ("D10 · 逐 RBG SINR 与 MU", "可延期", "本轮全带 SINR 判 BLER，体验模式关闭 MU。逐RBG信道会扩 UeLinkTable 维度；MU 会引入配对、功率与层数耦合。", "推荐先把 SU/全带链条校准完，再分别立 P1-A（逐RBG）与 P1-B（MU）实验，避免同时改数据结构。"),
         ("D11 · Type-I 完整码本", "建议确认", "当前是 Type-I-style 单面板列码本增量贪心，不冒充完整38.214多层/子带/多面板码本。", "若用于标准对标，接入完整 RI/PMI 枚举与反馈开销；当前只适合作为工程基线。"),
         ("D12 · 多重比较", "必须守住", "主指标只有 small queue-wait P95；completion/PDB/large throughput 等是次指标。large throughput 虽显著但未做 multiplicity correction。", "只把预注册主指标写成主结论；次指标标‘支持性’，不凭 p<0.05 扩大战果。"),

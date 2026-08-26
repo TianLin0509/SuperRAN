@@ -759,7 +759,7 @@ async def sr_calibrate(dataset_id: str) -> dict[str, Any]:
     """按 3GPP TR 38.901 §7.8 的口径算校准量。
 
     这是业界判断"信道生成得对不对"的标准做法：不看曲线好不好看，而是把标准
-    规定的几个统计量按规定口径算出来，跟各公司提交给 3GPP 的参考曲线对。
+    规定的几个统计量按规定口径算出来，跟各参与方提交给 3GPP 的参考曲线对。
 
     出的量（括号内是标准里的条款与指标号）：
 
@@ -1801,6 +1801,9 @@ def sr_system_sim(
     scheduler: str = "pf",
     pf_window_tti: int = 100,
     pf_accounting: str = "auto",
+    frequency_selective: str = "auto",
+    max_layers_per_rbg: int = 4,
+    max_logical_prb_per_tti: int | None = None,
     target_bler: float = 0.1,
     harq_combining: str = "ir",
     olla_step_up_db: float = 0.01,
@@ -1823,6 +1826,8 @@ def sr_system_sim(
     csi_aging: bool | str = True,
     srs_period_ms: float = 10.0,
     srs_hopping: bool | str = True,
+    srs_resource_allocation: bool | str = True,
+    srs_pci_mod3: int = 0,
     csi_processing_delay_ms: float = 2.0,
     csi_report_period_ms: float = 20.0,
     warmup_s: float = 1.0,
@@ -1911,6 +1916,10 @@ def sr_system_sim(
         正式 ``num_replications`` 反馈校正几轮；默认 2，完整轨迹会返回。
     pf_accounting : ``auto`` 会在 legacy_v1 使用历史 best_se，在 experience_v2
         使用实际 scheduled TBS。``acked_goodput`` 只供研究，不是默认 PF 口径。
+    frequency_selective : ``auto`` 在逐 RBG 字段完整时启用，``on`` 缺字段硬失败，
+        ``off`` 是宽带/顺序 RBG 基线。它与 RB 功控开关相互独立。
+    max_layers_per_rbg / max_logical_prb_per_tti : P0 资源账本的空间层和逻辑
+        layer-PRB 预算。默认每 RBG 4 层、逻辑预算取 272×4；PDCCH/CCE 暂不建模。
     target_bler : MCS 选择与 SU/MU OLLA 共用的目标 IBLER。未显式给 down 步长时，
         按 ``s_down=s_up*(1-target)/target`` 自动反解，防止链路表按 20% 选 MCS、
         主循环却仍按 10% OLLA 记账。
@@ -1943,6 +1952,9 @@ def sr_system_sim(
     srs_hopping : SRS 跳频。默认开，对应 38.211 Table 6.4.1.4.3-1 的 C_SRS=63
         （每跳 16 RB = 1 个 RBG，**17 跳**扫完 272 RB）。
         **这是老化的主导项**：10 ms 周期下全带扫一遍要 170 ms。
+    srs_resource_allocation : 为每个 UE 分配周期 offset、symbol、comb 与循环移位；
+        PCI mod3 只控制候选优先顺序。默认开；关闭仅用于复现旧的全 UE offset=0 上界。
+    srs_pci_mod3 : 当前服务小区的 PCI 模 3 颜色，取 0/1/2；系统结果仍是单小区。
     csi_processing_delay_ms : 信道估计 + 预编码计算 + 调度下发的固定时延。
     csi_report_period_ms : 宽带 CQI/PMI 报告周期，默认 20 ms。它与 5 ms 的信道
         快照间隔、SRS 周期是三个不同量；38.331 按 slot 配置，并未规定 PMI 固定 5 ms。
@@ -2085,6 +2097,11 @@ def sr_system_sim(
         return v.strip().lower() not in ("off", "false", "0", "no", "") \
             if isinstance(v, str) else bool(v)
 
+    if (isinstance(srs_pci_mod3, bool)
+            or not isinstance(srs_pci_mod3, (int, np.integer))
+            or int(srs_pci_mod3) not in (0, 1, 2)):
+        return {"error": "srs_pci_mod3 必须是整数 0 / 1 / 2"}
+
     try:
         power_cfg = pc.RbPowerControlConfig.from_raw(
             enabled=rb_power_control_enabled, num_rb=int(h.shape[2]),
@@ -2112,6 +2129,7 @@ def sr_system_sim(
         csi_cfg = sysm.ca.CsiConfig(
             enabled=_flag(csi_aging), srs_period_ms=float(srs_period_ms),
             hopping=_flag(srs_hopping),
+            srs_resource_allocation=_flag(srs_resource_allocation),
             processing_delay_ms=float(csi_processing_delay_ms),
             csi_report_period_ms=float(csi_report_period_ms),
             periodic_trace_history=(mode == "experience" and float(warmup_s) > 0))
@@ -2179,6 +2197,9 @@ def sr_system_sim(
         scheduler_cfg = sysm.SchedulerConfig(
             algorithm=scheduler, pf_window_tti=pf_window_tti,
             pf_accounting=pf_accounting,
+            frequency_selective=str(frequency_selective),
+            max_layers_per_rbg=max_layers_per_rbg,
+            max_logical_prb_per_tti=max_logical_prb_per_tti,
             olla_step_up_db=float(olla_step_up_db),
             olla_step_down_db=resolved_su_down,
             qos_avg_rate_exponent=float(qos_avg_rate_exponent),
@@ -2235,6 +2256,7 @@ def sr_system_sim(
             mu_csi_error_variance=float(mu_csi_error_variance),
             rb_power_control=power_cfg, power_geometry=power_geometry,
             bs_panel=ds.config.get("bs_panel"),
+            srs_pci_mod3=int(srs_pci_mod3),
             port_order=_port_order,
             vertical_index_order=_v_order)
     except ValueError as exc:
@@ -2418,6 +2440,12 @@ def sr_system_sim(
             f"{f'、{csi_cfg.hop_factor} 倍跳频' if csi_cfg.hopping else '、不跳频'}，"
             f"全带扫一遍 {csi_cfg.full_sweep_ms:g} ms，平均 CSI 陈旧时长 "
             f"{csi_cfg.mean_csi_staleness_ms:.0f} ms。")
+        notes.append(
+            "SRS 基础资源分配已开启：每 UE 的周期 offset/symbol/comb/循环移位"
+            "会落入链路表，其中 offset 已进入 CSI 老化；当前只覆盖固定载波普通 H "
+            "资源，P-H/F、BWP2 与跨小区波形级导频污染未建模。"
+            if csi_cfg.srs_resource_allocation else
+            "SRS 资源分配已显式关闭：所有 UE 复现旧的 offset=0 上界。")
     if float(olla_speedup) != 1.0:
         notes.append(sysm.SchedulerConfig(
             olla_speedup=float(olla_speedup)).as_dict()["olla_speedup_warning"])

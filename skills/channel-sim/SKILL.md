@@ -228,6 +228,11 @@ SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且�
 SRS hopping 也不是通用旋钮：当前只有 272 RB 上的
 `C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0` 17-hop profile，顺序由 SuperRAN 本地合同给出；
 其他带宽或跳频参数直接拒绝，不调用外部 helper，也不退回恒等扫描。
+`srs_resource_allocation=True` 时每 UE 另分 period offset/symbol/comb/循环移位，
+offset 会进入 CSI 老化；PCI mod3 只是可溢出的候选优先顺序。体验模式默认
+`frequency_selective="auto"`，逐 RBG 字段齐全就启用且与 RB 功控解耦；MU 固定 PF anchor
+后枚举全部伙伴并按 useful bytes/RBG 评分。所有候选计划先过 RBG/层/逻辑 layer-PRB
+账本，再由统一 Finalizer 定稿；PDCCH/CCE 当前明确未建模。
 全部参数逐项说明 → `references/system-sim.md`
 
 **系统级 A/B 必须用公共随机数（CRN），并且同样受 `<HARD-GATE>` 约束。**
@@ -297,7 +302,7 @@ publishable winner；否则即使统计显著也必须保持 `exploratory_unregi
 选定的解析关系与机制成立，不能替代预置/现场 BLER、业务 CDF 或现网 KPI。每批新数据还要检查
 `summary.provenance`；代码/依赖/曲线哈希 mismatch 时重新生成后再做正式结论。
 
-**公司 64T/256T 都走已确认的真实子阵，并统一 `pol_h_v + top_to_bottom`**；旧 64T 布局只作显式历史兼容，历史性能差值不能当当前通用结论 → `references/default-hardware.md`。
+**预置 64T/256T 都走已确认的真实子阵，并统一 `pol_h_v + top_to_bottom`**；旧 64T 布局只作显式历史兼容，历史性能差值不能当当前通用结论 → `references/default-hardware.md`。
 **CDL 剖面表已被替换为逐字核对过的 38.901 标准值**（`SUPERRAN_CDL_SPEC=0` 可复现未修正前的结果；CDL-D/E 未覆盖）。**引擎不可用时如实说缺什么，不要假装能跑**（`sr_capabilities` 查；`quadriga_real` 需要 MATLAB/Octave）。
 
 ## 工具地图与参考文件

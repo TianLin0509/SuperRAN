@@ -4,8 +4,9 @@
 ``system.simulate`` 的 legacy 路径并存：legacy 用来复现历史结果，本文实现的
 ``experience_v2`` 用实际分配的 TBS 给 PF 记账，并允许一个 TTI 服务多个 UE。
 
-物理边界明确写在结果里：RB 功控关闭时使用宽带 MCS/SINR；开启时按实际 grant
-bitmap 聚合逐 RBG SINR 并重选 MCS。当前聚合仍是 dB 算术平均而非标定过的
+物理边界明确写在结果里：逐 RBG 频选与 RB 功控是两个独立开关；只要链路表
+带逐 RBG SINR，实际 grant 就按 bitmap 聚合并重选 MCS。当前聚合仍是 dB
+算术平均而非标定过的
 EESM/MIESM。每个单码字 TB 最多一次 IR/CC 重传：空口 MCS、RBG 数、rank 与
 TBS 保持不变，BLER 只由预置 NewTx 曲线推导；失败 payload 留队并成为后续新 TB。
 """
@@ -15,13 +16,17 @@ import time
 import zlib
 from collections import deque
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
 
 from . import linkadapt as la
 from . import rng as rg
+from . import scheduler_finalize as sfinal
+from . import scheduler_frequency as sfreq
+from . import scheduler_mu as smu
+from . import scheduler_resource as sres
 from . import traffic as traffic_cdf
 
 _EPS = 1e-12
@@ -478,6 +483,17 @@ class Allocation:
     bler_lookup_sinr_db: float | None = None
     original_tb_tti: int | None = None
     original_transmission_mode: str | None = None
+    reservation_id: str | None = None
+    logical_prb: int = 0
+    layers_per_rbg: int = 0
+    finalizer_version: str = "grant-finalizer-v1"
+    frequency_selection_score_gain: float = 0.0
+    frequency_incremental_useful_bytes: int = 0
+    frequency_evaluated_subsets: int = 0
+    frequency_selected_source: str = "wideband_or_sequential"
+    mu_candidate_score: float | None = None
+    mu_candidate_count: int = 0
+    mu_rejected_candidate_reasons: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         d = dict(self.__dict__)
@@ -499,6 +515,8 @@ class Allocation:
         d["harq_random_draw"] = round(self.harq_random_draw, 6)
         if self.bler_lookup_sinr_db is not None:
             d["bler_lookup_sinr_db"] = round(self.bler_lookup_sinr_db, 4)
+        d["mu_rejected_candidate_reasons"] = list(
+            self.mu_rejected_candidate_reasons)
         return d
 
 
@@ -542,6 +560,8 @@ def _tti_trace_row(
     allocations: Sequence[Allocation],
     backlog_bytes_after: int,
     pf_average_after: np.ndarray,
+    resource_ledger: dict[str, Any] | None = None,
+    mu_candidate_decisions: Sequence[smu.MuCandidateDecision] = (),
 ) -> dict[str, Any]:
     """Collapse one scheduling opportunity while retaining every grant detail."""
     grants = [allocation.as_dict() for allocation in allocations]
@@ -573,6 +593,9 @@ def _tti_trace_row(
         "pf_average_after_bytes": {
             str(ue): round(float(pf_average_after[ue]), 6) for ue in scheduled_ues
         },
+        "resource_ledger": resource_ledger,
+        "mu_candidate_decisions": [
+            decision.as_dict() for decision in mu_candidate_decisions],
         "grants": grants,
     }
 
@@ -598,6 +621,14 @@ class _PlannedGrant:
     useful_bytes: tuple[int, ...]
     potential_fullband_bytes: tuple[int, ...]
     pair_correlation: float | None = None
+    candidate_score: float | None = None
+    candidate_count: int = 0
+    rejected_candidate_reasons: tuple[str, ...] = ()
+    frequency_selection_score_gain: float = 0.0
+    frequency_incremental_useful_bytes: int = 0
+    frequency_evaluated_subsets: int = 0
+    frequency_selected_source: str = "wideband_or_sequential"
+    reservation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -622,6 +653,8 @@ class _TtiPlan:
     used_rbg: int
     has_mu: bool
     clears_all_queues: bool
+    mu_candidate_decisions: tuple[smu.MuCandidateDecision, ...] = ()
+    resource_admission: sres.ResourceAdmission | None = None
 
 
 @dataclass
@@ -1059,7 +1092,8 @@ def _build_su_plan(
     harq_pending: dict[int, _HarqTb] | None = None,
 ) -> _TtiPlan:
     pending_map = harq_pending or {}
-    remaining = int(num_rbg)
+    available: set[int] = set(range(int(num_rbg)))
+    remaining = len(available)
     grants: list[_PlannedGrant] = []
     for u0 in ordered_users:
         if remaining <= 0:
@@ -1070,6 +1104,10 @@ def _build_su_plan(
         rank = int(pending.rank) if pending is not None else int(rank_of[u])
         mcs = int(pending.mcs) if pending is not None else int(mcs_of[u])
         offset = int(num_rbg) - remaining
+        frequency_score_gain = 0.0
+        frequency_incremental = 0
+        frequency_evaluated = 0
+        frequency_source = "wideband_or_sequential"
         if pending is not None:
             if q < int(pending.payload_bytes):
                 raise RuntimeError(
@@ -1079,17 +1117,26 @@ def _build_su_plan(
             if need > remaining:
                 continue
             n = need
-            indices = _grant_indices(cursor, offset, n, num_rbg)
             if frequency_aware:
                 if tables[u].sinr_rbg_db is None:
-                    raise ValueError("RB 功控重传需要逐 RBG true SINR")
+                    raise ValueError("频选重传需要逐 RBG true SINR")
                 base_rows = (tables[u].sinr_tx_rbg_db
                              if tables[u].sinr_tx_rbg_db is not None
                              else tables[u].sinr_rbg_db)
+                score = np.asarray(base_rows[snap, rank - 1], dtype=float)
+                ordered = sfreq.quality_order(
+                    tuple(available), score, cursor=cursor)
+                indices = tuple(ordered[:n])
+                frequency_score_gain = float(
+                    np.mean(score[np.asarray(indices, dtype=int)])
+                    - np.mean(score[np.asarray(tuple(available), dtype=int)]))
+                frequency_source = "quality_fixed_count_retx"
                 base_tx = _subset_db(base_rows[snap, rank - 1], indices)
                 true_sinr = _subset_db(
                     tables[u].sinr_rbg_db[snap, rank - 1], indices)
             else:
+                indices = tuple(sfreq.rotated_order(
+                    tuple(available), cursor=cursor, total_rbg=num_rbg)[:n])
                 base_rows = (tables[u].sinr_tx_db
                              if tables[u].sinr_tx_db is not None
                              else tables[u].sinr_db)
@@ -1104,17 +1151,45 @@ def _build_su_plan(
                     f"UE {u}, original={pending.tb_bytes} B, current={current_tbs} B")
             tbs = int(pending.tb_bytes)
         elif frequency_aware:
-            need, fits = _frequency_su_need(
-                table=tables[u], snap=snap, rank=rank, queue_bytes=q,
-                cursor=cursor, offset=offset, num_rbg=num_rbg,
-                olla_db=float(su_olla_db[u]), olla_enabled=olla_enabled,
-                lookup=lookup, slot=slot)
-            n = min(int(need), remaining)
-            indices = _grant_indices(cursor, offset, n, num_rbg)
-            values = _frequency_su_values(
-                table=tables[u], snap=snap, rank=rank, indices=indices,
-                olla_db=float(su_olla_db[u]), olla_enabled=olla_enabled,
-                lookup=lookup, slot=slot)
+            table = tables[u]
+            base_rows = (table.sinr_tx_rbg_db if table.sinr_tx_rbg_db is not None
+                         else table.sinr_rbg_db)
+            if base_rows is None:
+                raise ValueError("频选调度需要逐 RBG predicted SINR")
+            score = np.asarray(base_rows[snap, rank - 1], dtype=float)
+
+            def _evaluate_su(
+                indices_value: tuple[int, ...],
+                *,
+                table_value: Any = table,
+                rank_value: int = rank,
+                user_value: int = u,
+                queue_value: int = q,
+            ) -> dict[str, Any]:
+                trial = _frequency_su_values(
+                    table=table_value, snap=snap, rank=rank_value,
+                    indices=indices_value,
+                    olla_db=float(su_olla_db[user_value]),
+                    olla_enabled=olla_enabled,
+                    lookup=lookup, slot=slot)
+                trial["useful_bytes"] = (
+                    min(queue_value, int(trial["tbs"])),)
+                return trial
+
+            selection = sfreq.select_frequency_subset(
+                tuple(available), score, cursor=cursor,
+                evaluate=_evaluate_su,
+                sufficient=lambda trial, queue_value=q: (
+                    int(trial["tbs"]) >= queue_value))
+            indices = tuple(selection.selected_indices)
+            n = len(indices)
+            values = selection.selected_grant
+            fits = int(values["tbs"]) >= q
+            need = n if fits else int(num_rbg)
+            frequency_score_gain = float(selection.selection_score_gain)
+            frequency_incremental = int(selection.incremental_useful_bytes)
+            frequency_evaluated = int(selection.evaluated_subset_count)
+            frequency_source = str(selection.selected_source)
             mcs = int(values["mcs"])
             tbs = int(values["tbs"])
             base_tx = float(values["base"])
@@ -1125,7 +1200,8 @@ def _build_su_plan(
             need, fits = lookup.required_rbg_for_indices(
                 slot, mcs, rank, q, full_order)
             n = min(int(need), remaining)
-            indices = _grant_indices(cursor, offset, n, num_rbg)
+            indices = tuple(sfreq.rotated_order(
+                tuple(available), cursor=cursor, total_rbg=num_rbg)[:n])
             tbs = lookup.tbs_bytes_for_indices(slot, mcs, rank, indices)
             base_tx = float(base_tx_sinr_of[u])
             no_olla_mcs = int(mcs_without_olla_of[u])
@@ -1143,8 +1219,13 @@ def _build_su_plan(
             power_loss_db=0.0, required_rbg=(int(need),),
             fits_in_fullband=(bool(fits),), tbs_bytes=(int(tbs),),
             useful_bytes=(int(useful),),
-            potential_fullband_bytes=(int(potential_of[u]),)))
-        remaining -= n
+            potential_fullband_bytes=(int(potential_of[u]),),
+            frequency_selection_score_gain=frequency_score_gain,
+            frequency_incremental_useful_bytes=frequency_incremental,
+            frequency_evaluated_subsets=frequency_evaluated,
+            frequency_selected_source=frequency_source))
+        available.difference_update(indices)
+        remaining = len(available)
     total_q = int(sum(queue_bytes.values()))
     useful_total = int(sum(sum(g.useful_bytes) for g in grants))
     return _TtiPlan(
@@ -1162,228 +1243,446 @@ def _build_mu_plan(
     tables: Sequence[Any], snap: int, sched: Any,
     su_olla_db: np.ndarray, mu_olla_db: np.ndarray, blocked_data: bool,
     cursor: int = 0, frequency_aware: bool = False,
+    pair_evaluation_cache: dict[tuple[Any, ...], smu.MuCandidateEvaluation] | None = None,
 ) -> _TtiPlan:
-    """PF-anchor + SUS 的两用户 rank2 方案；可与 SU grant 混排。"""
-    remaining = int(num_rbg)
-    ordered = [int(x) for x in ordered_users]
+    """PF anchor fixed; enumerate and score every feasible two-user rank2 pair."""
+    ordered = [int(value) for value in ordered_users]
     pending = set(ordered)
+    available: set[int] = set(range(int(num_rbg)))
     grants: list[_PlannedGrant] = []
-    has_mu = False
+    decisions: list[smu.MuCandidateDecision] = []
     corr_thr = float(getattr(sched, "mu_corr_threshold", 0.7))
     mu_rank = int(getattr(sched, "mu_rank_per_user", 2))
+    olla_enabled = bool(getattr(sched, "olla_enabled", True))
+
+    def _single_user_grant(user: int) -> _PlannedGrant | None:
+        q = int(queue_bytes[user])
+        rank = int(rank_of[user])
+        mcs = int(mcs_of[user])
+        offset = int(num_rbg) - len(available)
+        score_gain = 0.0
+        incremental = 0
+        evaluated = 0
+        source = "wideband_or_sequential"
+        if frequency_aware:
+            table = tables[user]
+            base_rows = (table.sinr_tx_rbg_db if table.sinr_tx_rbg_db is not None
+                         else table.sinr_rbg_db)
+            if base_rows is None:
+                raise ValueError("频选调度需要逐 RBG predicted SINR")
+            score = np.asarray(base_rows[snap, rank - 1], dtype=float)
+
+            def _evaluate(indices_value: tuple[int, ...]) -> dict[str, Any]:
+                value = _frequency_su_values(
+                    table=table, snap=snap, rank=rank, indices=indices_value,
+                    olla_db=float(su_olla_db[user]),
+                    olla_enabled=olla_enabled, lookup=lookup, slot=slot)
+                value["useful_bytes"] = (min(q, int(value["tbs"])),)
+                return value
+
+            selection = sfreq.select_frequency_subset(
+                tuple(available), score, cursor=cursor, evaluate=_evaluate,
+                sufficient=lambda value: int(value["tbs"]) >= q)
+            indices = tuple(selection.selected_indices)
+            value = selection.selected_grant
+            n = len(indices)
+            fits = int(value["tbs"]) >= q
+            need = n if fits else int(num_rbg)
+            mcs = int(value["mcs"])
+            tbs = int(value["tbs"])
+            base_tx = float(value["base"])
+            no_olla = int(value["mcs_without_olla"])
+            true_sinr = float(value["true"])
+            score_gain = float(selection.selection_score_gain)
+            incremental = int(selection.incremental_useful_bytes)
+            evaluated = int(selection.evaluated_subset_count)
+            source = str(selection.selected_source)
+        else:
+            full_order = _grant_indices(cursor, offset, num_rbg, num_rbg)
+            need, fits = lookup.required_rbg_for_indices(
+                slot, mcs, rank, q, full_order)
+            n = min(int(need), len(available))
+            indices = tuple(sfreq.rotated_order(
+                tuple(available), cursor=cursor, total_rbg=num_rbg)[:n])
+            tbs = int(lookup.tbs_bytes_for_indices(slot, mcs, rank, indices))
+            base_tx = float(base_tx_sinr_of[user])
+            no_olla = int(mcs_without_olla_of[user])
+            true_sinr = float(true_sinr_of[user])
+        useful = min(q, int(tbs))
+        if useful <= 0:
+            return None
+        return _PlannedGrant(
+            mode="SU", users=(user,), rbg_indices=indices, n_rbg=len(indices),
+            ranks=(rank,), mcs=(mcs,), base_tx_sinr_db=(base_tx,),
+            mcs_without_olla=(no_olla,), true_sinr_db=(true_sinr,),
+            corr_loss_db=(0.0,), power_loss_db=0.0,
+            required_rbg=(int(need),), fits_in_fullband=(bool(fits),),
+            tbs_bytes=(int(tbs),), useful_bytes=(int(useful),),
+            potential_fullband_bytes=(int(potential_of[user]),),
+            frequency_selection_score_gain=score_gain,
+            frequency_incremental_useful_bytes=incremental,
+            frequency_evaluated_subsets=evaluated,
+            frequency_selected_source=source)
+
+    def _reject(
+        anchor: int, partner: int, pf_order: int, reason: str,
+        *, correlation: float | None = None,
+        predicted_bler_max: float | None = None,
+    ) -> smu.MuCandidateEvaluation:
+        return smu.MuCandidateEvaluation(
+            anchor_ue=anchor, partner_ue=partner, pf_order=pf_order,
+            feasible=False, rejection_reason=reason, correlation=correlation,
+            predicted_bler_max=predicted_bler_max, useful_bytes=0,
+            used_rbg=0, useful_bytes_per_rbg=0.0, final_mcs=(), grant=None)
+
+    def _evaluate_pair(
+        anchor: int, partner: int, pf_order: int,
+    ) -> smu.MuCandidateEvaluation:
+        cache_key: tuple[Any, ...] | None = None
+        if pair_evaluation_cache is not None:
+            cache_key = (
+                int(anchor), int(partner), int(snap), str(slot),
+                tuple(sorted(available)), int(cursor) % int(num_rbg),
+                int(queue_bytes[anchor]), int(queue_bytes[partner]),
+                float(su_olla_db[anchor]), float(su_olla_db[partner]),
+                float(mu_olla_db[anchor]), float(mu_olla_db[partner]),
+                bool(olla_enabled), bool(frequency_aware),
+            )
+            cached_pair = pair_evaluation_cache.get(cache_key)
+            if cached_pair is not None:
+                return replace(cached_pair, pf_order=int(pf_order))
+        link = getattr(tables[anchor], "mu_links", {}).get(partner)
+        if link is None:
+            return _reject(anchor, partner, pf_order, "missing_pair_link")
+        correlation = float(link.correlation[snap])
+        if not np.isfinite(correlation):
+            return _reject(anchor, partner, pf_order, "nonfinite_correlation")
+        if correlation > corr_thr:
+            return _reject(
+                anchor, partner, pf_order, "correlation_threshold",
+                correlation=correlation)
+        if 2 * mu_rank > int(getattr(sched, "max_layers_per_rbg", 4)):
+            return _reject(
+                anchor, partner, pf_order, "layer_limit",
+                correlation=correlation)
+
+        users = (anchor, partner)
+        offset = int(num_rbg) - len(available)
+        score_gain = 0.0
+        incremental = 0
+        evaluated = 0
+        source = "wideband_or_sequential"
+        if frequency_aware:
+            if (link.true_sinr_rbg_db is None
+                    or link.corr_loss_tx_rbg_db is None):
+                return _reject(
+                    anchor, partner, pf_order, "missing_rbg_pair_sinr",
+                    correlation=correlation)
+            score = np.zeros(int(num_rbg), dtype=float)
+            for user in users:
+                side = int(link.side(user))
+                table = tables[user]
+                base_rows = (table.sinr_tx_rbg_db
+                             if table.sinr_tx_rbg_db is not None
+                             else table.sinr_rbg_db)
+                if base_rows is None:
+                    return _reject(
+                        anchor, partner, pf_order, "missing_rbg_su_sinr",
+                        correlation=correlation)
+                score += (
+                    np.asarray(base_rows[snap, mu_rank - 1], dtype=float)
+                    + np.asarray(link.corr_loss_tx_rbg_db[snap, side], dtype=float)
+                    + float(link.power_loss_db))
+
+            trial_cache: dict[tuple[int, ...], dict[str, Any]] = {}
+
+            def _evaluate(indices_value: tuple[int, ...]) -> dict[str, Any]:
+                # TBS/SINR only depends on the bitmap, not its presentation order.
+                # The selector and the per-user "required RBG" audit examine many
+                # identical prefixes; memoizing here halves the MU hot path without
+                # changing one bit of the decision.
+                key = tuple(sorted(int(value) for value in indices_value))
+                cached = trial_cache.get(key)
+                if cached is not None:
+                    return cached
+                values = _frequency_mu_values(
+                    pair_link=link, users=users, tables=tables, snap=snap,
+                    rank=mu_rank, indices=key,
+                    su_olla_db=su_olla_db, mu_olla_db=mu_olla_db,
+                    olla_enabled=olla_enabled, lookup=lookup, slot=slot)
+                result = {
+                    "values": values,
+                    "useful_bytes": tuple(
+                        min(int(queue_bytes[user]), int(values[side]["tbs"]))
+                        for side, user in enumerate(users)),
+                }
+                trial_cache[key] = result
+                return result
+
+            selection = sfreq.select_frequency_subset(
+                tuple(available), score, cursor=cursor, evaluate=_evaluate,
+                sufficient=lambda value: any(
+                    int(value["values"][side]["tbs"]) >= int(queue_bytes[user])
+                    for side, user in enumerate(users)))
+            indices = tuple(selection.selected_indices)
+            actual = selection.selected_grant["values"]
+            needs: list[int] = []
+            fits_list: list[bool] = []
+            quality = sfreq.quality_order(tuple(available), score, cursor=cursor)
+            for side, user in enumerate(users):
+                found = int(num_rbg)
+                fit = False
+                for count in range(1, len(quality) + 1):
+                    trial = _evaluate(tuple(quality[:count]))["values"]
+                    if int(trial[side]["tbs"]) >= int(queue_bytes[user]):
+                        found, fit = count, True
+                        break
+                needs.append(found)
+                fits_list.append(fit)
+            full_values = _evaluate(tuple(range(int(num_rbg))))["values"]
+            potentials = [int(value["tbs"]) for value in full_values]
+            score_gain = float(selection.selection_score_gain)
+            incremental = int(selection.incremental_useful_bytes)
+            evaluated = int(selection.evaluated_subset_count)
+            source = str(selection.selected_source)
+        else:
+            full_order = _grant_indices(cursor, offset, num_rbg, num_rbg)
+            actual = []
+            needs = []
+            fits_list = []
+            potentials = []
+            for user in users:
+                side = int(link.side(user))
+                base_rows = (tables[user].sinr_tx_db
+                             if tables[user].sinr_tx_db is not None
+                             else tables[user].sinr_db)
+                base = float(base_rows[snap, mu_rank - 1])
+                corr = float(link.corr_loss_tx_db[snap, side])
+                mcs_input = base + corr + float(link.power_loss_db)
+                no_olla = _select_mcs(mcs_input, lookup)
+                mcs = (int(la.apply_olla_mcs(
+                    no_olla, float(su_olla_db[user]) + float(mu_olla_db[user]),
+                    mcs_table=int(lookup.mcs_table))["final_mcs"])
+                    if olla_enabled else no_olla)
+                need, fits = lookup.required_rbg_for_indices(
+                    slot, mcs, mu_rank, int(queue_bytes[user]), full_order)
+                actual.append({
+                    "base": base, "corr": corr,
+                    "true": float(link.true_sinr_db[snap, side]),
+                    "mcs": mcs, "mcs_without_olla": no_olla})
+                needs.append(int(need))
+                fits_list.append(bool(fits))
+                potentials.append(int(lookup.tbs_bytes_for_indices(
+                    slot, mcs, mu_rank, full_order)))
+            n = min(min(needs), len(available))
+            indices = tuple(sfreq.rotated_order(
+                tuple(available), cursor=cursor, total_rbg=num_rbg)[:n])
+            for value in actual:
+                value["tbs"] = int(lookup.tbs_bytes_for_indices(
+                    slot, int(value["mcs"]), mu_rank, indices))
+
+        mcs_list = tuple(int(value["mcs"]) for value in actual)
+        predicted_blers = tuple(
+            _bler_lookup(
+                int(value["mcs"]),
+                float(value["base"]) + float(value["corr"])
+                + float(link.power_loss_db))
+            for value in actual)
+        max_predicted_bler = max(predicted_blers)
+        if (not all(np.isfinite(
+                float(value["base"]) + float(value["corr"])
+                + float(link.power_loss_db)) for value in actual)
+                or max_predicted_bler > 0.5):
+            return _reject(
+                anchor, partner, pf_order, "predicted_bler_gt_0.5",
+                correlation=correlation,
+                predicted_bler_max=float(max_predicted_bler))
+        useful = tuple(
+            min(int(queue_bytes[user]), int(actual[side]["tbs"]))
+            for side, user in enumerate(users))
+        grant = _PlannedGrant(
+            mode="MU", users=users, rbg_indices=indices, n_rbg=len(indices),
+            ranks=(mu_rank, mu_rank), mcs=mcs_list,
+            base_tx_sinr_db=tuple(float(value["base"]) for value in actual),
+            mcs_without_olla=tuple(
+                int(value["mcs_without_olla"]) for value in actual),
+            true_sinr_db=tuple(float(value["true"]) for value in actual),
+            corr_loss_db=tuple(float(value["corr"]) for value in actual),
+            power_loss_db=float(link.power_loss_db),
+            required_rbg=tuple(int(value) for value in needs),
+            fits_in_fullband=tuple(bool(value) for value in fits_list),
+            tbs_bytes=tuple(int(value["tbs"]) for value in actual),
+            useful_bytes=useful,
+            potential_fullband_bytes=tuple(int(value) for value in potentials),
+            pair_correlation=correlation,
+            frequency_selection_score_gain=score_gain,
+            frequency_incremental_useful_bytes=incremental,
+            frequency_evaluated_subsets=evaluated,
+            frequency_selected_source=source)
+        useful_total = int(sum(useful))
+        density = float(useful_total / max(len(indices), 1))
+        result = smu.MuCandidateEvaluation(
+            anchor_ue=anchor, partner_ue=partner, pf_order=pf_order,
+            feasible=True, rejection_reason=None, correlation=correlation,
+            predicted_bler_max=float(max_predicted_bler),
+            useful_bytes=useful_total, used_rbg=len(indices),
+            useful_bytes_per_rbg=density, final_mcs=mcs_list, grant=grant)
+        if pair_evaluation_cache is not None and cache_key is not None:
+            pair_evaluation_cache[cache_key] = result
+        return result
+
     for anchor in ordered:
-        if remaining <= 0:
+        if not available:
             break
         if anchor not in pending:
             continue
         pending.remove(anchor)
-        partner: int | None = None
-        pair_link: Any = None
+        evaluations: list[smu.MuCandidateEvaluation] = []
         if int(getattr(sched, "max_mu_users", 2)) >= 2 and mu_rank == 2:
-            for v in ordered:
-                if v not in pending:
-                    continue
-                link = getattr(tables[anchor], "mu_links", {}).get(v)
-                if link is None:
-                    continue
-                if float(link.correlation[snap]) <= corr_thr:
-                    # OLLA 已经把某个 MU 用户压到 MCS0 曲线仍超过 50% BLER 时，
-                    # 继续把 ``select_mcs`` 的下界 0 当成“可调度”会形成永久 NACK
-                    # 黑洞。这个判决只用 gNB 可见的 CQI/BF/CorrLoss 与用户级
-                    # OLLA，不偷看 true SINR；若当前 pair 不可用，继续尝试下一个
-                    # SUS 候选，全部不可用才回退 SU。
-                    pair_feasible = True
-                    for member in (anchor, v):
-                        member_side = int(link.side(member))
-                        if tables[member].sinr_tx_db is not None:
-                            member_base = float(
-                                tables[member].sinr_tx_db[snap, mu_rank - 1])
-                        else:
-                            member_base = float(
-                                tables[member].sinr_db[snap, mu_rank - 1])
-                        member_tx_sinr = (
-                            member_base
-                            + float(link.corr_loss_tx_db[snap, member_side])
-                            + float(link.power_loss_db))
-                        member_mcs = _select_mcs(member_tx_sinr, lookup)
-                        if bool(getattr(sched, "olla_enabled", True)):
-                            member_mcs = int(la.apply_olla_mcs(
-                                member_mcs,
-                                float(su_olla_db[member]) + float(mu_olla_db[member]),
-                                mcs_table=int(lookup.mcs_table),
-                            )["final_mcs"])
-                        if (not np.isfinite(member_tx_sinr)
-                                or _bler_lookup(member_mcs, member_tx_sinr) > 0.5):
-                            pair_feasible = False
-                            break
-                    if pair_feasible:
-                        partner, pair_link = v, link
-                        break
-
-        if partner is None:
-            q = int(queue_bytes[anchor])
-            rank, mcs = int(rank_of[anchor]), int(mcs_of[anchor])
-            offset = int(num_rbg) - remaining
-            if frequency_aware:
-                need, fits = _frequency_su_need(
-                    table=tables[anchor], snap=snap, rank=rank, queue_bytes=q,
-                    cursor=cursor, offset=offset, num_rbg=num_rbg,
-                    olla_db=float(su_olla_db[anchor]),
-                    olla_enabled=bool(getattr(sched, "olla_enabled", True)),
-                    lookup=lookup, slot=slot)
-                n = min(int(need), remaining)
-                indices = _grant_indices(cursor, offset, n, num_rbg)
-                values = _frequency_su_values(
-                    table=tables[anchor], snap=snap, rank=rank, indices=indices,
-                    olla_db=float(su_olla_db[anchor]),
-                    olla_enabled=bool(getattr(sched, "olla_enabled", True)),
-                    lookup=lookup, slot=slot)
-                mcs = int(values["mcs"])
-                tbs = int(values["tbs"])
-                base_tx = float(values["base"])
-                no_olla_mcs = int(values["mcs_without_olla"])
-                true_sinr = float(values["true"])
-            else:
-                full_order = _grant_indices(cursor, offset, num_rbg, num_rbg)
-                need, fits = lookup.required_rbg_for_indices(
-                    slot, mcs, rank, q, full_order)
-                n = min(int(need), remaining)
-                indices = _grant_indices(cursor, offset, n, num_rbg)
-                tbs = lookup.tbs_bytes_for_indices(slot, mcs, rank, indices)
-                base_tx = float(base_tx_sinr_of[anchor])
-                no_olla_mcs = int(mcs_without_olla_of[anchor])
-                true_sinr = float(true_sinr_of[anchor])
-            useful = min(q, tbs)
-            if useful > 0:
-                grants.append(_PlannedGrant(
-                    mode="SU", users=(anchor,), rbg_indices=indices,
-                    n_rbg=n, ranks=(rank,), mcs=(mcs,),
-                    base_tx_sinr_db=(base_tx,),
-                    mcs_without_olla=(no_olla_mcs,),
-                    true_sinr_db=(true_sinr,), corr_loss_db=(0.0,),
-                    power_loss_db=0.0, required_rbg=(int(need),),
-                    fits_in_fullband=(bool(fits),), tbs_bytes=(int(tbs),),
-                    useful_bytes=(int(useful),),
-                    potential_fullband_bytes=(int(potential_of[anchor]),)))
-                remaining -= n
-            continue
-
-        pending.remove(partner)
-        users = (anchor, partner)
-        offset = int(num_rbg) - remaining
-        full_order = _grant_indices(cursor, offset, num_rbg, num_rbg)
-        ranks: list[int] = []
-        mcs_list: list[int] = []
-        base_list: list[float] = []
-        no_olla_list: list[int] = []
-        true_list: list[float] = []
-        corr_loss: list[float] = []
-        needs: list[int] = []
-        fits_list: list[bool] = []
-        potentials: list[int] = []
-        for u in users:
-            side = int(pair_link.side(u))
-            if tables[u].sinr_tx_db is not None:
-                su_base = float(tables[u].sinr_tx_db[snap, mu_rank - 1])
-            else:
-                su_base = float(tables[u].sinr_db[snap, mu_rank - 1])
-            cl = float(pair_link.corr_loss_tx_db[snap, side])
-            pl = float(pair_link.power_loss_db)
-            no_olla_sinr = su_base + cl + pl
-            no_olla_mcs = _select_mcs(no_olla_sinr, lookup)
-            if bool(getattr(sched, "olla_enabled", True)):
-                # 用户指定口径：SU OLLA 与 MU OLLA 都是用户级，但状态分开维护。
-                mcs_u = int(la.apply_olla_mcs(
-                    no_olla_mcs,
-                    float(su_olla_db[u]) + float(mu_olla_db[u]),
-                    mcs_table=int(lookup.mcs_table),
-                )["final_mcs"])
-            else:
-                mcs_u = no_olla_mcs
-            q = int(queue_bytes[u])
-            need, fits = lookup.required_rbg_for_indices(
-                slot, mcs_u, mu_rank, q, full_order)
-            ranks.append(mu_rank)
-            mcs_list.append(mcs_u)
-            base_list.append(su_base)
-            no_olla_list.append(no_olla_mcs)
-            true_list.append(float(pair_link.true_sinr_db[snap, side]))
-            corr_loss.append(cl)
-            needs.append(int(need))
-            fits_list.append(bool(fits))
-            potentials.append(lookup.tbs_bytes_for_indices(
-                slot, mcs_u, mu_rank, full_order))
-        if frequency_aware:
-            needs = []
-            fits_list = []
-            for side, u in enumerate(users):
-                found = int(num_rbg)
-                fit = False
-                for candidate_n in range(1, int(num_rbg) + 1):
-                    candidate_idx = _grant_indices(
-                        cursor, offset, candidate_n, num_rbg)
-                    candidate_values = _frequency_mu_values(
-                        pair_link=pair_link, users=users, tables=tables,
-                        snap=snap, rank=mu_rank, indices=candidate_idx,
-                        su_olla_db=su_olla_db, mu_olla_db=mu_olla_db,
-                        olla_enabled=bool(getattr(sched, "olla_enabled", True)),
-                        lookup=lookup, slot=slot)
-                    if int(candidate_values[side]["tbs"]) >= int(queue_bytes[u]):
-                        found, fit = candidate_n, True
-                        break
-                needs.append(found)
-                fits_list.append(fit)
-        # 同一 RBG bitmap 上同时发两个 TB。分到“先让至少一个队列排空”的最小值，
-        # 之后再轮到下一 PF anchor；不会把 MU 误算成两份物理 RBG。
-        n = min(min(needs), remaining)
-        indices = _grant_indices(cursor, offset, n, num_rbg)
-        if frequency_aware:
-            actual = _frequency_mu_values(
-                pair_link=pair_link, users=users, tables=tables,
-                snap=snap, rank=mu_rank, indices=indices,
-                su_olla_db=su_olla_db, mu_olla_db=mu_olla_db,
-                olla_enabled=bool(getattr(sched, "olla_enabled", True)),
-                lookup=lookup, slot=slot)
-            mcs_list = [int(x["mcs"]) for x in actual]
-            base_list = [float(x["base"]) for x in actual]
-            no_olla_list = [int(x["mcs_without_olla"]) for x in actual]
-            true_list = [float(x["true"]) for x in actual]
-            corr_loss = [float(x["corr"]) for x in actual]
-            tbs_list = [int(x["tbs"]) for x in actual]
-            full_idx = _grant_indices(cursor, offset, num_rbg, num_rbg)
-            full_values = _frequency_mu_values(
-                pair_link=pair_link, users=users, tables=tables,
-                snap=snap, rank=mu_rank, indices=full_idx,
-                su_olla_db=su_olla_db, mu_olla_db=mu_olla_db,
-                olla_enabled=bool(getattr(sched, "olla_enabled", True)),
-                lookup=lookup, slot=slot)
-            potentials = [int(x["tbs"]) for x in full_values]
+            for pf_order, partner in enumerate(ordered):
+                if partner in pending:
+                    evaluations.append(_evaluate_pair(anchor, partner, pf_order))
+        decision = smu.choose_mu_candidate(anchor, evaluations)
+        decisions.append(decision)
+        if decision.selected_partner_ue is not None:
+            partner = int(decision.selected_partner_ue)
+            pending.remove(partner)
+            selected = replace(
+                decision.selected_grant,
+                candidate_score=float(decision.selected_score),
+                candidate_count=len(decision.evaluations),
+                rejected_candidate_reasons=decision.rejection_reasons)
+            grants.append(selected)
+            available.difference_update(selected.rbg_indices)
         else:
-            tbs_list = [lookup.tbs_bytes_for_indices(
-                slot, mcs_list[k], mu_rank, indices) for k in range(2)]
-        useful_list = [min(int(queue_bytes[u]), int(tbs_list[k]))
-                       for k, u in enumerate(users)]
-        if sum(useful_list) > 0:
-            grants.append(_PlannedGrant(
-                mode="MU", users=users, rbg_indices=indices,
-                n_rbg=int(n), ranks=tuple(ranks),
-                mcs=tuple(mcs_list), base_tx_sinr_db=tuple(base_list),
-                mcs_without_olla=tuple(no_olla_list), true_sinr_db=tuple(true_list),
-                corr_loss_db=tuple(corr_loss), power_loss_db=float(pair_link.power_loss_db),
-                required_rbg=tuple(needs), fits_in_fullband=tuple(fits_list),
-                tbs_bytes=tuple(int(x) for x in tbs_list),
-                useful_bytes=tuple(int(x) for x in useful_list),
-                potential_fullband_bytes=tuple(int(x) for x in potentials),
-                pair_correlation=float(pair_link.correlation[snap])))
-            remaining -= n
-            has_mu = True
+            fallback = _single_user_grant(anchor)
+            if fallback is not None:
+                grants.append(fallback)
+                available.difference_update(fallback.rbg_indices)
 
     total_q = int(sum(queue_bytes.values()))
-    useful_total = int(sum(sum(g.useful_bytes) for g in grants))
+    useful_total = int(sum(sum(grant.useful_bytes) for grant in grants))
     return _TtiPlan(
         name="MU", grants=tuple(grants), useful_bytes=useful_total,
-        used_rbg=int(num_rbg) - remaining, has_mu=has_mu,
-        clears_all_queues=(not blocked_data and useful_total == total_q))
+        used_rbg=int(num_rbg) - len(available),
+        has_mu=any(grant.mode == "MU" for grant in grants),
+        clears_all_queues=(not blocked_data and useful_total == total_q),
+        mu_candidate_decisions=tuple(decisions))
+
+
+def _admit_plan_resources(
+    plan: _TtiPlan,
+    *,
+    budget: sres.ResourceBudget,
+    tti: int,
+) -> _TtiPlan:
+    """Apply the same transactional resource contract before SU/MU comparison."""
+    ledger = sres.ResourceLedger(budget, tti=tti)
+    admission = ledger.admit_grants(plan.grants)
+    accepted: list[_PlannedGrant] = []
+    for grant_index, reservation_id in zip(
+            admission.accepted_grant_indices,
+            admission.reservation_ids, strict=True):
+        accepted.append(replace(
+            plan.grants[int(grant_index)], reservation_id=reservation_id))
+    useful = int(sum(sum(grant.useful_bytes) for grant in accepted))
+    used = len({
+        index for grant in accepted for index in grant.rbg_indices
+    })
+    return replace(
+        plan,
+        grants=tuple(accepted),
+        useful_bytes=useful,
+        used_rbg=used,
+        has_mu=any(grant.mode == "MU" for grant in accepted),
+        clears_all_queues=(plan.clears_all_queues and not admission.rejections),
+        resource_admission=admission,
+    )
+
+
+def _finalize_selected_plan(
+    plan: _TtiPlan,
+    *,
+    queue_bytes: dict[int, int],
+    lookup: TbsLookup,
+    slot: str,
+    su_olla_db: np.ndarray,
+    mu_olla_db: np.ndarray,
+    olla_enabled: bool,
+    harq_pending: dict[int, _HarqTb],
+    tables: Sequence[Any],
+) -> tuple[sfinal.FinalGrant, ...]:
+    """Recompute every executable physical value and hard-compare the estimate."""
+    out: list[sfinal.FinalGrant] = []
+    for grant in plan.grants:
+        olla_values: list[float] = []
+        frozen_mcs: list[int | None] = []
+        frozen_tbs: list[int | None] = []
+        frozen_payload: list[int | None] = []
+        explicit_newtx_mcs: list[int | None] = []
+        for user in grant.users:
+            pending = harq_pending.get(int(user))
+            olla_values.append(
+                float(su_olla_db[int(user)])
+                + (float(mu_olla_db[int(user)]) if grant.mode == "MU" else 0.0)
+            )
+            frozen_mcs.append(None if pending is None else int(pending.mcs))
+            frozen_tbs.append(None if pending is None else int(pending.tb_bytes))
+            frozen_payload.append(None if pending is None else int(pending.payload_bytes))
+            explicit_newtx_mcs.append(
+                int(grant.mcs[len(explicit_newtx_mcs)])
+                if pending is None
+                and getattr(tables[int(user)], "sinr_tx_db", None) is None
+                and getattr(tables[int(user)], "sinr_tx_rbg_db", None) is None
+                else None)
+        candidate = sfinal.CandidateGrant(
+            mode=grant.mode,
+            users=tuple(int(value) for value in grant.users),
+            rbg_indices=tuple(int(value) for value in grant.rbg_indices),
+            ranks=tuple(int(value) for value in grant.ranks),
+            base_predicted_sinr_db=tuple(
+                float(value) for value in grant.base_tx_sinr_db),
+            receive_sinr_db=tuple(float(value) for value in grant.true_sinr_db),
+            corr_loss_db=tuple(float(value) for value in grant.corr_loss_db),
+            power_loss_db=float(grant.power_loss_db),
+            olla_mcs=tuple(olla_values),
+            queue_bytes=tuple(int(queue_bytes[int(user)]) for user in grant.users),
+            required_rbg=tuple(int(value) for value in grant.required_rbg),
+            fits_in_fullband=tuple(bool(value) for value in grant.fits_in_fullband),
+            potential_fullband_bytes=tuple(
+                int(value) for value in grant.potential_fullband_bytes),
+            pair_correlation=grant.pair_correlation,
+            frozen_mcs=tuple(frozen_mcs),
+            frozen_tbs_bytes=tuple(frozen_tbs),
+            frozen_payload_bytes=tuple(frozen_payload),
+            explicit_newtx_mcs=tuple(explicit_newtx_mcs),
+            candidate_score=grant.candidate_score,
+            candidate_count=int(grant.candidate_count),
+            rejected_candidate_reasons=tuple(grant.rejected_candidate_reasons),
+            frequency_selection_score_gain=float(
+                grant.frequency_selection_score_gain),
+            frequency_incremental_useful_bytes=int(
+                grant.frequency_incremental_useful_bytes),
+            frequency_evaluated_subsets=int(grant.frequency_evaluated_subsets),
+            frequency_selected_source=str(grant.frequency_selected_source),
+        )
+        finalized = sfinal.finalize_candidate_grant(
+            candidate, lookup=lookup, slot=slot, olla_enabled=olla_enabled)
+        if (
+            finalized.mcs != tuple(int(value) for value in grant.mcs)
+            or finalized.tbs_bytes != tuple(int(value) for value in grant.tbs_bytes)
+            or finalized.useful_bytes != tuple(int(value) for value in grant.useful_bytes)
+        ):
+            raise RuntimeError(
+                "GrantFinalizer 与候选计划不一致："
+                f"plan(mcs={grant.mcs},tbs={grant.tbs_bytes},useful={grant.useful_bytes}) "
+                f"!= final(mcs={finalized.mcs},tbs={finalized.tbs_bytes},"
+                f"useful={finalized.useful_bytes})"
+            )
+        if grant.reservation_id is None:
+            raise RuntimeError("FinalGrant 缺少资源账本 reservation_id")
+        out.append(finalized.with_reservation(grant.reservation_id))
+    return tuple(out)
 
 
 def simulate_experience(
@@ -1524,8 +1823,44 @@ def simulate_experience(
         sys_cfg.num_rbg, sys_cfg.rb_per_rbg, s_slot_fraction,
         rbg_prb_sizes=rbg_sizes, mcs_table=mcs_table,
         target_bler=link_target_bler)
-    frequency_aware = bool(getattr(
-        getattr(sys_cfg, "rb_power_control", None), "enabled", False))
+    frequency_mode = str(getattr(sched, "frequency_selective", "auto"))
+    su_frequency_ready = all(
+        getattr(table, "sinr_rbg_db", None) is not None
+        and np.asarray(table.sinr_rbg_db).ndim == 3
+        and int(np.asarray(table.sinr_rbg_db).shape[-1]) == int(sys_cfg.num_rbg)
+        and (getattr(table, "sinr_tx_rbg_db", None) is not None
+             or getattr(table, "sinr_rbg_db", None) is not None)
+        and (getattr(table, "sinr_tx_rbg_db", None) is None
+             or int(np.asarray(table.sinr_tx_rbg_db).shape[-1])
+             == int(sys_cfg.num_rbg))
+        for table in tables)
+    mu_frequency_ready = (not bool(sched.mu_enabled)) or all(
+        all(
+            getattr(link, "true_sinr_rbg_db", None) is not None
+            and getattr(link, "corr_loss_tx_rbg_db", None) is not None
+            and int(np.asarray(link.true_sinr_rbg_db).shape[-1])
+            == int(sys_cfg.num_rbg)
+            and int(np.asarray(link.corr_loss_tx_rbg_db).shape[-1])
+            == int(sys_cfg.num_rbg)
+            for link in getattr(table, "mu_links", {}).values()
+        )
+        for table in tables)
+    frequency_ready = bool(su_frequency_ready and mu_frequency_ready)
+    if frequency_mode == "on" and not frequency_ready:
+        raise ValueError(
+            "frequency_selective='on' 需要完整逐 RBG SU/MU SINR；"
+            "请重新 build_link_tables，不能静默退回宽带"
+        )
+    frequency_aware = bool(
+        frequency_mode == "on" or (frequency_mode == "auto" and frequency_ready))
+    resource_budget = sres.ResourceBudget(
+        num_rbg=int(sys_cfg.num_rbg),
+        rbg_prb_sizes=tuple(int(value) for value in rbg_sizes),
+        max_layers_per_rbg=int(getattr(sched, "max_layers_per_rbg", 4)),
+        max_logical_prb=(
+            None if getattr(sched, "max_logical_prb_per_tti", None) is None
+            else int(sched.max_logical_prb_per_tti)),
+    )
     tr = ExperienceTraffic(traffic_cfg, n_ue, sys_cfg.tti_ms,
                            book.generator("traffic"))
     # **CRN 必须绑定到同一个事件，而不是“第几个被调度者”。** 若顺序消费一条
@@ -1606,6 +1941,23 @@ def simulate_experience(
     allocated_rbg_full = 0
     available_rbg_equiv = allocated_rbg_equiv = 0.0
     available_prb_equiv = allocated_prb_equiv = 0.0
+    allocated_logical_prb_equiv = 0.0
+    max_layers_used = 0
+    resource_rejection_reasons: dict[str, int] = {}
+    resource_evaluated_rejection_reasons: dict[str, int] = {}
+    finalizer_grant_count = 0
+    frequency_grant_count = 0
+    frequency_quality_selected_count = 0
+    frequency_score_gains: list[float] = []
+    frequency_incremental_useful = 0
+    frequency_evaluated_subsets = 0
+    mu_candidate_count = 0
+    mu_candidate_feasible_count = 0
+    mu_candidate_selected_count = 0
+    mu_candidate_rejection_reasons: dict[str, int] = {}
+    mu_candidate_selected_scores: list[float] = []
+    mu_pair_evaluation_cache: dict[
+        tuple[Any, ...], smu.MuCandidateEvaluation] = {}
     total_prb = int(sum(lookup.rbg_prb_sizes))
     # ``rbg_hist`` 是每个非零 grant 的大小，不能回答“一个 TTI 总共占了几个 RBG”。
     # 后者必须每个测量窗 DL 调度机会只记一次，而且把 idle TTI 记进 0 桶。
@@ -1708,7 +2060,9 @@ def simulate_experience(
         for i, u in enumerate(cand):
             pending = harq_pending.get(u)
             rank = (int(pending.rank) if pending is not None
-                    else int(tables[u].best_rank[snap]))
+                    else min(
+                        int(tables[u].best_rank[snap]),
+                        int(getattr(sched, "max_layers_per_rbg", 4))))
             if pending is not None:
                 base_rows = (tables[u].sinr_tx_db
                              if tables[u].sinr_tx_db is not None
@@ -1794,7 +2148,13 @@ def simulate_experience(
             blocked_data=blocked_data, cursor=cursor, tables=tables, snap=snap,
             su_olla_db=olla_db, olla_enabled=bool(sched.olla_enabled),
             frequency_aware=frequency_aware, harq_pending=harq_pending)
+        su_plan = _admit_plan_resources(
+            su_plan, budget=resource_budget, tti=tti)
         if bool(sched.mu_enabled) and not pending_ready:
+            if len(mu_pair_evaluation_cache) > 20_000:
+                # Finite-queue states can be unique every TTI.  Keep the cache a
+                # bounded hot-path aid, never an unbounded second result store.
+                mu_pair_evaluation_cache.clear()
             mu_plan = _build_mu_plan(
                 ordered_users, queue_bytes=queue_bytes, lookup=lookup, slot=slot,
                 num_rbg=int(sys_cfg.num_rbg), rank_of=rank_of, mcs_of=mcs_of,
@@ -1804,9 +2164,12 @@ def simulate_experience(
                 tables=tables, snap=snap, sched=sched,
                 su_olla_db=olla_db, mu_olla_db=mu_olla_db,
                 blocked_data=blocked_data, cursor=cursor,
-                frequency_aware=frequency_aware)
+                frequency_aware=frequency_aware,
+                pair_evaluation_cache=mu_pair_evaluation_cache)
         else:
             mu_plan = _TtiPlan("MU", tuple(), 0, 0, False, False)
+        mu_plan = _admit_plan_resources(
+            mu_plan, budget=resource_budget, tti=tti)
 
         if in_measurement and not pending_ready:
             su_plan_useful += su_plan.useful_bytes
@@ -1830,11 +2193,65 @@ def simulate_experience(
                                else "SU_no_eligible_MU_pair")
             su_decisions += int(in_measurement)
 
+        final_grants = _finalize_selected_plan(
+            selected_plan,
+            queue_bytes=queue_bytes,
+            lookup=lookup,
+            slot=slot,
+            su_olla_db=olla_db,
+            mu_olla_db=mu_olla_db,
+            olla_enabled=bool(sched.olla_enabled),
+            harq_pending=harq_pending,
+            tables=tables,
+        )
+        if in_measurement:
+            for evaluated_plan in (su_plan, mu_plan):
+                admission = evaluated_plan.resource_admission
+                if admission is not None:
+                    for rejected in admission.rejections:
+                        resource_evaluated_rejection_reasons[rejected.reason] = (
+                            resource_evaluated_rejection_reasons.get(
+                                rejected.reason, 0) + 1)
+            selected_admission = selected_plan.resource_admission
+            if selected_admission is None:
+                raise RuntimeError("选中的计划没有经过 ResourceLedger")
+            for rejected in selected_admission.rejections:
+                resource_rejection_reasons[rejected.reason] = (
+                    resource_rejection_reasons.get(rejected.reason, 0) + 1)
+            selected_snapshot = selected_admission.snapshot
+            allocated_logical_prb_equiv += (
+                float(selected_snapshot.used_logical_prb) * slot_fraction)
+            max_layers_used = max(
+                max_layers_used, int(selected_snapshot.max_layers_used))
+            finalizer_grant_count += len(final_grants)
+            for grant in final_grants:
+                if frequency_aware:
+                    frequency_grant_count += 1
+                    frequency_quality_selected_count += int(
+                        str(grant.frequency_selected_source).startswith("quality"))
+                    frequency_score_gains.append(float(
+                        grant.frequency_selection_score_gain))
+                    frequency_incremental_useful += int(
+                        grant.frequency_incremental_useful_bytes)
+                    frequency_evaluated_subsets += int(
+                        grant.frequency_evaluated_subsets)
+            for decision in mu_plan.mu_candidate_decisions:
+                mu_candidate_count += len(decision.evaluations)
+                mu_candidate_feasible_count += decision.feasible_count
+                if decision.selected_partner_ue is not None:
+                    mu_candidate_selected_count += 1
+                if decision.selected_score is not None:
+                    mu_candidate_selected_scores.append(
+                        float(decision.selected_score))
+                for reason in decision.rejection_reasons:
+                    mu_candidate_rejection_reasons[reason] = (
+                        mu_candidate_rejection_reasons.get(reason, 0) + 1)
+
         used_indices: set[int] = set()
         inst = np.zeros(n_ue, dtype=float)
         users_this_tti = 0
         tti_allocations: list[Allocation] = []
-        for group_idx, grant in enumerate(selected_plan.grants):
+        for group_idx, grant in enumerate(final_grants):
             n_alloc = int(grant.n_rbg)
             indices = tuple(int(x) for x in grant.rbg_indices)
             grant_prb = int(sum(lookup.rbg_prb_sizes[index] for index in indices))
@@ -1878,10 +2295,7 @@ def simulate_experience(
                 ack = bool(harq_draw[tti, u] > bler)
                 su_olla_before = float(olla_db[u])
                 mu_olla_before = float(mu_olla_db[u])
-                mcs_input_sinr = float(grant.base_tx_sinr_db[side])
-                if grant.mode == "MU" and not is_retx:
-                    mcs_input_sinr += (float(grant.corr_loss_db[side])
-                                       + float(grant.power_loss_db))
+                mcs_input_sinr = float(grant.mcs_input_sinr_db[side])
                 prediction_error = sinr - mcs_input_sinr
                 mode = str(grant.mode)
                 if not is_retx:
@@ -2031,7 +2445,23 @@ def simulate_experience(
                                      if pending_tb is not None else tti),
                     original_transmission_mode=(
                         str(pending_tb.first_mode)
-                        if pending_tb is not None else str(grant.mode)))
+                        if pending_tb is not None else str(grant.mode)),
+                    reservation_id=grant.reservation_id,
+                    logical_prb=int(rank * grant_prb),
+                    layers_per_rbg=int(sum(grant.ranks)),
+                    finalizer_version=str(grant.finalizer_version),
+                    frequency_selection_score_gain=float(
+                        grant.frequency_selection_score_gain),
+                    frequency_incremental_useful_bytes=int(
+                        grant.frequency_incremental_useful_bytes),
+                    frequency_evaluated_subsets=int(
+                        grant.frequency_evaluated_subsets),
+                    frequency_selected_source=str(
+                        grant.frequency_selected_source),
+                    mu_candidate_score=grant.candidate_score,
+                    mu_candidate_count=int(grant.candidate_count),
+                    mu_rejected_candidate_reasons=tuple(
+                        grant.rejected_candidate_reasons))
                 tti_allocations.append(alloc)
                 if in_measurement:
                     if len(allocation_sample) < allocation_limit:
@@ -2095,6 +2525,10 @@ def simulate_experience(
                     allocations=tti_allocations,
                     backlog_bytes_after=int(tr.backlog_bytes),
                     pf_average_after=r_avg,
+                    resource_ledger=(
+                        selected_plan.resource_admission.as_dict()
+                        if selected_plan.resource_admission is not None else None),
+                    mu_candidate_decisions=mu_plan.mu_candidate_decisions,
                 )
         if progress and tti % 5000 == 0:
             progress(tti, int(sys_cfg.num_tti))
@@ -2232,6 +2666,10 @@ def simulate_experience(
         cls_row["deadline_missed_incomplete"] += len(overdue_incomplete)
         users.append({
             "ue": u,
+            "srs_resource_assignment": (
+                tables[u].srs_resource_assignment.as_dict()
+                if getattr(tables[u], "srs_resource_assignment", None) is not None
+                else None),
             "traffic_class": str(q.traffic_class.name),
             "geo_sinr_db": round(float(tables[u].geo_sinr_db), 4),
             "iot_db": round(float(tables[u].iot_db), 4),
@@ -2646,6 +3084,60 @@ def simulate_experience(
         "mu_paired_prb_equivalent": float(mu_prb_equiv),
         "allocated_prb_equivalent": float(allocated_prb_equiv),
         "available_prb_equivalent": float(available_prb_equiv),
+        "resource_ledger": {
+            "budget": resource_budget.as_dict(),
+            "allocated_logical_prb_equivalent": float(
+                allocated_logical_prb_equiv),
+            "available_logical_prb_equivalent": float(
+                available_prb_equiv * int(resource_budget.max_layers_per_rbg)),
+            "logical_prb_utilization": float(
+                allocated_logical_prb_equiv
+                / max(available_prb_equiv
+                      * int(resource_budget.max_layers_per_rbg), _EPS)),
+            "max_layers_used": int(max_layers_used),
+            "selected_plan_rejections": resource_rejection_reasons,
+            "evaluated_plan_rejections": resource_evaluated_rejection_reasons,
+            "physical_overlap_violations": int(overlap_violations),
+            "pdcch_cce": "not_modelled_by_explicit_scope",
+        },
+        "grant_finalizer": {
+            "version": "grant-finalizer-v1",
+            "finalized_grants": int(finalizer_grant_count),
+            "plan_final_mismatch_count": 0,
+            "one_codeword_per_user_tb": True,
+        },
+        "frequency_selection": {
+            "requested_mode": frequency_mode,
+            "enabled": bool(frequency_aware),
+            "rbg_fields_ready": bool(frequency_ready),
+            "independent_of_rb_power_control": True,
+            "policy": "best-quality-prefix-with-sequential-safety-net-v1",
+            "grant_count": int(frequency_grant_count),
+            "quality_selected_count": int(frequency_quality_selected_count),
+            "mean_selection_score_gain": (
+                float(np.mean(frequency_score_gains))
+                if frequency_score_gains else None),
+            "selection_score_definition": (
+                "selected-minus-available mean of predicted per-RBG score; "
+                "SU score is user dB SINR, MU score is the sum of both users' "
+                "effective predicted dB coordinates"),
+            "incremental_predicted_useful_bytes_vs_sequential": int(
+                frequency_incremental_useful),
+            "evaluated_subset_count": int(frequency_evaluated_subsets),
+            "effective_sinr": "arithmetic mean in dB over granted RBGs and rank streams",
+        },
+        "mu_candidate_scoring": {
+            "candidate_count": int(mu_candidate_count),
+            "feasible_count": int(mu_candidate_feasible_count),
+            "selected_count": int(mu_candidate_selected_count),
+            "selected_score_mean_useful_bytes_per_rbg": (
+                float(np.mean(mu_candidate_selected_scores))
+                if mu_candidate_selected_scores else None),
+            "rejection_reasons": mu_candidate_rejection_reasons,
+            "objective": (
+                "PF anchor fixed; maximize queue-limited useful bytes per RBG; "
+                "tie by useful bytes, lower correlation, earlier PF partner"),
+        },
         "mu_user_tx_share": float(
             mu_user_tx / max(int(np.sum(sched_cnt_measured)), 1)),
         "su_mu_plan": {
@@ -2694,12 +3186,13 @@ def simulate_experience(
 
     notes: list[str] = [
         (
-            "experience_v2 已开启 RB 功控：按实际 grant bitmap 聚合逐 RBG "
-            "SINR、重选 MCS 并判误码；当前有效 SINR 是 RBG dB 算术平均，尚未用"
-            "标定过的 EESM/MIESM。"
+            "experience_v2 已开启逐 RBG 频选：它与 RB 功控解耦，按实际 grant "
+            "bitmap 聚合 predicted/receive SINR、重选 MCS 并判误码；当前有效 "
+            "SINR 是 RBG dB 算术平均，尚未用标定过的 EESM/MIESM。"
             if frequency_aware else
-            "experience_v2 在 RB 功控关闭时使用**宽带 SINR/MCS**做误码与调度，"
-            "不包含逐 RBG 频选增益。"
+            "experience_v2 当前显式使用**宽带/顺序 RBG 基线**；这是 "
+            "frequency_selective='off' 或逐 RBG 字段不可用的结果，不再由 RB 功控"
+            "开关暗中决定。"
         ),
         "TBS 量化算法走 38.214 §5.1.3.2，但 MCS 使用预置 20B profile；D 时隙按"
         "每 RB 12 个数据符号、S 时隙按 0.7 倍 N_RE，未展开 DMRS/PTRS/CORESET。",
@@ -2711,6 +3204,12 @@ def simulate_experience(
         f"PF 平均量口径是 **{accounting}**；ACKed bytes 另作为 KPI 统计。",
         "分配器每个 DL TTI 只排序一次：按 PF/QoS-PF 优先级依次给最小够用 RBG；"
         "剩余 RBG 没有候选需求时留空，不回填给第一名。",
+        "每个 SU/MU 候选计划先经过 ResourceLedger：物理 RBG 只扣一次、逐 RBG "
+        "总层数不超过预算、逻辑 layer-PRB 单独记账；按当前范围 PDCCH/CCE 不建模。"
+        "选中计划再统一经过 GrantFinalizer 重算 MCS/TBS/useful bytes，和计划估值"
+        "不一致会硬失败。",
+        "MU 先固定 PF anchor，再枚举全部伙伴；过滤缺链路、相关性、层数和预测 "
+        "BLER 后，按 queue-limited useful bytes/RBG 评分，不再取第一个可行伙伴。",
         "DRB throughput 按 buffer busy period；queue/completion/PDB 按 FIFO "
         "arrival object（mixed/FTP 为文件，CBR 为每 TTI 字节块）。1500 B small "
         "类可作小包代理，large FTP 文件的 PDB 不能冒充逐 PDCP SDU 时延。",
@@ -2781,8 +3280,18 @@ def simulate_experience(
         notes.append("**本小区 PRB 利用率超过 98%**，当前结果更接近容量上限而非稳态体验。")
     diagnostics = {
         "tbs_lookup": lookup.as_dict(),
+        "srs_resource_assignments": [
+            table.srs_resource_assignment.as_dict()
+            for table in tables
+            if getattr(table, "srs_resource_assignment", None) is not None
+        ],
+        "resource_ledger": cell["resource_ledger"],
+        "grant_finalizer": cell["grant_finalizer"],
+        "frequency_selection": cell["frequency_selection"],
+        "mu_candidate_scoring": cell["mu_candidate_scoring"],
         "tti_trace": {
             "schema": "superran_tti_trace_v1",
+            "additive_contract_version": 2,
             "mode": trace_mode,
             "source_replication": int(book.replication),
             "tti_ms": float(sys_cfg.tti_ms),
@@ -2844,6 +3353,22 @@ def simulate_experience(
                 "unit": "ratio and PRB-equivalent",
                 "share_of_used": "MU-paired PRB-equivalent / allocated PRB-equivalent",
                 "utilization": "MU-paired PRB-equivalent / available PRB-equivalent",
+            },
+            "logical_prb_utilization": {
+                "unit": "ratio",
+                "scope": "measurement-window spatial/baseband resource",
+                "formula": (
+                    "sum_grant(sum_user(rank) * physical_PRB) / "
+                    "(available_PRB * max_layers_per_rbg)"),
+                "pdcch_cce": "not modelled",
+            },
+            "frequency_selection": {
+                "unit": "RBG subset",
+                "decision_information": "gNB-predicted per-RBG SINR only",
+                "safety_net": (
+                    "quality prefixes and sequential prefixes are both evaluated; "
+                    "selected predicted useful bytes cannot be lower than sequential"),
+                "effective_sinr": "arithmetic dB mean over selected RBGs",
             },
             "user_prb_attribution": {
                 "unit": "PRB-equivalent",

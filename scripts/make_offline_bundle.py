@@ -26,7 +26,7 @@ wheel 有效，且必须配 ``--only-binary=:all:``）。
     python scripts/make_offline_bundle.py --no-wheels  # 只打源码
 
 ChannelHub **默认不打包** —— 它没有开源许可证，默认保留所有权利，转发有法律风险。
-确认自己有权分发时（公司内部本来就有这份代码、或已获授权）用
+确认自己有权分发时（受控环境本来就有这份代码、或已获授权）用
 ``--include-channelhub`` 打进去。
 """
 from __future__ import annotations

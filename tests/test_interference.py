@@ -472,9 +472,9 @@ check(hw.COMPANY_UE_TX_ANT == hw.COMPANY_UE_RX_ANT == 4
       "默认 4Tx/4Rx，成对生成 DL 真值与 UL SRS 预编码 CSI")
 _company_ant = hw.company_antenna_block()
 check(_company_ant["element_pattern"]["polarization_slant_angles_deg"] == [45.0, -45.0],
-      "公司默认显式使用 +45/-45 度双极化且端口顺序固定")
+      "预置默认显式使用 +45/-45 度双极化且端口顺序固定")
 check(_company_ant["element_pattern"]["horizontal_hpbw_deg"] == 110.0,
-      "公司临时参数化阵元方向图采用用户给出的水平 110 度 HPBW")
+      "预置临时参数化阵元方向图采用用户给出的水平 110 度 HPBW")
 
 # 自动挂载规则：只对已确认物理结构的 64T/256T 生效，显式指定一律尊重
 c1 = {"bs_panel": [8, 4, 2]}

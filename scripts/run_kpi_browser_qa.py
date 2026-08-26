@@ -288,7 +288,7 @@ def main() -> None:
             "本页不能作为目标利用率的校准证据")
     result.setdefault("notes", []).append(
         "本页只使用合成信道和示例 CDF，验证呈现、校准和统计口径；"
-        "不代表公司 CDF、现网负载或算法收益。"
+        "不代表实测 CDF、现网负载或算法收益。"
     )
     report = kpi_view.write_kpi_report(
         result,

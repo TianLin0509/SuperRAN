@@ -37,6 +37,7 @@ from . import csi_aging as ca
 from . import mumimo as mu
 from . import power_control as pc
 from . import rng as rg
+from . import srs_resource as srsr
 
 _EPS = 1e-12
 _REPLICATION_PROCESS_STATE: dict[str, Any] = {}
@@ -64,6 +65,7 @@ ThroughputTrim = Literal["none", "tail", "head_tail"]
 SmallBurstPolicy = Literal["fractional_slot", "exclude"]
 HarqCombining = Literal["ir", "cc"]
 TtiTraceMode = Literal["off", "sampled", "full"]
+FrequencySelectionMode = Literal["auto", "on", "off"]
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +405,13 @@ class SchedulerConfig:
     # acked_goodput 是研究型口径，NACK 时给 0 会反向抬高坏链路用户优先级，
     # 所以不作为默认。
     pf_accounting: PfAccounting = "auto"
+    # auto: 链路表有逐 RBG SINR 就启用；on: 缺字段硬失败；off: 宽带/顺序基线。
+    # 与 RB 功控正交，关闭功控不再让频率选择性凭空消失。
+    frequency_selective: FrequencySelectionMode = "auto"
+    # P0 资源账本先建模物理 RBG、每 RBG 层数和逻辑 layer-PRB；PDCCH/CCE
+    # 按用户确认暂不建模。None 表示 num_PRB × max_layers 的自然上界。
+    max_layers_per_rbg: int = 4
+    max_logical_prb_per_tti: int | None = None
     # qos_pf = w(priority) * R_inst^beta / R_avg^alpha * delay_factor^gamma。
     # 默认 alpha=beta=1、gamma=0、w=1，严格退化成经典 PF；现场 EPF 定义
     # 未确认前，不把业务权重或时延权重偷偷打开。
@@ -462,6 +471,18 @@ class SchedulerConfig:
             "legacy_fullband",
         ):
             raise ValueError(f"未知 PF 记账口径 {self.pf_accounting!r}")
+        if self.frequency_selective not in ("auto", "on", "off"):
+            raise ValueError("frequency_selective 只支持 auto / on / off")
+        if (isinstance(self.max_layers_per_rbg, (bool, np.bool_))
+                or not isinstance(self.max_layers_per_rbg, (int, np.integer))
+                or int(self.max_layers_per_rbg) < 1):
+            raise ValueError("max_layers_per_rbg 必须是至少为 1 的整数")
+        if self.max_logical_prb_per_tti is not None and (
+            isinstance(self.max_logical_prb_per_tti, (bool, np.bool_))
+            or not isinstance(self.max_logical_prb_per_tti, (int, np.integer))
+            or int(self.max_logical_prb_per_tti) < 1
+        ):
+            raise ValueError("max_logical_prb_per_tti 必须为 null 或正整数")
         if self.qos_priority_weighting not in ("none", "inverse_priority"):
             raise ValueError("qos_priority_weighting 只支持 none / inverse_priority")
         for name, value in (
@@ -565,6 +586,10 @@ class SchedulerConfig:
         d: dict[str, Any] = {
             "algorithm": self.algorithm, "pf_window_tti": self.pf_window_tti,
             "pf_accounting": self.pf_accounting,
+            "frequency_selective": self.frequency_selective,
+            "max_layers_per_rbg": int(self.max_layers_per_rbg),
+            "max_logical_prb_per_tti": self.max_logical_prb_per_tti,
+            "pdcch_cce_model": "not_modelled_by_explicit_scope",
             "qos_avg_rate_exponent": self.qos_avg_rate_exponent,
             "qos_instant_rate_exponent": self.qos_instant_rate_exponent,
             "qos_delay_exponent": self.qos_delay_exponent,
@@ -1037,6 +1062,7 @@ class UeLinkTable:
     power_diagnostics: list[dict[str, Any]] | None = None  # [snapshot] 选中 rank
     csi_report_source_snapshot: np.ndarray | None = None   # [snapshot]
     csi_report_period_ms: float | None = None
+    srs_resource_assignment: srsr.SrsResourceAssignment | None = None
     precoding_csi_source: str = "evaluation_channel"
     # MU 建表只保存 RBG 粒度；避免 TTI 主循环反复做 SVD/矩阵求逆。
     h_true_rbg: np.ndarray | None = field(default=None, repr=False)  # [S,F,BS,UE]
@@ -1249,6 +1275,8 @@ def build_link_tables(
     rb_per_rbg: int = 16,
     rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
     csi: ca.CsiConfig | None = None,
+    srs_cell_ids: list[int] | tuple[int, ...] | int | None = None,
+    srs_pci_mod3: list[int] | tuple[int, ...] | int | None = None,
     snapshot_ms: float = 5.0,
     load_jitter_rng: np.random.Generator | None = None,
     neighbor_load_jitter: float = 0.05,
@@ -1282,6 +1310,11 @@ def build_link_tables(
     ``csi`` 给定且 ``enabled`` 时走 CSI 老化：预编码用滞后若干个快照的信道，
     评估用当前快照。逐 RBG 的滞后由 SRS 周期与跳频决定，见 :mod:`csi_aging`。
     不给的话是零时延完美 CSI——**那是个上界，不是现网**。
+
+    ``csi.srs_resource_allocation`` 开启时，每个 UE 先从本地固定载波资源池
+    分到周期 offset、symbol、comb 与循环移位；其中 offset 会真正进入 CSI
+    老化时间轴。``srs_cell_ids`` / ``srs_pci_mod3`` 是结果 UE 粒度，默认单小区
+    cell 0 / PCI mod3=0；当前不在这里伪造跨小区导频污染。
 
     ``load_jitter_rng`` 只用来抽邻区负载的逐快照抖动，抖动幅度由
     ``neighbor_load_jitter`` 给出；它**应当来自
@@ -1527,6 +1560,50 @@ def build_link_tables(
         geo_sinr_db = [_nan_safe(np.mean, v) for v in per_snap_sinr]
         sir_in = [_nan_safe(np.mean, v) for v in per_snap_sir]
 
+    srs_assignments: tuple[srsr.SrsResourceAssignment, ...] | None = None
+    if csi is not None and csi.enabled and bool(csi.srs_resource_allocation):
+        n_link_ue = len(h_users)
+
+        def _expand_srs_values(
+            name: str,
+            raw: list[int] | tuple[int, ...] | int | None,
+            default: list[int],
+        ) -> list[int]:
+            if raw is None:
+                values = list(default)
+            elif isinstance(raw, (int, np.integer)) and not isinstance(
+                    raw, (bool, np.bool_)):
+                values = [int(raw)] * n_link_ue
+            else:
+                try:
+                    values = list(raw)  # type: ignore[arg-type]
+                except TypeError as exc:
+                    raise ValueError(f"{name} 必须是整数或逐 UE 整数数组") from exc
+            if len(values) != n_link_ue or any(
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                for value in values
+            ):
+                raise ValueError(f"{name} 必须包含 {n_link_ue} 个逐 UE 整数")
+            return [int(value) for value in values]
+
+        default_cells = (
+            [int(value) if value is not None else 0 for value in serving_cell_by_ue]
+            if serving_cell_by_ue is not None else [0] * n_link_ue
+        )
+        cell_values = _expand_srs_values(
+            "srs_cell_ids", srs_cell_ids, default_cells)
+        pci_values = _expand_srs_values(
+            "srs_pci_mod3", srs_pci_mod3,
+            [int(value) % 3 for value in cell_values])
+        if any(value not in (0, 1, 2) for value in pci_values):
+            raise ValueError("srs_pci_mod3 每项必须是 0 / 1 / 2")
+        port_values = [int(np.asarray(value).shape[-1]) for value in h_users]
+        srs_assignments = srsr.allocate_basic_srs_resources(
+            list(range(n_link_ue)), period_ms=float(csi.srs_period_ms),
+            n_ports_by_ue=port_values, cell_ids=cell_values,
+            pci_mod3_by_ue=pci_values, hopping=bool(csi.hopping))
+
     out: list[UeLinkTable] = []
     aging = csi is not None and csi.enabled
     for i, (h, h_precoding) in enumerate(zip(
@@ -1623,7 +1700,10 @@ def build_link_tables(
                 assert csi is not None
                 lag_rbg = ca.rbg_lag_snapshots(
                     csi, n_rbg_eff, snapshot_ms=snapshot_ms,
-                    snapshot_index=s, rb_per_rbg=rb_per_rbg)
+                    snapshot_index=s, rb_per_rbg=rb_per_rbg,
+                    opportunity_offset_ms=(
+                        float(srs_assignments[i].offset_ms)
+                        if srs_assignments is not None else 0.0))
                 lags = (
                     carrier_grid.expand_rbg_values(
                         lag_rbg, resolved_boundaries, num_rows=n_rows)
@@ -1836,6 +1916,8 @@ def build_link_tables(
             power_diagnostics=selected_power_diag,
             csi_report_source_snapshot=report_source,
             csi_report_period_ms=report_period_ms,
+            srs_resource_assignment=(
+                srs_assignments[i] if srs_assignments is not None else None),
             precoding_csi_source=("explicit_estimate" if explicit_precoding_csi
                                   else "evaluation_channel"),
             h_true_rbg=np.asarray(snaps_u), h_prec_rbg=np.asarray(h_prec_seq),
@@ -2542,6 +2624,8 @@ def simulate(
     from . import linkadapt as la  # noqa: PLC0415
 
     book = rng if rng is not None else rg.RngBook(master_seed=int(sys_cfg.seed))
+    if not tables:
+        raise ValueError("至少需要一个 UE 链路表")
     if sys_cfg.evaluation_mode not in ("capacity", "experience"):
         raise ValueError("evaluation_mode 只支持 capacity / experience")
     cfg_power = str(sys_cfg.power_constraint).lower()
@@ -2552,6 +2636,13 @@ def simulate(
         if table_power != cfg_power:
             raise ValueError(
                 f"UE {i} 链路表功率约束 {table_power} 与系统配置 {cfg_power} 不一致")
+    _srs_rows = [
+        table.srs_resource_assignment for table in tables
+        if table.srs_resource_assignment is not None
+    ]
+    if _srs_rows and len(_srs_rows) != len(tables):
+        raise ValueError("SRS 资源分配不能只覆盖部分 UE；请重新构建整套链路表")
+    _srs_summary = srsr.summarize_assignments(_srs_rows)
     # **主循环选 MCS 用的表与目标 BLER，必须就是建表时那一套。** 各 UE 之间也得
     # 一致——一个小区里不可能一半用表 1、一半用表 3。早先这里写死 table=3 /
     # target_bler=0.1，经 MCP 走默认值恰好对得上，直接调 Python API 时就会出现
@@ -2603,6 +2694,7 @@ def simulate(
         return SystemResult(
             config={"system": sys_cfg.as_dict(), "traffic": traffic.as_dict(),
                     "scheduler": sched.as_dict(), "kpi": kpi.as_dict(),
+                    "srs_resource_allocation": _srs_summary,
                     "harq_model": {
                         "max_retransmissions": 1,
                         "combining": str(sys_cfg.harq_combining).lower(),
@@ -2612,19 +2704,21 @@ def simulate(
                     "mu_se_ratio": 1.0, "rng": book.as_dict(),
                     "physical_approximations": {
                         "sinr": (
-                            "RB-domain desired/inter-cell power coupling, RBG grant-specific "
-                            "single-codeword SINR/MCS; current TB compression is arithmetic "
-                            "mean in dB across granted RBGs, not calibrated EESM/MIESM"
-                            if sys_cfg.rb_power_control.enabled else
-                            "wideband; no per-RBG frequency-selective scheduling"),
+                            "RBG grant-specific single-codeword SINR/MCS; current TB "
+                            "compression is arithmetic mean in dB across granted RBGs, "
+                            "not calibrated EESM/MIESM; frequency selection is independent "
+                            "of RB power control"
+                            if run.cell.get("frequency_selection", {}).get("enabled") else
+                            "explicit wideband/sequential-RBG baseline"),
                         "harq": (
                             "one retransmission; same MCS/RBG-count/rank/TBS; "
                             f"{str(sys_cfg.harq_combining).upper()} combining derived "
                             "from preset NewTx curves; failed retransmission payload "
                             "later becomes a new TB"),
                         "allocator": (
-                            "one PF sort; data-limited SU/MU plans; compare useful bytes; "
-                            "unused tail RBG stays idle"),
+                            "one PF sort; data-limited SU/MU plans; full MU partner scoring; "
+                            "transactional RBG/layer/logical-PRB ledger; unified finalizer; "
+                            "compare useful bytes; unused tail RBG stays idle; PDCCH not modelled"),
                         "mu_link_adaptation": (
                             "CQI+BF+SU-OLLA+CorrLoss+powerLoss+MU-OLLA; "
                             "separate user-level SU/MU OLLA arrays"),
@@ -3073,6 +3167,7 @@ def simulate(
     return SystemResult(
         config={"system": sys_cfg.as_dict(), "traffic": traffic.as_dict(),
                 "scheduler": sched.as_dict(), "kpi": kpi.as_dict(),
+                "srs_resource_allocation": _srs_summary,
                 "harq_model": {
                     "max_retransmissions": 1,
                     "combining": str(sys_cfg.harq_combining).lower(),

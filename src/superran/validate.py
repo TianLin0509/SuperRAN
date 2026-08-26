@@ -778,7 +778,7 @@ def check_antenna_model(ds: Any) -> Check:
     以上仅是 2026-07-31 旧内核历史消融，不能作为当前通用百分比。
 
     这一项是 warn 不是 error：16T 等未确认面板不能猜 1 驱 N，legacy 合理；
-    显式指定 legacy 做对照也合理。但公司 64T/256T 拿 legacy 报结果必须被看见。
+    显式指定 legacy 做对照也合理。但预置 64T/256T 拿 legacy 报结果必须被看见。
     """
     from . import hardware as hw  # noqa: PLC0415
 
@@ -820,11 +820,11 @@ def check_antenna_model(ds: Any) -> Check:
             )
         if not ok:
             detail += (
-                " —— **公司阵列合同不匹配**：应为垂直 0.67λ、"
+                " —— **预置阵列合同不匹配**：应为垂直 0.67λ、"
                 f"1 驱 {expected_m}、pol_h_v + top_to_bottom")
         return Check("基站阵列模型", ok, detail,
                      measured=mode, expected="effective_subarray",
-                     tolerance="公司 64T/256T 必须匹配馈电数、垂直间距和 canonical 端口布局",
+                     tolerance="预置 64T/256T 必须匹配馈电数、垂直间距和 canonical 端口布局",
                      severity="warn")
 
     if not is_company:
@@ -835,7 +835,7 @@ def check_antenna_model(ds: Any) -> Check:
         )
     return Check(
         "基站阵列模型", False,
-        f"公司面板 {panel} 却用了 legacy_64 独立阵元模型。"
+        f"预置面板 {panel} 却用了 legacy_64 独立阵元模型。"
         f"当前硬件合同应为 1 驱 {expected_m}、垂直 0.67λ、"
         "pol_h_v + top_to_bottom；只有显式历史兼容/消融实验才应这样做。",
         measured=mode, expected="effective_subarray",

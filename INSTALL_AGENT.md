@@ -77,7 +77,7 @@ git clone https://github.com/TianLin0509/superran
 superran 就是你手上这份。ChannelHub **不在离线包里**——它没有开源许可证，
 不能随包转发。
 
-先找一遍，很多公司内网已经有：
+先找一遍，很多受控内网已经有：
 
 ```bash
 # 在常见位置找 ChannelHub 的特征文件
@@ -148,7 +148,7 @@ thin 包**不含 numpy/scipy**，靠目标机器自带。装完先验：
 <PYTHON> -c "import numpy, scipy; print(numpy.__version__, scipy.__version__)"
 ```
 
-报缺就停下来 **【问用户】** 怎么补（公司内网 pip 源 / 另找 wheel /
+报缺就停下来 **【问用户】** 怎么补（受控内网 pip 源 / 另找 wheel /
 换成 full 包重打）。**不要自己去联网装**——离线环境里那也不会成功。
 
 ### 关于 `pip install -e .` 到底要不要做

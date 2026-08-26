@@ -92,6 +92,12 @@ async def main() -> None:
                   "MCP schema 公开 CDF、多 profile、目标 PRB 校准、算法标签、TTI trace 与 Agent KPI 编排")
             check("harq_combining" in sim_props,
                   "MCP schema 公开一次重传的 IR/CC 合并选择")
+            p0_args = {
+                "frequency_selective", "max_layers_per_rbg",
+                "max_logical_prb_per_tti", "srs_resource_allocation",
+                "srs_pci_mod3"}
+            check(p0_args.issubset(sim_props),
+                  "MCP schema 公开 SRS 分配、逐 RBG 频选与 layer-PRB 资源预算")
             worker_schema = json.dumps(
                 sim_props.get("replication_workers", {}), ensure_ascii=False)
             check("integer" in worker_schema and "string" in worker_schema,
@@ -367,7 +373,7 @@ async def main() -> None:
             check(wait["bridge"]["enabled"] is True, "回传桥状态一并返回，便于排查")
 
     print("\n" + "=" * 68 + "\n10  TDD 系统载波固定为 272 RB / 17×16\n" + "=" * 68)
-    # 链路级仍可生成其他带宽，但当前 sr_system_sim 是公司 100 MHz
+    # 链路级仍可生成其他带宽，但当前 sr_system_sim 是预置 100 MHz
     # TDD 产品 profile：张量必须真的是 272 RB，标签也必须是
     # 100 MHz / 30 kHz。错配时硬失败，不猜一个新 RBG 口径。
     from superran import server as _sv  # noqa: PLC0415

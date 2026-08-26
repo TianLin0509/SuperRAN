@@ -212,10 +212,10 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
     "hardware": DetailSpec(
         promise="把 64T/256T、物理阵元、RF 端口、展平索引、载波与电下倾放进同一张硬件合同中，理解一个配置值如何一路改变 F 矩阵、端口信道和最终链路结果。",
         principles=(
-            "“64T”或“256T”首先是 RF 端口数，不等于物理辐射阵元数。公司 64T 面板按两种极化、水平和垂直端口组织，每个 RF 端口再驱动 3 个垂直阵元，因此物理阵元侧是 192；256T 场景每端口驱动 6 个垂直阵元，物理阵元侧是 1536。<code>F</code> 就是把这些物理阵元电压映射到 RF 端口激励的稀疏馈电矩阵。",
+            "“64T”或“256T”首先是 RF 端口数，不等于物理辐射阵元数。预置 64T 面板按两种极化、水平和垂直端口组织，每个 RF 端口再驱动 3 个垂直阵元，因此物理阵元侧是 192；256T 场景每端口驱动 6 个垂直阵元，物理阵元侧是 1536。<code>F</code> 就是把这些物理阵元电压映射到 RF 端口激励的稀疏馈电矩阵。",
             "统一展平顺序是 <code>r(p,h,v)=p·(N_hN_v)+h·N_v+v</code>：先分极化块，再水平，再垂直，垂直索引从面板顶部到下部。它是内存和接口合同，不改变阵元的真实坐标。Type-I 码本有自己的行序，边界函数显式生成 permutation；绝不能通过翻转几何坐标来“修复”编号差异，否则电下倾方向也会跟着被翻转。",
             "载波默认值先经过标准表和硬件默认解析，再进入场景。100 MHz、30 kHz SCS 对应 273 RB 才是标准栅格；项目中的 272 是系统级按 17 个 RBG、每组 16 RB 对齐后的可调度部分。剩余标准 RB 没有消失，而是被明确排除在当前调度网格之外。这个区别会影响噪声带宽、总功率到每 RB 的换算和资源利用率分母。",
-            "6° 电下倾不是自然常数，而是公司面板当前默认馈电校准。用户可配置其他角度；角度进入每个垂直子阵的复馈电权，因而不同下倾必须产生不同 <code>calibration_id</code>。正值表示把主瓣压向水平面以下，top-to-bottom 只决定编号，不得参与符号翻转。",
+            "6° 电下倾不是自然常数，而是预置面板当前默认馈电校准。用户可配置其他角度；角度进入每个垂直子阵的复馈电权，因而不同下倾必须产生不同 <code>calibration_id</code>。正值表示把主瓣压向水平面以下，top-to-bottom 只决定编号，不得参与符号翻转。",
         ),
         implementation=(
             ("解析硬件 profile", "<code>company_antenna_block</code> 根据 64T/256T 选择端口布局、每端口阵元数、间距、极化、方向图和默认下倾，并把临时参数化方向图标成非实测。"),
@@ -276,7 +276,7 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
     "antenna": DetailSpec(
         promise="从单个阵元接收一条 +45/−45° 极化射线开始，逐层叠加阵元方向图、空间相位和子阵馈电，直到得到可供预编码使用的端口级 H，并用结构不变量证明 F 矩阵没有排错。",
         principles=(
-            "天线响应至少有三层。第一层是<strong>单元方向图</strong>：水平约 110°、垂直约 65° 的参数化包络把入射方向变成幅度增益；这不是实测图，metadata 必须保留 <code>parametric_temporary</code>。第二层是<strong>极化 Jones 向量</strong>：公司交叉极化为 +45°/−45°，路径的 2×2 极化矩阵决定同极化和交叉极化耦合。第三层是<strong>阵列与子阵因子</strong>：真实坐标带来角度相关相位，F 的复馈电权再把多个物理阵元合成一个 RF 端口。",
+            "天线响应至少有三层。第一层是<strong>单元方向图</strong>：水平约 110°、垂直约 65° 的参数化包络把入射方向变成幅度增益；这不是实测图，metadata 必须保留 <code>parametric_temporary</code>。第二层是<strong>极化 Jones 向量</strong>：预置交叉极化为 +45°/−45°，路径的 2×2 极化矩阵决定同极化和交叉极化耦合。第三层是<strong>阵列与子阵因子</strong>：真实坐标带来角度相关相位，F 的复馈电权再把多个物理阵元合成一个 RF 端口。",
             "方向图以 dB 衰减相加，但进入复信道前必须转换成电压幅度 <code>10^(G/20)</code>，而不是功率比例 <code>10^(G/10)</code>。一条射线对某个收发极化对的复系数，是发射 Jones 向量、路径极化矩阵、接收 Jones 向量、两端方向图幅度与空间相位的共同结果。最后对所有路径、时延和多普勒相干叠加，才能得到 H。",
             "F 是硬件馈电的线性算子。对 64T，192 个物理阵元按端口分成 64 组，每组三个垂直阵元；对 256T，1536 个阵元分成 256 组六阵元。每列表示“激励这个 RF 端口时哪些阵元以什么复权发射”，每行表示“这个物理阵元属于哪个端口”。子阵不重叠且列归一时，<code>FᴴF=I</code>；这既给出能量守恒，也给出排布正确性的强检查。",
             "单元方向图与端口方向图不能混为一张图。端口方向图等于单元方向图乘以垂直子阵因子；改变电下倾只改变子阵因子的相位斜坡，改变 110° HPBW 则改变每个阵元的水平包络。最终链路还要乘传播路径和对端阵列，不能从某张方向图直接读取用户 SINR。",
@@ -878,14 +878,14 @@ DETAIL_SPECS.update({
     "presets": DetailSpec(
         promise="把预设理解成可追溯配置层而不是复制粘贴 YAML：解释默认值、硬件 profile、信道 preset、系统场景和用户 override 的合并次序，以及如何证明最终 resolved config 正是仿真执行的配置。",
         principles=(
-            "预设的目标是复用已审核的一组参数与语义，不是给配置起一个短名字。一个场景通常包含载波/天线、信道源、用户撒点、干扰、SRS/CSI、算法、traffic、scheduler、warmup 和 KPI。每一层有所有者；例如公司天线默认由 hardware profile 注入，用户只改 fixed_downtilt 时不能顺带丢掉极化和端口顺序。",
+            "预设的目标是复用已审核的一组参数与语义，不是给配置起一个短名字。一个场景通常包含载波/天线、信道源、用户撒点、干扰、SRS/CSI、算法、traffic、scheduler、warmup 和 KPI。每一层有所有者；例如预置天线默认由 hardware profile 注入，用户只改 fixed_downtilt 时不能顺带丢掉极化和端口顺序。",
             "合并必须是确定且可解释的。常见顺序为 schema 默认→硬件/信道 preset→系统场景→用户显式 override；深层字典按字段合并，列表是否替换需明示。最终运行只读取 resolved config，并在 manifest 保存来源链与每个关键字段的 provenance。否则同名 preset 更新后，历史结果无法复现。",
             "信道 preset 与系统场景不是同一层。前者描述数据源、channel model、阵列、频率与样本；后者增加 TTI、业务、调度、负载目标和 KPI。capacity 与 experience 也应选择各自允许的场景合同。页面中的全量清单由 YAML 动态扫描，详细阅读重点是字段语义、继承和边界，而不是重复展示每行文本。",
-            "公司 CDF 到位后应作为版本化资产进入 traffic profile：文件哈希、单位、采样规则和 scale 与 preset 一起记录。校准得到的 30%/50% scale 是场景/算法/用户数相关结果，不应写成永远有效的全局常数；可以缓存，但命中条件必须包含影响负载的配置哈希。",
+            "实测 CDF 到位后应作为版本化资产进入 traffic profile：文件哈希、单位、采样规则和 scale 与 preset 一起记录。校准得到的 30%/50% scale 是场景/算法/用户数相关结果，不应写成永远有效的全局常数；可以缓存，但命中条件必须包含影响负载的配置哈希。",
         ),
         implementation=(
             ("加载分层配置", "解析 presets.yaml/system_presets.yaml 与 schema 默认，拒绝未知字段、重复名称和非法枚举。"),
-            ("应用 profile 与 override", "硬件解析器补齐公司 64T/256T 合同，场景层再合并 traffic/scheduler；用户 override 只覆盖显式字段。"),
+            ("应用 profile 与 override", "硬件解析器补齐预置 64T/256T 合同，场景层再合并 traffic/scheduler；用户 override 只覆盖显式字段。"),
             ("生成 resolved snapshot", "运行前写出完全展开的 config、preset 来源、关键 provenance、文件哈希和版本，后续模块只读该快照。"),
             ("动态生成参考页", "生成器扫描当前 YAML，把摘要放精简视图、完整字段与来源放参考项；数量测试防止新增 preset 漏文档。"),
         ),
@@ -974,7 +974,7 @@ DETAIL_SPECS.update({
     "limitations": DetailSpec(
         promise="把已拍板行为、工程近似和下一阶段决策分开管理，说明每个限制会偏向什么方向、影响哪些结论，以及未来替换时需要守住哪些回归。",
         principles=(
-            "限制不是一句“仅供参考”，而应包含当前实现、为何暂时接受、可能偏差方向、适用范围、检测信号与替换接口。例如单元方向图当前是 110°/65° 参数化包络而非公司实测图：可用于比较索引、F、下倾和相对波束机制，但不能宣称绝对旁瓣/覆盖与产品一致。metadata 的 measured flag 防止呈现层误写。",
+            "限制不是一句“仅供参考”，而应包含当前实现、为何暂时接受、可能偏差方向、适用范围、检测信号与替换接口。例如单元方向图当前是 110°/65° 参数化包络而非实测图：可用于比较索引、F、下倾和相对波束机制，但不能宣称绝对旁瓣/覆盖与产品一致。metadata 的 measured flag 防止呈现层误写。",
             "已拍板项与近似项必须分栏。经典 PF、尾料留空、NACK 字节按现状、1 s 可配置 warmup、MU useful bytes 选择等是当前产品/算法合同；全带 SINR 判 BLER、简化 HARQ、MU pair 细节待完善、PMI 周期待标定等是模型边界。前者变更需要 migration，后者替换需要证明精度提高且默认影响可解释。",
             "近似之间会耦合。逐 RBG SINR 暂不做时，全带 BLER 会弱化频率选择与功控效果；未来加入后会改变 UeLinkTable 维度、TBS planner 与系统复杂度，并可能与其他同一结构改动冲突。路线图应按数据合同依赖排序，而不是把每个愿望独立列出。",
             "限制还要进入报告筛选：当实验问题触碰限制时，Agent 自动前置相关说明。例如用户问实测产品覆盖，方向图未实测是阻塞/强限制；用户只比较同一参数化图下两种端口顺序，则它是共同控制条件，不妨碍相对结论。",
@@ -986,7 +986,7 @@ DETAIL_SPECS.update({
             ("替换时做桥接", "新模型在同一 toy/正式样本与旧近似 A/B，比对接口、性能、资源和结论变化，保留 compatibility mode。"),
             ("文档动态核对", "已决策、当前边界和路线图分别渲染；禁止把未实现项写成现在能力。"),
         ),
-        example_title="把参数化方向图换成公司实测图时不能只换一张曲线",
+        example_title="把参数化方向图换成实测图时不能只换一张曲线",
         example=(
             "<p>实测资产可能包含水平/垂直切面、频率点、极化复响应、校准坐标和旁瓣。接入时需定义插值、角度基准、Jones 基底、频率外推与归一参考，并保留旧 parametric profile 作为回归。</p>"
             "<p>验证不仅比较示意图，还要在波束中心、±HPBW/2、背瓣、交叉极化与多频点做锚点，再检查 H、RSRP、SINR 和系统 KPI 的变化。此前基于临时图的绝对覆盖结论不能自动继承；相同临时图下算法 A/B 的机制结论则可重新评估后保留。</p>"
@@ -1100,7 +1100,7 @@ DETAIL_SPECS.update({
             ("零时延退化", "h_prec=h_true 时，aged rank/SINR 与原实现逐位一致。"),
             ("未来隔离", "任意修改 snapshot s 之后的 H，不能改变 s 时刻的 PMI、CQI、BF gain 或 source snapshot。"),
             ("周期分离", "默认报告周期 20 ms 时不会每个 5 ms snapshot 更新；显式设 5 ms 后才逐快照更新。"),
-            ("跳频来源", "公司默认场景返回 superran:superran-srs-c63-b1-17hop-v1 provenance 与 17 跳顺序；非 272-RB profile 必须硬失败。"),
+            ("跳频来源", "预置默认场景返回 superran:superran-srs-c63-b1-17hop-v1 provenance 与 17 跳顺序；非 272-RB profile 必须硬失败。"),
             ("端口合同", "64T/256T 的 Type-I codebook 按 pol-h-v/top-to-bottom 置换后，可直接作用于真实 H。"),
         ),
         pitfalls=(
@@ -1187,7 +1187,7 @@ DETAIL_SPECS.update({
         promise="把 PMI 从一个缩写拆成可执行的数据链：候选码本怎样由二维阵列和双极化生成，真实端口顺序怎样进入 W，宽带搜索怎样选列，报告时序怎样保持，以及 PMI 如何同时成为 CQI 与 BF Gain 的参照。",
         principles=(
             "PMI 的本质不是“最优预编码矩阵本身”，而是有限候选集合中的可反馈索引。SVD/协方差特征向量可以在连续复向量空间寻找方向，PMI 只能从码本里挑，因此两者之间包含码本量化与结构限制。SuperRAN 又允许 <code>precoder=type1</code> 把该参照权直接用于发射；这时额外 BF Gain 为 0，只说明参照权和发送权相同，PMI 自身的阵列增益已经在 CQI 参照 SINR 中。",
-            "候选方向必须和真实物理端口一一对应。Type-I 逻辑行按 polarization block、vertical、horizontal 排列；公司新 64T/256T 信道采用 pol-h-v、top-to-bottom。搜索前把码本行置换到 H 的 RF-port 轴，返回的 W 才能直接左乘/右乘信道。只改变 metadata、不重排 H/W，或把 64×rank 的矩阵 reshape 成另一顺序，都会让波束指向错误物理位置。",
+            "候选方向必须和真实物理端口一一对应。Type-I 逻辑行按 polarization block、vertical、horizontal 排列；预置 64T/256T 信道采用 pol-h-v、top-to-bottom。搜索前把码本行置换到 H 的 RF-port 轴，返回的 W 才能直接左乘/右乘信道。只改变 metadata、不重排 H/W，或把 64×rank 的矩阵 reshape 成另一顺序，都会让波束指向错误物理位置。",
             "宽带统计必须积功率而不是积复电压。<code>R_tx=E[HHᴴ]</code> 对每个 snapshot 的公共相位旋转不变，也保留各 RB/UE 端口的方向能量；<code>|E[H]|²</code> 会把相反相位的同一空间方向错误抵消。当前多层算法在残余协方差上逐列贪心，适合作为工程 baseline，但它没有联合枚举完整多层 Type-I 矩阵，因此文档始终写 Type-I-style。",
             "PMI、RI 和报告状态是三个轴。<code>PMIResult.rank</code> 只说明函数最终给了几列；<code>compute_precoder(type1)</code> 可用特征值门限先做工程 rank；体验系统则计算 rank 候选并按 gNB 视角 SE 选择。系统可用 PMI 还要经过报告周期和因果 hold。任何图表都应同时给 <code>indices/rank source/report source snapshot</code>，否则一个“PMI=320”没有可复算意义。",
             "CQI 与 BF Gain 复用同一个 PMI 参照，但评价视角不同。终端把最近报告中的 W_PMI 作用到当前真实 H，得到 PMI-SINR 并形成 CQI；基站在自己可见的 H_prec 上比较 W_tx 与 W_PMI，得到额外 BF Gain。两边必须锁定相同 rank、功率约束、干扰口径和接收机，不能让 SVD 一臂用真值、PMI 一臂用估计。",
@@ -1368,7 +1368,7 @@ DETAIL_SPECS.update({
     "referencesignals": DetailSpec(
         promise="把载波资源表、TDD 时隙、SSB/Gold/SRS/CSI-RS 序列与波束选择放在同一物理基线中，解释这些工具函数怎样支撑估计和测量，又为何“序列相关低”并不自动等于现场导频无污染。",
         principles=(
-            "NR RB 数必须查 38.104 频率范围对应表，不能用带宽除以子载波间隔后取整。相同 50/100 MHz 与 60 kHz 在 FR1/FR2 可得到不同 RB 数；项目公司基线又显式从标准 273 RB 截成 272 RB，以形成 17 个完整 16-RB RBG。参考信号、SRS 轮转和调度必须共享同一载波对象，否则频域索引会差一个 RB。",
+            "NR RB 数必须查 38.104 频率范围对应表，不能用带宽除以子载波间隔后取整。相同 50/100 MHz 与 60 kHz 在 FR1/FR2 可得到不同 RB 数；项目预置基线又显式从标准 273 RB 截成 272 RB，以形成 17 个完整 16-RB RBG。参考信号、SRS 轮转和调度必须共享同一载波对象，否则频域索引会差一个 RB。",
             "TDD 可用下行比例来自 D/U/S pattern 和特殊时隙 symbol 划分。一个 S slot 不能粗暴按完整 DL 或完整 UL 计；DL fraction 为普通 D slot 加上特殊时隙中 DL symbols 的比例，再除以周期总 slot。部分历史算法说明仍出现 0.7 工程值，正式系统和文档应从同一 pattern/special-slot 配置派生，并把固定值视为待迁移兼容边界。",
             "SSB 与 Gold/SRS 序列的作用首先是资源和相关性合同。PSS/SSS/PBCH-DMRS 使用各自序列结构与 cell identity，SRS 通过端口/循环移位/频域轮转区分资源。归一化相关可发现实现级冲突，但真实污染还取决于同步误差、功控、近远效应、频率选择性和复用拓扑；不能因为理想序列互相关低就宣称 LS 不受定向干扰。",
             "CSI-RS DFT 波束扫描与 PMI Type-I-style 是两套对象。前者的候选通常按 <code>[beam, port]</code> 存储，用 <code>argmax ||H w_i||²</code> 选接收功率最大波束；后者是 <code>[port, column]</code>，还涉及双极化共相、多层选择和反馈索引。两套实现都可能含 DFT，但 shape、用途、规模和时序不能互换。",
@@ -1378,13 +1378,13 @@ DETAIL_SPECS.update({
             ("建立载波与 TDD", "<code>nr_rb_count()</code> 按 FR1/FR2 表查询；<code>tdd_pattern_info()</code> 展开 D/U/S 与特殊时隙的 DL/UL symbol 数，GP 缺省时由 14−DL−UL 推出，调用者据此导出 DL fraction。"),
             ("生成同步与参考序列", "<code>physical.py</code> 生成 PSS/SSS、PBCH DMRS、Gold sequence 与 SRS 基序列/循环移位，显式保持 cell/port/length 参数。"),
             ("验证相关合同", "<code>sequence_correlation()</code> 比较自相关峰、旁瓣和不同端口/小区互相关；测试覆盖循环移位与长度不一致处理。"),
-            ("映射 SRS 频域轮转", "公司基线 C_SRS=63、B_SRS=1 每次覆盖 16 RB，17 次覆盖 272 RB；测量链按周期收集，不使用“年龄”作为周期名称。"),
+            ("映射 SRS 频域轮转", "预置基线 C_SRS=63、B_SRS=1 每次覆盖 16 RB，17 次覆盖 272 RB；测量链按周期收集，不使用“年龄”作为周期名称。"),
             ("生成 CSI-RS 扫描码本", "<code>dft_codebook()</code> 构造单位范数候选波束，<code>select_beam()</code> 在当前 H 上计算接收总功率并返回索引与功率。"),
             ("进入估计与干扰投影", "LS/LMMSE 使用同一导频观测；<code>project_interference()</code> 按参考序列投影污染项。若干扰发送信号模型是 rank-1，precoded/isotropic 可能数值相同，不能据此声称方向性不存在。"),
         ),
         example_title="17 次 SRS 轮转、一个特殊时隙和两套 DFT 码本",
         example=(
-            "<p>100 MHz 公司基线实际调度 272 RB。SRS 每次覆盖 16 RB，因此 17 次恰好覆盖全带；若误用标准表的 273 RB，第 18 次只剩一个残块，测量与 17-RBG 调度无法一一对齐。再假设 TDD 周期有 7 个 D、2 个 U、1 个 S，S 中 6/14 个 symbol 为 DL，则可用 DL 比例是 (7+6/14)/10，而不是写死 0.7 或把 S 整个算成 DL。</p>"
+            "<p>100 MHz 预置基线实际调度 272 RB。SRS 每次覆盖 16 RB，因此 17 次恰好覆盖全带；若误用标准表的 273 RB，第 18 次只剩一个残块，测量与 17-RBG 调度无法一一对齐。再假设 TDD 周期有 7 个 D、2 个 U、1 个 S，S 中 6/14 个 symbol 为 DL，则可用 DL 比例是 (7+6/14)/10，而不是写死 0.7 或把 S 整个算成 DL。</p>"
             "<p>同一个 64 端口阵列可生成 64 个 CSI-RS DFT 扫描波束，数组形状为 beam×port；PMI Type-I-style 则可能有 2048 个 port×column 候选，并含 +45/−45° 共相结构。二者都调用复指数并不意味着 index 17 指向同一个物理对象。文档和 API 必须标出 shape 与角色。</p>"
         ),
         checks=(
@@ -1568,7 +1568,7 @@ FORMULA_SPECS: dict[str, FormulaSpec] = {
         (("f<sub>p</sub>(φ,ε)", "极化端口 p 在方向 (φ,ε) 上的二维 Jones 响应。"),
          ("g<sub>E</sub>", "单元方向图给出的线性电压幅度。"),
          ("ζ<sub>p</sub>", "端口 p 的极化斜角。"),
-         ("ζ<sub>0</sub> / ζ<sub>1</sub>", "公司交叉极化的 +45° / −45°。"),
+         ("ζ<sub>0</sub> / ζ<sub>1</sub>", "预置交叉极化的 +45° / −45°。"),
          ("cos / sin 分量", "Jones 基底中两个正交电场方向上的投影。")),
     ),
     "F_SUBARRAY_PATTERN": FormulaSpec(
@@ -2026,7 +2026,7 @@ FORMULA_SPECS.update({
         "跳频完整采集窗与平均 CSI 陈旧时长",
         "一次 SRS 只覆盖一个跳频片段时，要 H_hop 次机会才扫完全带。均匀轮转下，跳频等待加周期内相位的平均正好是完整扫描时间的一半，再加固定处理时延。",
         (("T<sub>sweep</sub>", "一轮 SRS 跳频覆盖全部目标 RBG 所需时间。"),
-         ("H<sub>hop</sub>", "一轮完整覆盖所需跳数；公司 272-RB 基线为 17。"),
+         ("H<sub>hop</sub>", "一轮完整覆盖所需跳数；预置 272-RB 基线为 17。"),
          ("T<sub>SRS</sub>", "相邻 SRS 发送机会的周期。"),
          ("bar τ<sub>CSI</sub>", "跨 RBG、周期相位平均后的 CSI 陈旧时长。"),
          ("D<sub>proc</sub>", "信道估计、算权与调度可用之间的固定处理时延。")),
@@ -2111,6 +2111,55 @@ FORMULA_SPECS.update({
          ("Δλ<sub>r</sub>", "两个空间模的 dB 间隔，用于 CDF 校准。"),
          ("10log<sub>10</sub>", "功率/特征值比转换到 dB；不能对 λ 再使用 20log10。"),
          ("r", "PRB/RB 频率索引；实现对每个频点独立出样本。")),
+    ),
+})
+
+
+FORMULA_SPECS.update({
+    "F_SRS_RESOURCE_COLLISION": FormulaSpec(
+        "两个周期 SRS 资源何时真正相撞",
+        "只有时域机会、OFDM symbol、comb 和循环移位都重合时才记为基础模型中的导频碰撞。不同周期不能只比较 offset 是否相等；要用周期最大公约数判断两个等差时间序列是否会在未来相遇。",
+        (("a / b", "来自两个 UE（可跨小区）的周期 SRS 资源。"),
+         ("s", "SRS 所在 OFDM symbol，基础 profile 使用 10..13。"),
+         ("c", "comb offset，基础 profile 使用 0 或 1。"),
+         ("𝒞", "该 UE 的 SRS port 占用的循环移位集合；4-port UE 占连续 4 个。"),
+         ("o", "一个 SRS 周期内的 slot offset。"),
+         ("T", "SRS 周期，按 30 kHz slot 数表达。"),
+         ("gcd", "两个周期的最大公约数；offset 差能被它整除时，两个周期机会最终重合。"),
+         ("1[·]", "条件成立为 1，否则为 0 的指示函数。")),
+    ),
+    "F_RESOURCE_LEDGER": FormulaSpec(
+        "物理 PRB 与逻辑 layer-PRB 是两本不同的账",
+        "MU 的两个用户共享同一组物理 RBG，因此物理 PRB 只扣一次；基带却要同时处理两人的所有层，所以逻辑资源按总层数乘 PRB。两本账任一超预算，grant 都不能提交。",
+        (("g", "本 TTI 中的一个 SU 或 MU grant。"),
+         ("𝓡_g", "grant g 占用的 RBG bitmap。"),
+         ("N_PRB,r", "RBG r 实际包含的 PRB 数；当前固定为 16。"),
+         ("u∈g", "共享该 grant 的用户；SU 一个、当前 MU 两个。"),
+         ("L_u", "用户 u 在该 grant 上的 rank/层数。"),
+         ("P_phys", "小区物理频域占用，MU 共享资源只计一次。"),
+         ("P_logical", "基带空间处理工作量，按 layer×PRB 累加。")),
+    ),
+    "F_FREQUENCY_OBJECTIVE": FormulaSpec(
+        "频选在可用 RBG 中最大化真实可服务字节",
+        "候选 RBG 先按 gNB 可见的逐 RBG predicted SINR 排序，再逐个前缀重算一个码字的有效 SINR、MCS 和量化 TBS。若某个前缀能发完队列，取最小 RBG 数；否则取 useful bytes 最大者。顺序分配前缀也同时参与，形成不劣于旧基线的安全网。",
+        (("𝒜", "当前 ResourceLedger 中仍可用的 RBG 集合。"),
+         ("𝓡", "被评估的一个 RBG 子集。"),
+         ("Q_u", "用户 u 在本 TTI 决策时的队列字节数。"),
+         ("γ_u,r^dB", "gNB 对用户 u 在 RBG r 的 predicted SINR。"),
+         ("γ̄_u", "当前已确认口径：grant 内 RBG 和 rank stream 的 dB 算术平均。"),
+         ("L_u", "该用户的发送 rank。"),
+         ("TBS", "按最终 MCS、rank 和真实 PRB 数经过 38.214 量化后的字节数。")),
+    ),
+    "F_MU_CANDIDATE_SCORE": FormulaSpec(
+        "PF anchor 固定后，用 useful bytes/RBG 选择 MU 伙伴",
+        "PF 已经决定 anchor，不在伙伴评分中被替换。对每个通过相关性、层数和预测 BLER 门的伙伴，使用 CorrLoss、均分功率损失与 SU+MU OLLA 重算两份 TB，再用队列封顶的总有用字节除以共享物理 RBG 数。",
+        (("u", "当前 PF 排序选出的 anchor UE。"),
+         ("v", "被枚举的一个伙伴 UE。"),
+         ("𝒱_u^feasible", "通过 pair link、相关性、层数和 predicted BLER 门的伙伴集合。"),
+         ("Q_u/Q_v", "两位用户当前真实队列字节数。"),
+         ("TBS_u/TBS_v", "同一共享 bitmap 上分别计算的两个单码字 TB 大小。"),
+         ("𝓡_u,v", "该 MU grant 共享的物理 RBG bitmap。"),
+         ("S(u,v)", "候选对每个物理 RBG 可交付的 queue-limited useful bytes。")),
     ),
 })
 
@@ -2427,5 +2476,93 @@ FORMULA_SPECS.update({
          ("g<sub>ℓ</sub>", "该流在单位范数预编码方向上的有效信道功率增益。"),
          ("L", "同时发送的总流数。"),
          ("P", "当前频率点的全小区总发射功率。")),
+    ),
+})
+
+
+DETAIL_SPECS.update({
+    "srsallocation": DetailSpec(
+        promise="把“SRS 周期”推进成一套可分配、可回收、可判碰撞并真正影响每 UE CSI 时间轴的资源合同。详细版同时说明当前普通 H 资源的能力边界，以及为什么 PCI 模 3 在轻载时能降低导频碰撞、在过载时却不能被宣传成绝对正交。",
+        principles=(
+            "资源分配和跳频是两层。<strong>资源叶子</strong>决定 UE 在哪个周期 offset、symbol、comb 与循环移位发送；<strong>频域跳频</strong>决定每次发送覆盖 17 个 RBG 中的哪一个。前者避免用户在同一导频机会互撞，后者决定某个 RBG 的 CSI 多久才能刷新。只建 17-hop 老化、不分配叶子，会让所有 UE 默认挤在 offset=0；只分配 metadata、不把 offset 送入老化，又不会改变任何物理结果。",
+            "基础 profile 固定在 100 MHz、30 kHz、272 PRB 和 8:2 TDD。每 10 slot 出现一次 slot-phase 7 的 SRS 机会，symbol 13→10、comb 0/1、总共 8 个循环移位。1/2/4-port UE 分别占连续 1/2/4 个循环移位。10 ms 周期包含两个不同 offset；4-port 情况容量是 2×4×2×2=32 个 UE 叶子，33 个必须硬失败。",
+            "PCI mod3 当前是<strong>候选优先顺序</strong>而不是不可越过的频谱分区。资源叶子按 0/1/2 着色，小区先取与 PCI mod3 同色的叶子，再在资源不足时向另外两色溢出。这样三小区各一个 UE 时首选叶子互不相撞；当每小区负载超过各自首选色容量后，碰撞可以重新出现，报告必须把这种负载依赖保留下来。",
+            "跨周期资源是否碰撞要用同余关系。10 ms offset 7 与 20 ms offset 27 虽然数字不同，却会每 20 ms 重合；相反 offset 7 与 17 永不重合。实现用 <code>(o_a-o_b) mod gcd(T_a,T_b)=0</code>，再同时检查 symbol、comb 与循环移位交集，避免只比较结构体是否相等的假安全。",
+            "当前跨小区实验是一个明确标注的 allocator-level proxy：碰撞的等功率外小区 UE 各贡献 1 单位 I/S，LS NMSE proxy 为 N/S+I/S；不碰撞维度按理想正交处理。它能验证资源错开方向，却不是 SRS 波形、时延扩展、根序列、TA 与非理想循环移位共同作用的链路级结果。",
+        ),
+        implementation=(
+            ("建立请求", "<code>SrsResourceRequest</code> 固定 UE/cell/PCI mod3/周期/port 数与 hopping 状态；周期只接受当前 CSI 合同的 5/10/20/40 ms，port 只接受 1/2/4。"),
+            ("生成候选池", "按周期内全部 slot-phase 7 机会、symbol 13→10、comb 0/1 和循环移位块展开叶子，并用线性索引 mod3 着色；本 PCI 颜色排在最前。"),
+            ("检查周期碰撞", "分配前与同小区所有已用叶子做周期同余、symbol、comb 和循环移位四维检查。没有空闲叶子就抛资源耗尽，不复用或降 port。"),
+            ("接入链路表", "<code>build_link_tables()</code> 按 UE 接收端口数批量分配，把对象保存到 <code>UeLinkTable</code>，并把 <code>offset_ms</code> 传给 <code>rbg_lag_snapshots()</code>。"),
+            ("进入结果合同", "系统配置给出 profile/分配 UE 数/暂不建模项，用户级结果给完整叶子，诊断里保留所有 assignment。这样逐 TTI CSI 差异可以追溯到具体资源。"),
+            ("做跨小区反例", "同相三小区和 PCI 0/1/2 三小区各分一个 4-port UE，比较 collision pair、I/S 与 LS NMSE proxy；证据写入 <code>scheduler_p0_validation.json</code>。"),
+        ),
+        example_title="同样是 10 ms 周期，为什么 PCI 模 3 把 LS NMSE proxy 从 2.01 降到 0.01",
+        example=(
+            "<p>同相基线中三个小区都先取 offset=3.5 ms、symbol13、comb0、CS0..3。三对跨小区组合全部碰撞；每个 UE 看见两个等功率污染者，所以平均 I/S=2，加入 N/S=0.01 后 LS NMSE proxy=2.01。</p>"
+            "<p>PCI 0/1/2 时，三个首选叶子分别是 CS0..3、CS4..7 和 comb1/CS0..3，精确碰撞数从 3/3 变成 0/3，proxy 只剩噪声 0.01。这个结论证明<strong>分配器方向正确</strong>；它没有证明重载三小区也零污染，更没有替代波形级估计仿真。</p>"
+        ),
+        checks=(
+            ("容量边界", "10 ms/4-port 同小区前 32 个分配成功，第 33 个硬失败；release 后同一叶子可确定性复用。"),
+            ("周期数学", "混合 10/20/40 ms 用 gcd 同余判碰撞，专门覆盖 offset 数字不同但未来重合的反例。"),
+            ("时间轴生效", "七个同小区 4-port UE 跨过第一个同色 offset 池后，至少出现两个不同 <code>csi_lag_snapshots</code> trace。"),
+            ("同小区正交", "任意已分配两 UE 的四维资源不碰撞；重复请求幂等，不同请求拒绝覆盖。"),
+            ("模 3 方向", "轻载三小区从 100% collision-pair rate 降到 0，且 LS NMSE proxy 严格下降。"),
+            ("公开边界", "每份 assignment/summary 都写 P-H/F、BWP2、根序列、非理想正交和波形级污染未建模。"),
+        ),
+        pitfalls=(
+            "把每个 UE 都设为同一个 SRS 周期，就误以为资源已经分开。周期相同不代表 offset/symbol/comb/CS 正交。",
+            "只把 assignment 写进 JSON，不把 offset 传给 CSI 老化；这种实现跑任何 KPI 都不会变化。",
+            "把 PCI mod3 偏好写成永不碰撞的硬保证；资源池溢出后允许进入其他颜色。",
+            "把 allocator-level LS NMSE proxy 写成完整 SRS 链路仿真。",
+            "遇到资源耗尽后静默复用叶子、降端口或改周期，导致结果看似能跑却违反输入。",
+        ),
+        source_paths=("src/superran/srs_resource.py", "src/superran/csi_aging.py", "src/superran/system.py", "tests/test_srs_resource.py", "tests/test_csi_aging.py", "scripts/run_scheduler_p0_validation.py"),
+    ),
+    "schedulerp0": DetailSpec(
+        promise="沿一个 TTI 从 PF 排序走到不可变 FinalGrant，理解资源账本、逐 RBG 频选、全 MU 伙伴评分和统一定稿器如何闭成一条可审计流水线；并用真实数值解释为什么每一步存在。",
+        principles=(
+            "调度被拆成<strong>估值与提交</strong>。SU/MU PlanBuilder 可以无副作用地估计多个方案，但不能改队列、HARQ、OLLA 或随机流；两套方案先分别通过 ResourceLedger，使用受限后的 useful bytes 决定胜负。选中的计划再由 GrantFinalizer 重算最终 MCS/TBS/useful bytes，最后才抽 BLER 随机数并原子更新状态。",
+            "物理 RBG 与逻辑 layer-PRB 必须分账。rank2+rank2 MU 在 3 个 16-PRB RBG 上只占 48 个物理 PRB，却消耗 3×16×4=192 个逻辑 layer-PRB。账本的 reserve/commit/rollback 不接触业务队列；任何重叠、层数或逻辑预算失败都能回滚到完全空的状态。按当前确认范围，PDCCH/CCE 和最大 grant 数明确不建模。",
+            "频选不再与 RB 功控绑定。链路表本来就保存逐 RBG predicted/receive SINR；<code>auto</code> 在字段完整时启用，<code>on</code> 缺字段硬失败，<code>off</code> 提供宽带/顺序基线。每个候选 bitmap 都按一个码字重新平均 SINR、选 MCS、查量化 TBS，不能把每 RBG TBS 线性相加。",
+            "频选策略同时评估质量排序前缀和旧的轮转顺序前缀。能排空队列时优先最少 RBG；排不空时取 useful bytes 最大者。顺序前缀作为 safety net，使开频选在 gNB 预测口径下不会比旧分配更差。真实 ACK 仍取决于 receive SINR，不能拿 safety net 冒充每个随机 realization 都必胜。",
+            "MU 先固定 PF anchor，再枚举全部待选伙伴。每个伙伴必须有 pair link、相关性不超门限、总层数不超预算，且 <code>CQI+BF+CorrLoss+powerLoss+SU-OLLA+MU-OLLA</code> 对应的预测 BLER 不超过 0.5。可行者按 queue-limited useful bytes/RBG 排序；相关性和 PF 顺序只作并列决胜。",
+            "SU/MU 总方案仍遵循已确认规则：若 SU 能在本 TTI 发完所有可服务队列，直接 SU；否则比较两套 data-limited plan 的总 useful bytes，MU≥SU 才走 MU。伙伴评分解决“MU 内部选谁”，PlanSelector 解决“这个 TTI 是否值得用 MU”，两层不能混成一个阈值。",
+            "GrantFinalizer 是执行前唯一真相。它按 base predicted SINR、CorrLoss、powerLoss 和 OLLA 重新得 MCS，再按实际 bitmap/rank 算 TBS 和 padding；HARQ 则冻结 MCS/RBG 数/rank/TBS。Planner 估值与 Finalizer 任何一项不同立即硬失败，当前压力结果 mismatch count=0。",
+        ),
+        implementation=(
+            ("形成只读快照", "TTI 起点读取队列、HOL、HARQ、PF 平均、OLLA、snapshot 和逐 RBG 链路表；HARQ/tie-break 随机数已按 [TTI,UE] 固定，不随候选顺序漂移。"),
+            ("做一次 PF 排序", "potential full-band TBS 除以 scheduled-TBS 指数平均；QoS-PF 只在显式开启时加入业务权重和 HOL/PDB 因子。重传按首传时间移到新传之前。"),
+            ("构造 SU 计划", "依 PF 顺序给每个 UE 选最小够用或 useful 最大的 RBG 子集；所选 bitmap 上重新算 predicted/receive SINR、MCS 与 TBS。尾料没有需求就留空。"),
+            ("构造 MU 计划", "对每个 anchor 枚举所有伙伴、记录可行性和拒绝原因，选 useful bytes/RBG 最高者；没有伙伴则该 anchor 回退 SU，随后继续使用剩余 RBG。"),
+            ("两套计划过账", "ResourceLedger 对 SU/MU 分别 reserve+commit 物理 bitmap、层数和逻辑 PRB；预算拒绝后的实际 useful bytes 才进入 SU/MU 比较。"),
+            ("选择与定稿", "HARQ 优先、SU 清空优先、否则 MU useful≥SU；GrantFinalizer 重算并对计划估值做逐值 hard compare，绑定 reservation id。"),
+            ("原子更新和留证", "按 FinalGrant 抽 BLER、更新队列/HARQ/OLLA/PF；TTI trace 保存 RBG bitmap、候选评分、拒绝原因、账本快照、MCS 输入、receive SINR、BLER draw 与 ACK。"),
+        ),
+        example_title="UE0 为什么跳过更早的 UE1，和 UE2 做 rank2+rank2 MU",
+        example=(
+            "<p>压力例中 PF 先选 UE0 为 anchor；伙伴顺序里 UE1 的 <code>pf_order=1</code>，UE2 的 <code>pf_order=2</code>。UE1 与 UE0 的 CorrLoss 是 −5 dB，17 RBG 上两份最终 MCS 为 12/11，合计 useful density 约 <b>3315.8 B/RBG</b>；UE2 虽排得更后，但 CorrLoss 只有 −1 dB，最终 MCS 17/14，density 约 <b>4701.6 B/RBG</b>，因此选择 UE2。</p>"
+            "<p>该 TTI 的 SU-only plan 只能交付 54,285 B；选中 MU plan 在同一 17-RBG bitmap 上交付 79,927 B，所以 <code>MU_useful_bytes_ge_SU</code> 成立。资源账显示物理 272 PRB 只扣一次、总层数为 4；两个用户共享同一个 <code>tti0-res0</code>。若把 UE2 相关性改到门限以上，它会留下 <code>correlation_threshold</code> 拒绝记录，而不是从结果中消失。</p>"
+            "<p>互补子带频选反例中，off 基线小区 ACK 吞吐为 148.71 Mbps、每忙 TTI 只服务 1 个 UE；on 在相同 CRN 下为 486.52 Mbps、每忙 TTI 服务 2 个 UE，约 3.27×。这个构造证明频选机制的方向和 bitmap 落账正确；它不是对一般现场信道承诺 3.27×。</p>"
+        ),
+        checks=(
+            ("资源事务", "MU 3×16 PRB/rank2+rank2 精确得到 physical=48、logical=192；rollback 回到 0，commit 后 max layer=4。"),
+            ("频选不劣估值", "每个 grant 同时评估质量/顺序前缀，predicted useful 增量非负；互补子带端到端吞吐与同 TTI 用户数显著上升。"),
+            ("MU 全候选", "刻意让早到伙伴更差，trace 仍选择后到高密度伙伴；candidate/feasible/selected 与拒绝原因都有计数。"),
+            ("统一定稿", "所有 SU/MU/NewTx/ReTx 都有 <code>finalizer_version</code> 和 reservation id；计划/定稿 MCS、TBS、useful mismatch 恒为 0。"),
+            ("HARQ 身份", "一次重传保持 MCS、RBG 数、rank、TBS 与 D/S 类型；只在 BLER lookup 使用 IR/CC 合并增益。"),
+            ("长序列守恒", "系统回归检查 arrived=ACK+queue+inflight+dropped、用户归因 PRB 求和回到小区物理 PRB、RBG overlap=0。"),
+        ),
+        pitfalls=(
+            "把频选开关继续写成 rb_power_control.enabled；这会在均匀功率时错误关闭频率选择性。",
+            "伙伴循环遇到第一个相关性过门者就 break，使 PF 顺序代替了 MU 收益评分。",
+            "在 MU 中给两个用户各扣一遍物理 RBG，或只扣物理资源却不记四层逻辑工作量。",
+            "Planner 和执行循环各算一遍 MCS/TBS，结果稍有漂移却不报错。",
+            "用 true SINR 选择候选 bitmap 或伙伴；调度只能消费 gNB 当时可见的 predicted 信息。",
+            "把互补子带 3.27× 构造结果扩写成一般现场收益；方向性反例不是统计发布结论。",
+            "忘记当前 PDCCH/CCE 不建模，进而把一个 TTI 可服务的小包 UE 数说成产品级精确上限。",
+        ),
+        source_paths=("src/superran/scheduler_resource.py", "src/superran/scheduler_frequency.py", "src/superran/scheduler_mu.py", "src/superran/scheduler_finalize.py", "src/superran/experience.py", "tests/test_scheduler_p0.py", "scripts/run_scheduler_p0_validation.py"),
     ),
 })

@@ -172,6 +172,11 @@ F_SRS_LAG = M(
     r"\tau_b(t)=t-t_{\mathrm{last\ SRS},b}-D_{\mathrm{proc}},\qquad "
     r"\widehat H_b(s)=H_b\!\left(\max(0,s-\lceil\tau_b/\Delta t_{\mathrm{snap}}\rceil)\right)",
 )
+F_SRS_RESOURCE_COLLISION = M(
+    r"\operatorname{collide}(a,b)=\mathbf 1\!\left[s_a=s_b,\ c_a=c_b,\ "
+    r"\mathcal C_a\cap\mathcal C_b\ne\varnothing,\ "
+    r"(o_a-o_b)\bmod\gcd(T_a,T_b)=0\right]",
+)
 F_CSI_SWEEP = M(
     r"T_{\mathrm{sweep}}=H_{\mathrm{hop}}T_{\mathrm{SRS}},\qquad "
     r"\bar\tau_{\mathrm{CSI}}=\frac{H_{\mathrm{hop}}T_{\mathrm{SRS}}}{2}+D_{\mathrm{proc}}",
@@ -513,6 +518,22 @@ F_LOG_BLER_INTERP = M(
 F_CONSERVE = M(
     r"B_{\mathrm{arrived}}=B_{\mathrm{ACK}}+B_{\mathrm{queued}}+"
     r"B_{\mathrm{inflight}}+B_{\mathrm{dropped}}",
+)
+F_RESOURCE_LEDGER = M(
+    r"P_{\mathrm{phys}}=\sum_{g}\sum_{r\in\mathcal R_g}N_{\mathrm{PRB},r},"
+    r"\qquad P_{\mathrm{logical}}=\sum_g\left(\sum_{u\in g}L_u\right)"
+    r"\sum_{r\in\mathcal R_g}N_{\mathrm{PRB},r}",
+)
+F_FREQUENCY_OBJECTIVE = M(
+    r"\mathcal R_u^{\star}=\arg\max_{\mathcal R\subseteq\mathcal A}"
+    r"\min\!\left(Q_u,\operatorname{TBS}(\bar\gamma_u(\mathcal R),L_u,\mathcal R)\right),"
+    r"\qquad \bar\gamma_u(\mathcal R)=\frac{1}{|\mathcal R|}"
+    r"\sum_{r\in\mathcal R}\gamma_{u,r}^{\mathrm{dB}}",
+)
+F_MU_CANDIDATE_SCORE = M(
+    r"S(u,v)=\frac{\min(Q_u,\operatorname{TBS}_u)+"
+    r"\min(Q_v,\operatorname{TBS}_v)}{|\mathcal R_{u,v}|},\qquad "
+    r"(u,v)^\star=\arg\max_{v\in\mathcal V_u^{\mathrm{feasible}}}S(u,v)",
 )
 
 # A mathematical expression is not self-documenting.  Wrap every curated
@@ -887,7 +908,7 @@ def array_svg() -> str:
     body += arrow(510, 205, 550, 197)
     body += arrow(510, 285, 550, 295)
     body += arrow(510, 365, 550, 393)
-    return svg_wrap(body, 980, 480, "公司 AAU 阵列拓扑：双极化、1 驱 3 与 192×64 耦合矩阵一一对应")
+    return svg_wrap(body, 980, 480, "预置 AAU 阵列拓扑：双极化、1 驱 3 与 192×64 耦合矩阵一一对应")
 
 
 def array_256_svg() -> str:
@@ -910,7 +931,7 @@ def array_256_svg() -> str:
     body += arrow(585, 112, 660, 86, "pol block")
     body += arrow(585, 205, 660, 192, "1→6")
     body += arrow(585, 288, 660, 298, "coupling")
-    return svg_wrap(body, 1080, 420, "公司 256T 图纸顺序：16H×8V×2pol 端口与 1 驱 6 的 1536×256 耦合")
+    return svg_wrap(body, 1080, 420, "预置 256T 图纸顺序：16H×8V×2pol 端口与 1 驱 6 的 1536×256 耦合")
 
 
 def port_contract_svg() -> str:
@@ -1024,7 +1045,7 @@ def element_pattern_svg() -> str:
         body,
         1105,
         395,
-        "阵元方向图示意：曲线由当前参数公式生成并归一化，不是公司实测方向图",
+        "阵元方向图示意：曲线由当前参数公式生成并归一化，不是已导入的实测方向图",
     )
 
 
@@ -2099,7 +2120,7 @@ python -m superran.server
 caps = sr_capabilities()
 draft = sr_plan(
     intent="在单小区 64T4R 全带场景，用同一批 SRS 估计信道比较 SVD 权与 PMI 权的谱效",
-    preset="company_64t4r",  # 同一公司阵列/100 MHz；入门实验先隔离多小区干扰
+    preset="company_64t4r",  # 同一预置阵列/100 MHz；入门实验先隔离多小区干扰
     overrides={"link": "BOTH"},  # 必须生成 DL 真值 + UL SRS 估计的 paired contract
 )
 
@@ -2187,7 +2208,7 @@ print(workbench["url"] or workbench["html_path"])
     )
     body += callout(
         "note", "为什么 Hello World 用单小区，而不是 21 小区",
-        "<p><code>company_64t4r</code> 与正式多小区预设使用同一 64T4R 公司阵列、100 MHz、"
+        "<p><code>company_64t4r</code> 与正式多小区预设使用同一预置 64T4R 阵列、100 MHz、"
         "272 RB、CDL-C 与 <code>ls_mmse</code>，但先隔离邻区干扰，让第一次实验只回答"
         "“连续 SRS/SVD 方向与有限 PMI 码本的差异”。<code>80=10 UE×8 snapshots</code> 也满足"
         "后续体验模式的最低快照数。21 小区全带场景属于进阶压力验证；它不能被包装成一分钟入门，"
@@ -2408,13 +2429,13 @@ def hardware_page() -> Page:
     body += array_svg()
     body += array_256_svg()
     body += """
-<h2>两套已确认的公司阵列合同</h2>
+<h2>两套已确认的阵列合同</h2>
 """
     body += table(
         ["profile", "RF 端口", "物理 AE / 馈电", "端口顺序", "垂直编号"],
         [
             ("64T 基线", "8H×4V×2pol = 64", "8H×12V×2pol = 192；1 驱 3", "pol_h_v", "top_to_bottom"),
-            ("公司 256T", "16H×8V×2pol = 256", "16H×48V×2pol = 1536；1 驱 6", "pol_h_v", "top_to_bottom"),
+            ("预置 256T", "16H×8V×2pol = 256", "16H×48V×2pol = 1536；1 驱 6", "pol_h_v", "top_to_bottom"),
         ],
     )
     body += callout(
@@ -2431,7 +2452,7 @@ def hardware_page() -> Page:
 同时标出 273，不能混写。SRS 仍能按标准表覆盖这 272 RB：<code>C_SRS=63</code>、
 <code>B_SRS=1</code> 时顶层带宽 272 RB、单次 16 RB、17 次完整轮转。</p>
 <p>标准反查还必须知道频率范围：50 MHz / 60 kHz 在 FR1 是 65 RB，在 FR2 是 66 RB；
-100 MHz / 60 kHz 则分别是 135 与 132 RB。因此实现保留两张独立表，默认公司 n41 场景用
+100 MHz / 60 kHz 则分别是 135 与 132 RB。因此实现保留两张独立表，默认预置 n41 场景用
 <code>FR1</code>，载频不低于 24.25 GHz 的物理后端显式选择 <code>FR2</code>。非标准带宽不会
 再用除法猜一个 RB 数；合成频域网格必须显式给 <code>num_rb</code>。</p>
 <h2>默认值如何生效</h2>
@@ -2444,11 +2465,11 @@ def hardware_page() -> Page:
     ))
     body += callout(
         "warn", "UE 面板仍是工程假设",
-        "<p><code>2H×1V×2pol</code> 的 4R UE 不是公司实测手机天线。它可配置，文档和结果都不能称为硬件真值。</p>",
+        "<p><code>2H×1V×2pol</code> 的 4R UE 不是实测手机天线。它可配置，文档和结果都不能称为硬件真值。</p>",
     )
     body += """
 <h2>6° 电下倾从哪来</h2>
-<p>当前 <code>fixed_downtilt_deg=6.0</code> 是公司 AAU 配置块的默认工程基线，不是由场景几何
+<p>当前 <code>fixed_downtilt_deg=6.0</code> 是预置 AAU 配置块的默认工程基线，不是由场景几何
 反推出来的自然常数。它进入每个固定垂直子阵（64T 的 1 驱 3、256T 的 1 驱 6）内部相位递进；用户可以通过
 <code>bs_antenna.fixed_vertical_subarray.fixed_downtilt_deg</code> 任意覆盖。改变它等价于改变馈电
 校准，应同时改变/记录 <code>calibration_id</code>，并用垂直波束峰值与 F 矩阵列范数回归。</p>
@@ -2456,7 +2477,7 @@ def hardware_page() -> Page:
     body += "<p class=source-row>唯一默认真相源：" + source_ref("src/superran/hardware.py", "def company_antenna_block") + "</p>"
     return Page(
         "hardware", "默认硬件与载波", "物理内核", "HARDWARE BASELINE",
-        "64T 基线与公司 256T 可选阵列、272 RB 和 6° 电下倾的来源、作用与覆盖方式。", body,
+        "64T 基线与预置 256T 可选阵列、272 RB 和 6° 电下倾的来源、作用与覆盖方式。", body,
         ("64T4R", "256T", "1驱6", "272 RB", "n41", "downtilt"),
     )
 
@@ -2514,10 +2535,10 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
 """ + F_JONES
     body += callout(
         "note", "Jones/XPR 的当前精确边界",
-        "<p>公司 <code>effective_subarray / physical_reference</code> 的 InternalSim CDL 路径已经调用 "
+        "<p>预置 <code>effective_subarray / physical_reference</code> 的 InternalSim CDL 路径已经调用 "
         "<code>element_jones()</code>，将理想 ±45° 基与逐 ray 的 2×2 <code>Jℓ</code> 收缩；legacy 面板仍按 "
-        "V/H 基兼容。<code>element_xpd_db=8</code> 不是公司实测方向相关 XPD：CDL 优先使用 profile "
-        "自带 XPR，它只在无 profile 值或统计回退路径中生效。方向相关复 Jones/XPD 仍需公司实测表。</p>",
+        "V/H 基兼容。<code>element_xpd_db=8</code> 不是实测方向相关 XPD：CDL 优先使用 profile "
+        "自带 XPR，它只在无 profile 值或统计回退路径中生效。方向相关复 Jones/XPD 仍需实测表。</p>",
     )
     body += """
 <h2>同站共享、异站不复制</h2>
@@ -2628,7 +2649,7 @@ def antenna_page() -> Page:
 <code>q=0,1,2</code> 三个相邻物理阵子，所以每列恰有三个非零值。</p>
 """ + F_FEED + F_COUPLING + F_EFFECTIVE
     body += """
-<h2>公司 256T：同一个展平合同，不同的面板与馈电规模</h2>
+<h2>预置 256T：同一个展平合同，不同的面板与馈电规模</h2>
 <p>256T 不是把 64T 的 shape 改成 256；两者端口轴顺序现在相同。256T RF 端口是
 16H×8V×2pol，按 <code>r=p·128+h·8+v</code>（0-based）展平。每个 T 在其背后驱动 6 个
 垂直物理 AE，因此实际为 16H×48V×2pol=1536 AE，RF 垂直相位中心间距为 6×0.67λ=4.02λ。</p>
@@ -2643,25 +2664,25 @@ def antenna_page() -> Page:
   先生成 192/1536-AE 信道再乘 F。二者必须在数值容差内一致。</li>
 </ul>
 <h2>阵元方向图</h2>
-<p>当前有单元阵子方向图，但它是<strong>可配置的参数化临时模型</strong>，不是公司实测表。
+<p>当前有单元阵子方向图，但它是<strong>可配置的参数化临时模型</strong>，不是实测表。
 水平 HPBW 110° 来自产品先验；垂直 65°、峰值 8 dBi 与 30 dB 截断当前仍是工程参数。
 下图曲线由当前公式和默认参数直接生成，作用是帮助理解，不代表暗室实测。</p>
 """ + element_pattern_svg() + F_PATTERN + F_PATTERN_COMBINE + F_JONES
     body += table(
         ["量", "当前默认", "在模型中的作用", "不能误读为"],
         [
-            ("φ3dB", "110°", "水平功率增益在 ±55° 约下降 3 dB", "已导入的公司实测 cos 表"),
+            ("φ3dB", "110°", "水平功率增益在 ±55° 约下降 3 dB", "已导入的实测 cos 表"),
             ("θ3dB", "65°", "垂直元素包络；与固定子阵因子相乘", "整机端口垂直波宽"),
             ("Gmax", "8 dBi", "由 /20 转成复场幅，再参与每条 ray", "数字 64T/256T 波束增益"),
             ("Am", "30 dB", "参数化前后向衰减截断", "真实 front-to-back ratio"),
             ("ζp", "+45° / −45°", "理想线极化 Jones 基", "方向相关复 Jones 实测值"),
-            ("element_xpd_db", "8 dB", "无 profile XPR/统计回退值与 provenance", "已贯通的公司方向相关天线 XPD"),
+            ("element_xpd_db", "8 dB", "无 profile XPR/统计回退值与 provenance", "已贯通的方向相关天线 XPD"),
         ],
     )
     body += callout(
         "danger", "不要把它称为 cos 实测方向图",
         "<p>实现是 3GPP 风格的抛物线 dB 包络，<code>measured_jones</code> 入口目前硬报"
-        " <code>NotImplementedError</code>。拿到公司 (az,el,f) 复 Jones 数据后，应新增插值、频率轴、"
+        " <code>NotImplementedError</code>。拿到 (az,el,f) 实测复 Jones 数据后，应新增插值、频率轴、"
         "极化端口校准与 hash，而不是只替换一个 HPBW 数字。</p>",
     )
     body += """
@@ -2728,10 +2749,10 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
 短长度走规范短序列；支持 comb、循环移位、group/sequence hopping 和频域 hopping。
 “SRS 周期”指发送周期；某个 RBG 距离最近一次有效 SRS 的时间应叫
 <strong>CSI 陈旧时长/lag</strong>，不叫“SRS 年龄”。</p>
-<p>当前系统老化模型只支持 38.211 Table 6.4.1.4.3-1 中的公司基线：
+<p>当前系统老化模型只支持 38.211 Table 6.4.1.4.3-1 中的预置基线：
 <code>C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0</code>。它在 SuperRAN 内固化为
 <code>0,8,16,7,...,1,9</code> 的 17-hop 镜像序列，不依赖外部 helper，也不提供
-恒等扫描兜底。默认公司预设使用
+恒等扫描兜底。默认预设使用
 <code>T_SRS=20 slot</code>；在 30 kHz SCS 下 1 slot=0.5 ms，故发送周期为 10 ms，
 17 跳的完整宽带采集窗为 170 ms。非 272 RB / 17×16 配置直接报错，
 后续获得新带宽的明确资源参数后再扩展。可对照
@@ -2786,6 +2807,78 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
         "srs", "SRS、64×4 与信道估计", "物理内核", "SRS & CHANNEL ESTIMATION",
         "ZC 序列、LS/LMMSE、17 跳频、周期/报告/处理时延的清晰边界。", body,
         ("SRS", "64x4", "LS", "LMMSE", "ZC", "PMI周期"),
+    )
+
+
+def srs_resource_allocation_page() -> Page:
+    body = """
+<div class="callout note"><span class="callout-icon">✓</span><div><strong>本章只承载已经落地的基础 profile</strong>
+<p>100 MHz @ 30 kHz、272 PRB、8:2 TDD、普通周期 H 资源、1/2/4 SRS ports。
+P-H/F、BWP2、intra-slot antenna switching、根序列规划与波形级跨小区污染仍明确在边界外。</p></div></div>
+<h2>一份 UE 资源到底包含什么</h2>
+<figure class="diagram"><svg viewBox="0 0 760 118" role="img" aria-label="SRS资源叶子六维拓扑">
+<rect x="8" y="22" width="112" height="58" rx="12" fill="#e7f1ff" stroke="#75a8e7"/><text x="64" y="48" text-anchor="middle" font-weight="700">周期</text><text x="64" y="68" text-anchor="middle" font-size="12">5/10/20/40 ms</text>
+<rect x="134" y="22" width="112" height="58" rx="12" fill="#e8f7f3" stroke="#65af9e"/><text x="190" y="48" text-anchor="middle" font-weight="700">offset</text><text x="190" y="68" text-anchor="middle" font-size="12">slot phase 7</text>
+<rect x="260" y="22" width="112" height="58" rx="12" fill="#e7f1ff" stroke="#75a8e7"/><text x="316" y="48" text-anchor="middle" font-weight="700">symbol</text><text x="316" y="68" text-anchor="middle" font-size="12">13 → 10</text>
+<rect x="386" y="22" width="112" height="58" rx="12" fill="#e8f7f3" stroke="#65af9e"/><text x="442" y="48" text-anchor="middle" font-weight="700">comb</text><text x="442" y="68" text-anchor="middle" font-size="12">0 / 1</text>
+<rect x="512" y="22" width="112" height="58" rx="12" fill="#e7f1ff" stroke="#75a8e7"/><text x="568" y="48" text-anchor="middle" font-weight="700">循环移位</text><text x="568" y="68" text-anchor="middle" font-size="12">8 CS / port block</text>
+<rect x="638" y="22" width="112" height="58" rx="12" fill="#e8f7f3" stroke="#65af9e"/><text x="694" y="48" text-anchor="middle" font-weight="700">频域</text><text x="694" y="68" text-anchor="middle" font-size="12">17-hop</text>
+</svg><div class="pipeline"><div><b>周期</b><small>5/10/20/40 ms</small></div>
+<div><b>offset</b><small>slot phase 7</small></div><div><b>symbol</b><small>13 → 10</small></div>
+<div><b>comb</b><small>0 / 1</small></div><div><b>循环移位</b><small>8 个，按 port 成块</small></div>
+<div><b>频域</b><small>17-hop 或全带上界</small></div></div><figcaption>一个基础 SRS 资源叶子的六个可审计维度</figcaption></figure>
+<p>资源分配器保存完整叶子，而不是只给一个“10 ms 周期”。4-port UE 占连续四个循环移位，
+因此每个 time/symbol/comb 位置可容纳两个这样的 UE。10 ms 周期有两个独立时域 offset，
+基础池容量为 <code>2 × 4 × 2 × 2 = 32 UE</code>；第 33 个请求硬失败。</p>
+<h2>跨周期碰撞不能只比较 offset 数字</h2>
+""" + F_SRS_RESOURCE_COLLISION
+    body += table(
+        ["维度", "正交条件", "当前实现"],
+        [
+            ("周期时域", "两个周期机会永不同时出现", "offset 差与 gcd(period) 做同余判断"),
+            ("symbol", "OFDM symbol 不同", "10/11/12/13"),
+            ("comb", "梳齿偏移不同", "comb 0 / 1"),
+            ("循环移位", "CS 集合无交集", "1/2/4-port 占连续 CS block"),
+            ("频域", "本次 hopping RBG 不同", "当前 collision proxy 先按同一 H profile；完整波形留后续"),
+        ],
+    )
+    body += """
+<h2>PCI 模 3 是偏好，不是永不碰撞的结界</h2>
+<p>候选叶子按线性序号着色 0/1/2，小区先取与 <code>PCI mod 3</code> 相同的颜色，
+再在本色用完后向其他颜色溢出。因此轻载三小区会从不同叶子起步；高负载时仍可能重新碰撞，
+这比把三份资源硬切死更符合“先规避、资源不足再复用”的工程含义。</p>
+"""
+    body += table(
+        ["三小区各 1 个 4-port UE", "碰撞对", "平均 I/S", "LS NMSE proxy"],
+        [
+            ("三小区都强制 PCI 色 0", "3 / 3", "2.00", "2.01"),
+            ("PCI 色 0 / 1 / 2", "0 / 3", "0.00", "0.01"),
+        ],
+    )
+    body += callout(
+        "warn", "这个实验能证明什么，不能证明什么",
+        "<p>它证明候选排序和碰撞判定的方向正确，也证明错开资源会降低理想正交模型下的导频干扰。"
+        "它不是带根序列、TA、时延扩展、非理想循环移位和接收机的 SRS 波形仿真，"
+        "不能把 2.01→0.01 写成现场 NMSE 承诺。</p>",
+    )
+    body += """
+<h2>资源分配怎样真正进入 CSI 老化</h2>
+<ol class="steps"><li><b>1</b><span><code>build_link_tables</code> 按 UE 接收端口数分配叶子。</span></li>
+<li><b>2</b><span>assignment 的 <code>offset_ms</code> 传给 <code>rbg_lag_snapshots</code>。</span></li>
+<li><b>3</b><span>最近可用机会变为 <code>offset + n·period</code>，处理时延仍守因果。</span></li>
+<li><b>4</b><span>每 UE 的 assignment、lag trace 与 profile 摘要一起进入结果合同。</span></li></ol>
+<p>七个同小区 4-port UE 的测试会跨过首个同色 offset 池，并断言至少出现两种 CSI lag trace。
+这条反向哨兵专门防止“页面上有资源表，实际所有 UE 仍用 offset=0”的 metadata-only 实现。</p>
+"""
+    body += "<p class=source-row>实现入口：" + source_ref(
+        "src/superran/srs_resource.py", "class SrsResourceAllocator") + " · " + source_ref(
+        "src/superran/system.py", "def build_link_tables") + " · " + source_ref(
+        "scripts/run_scheduler_p0_validation.py", "def _srs_experiment") + "</p>"
+    return Page(
+        "srsallocation", "SRS 资源分配与 PCI 模 3", "物理内核",
+        "SRS RESOURCE ALLOCATION",
+        "固定载波的周期 H 资源池、碰撞同余、端口循环移位与可复现的模 3 干扰反例。",
+        body, ("SRS资源", "PCI mod3", "offset", "comb", "循环移位", "碰撞"),
     )
 
 
@@ -3052,8 +3145,8 @@ def pmi_page() -> Page:
     body += table(
         ["阵列", "逻辑布局", "默认过采样", "双极化候选列数", "真实端口输出"],
         [
-            ("公司 64T", "8H×4V×2pol", "O_H=O_V=4", "4×32×16 = 2,048", "W[64, rank]"),
-            ("公司 256T", "16H×8V×2pol", "O_H=O_V=4", "4×64×32 = 8,192", "W[256, rank]"),
+            ("预置 64T", "8H×4V×2pol", "O_H=O_V=4", "4×32×16 = 2,048", "W[64, rank]"),
+            ("预置 256T", "16H×8V×2pol", "O_H=O_V=4", "4×64×32 = 8,192", "W[256, rank]"),
         ],
     )
     body += """
@@ -3966,6 +4059,126 @@ MCS12/rank2 的 TBS=1,729 B：新 R̄=0.99×1,000+0.01×1,729=<strong>1,007.29 B
     )
 
 
+def scheduler_p0_page() -> Page:
+    body = """
+<div class="callout note"><span class="callout-icon">✓</span><div><strong>结果先说</strong>
+<p>体验调度现在是一条“候选计划 → 资源预留 → SU/MU 选择 → 物理定稿 → 原子提交”的流水线。
+PDCCH/CCE 按已确认范围暂不建模；除此之外，物理 RBG、逐 RBG 层数、逻辑 layer-PRB、
+频选 bitmap、全 MU 伙伴评分和 FinalGrant 都有可复算证据。</p></div></div>
+<h2>一个 TTI 的七步闭环</h2>
+<figure class="diagram"><svg viewBox="0 0 840 120" role="img" aria-label="下行调度七阶段闭环">
+<defs><marker id="sched-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#6b809a"/></marker></defs>
+<g fill="#e8f2ff" stroke="#79a9e2"><rect x="8" y="24" width="102" height="56" rx="11"/><rect x="128" y="24" width="102" height="56" rx="11"/><rect x="248" y="24" width="102" height="56" rx="11"/><rect x="368" y="24" width="102" height="56" rx="11"/><rect x="488" y="24" width="102" height="56" rx="11"/><rect x="608" y="24" width="102" height="56" rx="11"/><rect x="728" y="24" width="102" height="56" rx="11"/></g>
+<g stroke="#6b809a" stroke-width="2" marker-end="url(#sched-arrow)"><path d="M110 52h16"/><path d="M230 52h16"/><path d="M350 52h16"/><path d="M470 52h16"/><path d="M590 52h16"/><path d="M710 52h16"/></g>
+<g text-anchor="middle" font-weight="700"><text x="59" y="56">Snapshot</text><text x="179" y="56">PF</text><text x="299" y="56">SU Plan</text><text x="419" y="56">MU Plan</text><text x="539" y="56">Ledger</text><text x="659" y="56">Finalizer</text><text x="779" y="56">Commit</text></g>
+</svg><div class="pipeline"><div><b>Snapshot</b><small>队列/CSI/HARQ/PF</small></div>
+<div><b>Priority</b><small>一次 PF 排序</small></div><div><b>SU Plan</b><small>按需频选</small></div>
+<div><b>MU Plan</b><small>全伙伴评分</small></div><div><b>Ledger</b><small>RBG/层/逻辑 PRB</small></div>
+<div><b>Finalizer</b><small>MCS/TBS 定稿</small></div><div><b>Commit</b><small>ACK/队列/OLLA/PF</small></div></div><figcaption>一个 TTI 从只读快照到原子提交的七阶段闭环</figcaption></figure>
+<p>SU 与 MU 都是无副作用计划：构造阶段不消费 HARQ 随机数、不更新队列、不动 OLLA/PF。
+两套计划分别过资源账后再比较。选中方案才进入 Finalizer，并绑定 reservation id。</p>
+<h2>资源账：MU 共享物理频域，不共享基带层工作量</h2>
+""" + F_RESOURCE_LEDGER
+    body += table(
+        ["例：3 个 RBG，每组 16 PRB", "物理 PRB", "总层数/RBG", "逻辑 layer-PRB"],
+        [
+            ("SU rank2", "48", "2", "96"),
+            ("MU rank2 + rank2", "48（只扣一次）", "4", "192"),
+        ],
+    )
+    body += """
+<p><code>reserve</code> 后资源立即从事务视图中占用；<code>rollback</code> 必须精确恢复；
+<code>commit</code> 只改变 reservation 状态，不触碰队列。物理 bitmap 重叠属于结构 bug 直接硬失败；
+层数或显式逻辑预算不足属于资源拒绝，进入 KPI 的 rejection reason。</p>
+<h2>逐 RBG 频选：与 RB 功控彻底解耦</h2>
+""" + F_FREQUENCY_OBJECTIVE
+    body += """
+<p><code>frequency_selective=auto</code> 在所有 SU/MU 逐 RBG 字段覆盖 17 RBG 时开启；
+<code>on</code> 缺字段直接报错，<code>off</code> 保留宽带/轮转 RBG 基线。
+每个候选 bitmap 都重新做一个码字的 dB 平均、MCS 与量化 TBS；不能用“最好 RBG 的 MCS × RBG 数”。</p>
+"""
+    body += table(
+        ["互补子带、相同 CRN", "频选 off", "频选 on", "变化"],
+        [
+            ("小区 ACK 吞吐", "148.71 Mbps", "486.52 Mbps", "3.27×"),
+            ("每忙 TTI 调度 UE", "1.00", "2.00", "两位用户各吃自己的强子带"),
+            ("RBG overlap", "0", "0", "账本不变量保持"),
+        ],
+    )
+    body += callout(
+        "warn", "3.27× 是构造反例，不是现场承诺",
+        "<p>两位 UE 的强子带被刻意设成 8/9 RBG 完全互补，用来证明频选会选对 bitmap、"
+        "且开启后不再被 RB 功控开关关掉。一般信道的收益必须用真实数据、多 replication 和 CRN Gate 3 另算。</p>",
+    )
+    body += """
+<h2>MU：PF 决定 anchor，全候选评分决定伙伴</h2>
+""" + F_MU_CANDIDATE_SCORE
+    body += table(
+        ["PF anchor UE0 的伙伴", "伙伴 PF 顺序", "CorrLoss", "最终 MCS", "useful B/RBG", "决定"],
+        [
+            ("UE1", "1（更早）", "−5 dB", "12 / 11", "3315.8", "可行但不选"),
+            ("UE2", "2（更晚）", "−1 dB", "17 / 14", "4701.6", "选中"),
+        ],
+    )
+    body += """
+<p>这一 TTI 的 SU-only useful bytes 是 54,285 B；MU(UE0,UE2) 是 79,927 B，
+所以最终原因是 <code>MU_useful_bytes_ge_SU</code>。两个用户共享 17 RBG、总层数 4，
+同属 reservation <code>tti0-res0</code>。如果 SU 已能排空全部可服务队列，仍会先走 SU，
+避免为了名义 MU 层数制造无效 padding。</p>
+<h3>伙伴逐个经历什么</h3>
+<ol class="steps"><li><b>1</b><span>是否存在预计算 <code>MuPairLink</code>。</span></li>
+<li><b>2</b><span>相关性是否 ≤ 门限、rank 总层数是否 ≤ 账本上限。</span></li>
+<li><b>3</b><span><code>CQI+BF+CorrLoss+powerLoss+SU OLLA+MU OLLA</code> 得到两位用户的 MCS。</span></li>
+<li><b>4</b><span>预测 BLER 是否 ≤ 0.5；不合格留下具体 rejection reason。</span></li>
+<li><b>5</b><span>在共享 bitmap 上计算两个 TB 的 queue-limited useful bytes/RBG。</span></li></ol>
+<h2>Finalizer：计划可以估，执行只认一个最终入口</h2>
+<p>所有 SU/MU/NewTx/ReTx 在发送前都由 <code>GrantFinalizer</code> 重新计算 MCS 输入、
+OLLA 后 MCS、实际 bitmap TBS、payload/padding 与 useful bytes。Planner 估值与 Finalizer
+任何一项不一致即抛错；压力结果中 <code>plan_final_mismatch_count=0</code>。
+HARQ 走同一入口，但 MCS、RBG 数、rank、TBS 用初传冻结值，并验证当前 bitmap 能复现 TBS。</p>
+<h3>本轮压力规模与耗时（同机实测，不是 SLA）</h3>
+"""
+    body += table(
+        ["压力项", "规模", "实测", "结论"],
+        [
+            ("资源事务", "10,000 次 reserve/commit/rollback", "0.334 s", "两本账与回滚全通过"),
+            ("SU 频选", "12 UE、1 s、2,000 TTI", "3.01 s", "5,688 grants，overlap/mismatch=0"),
+            ("MU 全伙伴", "8 UE、0.5 s、1,000 TTI", "7.84 s", "6,832 candidates，overlap/mismatch=0"),
+        ],
+    )
+    body += callout(
+        "warn", "MU 全候选频选是当前新热点",
+        "<p>8 UE/0.5 s 已要约 7.8 s；5 s×8 repetitions 应使用进程并行，并把实际 elapsed 写进报告。"
+        "这不是正确性问题，但说明下一轮最高 ROI 性能工作是缓存/批量化候选前缀，而不是再加伙伴维度。</p>",
+    )
+    body += table(
+        ["逐 TTI 可复盘字段", "用途"],
+        [
+            ("candidate_ues / MU evaluations / rejection reasons", "解释为什么没选另一个伙伴"),
+            ("rbg_indices / layers_per_rbg / logical_prb / reservation_id", "复算两本资源账"),
+            ("base_tx_sinr / CorrLoss / powerLoss / OLLA / final MCS", "复算 AMC 链"),
+            ("receive SINR / BLER / random draw / ACK", "解释真实判错"),
+            ("SU/MU planned useful bytes / selected reason", "解释模式选择"),
+        ],
+    )
+    body += callout(
+        "warn", "当前 P0 的硬边界",
+        "<p>PDCCH/CCE、每 TTI 最大 grant/UE、并行 HARQ process、CA N−3、XR 帧完整性、HBF 模拟波束调度"
+        "仍未进入资源预算。因而小包多 UE/TTI 的结果比过去可信得多，但不能冒充已包含控制信道上限的产品级数字。</p>",
+    )
+    body += "<p class=source-row>实现入口：" + source_ref(
+        "src/superran/scheduler_resource.py", "class ResourceLedger") + " · " + source_ref(
+        "src/superran/scheduler_frequency.py", "def select_frequency_subset") + " · " + source_ref(
+        "src/superran/scheduler_mu.py", "def choose_mu_candidate") + " · " + source_ref(
+        "src/superran/scheduler_finalize.py", "def finalize_candidate_grant") + "</p>"
+    return Page(
+        "schedulerp0", "下行调度 P0：资源、频选、MU 与定稿", "系统仿真",
+        "DOWNLINK SCHEDULER P0",
+        "从 PF 快照到不可变 FinalGrant，并用频选与 MU 数字反例证明每个决策环节。",
+        body, ("ResourceLedger", "频选", "MU评分", "FinalGrant", "TTI trace"),
+    )
+
+
 def traffic_page() -> Page:
     body = traffic_kpi_svg()
     body += """
@@ -4697,7 +4910,7 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         ("自定义站点三扇区", "custom positions 永远只建 sector 0", "按 0/120/240° 展开，2站×3扇区 toy case 固定为 6 cells", "契约测试"),
         ("扇区服务选择", "azimuth_deg 不进 path gain，三扇区同功率、按列表先后胜出", "110° 水平阵子图给相对 sector gain；pathloss 保持纯传播量", "boresight 反例"),
         ("SRS 时序", "样本 idx 直接当 slot；可在 DL/guard slot 合成 SRS", "idx 映射到第 n 个满足 TDD+T_SRS+offset 的真实机会；无交集硬失败", "paired 3→13 slot toy"),
-        ("SRS 带宽与跳频", "ChannelHub 只硬编码 C_SRS 0..17，默认 row 3；多级 F_b 有空循环且混淆 n_RRC/n_shift", "补全 64 行 38.211 表，分离 freqDomainPosition/freqDomainShift，奇偶 N_b 逐式实现；公司预设冻结 63/1/0、20 slot", "64 行×各 B_SRS/b_hop 穷举 + 17 跳覆盖 272 RB"),
+        ("SRS 带宽与跳频", "ChannelHub 只硬编码 C_SRS 0..17，默认 row 3；多级 F_b 有空循环且混淆 n_RRC/n_shift", "补全 64 行 38.211 表，分离 freqDomainPosition/freqDomainShift，奇偶 N_b 逐式实现；预置冻结 63/1/0、20 slot", "64 行×各 B_SRS/b_hop 穷举 + 17 跳覆盖 272 RB"),
         ("小载波 SRS 默认值", "Sionna/QuaDRiGa 固定 C_SRS=3；4 RB toy carrier 在历史 hopping 回看时映射到 RB[8,12) 并崩溃", "四种 source 均按实际载波自动选最宽合法 C_SRS；显式非法资源仍硬失败", "跨 backend 86 passed / 1 conditional skip"),
         ("CDL 标准表校准", "旧 A/B/C 角度错、D/E 行数短；新 dataclass 字段又让兼容覆盖 TypeError，异常被吞后继续生成", "MSG A~E 源表直接修正；兼容层只写已支持字段；shape mismatch 全表判错且校准异常阻断生成", "A/B/C/D/E 分别 23/23/24/14/15 行，逐字段 0 mismatch"),
         ("CDL ray 与 LOS", "每簇只生成一个 rank-1 方向，忽略 20-ray spread/XPR；D/E 又二次混 K；显式 UMa_LOS 仍随机出 NLOS", "20-ray 偏移/角耦合/逐 ray Jones+Doppler；D/E K 只用表功率；显式 LOS 强制 LOS/CDL-D", "CDL 定向 19/19 + LOS 反例"),
@@ -4741,7 +4954,7 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         "其中包含 100,000 TTI×8 UE；<code>test_rng.py</code> 为 <strong>125/125</strong>；"
         "MU、物理不变量与开发手册定向回归均通过。MSG-Platform 的多 UE static 位置轮转回归也已通过。</p>"
         "<p>这些证据证明合同、守恒、机制反例与边界处理，不等价于所有性能假设已经成立。"
-        "SRS/PMI Hello World 的 Gate 3 仍阻断，50% MU pilot 的 Gate 2 仍阻断；公司实测方向图、"
+        "SRS/PMI Hello World 的 Gate 3 仍阻断，50% MU pilot 的 Gate 2 仍阻断；实测方向图、"
         "完整 Type-I 多层码本和现场标定的 EESM/MIESM 仍是外部校准边界。主手册浏览器 QA 已覆盖"
         "桌面/平板/手机：38/38 页、89/89 个 KaTeX 公式、276 条路由、36 张图、0 px 页面级溢出、"
         "0 个控制台错误；真实 KPI 工作台另通过双 Tab 点击、桌面/手机与 19 个用户指标面板检查。</p>",
@@ -4779,15 +4992,15 @@ def limitations_page() -> Page:
         ["边界", "当前实现", "升级需要"],
         [
             ("Agent 任务画像", "确定性关键词命中与 generic fallback；不是 LLM 语义分类器", "扩充可测试同义词/结构化 intent；模型只辅助解释，执行仍落有限合同"),
-            ("阵子方向图", "110°×65° 参数化 3GPP-style cos/抛物近似，+45/−45° Jones", "公司实测复 Jones pattern、频率/温度/校准版本"),
+            ("阵子方向图", "110°×65° 参数化 3GPP-style cos/抛物近似，+45/−45° Jones", "实测复 Jones pattern、频率/温度/校准版本"),
             ("电下倾", "默认 6° 产品先验，可任意配置并进入 F", "实际 AAU 校准表与波束档位"),
             ("LMMSE", "真实 pilot→target 的频域 LMMSE；指数 PDP + 白噪声默认，时间仍线性", "实测/在线 PDP、Doppler/空间协方差、Kalman 或 2D LMMSE 路径"),
-            ("宽带有效 SINR", "库支持 MIESM/EESM；experience 仍为 RBG 内线性、跨流/RBG dB 算术均值", "公司链路级标定并显式接入体验链的 EESM/MIESM β"),
+            ("宽带有效 SINR", "库支持 MIESM/EESM；experience 仍为 RBG 内线性、跨流/RBG dB 算术均值", "链路级标定并显式接入体验链的 EESM/MIESM β"),
             ("PMI/RI", "Type-I-style 宽带列集合、端口置换与独立 rank 选择", "严格 38.214 多层/子带/subset restriction/反馈比特与 RI pipeline"),
             ("RB 功控算法", "给定 profile 的守恒、逐小区耦合与逐 RBG 调度已实现", "跨小区闭环优化目标、约束信令与现场策略；当前不是自动功控算法"),
             ("MU", "SUS + ZF/RZF、pair table、用户级 MU-OLLA", "现场配对细则、最大用户/层数、接收机与 CSI error 标定"),
             ("BLER/HARQ", "预置通用 NewTx 曲线；每 TB 最多一次 IR/CC，空口身份冻结", "若升级为标准 HARQ，再补 RV、LLR、并行 process 与严格 timing"),
-            ("话务 CDF", "可插拔经验 CDF + 标量 size/interval 校准", "公司视频/XR/FTP CDF 文件与用户 mix"),
+            ("话务 CDF", "可插拔经验 CDF + 标量 size/interval 校准", "实测视频/XR/FTP CDF 文件与用户 mix"),
             ("CDL 几何", "标准 profile 的 20-ray 相对几何旋到实际链路；仍非场景确定性 ray tracing", "Sionna RT Paths 或实测 CIR/角度"),
             ("RT 快速探测", "InternalSim 有几何 probe；Sionna RT 只能减少 UE/drop 跑小 N 完整路径", "若后端提供路径缓存/增量求解，再单独定义可验证 RT probe"),
             ("外部算法 CSI 角色", "method_metadata 声明 h_est/h_true 用法，MCP 不执行也无法观察用户进程", "受控沙箱、可检查中间产物或可复现容器"),
@@ -4803,7 +5016,7 @@ def limitations_page() -> Page:
 <h2>下一批需要业务/产品拍板</h2>
 <ol>
 <li>现场 EPF 的确切公式：乘性/加性时延因子、HoL/平均时延、budget 来源。</li>
-<li>公司 AAU 的实测 Jones pattern、6° 下倾来源与频段/波束校准编号。</li>
+<li>AAU 的实测 Jones pattern、6° 下倾来源与频段/波束校准编号。</li>
 <li>MU 配对/层数/接收机的产品细节，以及用户级 MU-OLLA 是否需按场景再分状态。</li>
 <li>现场话务 CDF 与 BLER 标定曲线；它们决定 30%/50% 负载校准是否有现场意义。</li>
 <li>有效 SINR 是否引入 EESM/MIESM，以及 β 的链路级标定协议。</li>
@@ -4867,7 +5080,7 @@ def api_page(modules: list[ModuleDoc]) -> Page:
 
 def glossary_page() -> Page:
     terms = [
-        ("AE", "Antenna Element，物理阵子。64T 基线 192 个；公司 256T 为 1536 个；都不是同数量的独立 RF 链。"),
+        ("AE", "Antenna Element，物理阵子。64T 基线 192 个；预置 256T 为 1536 个；都不是同数量的独立 RF 链。"),
         ("RF port", "基带/射频可独立加权的端口。64T 为 64 个、每端口驱动 3 AE；256T 为 256 个、每端口驱动 6 AE。"),
         ("F", "被动馈电/耦合矩阵；64T 为 192×64，256T 为 1536×256。列范数 1，表达固定馈电、相位和下倾。"),
         ("configured / effective profile", "configured 是用户请求的剖面入口；effective 是按逐链路 LOS/NLOS 自洽后真正用于生成的剖面。"),
@@ -4907,7 +5120,7 @@ def glossary_page() -> Page:
     body += table(
         ["问题", "第一入口", "再追"],
         [
-            ("64T/公司256T/阵子图/F", "hardware.py", "MSG-Platform effective_array.py"),
+            ("64T/256T/阵子图/F", "hardware.py", "MSG-Platform effective_array.py"),
             ("H 如何生成/同站状态", "channelhub.py + generate.py", "MSG-Platform internal_sim.py / sionna_rt.py"),
             ("SRS/LMMSE/老化", "physical.py + csi_aging.py", "MSG-Platform ref_signals/channel_est"),
             ("PMI/Type-I/RI/CQI 参照", "measure.py + hardware.py", "linklevel.py / system.py"),
@@ -5184,10 +5397,11 @@ def build() -> str:
     pages = [
         overview_page(modules, tools, tests, skills), quickstart_page(), architecture_page(),
         agentloop_page(), hardware_page(), channel_page(), raytracing_page(), antenna_page(),
-        pdp_page(), reference_signals_page(), srs_page(), csi_page(), pmi_page(),
+        pdp_page(), reference_signals_page(), srs_page(),
+        srs_resource_allocation_page(), csi_page(), pmi_page(),
         measurements_page(modules), beamforming_page(), powercontrol_page(), robust_page(),
         sinr_page(), bfgain_page(), linkadapt_page(), bler_page(), mu_page(),
-        modes_page(), experience_page(), traffic_page(), kpi_page(),
+        modes_page(), experience_page(), scheduler_p0_page(), traffic_page(), kpi_page(),
         calibration_page(), interference_page(), rng_page(), gates_page(),
         external_results_page(), tests_page(tests, modules),
         tools_page(tools), skill_page(skills), presets_page(presets), extension_page(),

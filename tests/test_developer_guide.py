@@ -168,8 +168,13 @@ def test_every_chapter_has_two_reading_depths_and_every_formula_is_explained() -
     meta = _meta(text)
     pages = _pages(text)
 
-    assert len(pages) == meta["logical_pages"] == meta["detailed_pages"] == 39
-    assert meta["annotated_formulas"] == 91
+    assert len(pages) == meta["logical_pages"] == meta["detailed_pages"]
+    assert {"srsallocation", "schedulerp0"}.issubset(
+        {page["key"] for page in pages})
+    rendered_formulas = set(re.findall(r'data-formula="([^"]+)"', text))
+    assert meta["annotated_formulas"] == len(rendered_formulas)
+    assert 'data-formula="F_SRS_RESOURCE_COLLISION"' in text
+    assert 'data-formula="F_MU_CANDIDATE_SCORE"' in text
     assert meta["detailed_module_exemptions"] == 3
     assert meta["detailed_module_coverage"] == (
         meta["modules"] - meta["detailed_module_exemptions"]
@@ -317,6 +322,36 @@ def test_every_module_public_symbol_tool_test_skill_and_preset_is_carried() -> N
     assert meta["test_files"] == len(test_files)
     assert meta["skill_files"] == len(skill_files)
     assert preset_count > 0
+
+
+def test_public_docs_and_source_do_not_expose_restricted_provenance_labels() -> None:
+    roots = [
+        ROOT / "src" / "superran",
+        ROOT / "scripts",
+        ROOT / "skills",
+        ROOT / "presets",
+    ]
+    files = [
+        ROOT / "README.md", ROOT / "INSTALL_AGENT.md",
+        ROOT / "docs" / "index.html",
+    ]
+    files.extend(ROOT.glob("*.html"))
+    for root in roots:
+        files.extend(
+            path for path in root.rglob("*")
+            if path.is_file() and path.suffix.lower() in {
+                ".py", ".md", ".yaml", ".yml", ".html"}
+        )
+    offenders: list[str] = []
+    restricted_chinese = "\u516c\u53f8"
+    restricted_ascii = "air" + "view"
+    for path in files:
+        content = path.read_text(encoding="utf-8")
+        if restricted_chinese in content or restricted_ascii in content.casefold():
+            offenders.append(str(path.relative_to(ROOT)))
+    assert not offenders, f"restricted provenance labels remain in: {offenders}"
+
+
 if __name__ == "__main__":
     import pytest
 
