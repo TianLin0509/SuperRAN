@@ -79,7 +79,7 @@ def _run_case(case_id: int) -> dict[str, Any]:
     scs = 30
     tdd = ("DDDD", "DDDSU", "DSU")[(case_id // 6) % 3]
     report_ms = (5.0, 20.0, 80.0)[case_id % 3]
-    srs_ms = (5.0, 10.0, 20.0, 40.0)[case_id % 4]
+    srs_ms = (10.0, 20.0, 40.0)[case_id % 3]
     hopping = bool((case_id // 2) % 2)
     mu_enabled = bool(case_id % 4 != 0)
     precoder = "type1" if case_id % 5 == 0 else "svd"

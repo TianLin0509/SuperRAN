@@ -274,7 +274,7 @@ def main() -> None:
                 "referencesignals": 3,
                 "bler": 6,
                 "externalresults": 4,
-                "srsallocation": 1,
+                "srsallocation": 3,
                 "schedulerp0": 3,
             }
             new_chapter_checks = {}

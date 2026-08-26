@@ -8,8 +8,10 @@ resource used by that profile:
 * SRS occasions repeat every 10 slots and use slot phase 7;
 * symbols 10..13 and comb offsets 0/1 are available;
 * eight cyclic shifts are divided into consecutive blocks for 1/2/4 ports;
-* PCI modulo three changes the deterministic preference order.  It is not a
-  hard partition: a loaded cell may spill into the other colour groups;
+* the user-confirmed PCI-mod-3 table colours the time/symbol/comb leaf.  All
+  cyclic-shift blocks under that leaf keep the same colour; a loaded cell may
+  spill into the other colour groups because colour is a preference, not a
+  hard partition;
 * allocations in the same cell are orthogonal under the time/symbol/comb/
   cyclic-shift model.  Resource exhaustion is a hard failure.
 
@@ -29,6 +31,9 @@ import numpy as np
 
 __all__ = [
     "BASIC_SRS_PROFILE_ID",
+    "PCI_MOD3_COLOR_BY_SYMBOL_COMB",
+    "pci_mod3_resource_color",
+    "pci_mod3_preference_order",
     "SrsResourceRequest",
     "SrsResourceAssignment",
     "SrsCollisionReport",
@@ -40,15 +45,52 @@ __all__ = [
 ]
 
 
-BASIC_SRS_PROFILE_ID = "superran-srs-basic-100m-30khz-8d2-v1"
+BASIC_SRS_PROFILE_ID = "superran-srs-basic-100m-30khz-8d2-v2"
 SLOT_DURATION_MS = 0.5
 SRS_SLOT_PHASE = 7
 SRS_OCCASION_STRIDE_SLOTS = 10
 SRS_SYMBOLS = (13, 12, 11, 10)
 SRS_COMB_OFFSETS = (0, 1)
 SRS_CYCLIC_SHIFT_COUNT = 8
-SUPPORTED_PERIOD_MS = (5.0, 10.0, 20.0, 40.0)
+SUPPORTED_PERIOD_MS = (10.0, 20.0, 40.0)
 SUPPORTED_PORTS = (1, 2, 4)
+
+# Ordinary-H part of the user-confirmed PCI-mod-3 resource table.  The full
+# field table also contains P-H/F, BWP2 and special long-period reservations;
+# those cells remain outside the current basic profile.  Colour is attached to
+# the time-frequency leaf rather than the cyclic shift: cross-cell timing error
+# can erode cyclic-shift orthogonality, so neighbouring PCI classes first avoid
+# the same symbol/comb resource before relying on code-domain separation.
+PCI_MOD3_COLOR_BY_SYMBOL_COMB: dict[tuple[int, int], int] = {
+    (10, 0): 0,
+    (10, 1): 1,
+    (11, 0): 2,
+    (11, 1): 0,
+    (12, 0): 1,
+    (12, 1): 2,
+    (13, 0): 1,
+    (13, 1): 0,
+}
+
+
+def pci_mod3_resource_color(symbol: int, comb_offset: int) -> int:
+    """Return the ordinary-H table colour for one symbol/comb leaf."""
+    raw_symbol = _strict_int("symbol", symbol)
+    raw_comb = _strict_int("comb_offset", comb_offset)
+    try:
+        return int(PCI_MOD3_COLOR_BY_SYMBOL_COMB[(raw_symbol, raw_comb)])
+    except KeyError as exc:
+        raise ValueError(
+            "basic PCI-mod-3 table only supports symbols 10..13 and comb 0/1"
+        ) from exc
+
+
+def pci_mod3_preference_order(pci_mod3: int) -> tuple[int, int, int]:
+    """Own colour first, then deterministic spill-over colours."""
+    pci = _strict_int("pci_mod3", pci_mod3)
+    if pci not in (0, 1, 2):
+        raise ValueError("pci_mod3 must be 0, 1 or 2")
+    return pci, (pci + 1) % 3, (pci + 2) % 3
 
 
 def _strict_int(name: str, value: int, *, minimum: int = 0) -> int:
@@ -175,12 +217,12 @@ def _cyclic_shift_blocks(n_ports: int) -> tuple[tuple[int, ...], ...]:
 def _raw_candidates(request: SrsResourceRequest) -> list[SrsResourceAssignment]:
     period_slots = _period_slots(request.period_ms)
     raw: list[SrsResourceAssignment] = []
-    linear = 0
+    preference = pci_mod3_preference_order(request.resolved_pci_mod3)
     for offset in _candidate_offsets(period_slots):
         for symbol in SRS_SYMBOLS:
             for comb in SRS_COMB_OFFSETS:
+                colour = pci_mod3_resource_color(symbol, comb)
                 for shifts in _cyclic_shift_blocks(request.n_ports):
-                    colour = linear % 3
                     raw.append(SrsResourceAssignment(
                         ue_id=int(request.ue_id),
                         cell_id=int(request.cell_id),
@@ -195,7 +237,7 @@ def _raw_candidates(request: SrsResourceRequest) -> list[SrsResourceAssignment]:
                         n_ports=int(request.n_ports),
                         hopping=bool(request.hopping),
                         resource_color=int(colour),
-                        preference_tier=(colour - request.resolved_pci_mod3) % 3,
+                        preference_tier=preference.index(colour),
                         b_srs=(1 if request.hopping else 0),
                         frequency_scope=(
                             "17-hop H resource; one 16-PRB RBG per SRS occasion"
@@ -203,7 +245,6 @@ def _raw_candidates(request: SrsResourceRequest) -> list[SrsResourceAssignment]:
                             "full-band no-hopping engineering upper bound"
                         ),
                     ))
-                    linear += 1
     # Own colour first.  Within each tier keep the transparent last-symbol-first
     # and increasing comb/CS order above.  This makes three lightly loaded cells
     # start on different leaves while retaining deterministic spill-over.
@@ -404,6 +445,11 @@ def summarize_assignments(
             "100 MHz/30 kHz/272 PRB ordinary periodic H resource; 1/2/4 ports; "
             "intra-cell orthogonality; PCI mod3 preference ordering"
         ),
+        "pci_mod3_color_by_symbol_comb": {
+            f"symbol{symbol}_comb{comb}": int(colour)
+            for (symbol, comb), colour in sorted(
+                PCI_MOD3_COLOR_BY_SYMBOL_COMB.items())
+        },
         "not_modelled": [
             "P-H/F and BWP2 resources",
             "root-sequence planning and non-ideal cyclic-shift orthogonality",

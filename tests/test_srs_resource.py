@@ -11,12 +11,39 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from superran.srs_resource import (  # noqa: E402
+    PCI_MOD3_COLOR_BY_SYMBOL_COMB,
     SrsResourceAllocator,
     SrsResourceRequest,
     allocate_basic_srs_resources,
     cross_cell_collision_report,
+    pci_mod3_preference_order,
+    pci_mod3_resource_color,
     resources_collide,
 )
+
+
+def test_user_confirmed_pci_mod3_table_is_exact_and_cs_independent() -> None:
+    expected = {
+        (10, 0): 0, (10, 1): 1,
+        (11, 0): 2, (11, 1): 0,
+        (12, 0): 1, (12, 1): 2,
+        (13, 0): 1, (13, 1): 0,
+    }
+    assert PCI_MOD3_COLOR_BY_SYMBOL_COMB == expected
+    assert all(
+        pci_mod3_resource_color(symbol, comb) == colour
+        for (symbol, comb), colour in expected.items())
+    assert pci_mod3_preference_order(0) == (0, 1, 2)
+    assert pci_mod3_preference_order(1) == (1, 2, 0)
+    assert pci_mod3_preference_order(2) == (2, 0, 1)
+
+    rows = allocate_basic_srs_resources(
+        [0, 1], period_ms=10.0, n_ports_by_ue=4,
+        cell_ids=0, pci_mod3_by_ue=0)
+    assert (rows[0].symbol, rows[0].comb_offset) == (
+        rows[1].symbol, rows[1].comb_offset)
+    assert rows[0].resource_color == rows[1].resource_color == 0
+    assert rows[0].cyclic_shifts != rows[1].cyclic_shifts
 
 
 def test_deterministic_intra_cell_allocation_is_collision_free() -> None:
@@ -80,6 +107,13 @@ def test_pci_mod3_preference_reduces_light_load_pilot_collision() -> None:
     assert staggered_report.colliding_pair_count == 0
     assert staggered_report.pilot_interference_to_signal_ratio == 0.0
     assert staggered_report.ls_nmse_proxy < aligned_report.ls_nmse_proxy
+    # PCI colours must first separate time-frequency leaves, not merely reuse
+    # the same leaf with different cyclic shifts across cells.
+    assert len({
+        (row.offset_slots, row.symbol, row.comb_offset)
+        for row in staggered
+    }) == 3
+    assert len({row.cyclic_shifts for row in staggered}) == 1
 
 
 def test_input_contracts_fail_loudly() -> None:
@@ -87,6 +121,8 @@ def test_input_contracts_fail_loudly() -> None:
         SrsResourceRequest(ue_id=0, n_ports=3)
     with pytest.raises(ValueError, match="period_ms"):
         SrsResourceRequest(ue_id=0, period_ms=15.0)
+    with pytest.raises(ValueError, match="period_ms"):
+        SrsResourceRequest(ue_id=0, period_ms=5.0)
     with pytest.raises(ValueError, match="same length"):
         allocate_basic_srs_resources([0, 1], n_ports_by_ue=[4])
     with pytest.raises(ValueError, match="boolean"):

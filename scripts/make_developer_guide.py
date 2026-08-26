@@ -58,6 +58,7 @@ from superran import bler_curves as bc  # noqa: E402
 from superran import katex as kx  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import mathml as mm  # noqa: E402
+from superran import srs_resource as srsres  # noqa: E402
 
 
 def M(tex: str, *, block: bool = True) -> str:
@@ -176,6 +177,14 @@ F_SRS_RESOURCE_COLLISION = M(
     r"\operatorname{collide}(a,b)=\mathbf 1\!\left[s_a=s_b,\ c_a=c_b,\ "
     r"\mathcal C_a\cap\mathcal C_b\ne\varnothing,\ "
     r"(o_a-o_b)\bmod\gcd(T_a,T_b)=0\right]",
+)
+F_PCI_MOD3 = M(
+    r"g_c=N_{\mathrm{ID}}^{\mathrm{cell}}\bmod 3\in\{0,1,2\},\qquad "
+    r"\Pi_c=(g_c,(g_c+1)\bmod3,(g_c+2)\bmod3)",
+)
+F_SRS_POOL_CAPACITY = M(
+    r"N_{\mathrm{UE,max}}=N_{\mathrm{offset}}\,N_{\mathrm{sym}}\,"
+    r"N_{\mathrm{comb}}\left\lfloor\frac{N_{\mathrm{CS}}}{N_{\mathrm{port}}}\right\rfloor",
 )
 F_CSI_SWEEP = M(
     r"T_{\mathrm{sweep}}=H_{\mathrm{hop}}T_{\mathrm{SRS}},\qquad "
@@ -2811,74 +2820,193 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
 
 
 def srs_resource_allocation_page() -> Page:
+    pci_style = {
+        0: "background:#f2c84b;color:#443300;border:1px solid #c49d18",
+        1: "background:#75be62;color:#123c16;border:1px solid #4b9440",
+        2: "background:#2384ad;color:white;border:1px solid #126181",
+    }
+
+    def pci_badge(colour: int, short: bool = False) -> str:
+        label = str(colour) if short else f"PCI mod3={colour}"
+        return (
+            '<span style="display:inline-block;min-width:36px;text-align:center;'
+            'padding:4px 8px;border-radius:999px;font-weight:750;'
+            + pci_style[int(colour)] + '">' + label + "</span>"
+        )
+
+    resource_headers = [
+        "SRS 机会", "sym10 / C0", "sym10 / C1", "sym11 / C0", "sym11 / C1",
+        "sym12 / C0", "sym12 / C1", "sym13 / C0", "sym13 / C1",
+    ]
+    resource_colours = [
+        srsres.pci_mod3_resource_color(symbol, comb)
+        for symbol in range(10, 14) for comb in (0, 1)
+    ]
+    resource_rows = [
+        (f"slot {slot}（{slot * 0.5:g} ms）", *[
+            pci_badge(colour, short=True) for colour in resource_colours])
+        for slot in (7, 17, 27, 37)
+    ]
+
     body = """
-<div class="callout note"><span class="callout-icon">✓</span><div><strong>本章只承载已经落地的基础 profile</strong>
-<p>100 MHz @ 30 kHz、272 PRB、8:2 TDD、普通周期 H 资源、1/2/4 SRS ports。
-P-H/F、BWP2、intra-slot antenna switching、根序列规划与波形级跨小区污染仍明确在边界外。</p></div></div>
-<h2>一份 UE 资源到底包含什么</h2>
-<figure class="diagram"><svg viewBox="0 0 760 118" role="img" aria-label="SRS资源叶子六维拓扑">
-<rect x="8" y="22" width="112" height="58" rx="12" fill="#e7f1ff" stroke="#75a8e7"/><text x="64" y="48" text-anchor="middle" font-weight="700">周期</text><text x="64" y="68" text-anchor="middle" font-size="12">5/10/20/40 ms</text>
-<rect x="134" y="22" width="112" height="58" rx="12" fill="#e8f7f3" stroke="#65af9e"/><text x="190" y="48" text-anchor="middle" font-weight="700">offset</text><text x="190" y="68" text-anchor="middle" font-size="12">slot phase 7</text>
-<rect x="260" y="22" width="112" height="58" rx="12" fill="#e7f1ff" stroke="#75a8e7"/><text x="316" y="48" text-anchor="middle" font-weight="700">symbol</text><text x="316" y="68" text-anchor="middle" font-size="12">13 → 10</text>
-<rect x="386" y="22" width="112" height="58" rx="12" fill="#e8f7f3" stroke="#65af9e"/><text x="442" y="48" text-anchor="middle" font-weight="700">comb</text><text x="442" y="68" text-anchor="middle" font-size="12">0 / 1</text>
-<rect x="512" y="22" width="112" height="58" rx="12" fill="#e7f1ff" stroke="#75a8e7"/><text x="568" y="48" text-anchor="middle" font-weight="700">循环移位</text><text x="568" y="68" text-anchor="middle" font-size="12">8 CS / port block</text>
-<rect x="638" y="22" width="112" height="58" rx="12" fill="#e8f7f3" stroke="#65af9e"/><text x="694" y="48" text-anchor="middle" font-weight="700">频域</text><text x="694" y="68" text-anchor="middle" font-size="12">17-hop</text>
-</svg><div class="pipeline"><div><b>周期</b><small>5/10/20/40 ms</small></div>
-<div><b>offset</b><small>slot phase 7</small></div><div><b>symbol</b><small>13 → 10</small></div>
-<div><b>comb</b><small>0 / 1</small></div><div><b>循环移位</b><small>8 个，按 port 成块</small></div>
-<div><b>频域</b><small>17-hop 或全带上界</small></div></div><figcaption>一个基础 SRS 资源叶子的六个可审计维度</figcaption></figure>
-<p>资源分配器保存完整叶子，而不是只给一个“10 ms 周期”。4-port UE 占连续四个循环移位，
-因此每个 time/symbol/comb 位置可容纳两个这样的 UE。10 ms 周期有两个独立时域 offset，
-基础池容量为 <code>2 × 4 × 2 × 2 = 32 UE</code>；第 33 个请求硬失败。</p>
-<h2>跨周期碰撞不能只比较 offset 数字</h2>
-""" + F_SRS_RESOURCE_COLLISION
+<div class="callout note"><span class="callout-icon">i</span><div><strong>先回答使用者真正关心的问题</strong>
+<p>SRS 资源分配不是“给 UE 填几个字段”，而是在多个小区、多个 UE 同时发上行探测信号时，
+决定<strong>谁在什么时刻、哪个 OFDM symbol、哪组梳齿子载波、哪组循环移位和哪段频带发</strong>。
+目标是既让本小区 UE 可分离，又让相邻小区尽量不要在同一个导频资源上相撞。</p></div></div>
+
+<h2>1 · 为什么必须分配 SRS 资源</h2>
+<p>基站用 UE 发出的 SRS 估计上行 MIMO 信道，并在 TDD 互易假设下把它用于下行预编码。
+若两个 UE 的 SRS 在接收端无法区分，基站估到的是两个信道的混合；后续 SVD/ZF 再精确，
+权值也会朝错误方向打。资源分配因此直接决定 CSI 是否干净、MU 零陷是否可信以及 MCS 是否会被高估。</p>
+<p>可用资源并不只有“周期”一个维度。标准的 SRS-Resource 同时配置周期与 slot offset、slot 内
+symbol、transmission comb、cyclic shift、频域位置/跳频和序列相关参数。当前固定载波先实现普通
+周期 H 资源的核心子集；P-H/F、BWP2、intra-slot antenna switching 与根序列规划仍明确在范围外。</p>
+
+<h2>2 · PCI 模3是什么，为什么能用于小区间错开</h2>
+<p>PCI 是 Physical Cell ID。NR 中相邻小区通常配置不同 PCI；“PCI 模3”就是把 PCI 除以 3，
+只保留余数 0、1、2，把很多小区压缩成三种资源偏好颜色。例如 PCI 100、101、102 的模3结果
+分别是 1、2、0。它本身不会产生正交性；真正的隔离来自颜色背后对应的 symbol/comb 资源。</p>
+""" + F_PCI_MOD3
     body += table(
-        ["维度", "正交条件", "当前实现"],
+        ["小区 PCI 模3", "第一优先色", "资源不足后的溢出顺序", "工程含义"],
         [
-            ("周期时域", "两个周期机会永不同时出现", "offset 差与 gcd(period) 做同余判断"),
-            ("symbol", "OFDM symbol 不同", "10/11/12/13"),
-            ("comb", "梳齿偏移不同", "comb 0 / 1"),
-            ("循环移位", "CS 集合无交集", "1/2/4-port 占连续 CS block"),
-            ("频域", "本次 hopping RBG 不同", "当前 collision proxy 先按同一 H profile；完整波形留后续"),
-        ],
-    )
-    body += """
-<h2>PCI 模 3 是偏好，不是永不碰撞的结界</h2>
-<p>候选叶子按线性序号着色 0/1/2，小区先取与 <code>PCI mod 3</code> 相同的颜色，
-再在本色用完后向其他颜色溢出。因此轻载三小区会从不同叶子起步；高负载时仍可能重新碰撞，
-这比把三份资源硬切死更符合“先规避、资源不足再复用”的工程含义。</p>
-"""
-    body += table(
-        ["三小区各 1 个 4-port UE", "碰撞对", "平均 I/S", "LS NMSE proxy"],
-        [
-            ("三小区都强制 PCI 色 0", "3 / 3", "2.00", "2.01"),
-            ("PCI 色 0 / 1 / 2", "0 / 3", "0.00", "0.01"),
+            ("0", "0（黄色）", "0 → 1 → 2", "优先使用黄色时频叶子"),
+            ("1", "1（绿色）", "1 → 2 → 0", "优先使用绿色时频叶子"),
+            ("2", "2（蓝色）", "2 → 0 → 1", "优先使用蓝色时频叶子"),
         ],
     )
     body += callout(
-        "warn", "这个实验能证明什么，不能证明什么",
-        "<p>它证明候选排序和碰撞判定的方向正确，也证明错开资源会降低理想正交模型下的导频干扰。"
-        "它不是带根序列、TA、时延扩展、非理想循环移位和接收机的 SRS 波形仿真，"
-        "不能把 2.01→0.01 写成现场 NMSE 承诺。</p>",
+        "warn", "标准能力与工程预置必须分开",
+        "<p>3GPP 定义 PCI 和 SRS 的周期、symbol、comb、循环移位、频域与序列配置；"
+        "下方这张具体的黄色/绿色/蓝色映射表是本项目采用的工程预置，不是 3GPP 强制算法。"
+        "这一区分很重要：标准说明资源能怎样配，预置表决定当前系统具体怎样错开。</p>",
     )
+
     body += """
-<h2>资源分配怎样真正进入 CSI 老化</h2>
-<ol class="steps"><li><b>1</b><span><code>build_link_tables</code> 按 UE 接收端口数分配叶子。</span></li>
-<li><b>2</b><span>assignment 的 <code>offset_ms</code> 传给 <code>rbg_lag_snapshots</code>。</span></li>
-<li><b>3</b><span>最近可用机会变为 <code>offset + n·period</code>，处理时延仍守因果。</span></li>
-<li><b>4</b><span>每 UE 的 assignment、lag trace 与 profile 摘要一起进入结果合同。</span></li></ol>
-<p>七个同小区 4-port UE 的测试会跨过首个同色 offset 池，并断言至少出现两种 CSI lag trace。
-这条反向哨兵专门防止“页面上有资源表，实际所有 UE 仍用 offset=0”的 metadata-only 实现。</p>
+<h2>3 · 当前 100 MHz 普通 H 资源的 PCI 模3表</h2>
+<p>下表从给定资源图中抽取当前已实现的普通 H 部分。每个格子的数字表示该
+<code>symbol + comb</code> 时频叶子的首选 PCI 模3颜色。颜色附着在时频叶子上，
+同一叶子下面的不同循环移位仍属于同一种颜色。</p>
 """
-    body += "<p class=source-row>实现入口：" + source_ref(
-        "src/superran/srs_resource.py", "class SrsResourceAllocator") + " · " + source_ref(
-        "src/superran/system.py", "def build_link_tables") + " · " + source_ref(
-        "scripts/run_scheduler_p0_validation.py", "def _srs_experiment") + "</p>"
+    body += table(resource_headers, resource_rows, raw=set(range(1, 9)))
+    body += """
+<p><b>如何读表：</b>绿色小区（PCI mod3=1）优先找绿色格，例如 symbol13/comb0；
+蓝色小区优先找 symbol12/comb1 等蓝色格；黄色小区优先找 symbol13/comb1 等黄色格。
+四个 SRS 机会重复同一普通 H 着色规则；完整资源图中被 P-H/F、BWP2 或长周期专用资源占用的格子
+应灰显处理，但这些特殊资源当前没有进入基础分配器。</p>
+<p>30 kHz SCS 下一个 slot 是 0.5 ms，所以 slot7/17/27/37 对应 3.5/8.5/13.5/18.5 ms。
+对 10 ms 周期而言，slot7 与 slot27 属于同一 offset 类，slot17 与 slot37 属于另一类；
+因此 20 ms 图上虽看到四次发送，实际只有两个不同的 10 ms 周期 offset 配置。</p>
+
+<h2>4 · 多个小区到底在哪些维度错开</h2>
+"""
+    body += table(
+        ["资源维度", "物理作用", "本小区内", "相邻小区之间的当前策略"],
+        [
+            ("slot offset", "把 SRS 放到不同时间机会", "资源扩容与周期错开", "PCI 表本身不强制错时；负载增加后分配器可使用其他 offset"),
+            ("OFDM symbol", "同一 slot 内的时分隔离", "symbol10..13", "PCI 颜色优先错开 symbol/comb 组合"),
+            ("comb offset", "在频域交错使用偶/奇梳齿子载波", "comb0/1 可正交复用", "PCI 颜色优先错开 symbol/comb 组合"),
+            ("cyclic shift", "同一时频叶子上的码域分离", "8 个 CS 按 1/2/4 ports 成块", "不作为 PCI 首选着色维度；跨小区定时误差会削弱其正交性"),
+            ("频域 hopping", "每次探测不同 RBG，最终覆盖全带", "当前 17-hop，每次 16 RB", "三类小区当前共用同一 hopping profile，尚未按 PCI 再分频"),
+            ("序列/root", "提供额外序列域隔离", "标准具备", "当前基础模型未规划，不能把它算成已有抗污染能力"),
+        ],
+    )
+
+    body += """
+<figure class="diagram"><svg viewBox="0 0 860 300" role="img" aria-label="三个相邻小区按PCI模3选择不同SRS时频资源">
+<defs><marker id="srs-pci-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#60758d"/></marker></defs>
+<circle cx="135" cy="88" r="62" fill="#75be62" fill-opacity=".22" stroke="#4b9440" stroke-width="3"/><text x="135" y="72" text-anchor="middle" font-weight="750">小区 A · PCI 100</text><text x="135" y="98" text-anchor="middle">100 mod 3 = 1</text><text x="135" y="122" text-anchor="middle" font-size="13">首选绿色</text>
+<circle cx="430" cy="88" r="62" fill="#2384ad" fill-opacity=".2" stroke="#126181" stroke-width="3"/><text x="430" y="72" text-anchor="middle" font-weight="750">小区 B · PCI 101</text><text x="430" y="98" text-anchor="middle">101 mod 3 = 2</text><text x="430" y="122" text-anchor="middle" font-size="13">首选蓝色</text>
+<circle cx="725" cy="88" r="62" fill="#f2c84b" fill-opacity=".28" stroke="#c49d18" stroke-width="3"/><text x="725" y="72" text-anchor="middle" font-weight="750">小区 C · PCI 102</text><text x="725" y="98" text-anchor="middle">102 mod 3 = 0</text><text x="725" y="122" text-anchor="middle" font-size="13">首选黄色</text>
+<path d="M135 152V205" stroke="#60758d" stroke-width="2" marker-end="url(#srs-pci-arrow)"/><path d="M430 152V205" stroke="#60758d" stroke-width="2" marker-end="url(#srs-pci-arrow)"/><path d="M725 152V205" stroke="#60758d" stroke-width="2" marker-end="url(#srs-pci-arrow)"/>
+<rect x="48" y="216" width="174" height="58" rx="12" fill="#75be62" fill-opacity=".22" stroke="#4b9440"/><text x="135" y="241" text-anchor="middle" font-weight="700">slot7 · sym13 · comb0</text><text x="135" y="261" text-anchor="middle" font-size="12">CS 0..3</text>
+<rect x="343" y="216" width="174" height="58" rx="12" fill="#2384ad" fill-opacity=".18" stroke="#126181"/><text x="430" y="241" text-anchor="middle" font-weight="700">slot7 · sym12 · comb1</text><text x="430" y="261" text-anchor="middle" font-size="12">CS 0..3</text>
+<rect x="638" y="216" width="174" height="58" rx="12" fill="#f2c84b" fill-opacity=".28" stroke="#c49d18"/><text x="725" y="241" text-anchor="middle" font-weight="700">slot7 · sym13 · comb1</text><text x="725" y="261" text-anchor="middle" font-size="12">CS 0..3</text>
+</svg><figcaption>轻载三小区实例：三者时间 offset 相同，但优先使用不同 symbol/comb；循环移位相同也不会发生时频碰撞</figcaption></figure>
+
+<h2>5 · 一个 UE 的资源是怎样选出来的</h2>
+"""
+    body += steps([
+        ("计算小区颜色", "<p>由服务小区 PCI 计算 <code>PCI mod 3</code>，得到首选色和溢出顺序。</p>"),
+        ("确定周期与 offset 候选", "<p>当前 100 MHz 基础实现直接接受 10/20/40 ms 周期，并列出周期内所有 slot-phase-7 机会。</p>"),
+        ("按颜色表筛时频叶子", "<p>先找本色的 <code>symbol + comb</code> 格，symbol 从靠近 slot 末尾的 13 向 10 搜索，以减少探测到可用 CSI 的等待。</p>"),
+        ("按端口数占循环移位块", "<p>1/2/4-port UE 分别占连续 1/2/4 个 CS。4-port UE 先拿 CS0..3，同一时频叶子的第二个 UE 拿 CS4..7。</p>"),
+        ("检查周期碰撞", "<p>与同小区已分配资源检查 offset 同余、symbol、comb 和 CS 交集；任何一维可分离就不算基础模型中的碰撞。</p>"),
+        ("本色用完后溢出", "<p>按 0→1→2、1→2→0 或 2→0→1 使用后续颜色。这样轻载优先抗干扰，重载仍能复用完整资源池。</p>"),
+    ])
+
+    body += """
+<h2>6 · 周期档位与容量：开销、用户数和 CSI 新鲜度的交换</h2>
+<p>参考全表通过档位逐步取消短周期：UE 越多时，允许更长周期可增加 offset 资源并降低上行开销，
+代价是 CSI 更新变慢。当前基础实现尚未实现“按 UE 数自动选档”，只支持直接请求周期。</p>
+"""
+    body += table(
+        ["参考档位", "普通 H 可选周期", "设计含义", "当前基础实现"],
+        [
+            ("档位 0", "10 / 20 / 40 / 80 ms", "低负载允许短周期", "直接支持 10/20/40；80 ms 未实现"),
+            ("档位 1", "20 / 40 / 80 ms", "资源吃紧时取消 10 ms", "未实现自动档位"),
+            ("档位 2", "40 / 80 ms", "继续扩容并降低开销", "未实现自动档位"),
+            ("档位 3", "80 / 160 ms", "高 UE 数/低更新频率", "80/160 ms 未实现"),
+            ("档位 4", "160 ms", "最大容量、最慢更新", "未实现"),
+        ],
+    )
+    body += F_SRS_POOL_CAPACITY
+    body += """
+<p>当前 10 ms、4-port 示例：两个不同 offset × 4 个 symbol × 2 个 comb ×
+<code>floor(8/4)=2</code> 个循环移位块，共 <b>32 个 UE</b>。注意这是整个池的硬容量，
+不是每个 PCI 颜色的无干扰容量；开始跨颜色溢出后，小区间碰撞概率会增加。</p>
+
+<h2>7 · 什么情况下两份资源仍会碰撞</h2>
+""" + F_SRS_RESOURCE_COLLISION
+    body += table(
+        ["条件", "为什么"],
+        [
+            ("周期机会在某一时刻重合", "混合周期不能只比 offset 数字；用 gcd 同余判断未来是否相遇"),
+            ("OFDM symbol 相同", "否则在 slot 内已经时分"),
+            ("comb offset 相同", "否则使用不同梳齿子载波"),
+            ("循环移位集合有交集", "否则基础模型可在码域解扩"),
+            ("频域也重合", "当前三类 PCI 共用同一 17-hop profile，所以碰撞代理按同频处理"),
+        ],
+    )
+    body += table(
+        ["三小区各 1 个 4-port UE", "跨小区碰撞对", "平均 I/S", "LS NMSE proxy"],
+        [
+            ("三小区都强制颜色 0", "3 / 3", "2.00", "2.01"),
+            ("PCI 模3分别为 0 / 1 / 2", "0 / 3", "0.00", "0.01"),
+        ],
+    )
+    body += callout(
+        "warn", "方向验证不等于现场性能承诺",
+        "<p>该反例证明表驱动错开确实减少基础模型中的精确导频碰撞。它仍假设等功率污染者、"
+        "非碰撞维度理想正交，没有展开根序列、TA、时延扩展、非理想 CS、接收滤波和真实邻区功率。"
+        "因此 2.01→0.01 只能作为分配器方向门，不能当作现场 NMSE 数字。</p>",
+    )
+
+    body += """
+<h2>8 · 资源分配如何影响后续仿真</h2>
+<p>分配结果中的周期 offset 会改变“最近一次可用 SRS”发生在何时，从而改变每个 UE、每个 RBG
+的 CSI 陈旧时长；symbol/comb/CS 决定导频是否碰撞；频域 hopping 决定某个 RBG 多久才被重新探测。
+因此资源分配最终会传导到预编码失配、MU 残余干扰、MCS、BLER 与体验 KPI，而不是一张只供展示的表。</p>
+
+<details><summary><b>开发者实现映射与反向测试（通信原理读者可跳过）</b></summary>
+<ul><li><code>PCI_MOD3_COLOR_BY_SYMBOL_COMB</code> 是上方普通 H 颜色表的唯一代码真相源。</li>
+<li>profile v2 把颜色固定在 symbol/comb 时频叶子；不同 CS block 不再被误着成不同小区颜色。</li>
+<li><code>offset_ms</code> 进入 CSI lag，而不是只写 metadata。</li>
+<li>测试锁定完整 4×2 表、CS 与颜色独立、三小区首选时频叶子互异、32/33 容量边界和混合周期 gcd 碰撞。</li></ul>
+<p class=source-row>实现：""" + source_ref(
+        "src/superran/srs_resource.py", "PCI_MOD3_COLOR_BY_SYMBOL_COMB") + " · " + source_ref(
+        "src/superran/system.py", "def build_link_tables") + " · 反向测试：" + source_ref(
+        "tests/test_srs_resource.py", "test_user_confirmed_pci_mod3_table_is_exact") + "</p></details>"
+    body += (
+        '<p class="source-row">标准资源字段参考：'
+        '<a class="src" href="https://www.etsi.org/deliver/etsi_ts/138300_138399/138331/19.01.00_60/ts_138331v190100p.pdf" target="_blank" rel="noreferrer">3GPP TS 38.331 SRS-Resource</a> · '
+        '<a class="src" href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138211/19.02.00_60/ts_138211v190200p.pdf" target="_blank" rel="noreferrer">3GPP TS 38.211 §6.4.1.4</a></p>'
+    )
     return Page(
         "srsallocation", "SRS 资源分配与 PCI 模 3", "物理内核",
         "SRS RESOURCE ALLOCATION",
-        "固定载波的周期 H 资源池、碰撞同余、端口循环移位与可复现的模 3 干扰反例。",
-        body, ("SRS资源", "PCI mod3", "offset", "comb", "循环移位", "碰撞"),
+        "从多小区导频污染问题出发，解释 PCI 模3资源表、六维正交、周期档位、容量与碰撞边界。",
+        body, ("SRS原理", "PCI模3表", "多小区", "symbol/comb", "循环移位", "周期档位"),
     )
 
 

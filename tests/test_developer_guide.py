@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 GUIDE = ROOT / "docs" / "index.html"
 GENERATOR = ROOT / "scripts" / "make_developer_guide.py"
 DETAILS = ROOT / "scripts" / "developer_guide_details.py"
@@ -350,6 +351,38 @@ def test_public_docs_and_source_do_not_expose_restricted_provenance_labels() -> 
         if restricted_chinese in content or restricted_ascii in content.casefold():
             offenders.append(str(path.relative_to(ROOT)))
     assert not offenders, f"restricted provenance labels remain in: {offenders}"
+
+
+def test_srs_allocation_chapter_is_algorithm_first_and_carries_the_pci_table() -> None:
+    text = _html()
+    start = text.index('<article class="doc-page" data-page="srsallocation"')
+    end = text.index('<article class="doc-page" data-page="csi"', start)
+    page = text[start:end]
+    required = (
+        "为什么必须分配 SRS 资源",
+        "PCI 是 Physical Cell ID",
+        "标准能力与工程预置必须分开",
+        "当前 100 MHz 普通 H 资源的 PCI 模3表",
+        "sym10 / C0",
+        "sym13 / C1",
+        "多个小区到底在哪些维度错开",
+        "周期档位与容量",
+        "开发者实现映射与反向测试（通信原理读者可跳过）",
+    )
+    assert all(item in page for item in required)
+    assert page.index("为什么必须分配 SRS 资源") < page.index(
+        "开发者实现映射与反向测试")
+    # Four SRS opportunities each render the exact table-driven 0/1/2/0/1/2/1/0 row.
+    expected_row = [0, 1, 2, 0, 1, 2, 1, 0]
+    from superran import srs_resource as srsres  # noqa: PLC0415
+    from superran import spec as specm  # noqa: PLC0415
+
+    assert [
+        srsres.pci_mod3_resource_color(symbol, comb)
+        for symbol in range(10, 14) for comb in (0, 1)
+    ] == expected_row
+    srs_control = next(row for row in specm._EDITABLE if row[0] == "srs_period_ms")
+    assert srs_control[3] == [10.0, 20.0, 40.0]
 
 
 if __name__ == "__main__":
