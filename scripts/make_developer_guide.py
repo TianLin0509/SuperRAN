@@ -4065,6 +4065,57 @@ def scheduler_p0_page() -> Page:
 <p>体验调度现在是一条“候选计划 → 资源预留 → SU/MU 选择 → 物理定稿 → 原子提交”的流水线。
 PDCCH/CCE 按已确认范围暂不建模；除此之外，物理 RBG、逐 RBG 层数、逻辑 layer-PRB、
 频选 bitmap、全 MU 伙伴评分和 FinalGrant 都有可复算证据。</p></div></div>
+<h2>P0 完成度审计：核心闭环完成，不等于原始清单 100%</h2>
+"""
+    body += table(
+        ["非 SRS P0", "当前状态", "已经进入主循环", "明确未完成 / 近似"],
+        [
+            (
+                "ResourceLedger",
+                "核心完成，原始清单仍有边界",
+                "物理 RBG/PRB、逐 RBG 层数、逻辑 layer-PRB、reserve/commit/rollback",
+                "每 TTI 最大 grant 数、最大调度 UE 数未设硬上限；PDCCH/CCE 按已确认范围排除",
+            ),
+            (
+                "逐 RBG 频选",
+                "完成",
+                "与 RB 功控解耦；质量/顺序前缀共同评估；实际 bitmap 重选单码字 MCS/TBS",
+                "跨 RBG、跨 rank stream 的有效 SINR 仍为 dB 算术平均，未标定 EESM/MIESM",
+            ),
+            (
+                "MU 全伙伴评分",
+                "当前基线完成",
+                "固定 PF anchor；枚举全部伙伴；相关性/层数/预测 BLER 门；useful bytes/RBG 评分",
+                "当前固定两用户、每用户 rank2；>2 UE MU 和更一般空间分组未实现",
+            ),
+            (
+                "GrantFinalizer",
+                "当前基线完成",
+                "SU/MU/NewTx/ReTx 统一重算 MCS、TBS、payload、padding、useful bytes 并硬对账",
+                "可选的低 MCS 后降 rank 并重算权尚未启用；功率回收属于后续增强",
+            ),
+        ],
+    )
+    body += callout(
+        "warn", "严格状态结论",
+        "<p>按本轮批准的典型场景范围，四个非 SRS 核心模块都已落地并审查；"
+        "若按最初 P0 子项逐字验收，不能写成 100% 全部完成。未完成项就是上表中的"
+        "最大 grant/UE 控制预算和可选 MU 降 rank，不得藏进“已完成”三个字里。</p>",
+    )
+    body += """
+<h2>审查与复现证据</h2>
+"""
+    body += table(
+        ["证据层", "本轮结果", "它证明什么"],
+        [
+            ("P0 专项", "8/8 通过（当前树再次运行）", "事务回滚、频选 safety net、Finalizer、MU 后到优选与端到端方向实验"),
+            ("系统主回归", "通过（当前树再次运行）", "PF、话务、HARQ、字节/PRB 守恒、SU/MU 选择与 KPI 没被新模块破坏"),
+            ("完整干扰/说明书联动", "通过；最终冻结树实测 477.6 s", "预设、配置白名单、页面默认值、物理/测量域和说明书全链仍闭合"),
+            ("浏览器 QA", "41 页、108 个公式；桌面/平板/手机均通过", "新章节公式、图、精简/详细切换、路由和响应式布局可用"),
+            ("压力", "10,000 次资源事务；5,720 个频选 grant；6,832 个 MU 候选", "overlap=0，plan/final mismatch=0；同时暴露 MU 全候选计算热点"),
+        ],
+    )
+    body += """
 <h2>一个 TTI 的七步闭环</h2>
 <figure class="diagram"><svg viewBox="0 0 840 120" role="img" aria-label="下行调度七阶段闭环">
 <defs><marker id="sched-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#6b809a"/></marker></defs>
@@ -4141,14 +4192,14 @@ HARQ 走同一入口，但 MCS、RBG 数、rank、TBS 用初传冻结值，并�
     body += table(
         ["压力项", "规模", "实测", "结论"],
         [
-            ("资源事务", "10,000 次 reserve/commit/rollback", "0.334 s", "两本账与回滚全通过"),
-            ("SU 频选", "12 UE、1 s、2,000 TTI", "3.01 s", "5,688 grants，overlap/mismatch=0"),
-            ("MU 全伙伴", "8 UE、0.5 s、1,000 TTI", "7.84 s", "6,832 candidates，overlap/mismatch=0"),
+            ("资源事务", "10,000 次 reserve/commit/rollback", "0.345 s", "两本账与回滚全通过"),
+            ("SU 频选", "12 UE、1 s、2,000 TTI", "3.00 s", "5,720 grants，overlap/mismatch=0"),
+            ("MU 全伙伴", "8 UE、0.5 s、1,000 TTI", "7.79 s", "6,832 candidates，overlap/mismatch=0"),
         ],
     )
     body += callout(
         "warn", "MU 全候选频选是当前新热点",
-        "<p>8 UE/0.5 s 已要约 7.8 s；5 s×8 repetitions 应使用进程并行，并把实际 elapsed 写进报告。"
+        "<p>8 UE/0.5 s 已要约 7.8 s；5 s×8 repetitions 应使用进程并行，并把实际 elapsed 写进结果。"
         "这不是正确性问题，但说明下一轮最高 ROI 性能工作是缓存/批量化候选前缀，而不是再加伙伴维度。</p>",
     )
     body += table(
