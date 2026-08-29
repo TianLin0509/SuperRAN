@@ -147,7 +147,7 @@ SRS_BODY = r"""
 <h2>结论：修复前不是最符合需求；修复后，在系统级体验仿真目标下是三者中最合适的组合</h2>
 <div class="verdict"><b>“最优”不是最高 RE 级保真度。</b>它指预置 64T/4R 硬件、1 驱 3、±45°、真实上下行 CSI 因果、SRS 干扰、LMMSE、CSI 陈旧与系统调度由一份可审计合同贯通。Sionna 更适合通用可微链路级研究；ChannelHub 是传播与参考信号引擎；SuperRAN 负责预置硬件、系统 KPI 和硬失败边界。</div>
 <div class="grid g3" style="margin-top:16px"><div class="card compare bad"><h3>修复前的硬伤</h3><ul class="list"><li>DL CSI-RS 估计被误当 SRS 预编码 CSI。</li><li>标量 pilot 广播到每个 H 系数，等价 oracle 观测。</li><li>预置 preset 4R/2T，配对 64×4 合同不成立。</li></ul></div>
-<div class="card compare"><h3>已经落地</h3><ul class="list"><li>h_true、UL h_est、DL h_dl_est 三路分离。</li><li>Y 中先叠加端口、干扰和噪声，再 cyclic-shift 解扩。</li><li>预置 BOTH preset 统一 4Tx/4Rx；LS/LMMSE 可选。</li></ul></div>
+<div class="card compare"><h3>已经落地</h3><ul class="list"><li>h_true、UL h_est、DL h_dl_est 三路分离。</li><li>资源/老化按2T4R两次2-port SRS拼64×4。</li><li>预置BOTH统一4个逻辑天线端口、4 CS；LS/LMMSE可选。</li></ul></div>
 <div class="card compare warn"><h3>仍需声明</h3><ul class="list"><li>RB 中心系统抽象，不是全 RE 接收机。</li><li>实现 1/2/4 port；Rel-18 8-port TDM 未做。</li><li>LMMSE 当前频域协方差 + 时间线性，无空间平滑。</li></ul></div></div></section>
 
 <section class="section" id="map"><div class="kicker">01 · Module map</div><h2>从传播状态到调度可见 CSI：每层只承担一件事</h2>
@@ -200,7 +200,7 @@ SRS_BODY = r"""
 </tbody></table></div></section>
 
 <section class="section" id="limits"><div class="kicker">07 · Boundaries and decisions</div><h2>当前可发结论，但不能删掉这些边界</h2>
-<details open><summary>P0 · 保持的默认</summary><ul class="list"><li>预置 BOTH、4Tx/4Rx、+45/−45、SRS 10 ms、LS/LMMSE 可选、系统每 slot 一个 H。</li><li>h_true 只评估；h_est 只来自 UL SRS；缺估计硬失败。</li><li>正式结果记录 estimator、prior、RS opportunity 和 CSI 陈旧时长。</li></ul></details>
+<details open><summary>P0 · 保持的默认</summary><ul class="list"><li>预置BOTH、2T4R、4 CS、+45/−45、全局SRS周期自适应、LS/LMMSE可选。</li><li>h_true只评估；h_est只来自UL SRS；缺估计硬失败。</li><li>正式结果记录estimator、prior、两个RS opportunity和端口组CSI陈旧时长。</li></ul></details>
 <details><summary>P1 · 需要你提供数据</summary><ul class="list"><li>实测二维复 Jones 图，替换 110° 参数化临时模型。</li><li>真实 SRS resource/comb/port/hopping 和接收机协方差。</li><li>若产品用 Rel-18 8 port，再实现 TDM port 组。</li></ul></details>
 <details><summary>P2 · 何时保留 14 symbol</summary><p>仅在 symbol 内 channel variation、ICI、symbol 级波束切换或 SRS TDM 课题中完整保留；体验仿真不应无条件承担 14 倍内存。</p></details>
 <div class="callout ok" style="margin-top:15px"><h3>最终判断</h3>SuperRAN 不是“比 Sionna 更强的通用 PHY 库”，而是<b>更符合预置硬件与系统体验口径的集成层</b>；依据是适配度和可审计性，不是单个性能样本。</div></section>

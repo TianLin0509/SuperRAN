@@ -30,6 +30,7 @@ _BLOCKS: dict[str, str] = {
 # ── 信道矩阵 ────────────────────────────────────────────────
 H      = ds.h_true      # [N, T, RB, BS_ant, UE_ant] complex64，理想信道
 H_est  = ds.h_est       # 同形，带导频与噪声的估计信道
+H_ul   = ds.h_ul_true   # 新 paired/BOTH 数据的物理上行真值；旧/单向数据为 None
 print("H:", H.shape, H.dtype)
 
 # 估计误差（做信道估计类课题时的基准指标）
@@ -67,6 +68,48 @@ print("主导秩 %d，最大特征值 %.3e" % (f.dominant_rank, f.eigenvalues[0]
 # f.eigenvalues   [BS] 全部特征值（降序，非只取前 4 个）
 # f.eigenvectors  [BS, BS]
 # f.beam_rsrp_db  [n_beams] DFT 波束域 RSRP
+''',
+    "srs_waveform": '''
+# ── assignment 驱动的 SRS 波形接收（真实 RE / 解扩 / UL IoT）
+from superran.srs_resource import allocate_basic_srs_resources
+from superran.srs_waveform import SrsWaveformConfig
+
+if ds.h_ul_true is None:
+    print("该旧/单向数据集没有 h_ul_true；波形接收拒绝静默伪造上行真值")
+else:
+    # 单 UE 机制探针。snapshot_indices 默认 (0,0)，只表示单快照诊断；
+    # 有真实5-ms时间演化时应分别指向两腿对应的UL snapshot。
+    # 正式多 UE 运行必须传入整池 allocator 的实际 assignment，
+    # 并把每个干扰 UE→受害 gNB 的 UL cross-link 作为 SrsWaveformSignal 提供。
+    assignment = allocate_basic_srs_resources([0], adaptive_period=False)[0]
+    rx = ds.srs_waveform_pair(
+        0, assignment, n_srs_id=0,
+        config=SrsWaveformConfig(noise_power_linear=1e-3),
+    )
+    print("双腿间隔 %.1f ms，H_hat=%s，NMSE=%.2f dB" % (
+        rx.as_dict()["leg_separation_ms"], rx.h_est_rb.shape, rx.nmse_db))
+    print("UL IoT evidence SHA-256:", rx.evidence.fingerprint())
+''',
+    "srs_metrics": '''
+# ── SRS物理测量口径：PreSINR + per-active-RE链路预算 ──────
+from superran.srs_resource import allocate_basic_srs_resources
+
+if ds.h_ul_true is None:
+    print("该数据集没有h_ul_true，不能复算UL PreSINR")
+else:
+    q = ds.srs_presinr(0, alpha=0.2)
+    print("PreSINR %.2f dB（线性域IIR后 %.2f dB）" % (
+        q.instantaneous_wideband_db, q.filtered_final_db))
+
+assignment = allocate_basic_srs_resources([0], adaptive_period=False)[0]
+try:
+    budget = ds.srs_link_budget(0, assignment)
+    print("SRS RX/active-RE %.2f dBm，noise/RE %.2f dBm，SNR %.2f dB" % (
+        budget.received_per_active_re_dbm,
+        budget.noise.noise_per_re_dbm,
+        budget.snr_per_active_re_db))
+except ValueError as exc:
+    print("绝对SRS链路预算不可用：", exc)
 ''',
     "pmi": '''
 # ── PMI（Type-I-style 单面板列码本子集近似，非 MAE token）──

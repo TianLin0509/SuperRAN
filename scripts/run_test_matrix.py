@@ -30,6 +30,8 @@ QUICK = (
     "test_power_control.py",
     "test_results.py",
     "test_rng.py",
+    "test_scheduler_p0.py",
+    "test_srs_resource.py",
     "test_sysscenes.py",
     "test_system.py",
     "test_system_sim_tool.py",
@@ -42,8 +44,10 @@ PHYSICS = (
     "test_interference.py",
     "test_linkadapt.py",
     "test_linklevel.py",
+    "test_physics_contract_extensions.py",
     "test_physics_invariants.py",
     "test_raytracing.py",
+    "test_srs_waveform.py",
 )
 
 
@@ -148,6 +152,16 @@ def main() -> int:
     parser.add_argument("--only", action="append", default=[])
     parser.add_argument("--output", default=str(OUT_DIR / "summary.json"))
     args = parser.parse_args()
+    registered = tuple(QUICK + PHYSICS)
+    discovered = tuple(sorted(path.name for path in (ROOT / "tests").glob("test_*.py")))
+    duplicates = sorted({name for name in registered if registered.count(name) > 1})
+    missing = sorted(set(discovered) - set(registered))
+    stale = sorted(set(registered) - set(discovered))
+    if duplicates or missing or stale:
+        raise SystemExit(
+            "test matrix catalogue drift: "
+            f"duplicates={duplicates}, missing={missing}, stale={stale}"
+        )
     selected = list(args.only) if args.only else (
         list(QUICK) if args.tier == "quick" else
         list(PHYSICS) if args.tier == "physics" else

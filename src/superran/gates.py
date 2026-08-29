@@ -250,10 +250,17 @@ def paired_compare(a: np.ndarray, b: np.ndarray) -> PairedResult:
     """
     a = np.asarray(a, dtype=float)
     b = np.asarray(b, dtype=float)
+    if a.ndim != 1 or b.ndim != 1:
+        raise ValueError(
+            f"配对比较要求一维逐样本数组，收到 {a.shape} 与 {b.shape}"
+        )
     if a.shape != b.shape:
         raise ValueError(f"配对比较要求形状一致，收到 {a.shape} 与 {b.shape}")
-    m = np.isfinite(a) & np.isfinite(b)
-    a, b = a[m], b[m]
+    if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
+        raise ValueError(
+            "配对比较不接受NaN/Inf；必须由上游显式处理失败样本和coverage，"
+            "不能在统计层静默删行"
+        )
     n = int(a.size)
     d = a - b
     if n < 2:
@@ -387,13 +394,16 @@ def _precoding_source_item(ds: Any, expected: str) -> GateItem:
             expected_count = int(np.asarray(ds.h_est).shape[0])
         except (AttributeError, IndexError, TypeError, ValueError):
             pass
-    complete = expected_count is None or raw.size == expected_count
+    # Unknown sample count is not evidence of completeness.  Gate 1 must not
+    # pass a hand-made object that carries one favourable label but exposes no
+    # way to prove how many channel samples it represents.
+    complete = expected_count is not None and raw.size == expected_count
     passed = bool(
         complete and raw.size > 0 and np.all(raw == str(expected))
     )
     count_note = (
         f"；标签数 {raw.size}/{expected_count}"
-        if expected_count is not None else f"；标签数 {raw.size}"
+        if expected_count is not None else f"；标签数 {raw.size}，样本总数不可核验"
     )
     return GateItem(
         name="预编码 CSI 来源符合实验声明",

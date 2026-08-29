@@ -144,10 +144,12 @@ check((lags >= 0).all(), "滞后非负")
 
 # 离散快照必须选“不新于真实测量”的那一个：2 ms/5 ms 不能四舍五入成当前信道。
 lag_2ms = ca.rbg_lag_snapshots(
-    ca.CsiConfig(srs_period_ms=5.0, hopping=False, processing_delay_ms=2.0),
+    ca.CsiConfig(srs_period_ms=5.0, hopping=False, processing_delay_ms=2.0,
+                 srs_resource_allocation=False),
     1, snapshot_ms=5.0, snapshot_index=0)
 lag_7ms = ca.rbg_lag_snapshots(
-    ca.CsiConfig(srs_period_ms=5.0, hopping=False, processing_delay_ms=7.0),
+    ca.CsiConfig(srs_period_ms=5.0, hopping=False, processing_delay_ms=7.0,
+                 srs_resource_allocation=False),
     1, snapshot_ms=5.0, snapshot_index=0)
 check(lag_2ms.tolist() == [1] and lag_7ms.tolist() == [2],
       "CSI 陈旧时长向上量化守因果：2 ms→1 快照，7 ms→2 快照")
@@ -187,23 +189,68 @@ else:
     _bad_phase_rejected = False
 check(_bad_phase_rejected, "SRS offset 不在一个周期内时硬失败")
 
-# 系统建表必须真正消费分配结果，而不是只在 metadata 里挂一张表。七个 4-port
-# UE 会跨过同色优先池的第一个时域 offset；它们的 CSI lag trace 因而不同。
-_resource_trace = _seq(
-    np.random.default_rng(20260825), 3, 0.9, n_rb=272, bs=8, ue=4)
+# 系统建表必须真正消费2T4R双腿分配结果，而不是只在metadata里挂一张表。
+# 每个快照的所有复系数都等于快照编号，这样可直接反查端口0/1和2/3究竟
+# 来自哪个历史快照。
+_resource_trace = np.stack([
+    np.full((272, 8, 4), float(t + 1), dtype=np.complex64)
+    for t in range(4)
+])
 _resource_tables = sy.build_link_tables(
     [_resource_trace.copy() for _ in range(7)], [12.0] * 7,
-    max_rank=1, csi=ca.CsiConfig(
+    num_snapshots=4, max_rank=1, csi=ca.CsiConfig(
         srs_period_ms=10.0, hopping=True, processing_delay_ms=2.0,
         srs_resource_allocation=True), snapshot_ms=5.0)
-_resource_offsets = {
-    table.srs_resource_assignment.offset_ms for table in _resource_tables
-    if table.srs_resource_assignment is not None}
-_lag_traces = {tuple(table.csi_lag_snapshots.tolist()) for table in _resource_tables}
 check(all(table.srs_resource_assignment is not None for table in _resource_tables),
-      "每个 UE 都拿到可审计的 SRS 资源叶子")
-check(len(_resource_offsets) >= 2 and len(_lag_traces) >= 2,
-      "SRS 资源 offset 真正改变逐 UE CSI lag，而不是 metadata-only")
+      "每个 UE 都拿到可审计的2T4R双腿SRS资源")
+check(all(
+    table.srs_resource_assignment.antenna_port_groups == ((0, 1), (2, 3))
+    and table.srs_resource_assignment.legs[1].offset_slots
+        - table.srs_resource_assignment.legs[0].offset_slots == 10
+    for table in _resource_tables),
+      "端口0/1与2/3分配到相邻两个可用SRS机会")
+_switch_table = _resource_tables[0]
+_switch_lags = _switch_table.csi_lag_snapshots_by_antenna_group_rbg
+check(_switch_lags is not None and _switch_lags.shape == (4, 2, 17),
+      "链路表保存逐快照×天线组×RBG的CSI lag")
+_switch_exact = True
+_switch_has_skew = False
+if _switch_lags is not None:
+    for _s in range(4):
+        for _g, _ports in enumerate(((0, 1), (2, 3))):
+            for _rbg in range(17):
+                _source = max(0, _s - int(_switch_lags[_s, _g, _rbg]))
+                _got = _switch_table.h_prec_rbg[_s, _rbg, 0, list(_ports)].real
+                _switch_exact &= bool(np.allclose(_got, float(_source + 1)))
+        _switch_has_skew |= bool(np.any(
+            _switch_lags[_s, 0] != _switch_lags[_s, 1]))
+check(_switch_exact,
+      "64x4 h_prec确实由两个不同时间的64x2端口片段拼接")
+check(_switch_has_skew,
+      "相邻SRS机会的5 ms天线切换偏差真实进入逐RBG CSI lag")
+
+# 资源层选出的全局周期必须继续进入系统老化，不能只在assignment里写20 ms、
+# 实际仍按用户请求的10 ms算lag。
+_adaptive_h = np.ones((1, 272, 1, 4), dtype=np.complex64)
+_adaptive_tables = sy.build_link_tables(
+    [_adaptive_h.copy() for _ in range(69)], [10.0] * 69,
+    max_rank=1, csi=ca.CsiConfig(
+        srs_period_ms=10.0, srs_period_adaptive=True,
+        hopping=True, processing_delay_ms=0.0), snapshot_ms=5.0)
+check({table.srs_resource_assignment.period_ms for table in _adaptive_tables}
+      == {20.0},
+      "第69个2T4R UE使全局周期从10 ms原子提升到20 ms")
+_a0 = _adaptive_tables[0]
+_expected_adaptive_lag = ca.rbg_lag_snapshots_by_antenna_group(
+    ca.CsiConfig(srs_period_ms=20.0, hopping=True, processing_delay_ms=0.0),
+    17, snapshot_ms=5.0, snapshot_index=0,
+    opportunity_offsets_ms=tuple(
+        leg.offset_ms for leg in _a0.srs_resource_assignment.legs),
+    frequency_resource_id=_a0.srs_resource_assignment.frequency_resource_id)
+check(np.array_equal(
+    _a0.csi_lag_snapshots_by_antenna_group_rbg[0],
+    _expected_adaptive_lag),
+      "系统CSI老化真实使用分配器选出的20 ms，而不是请求下限10 ms")
 
 off = ca.CsiConfig(enabled=False)
 check(ca.rbg_lag_snapshots(off, 17, snapshot_ms=5.0, snapshot_index=3).max() == 0,
@@ -341,11 +388,19 @@ for bad in (7.0, 0.0, 100.0):
     except ValueError:
         check(True, f"srs_period_ms={bad} 被拒（只允许 5/10/20/40）")
 
+try:
+    ca.CsiConfig(srs_period_ms=5.0, srs_resource_allocation=True)
+    check(False, "基础资源分配不应接受无法组成2T4R机会pair的5 ms全局周期")
+except ValueError:
+    check(True, "5 ms仅在关闭资源分配的诊断上界中可用；基础profile从10 ms起")
+
 for _kwargs, _label in (
     ({"processing_delay_ms": float("nan")}, "NaN processing delay"),
     ({"processing_delay_ms": float("inf")}, "Inf processing delay"),
     ({"hop_factor": 1.5}, "非整数 hop factor"),
     ({"hop_factor": True}, "bool hop factor"),
+    ({"hopping": "off"}, "字符串 hopping 开关"),
+    ({"periodic_trace_history": 1}, "整数 periodic history 开关"),
 ):
     try:
         ca.CsiConfig(**_kwargs)
@@ -371,6 +426,9 @@ for _call, _label in (
 summ = ca.aging_summary(ca.CsiConfig(srs_period_ms=10.0, hopping=True),
                         num_rbg=17, snapshot_ms=5.0, speed_kmh=30.0)
 check(summ["hop_order_source"].startswith("superran:"), "摘要里标注了跳频序列来源")
+check(summ["antenna_group_measurement_skew_ms"] == 5.0
+      and summ["srs_transmissions_per_full_4port_sweep"] == 34,
+      "摘要显式报告2T4R的5 ms列间偏差与34次全带SRS发送")
 check(summ["coherence_time_ms"] is not None and summ["coherence_time_ms"] < 10,
       f"30 km/h 相干时间 {summ['coherence_time_ms']} ms（应当 < 10）")
 check(len(summ["warnings"]) > 0, "平均 CSI 陈旧时长远大于相干时间时给出告警")
@@ -407,7 +465,8 @@ check(float(_cold[0, 0, 0]) == 10.0 and float(_steady[0, 0, 0]) == 30.0,
 
 # 5 ms 周期 + 不跳频 + 5 ms 快照 → 滞后全部量化成 0，模型失效必须警告
 degenerate = ca.aging_summary(
-    ca.CsiConfig(srs_period_ms=5.0, hopping=False, processing_delay_ms=0.0),
+    ca.CsiConfig(srs_period_ms=5.0, hopping=False, processing_delay_ms=0.0,
+                 srs_resource_allocation=False),
     num_rbg=17, snapshot_ms=5.0, speed_kmh=3.0)
 check(any("量化成 0" in w for w in degenerate["warnings"]),
       "滞后被量化成 0 个快照时明确告警（模型此时几乎不起作用）")

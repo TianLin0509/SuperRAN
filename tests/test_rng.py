@@ -595,6 +595,21 @@ check(rg.compare_replications(np.arange(8.0), np.arange(8.0) + 1.0,
                               books_a=_ba, books_b=_ba)["crn"] is True,
       "给了 books 且成立时 crn=True")
 
+_coverage = rg.summarize([1.0, float("nan"), 3.0], "coverage_probe").as_dict()
+check(_coverage["n_rep"] == 2 and _coverage["n_total"] == 3
+      and _coverage["n_nonfinite"] == 1
+      and abs(_coverage["coverage"] - 2 / 3) < 1e-4,
+      "KPI汇总显式报告有限重复覆盖率，不把NaN删样藏起来")
+for _bad_a, _bad_b in (
+    (np.array([[1.0, 2.0]]), np.array([1.0, 2.0])),
+    (np.array([1.0, np.nan]), np.array([1.0, 2.0])),
+):
+    try:
+        rg.compare_replications(_bad_a, _bad_b)
+        check(False, "配对比较不应flatten二维或删除非有限replication")
+    except ValueError:
+        check(True, "配对比较拒绝二维/非有限输入，不产生伪窄区间")
+
 # n ≤ 5 时 Wilcoxon 最小可达 p = 2/2^n > 0.05，**无论数据多干净都不可能显著**
 for _n, _pmin in ((4, 0.125), (5, 0.0625), (6, 0.03125), (8, 0.0078125)):
     _got = float(stats.wilcoxon(np.arange(1.0, _n + 1)).pvalue)

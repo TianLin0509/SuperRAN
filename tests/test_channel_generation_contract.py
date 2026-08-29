@@ -54,9 +54,13 @@ def test_precoding_source_gate_rejects_csirs_when_srs_was_declared() -> None:
         h_est=np.ones((2, 1, 1, 1, 1)),
         precoding_csi_sources=np.array(["ul_srs_estimate"]),
     )
+    unverifiable = SimpleNamespace(
+        precoding_csi_sources=np.array(["ul_srs_estimate"]),
+    )
     assert not gates._precoding_source_item(wrong, "ul_srs_estimate").passed
     assert gates._precoding_source_item(right, "ul_srs_estimate").passed
     assert not gates._precoding_source_item(incomplete, "ul_srs_estimate").passed
+    assert not gates._precoding_source_item(unverifiable, "ul_srs_estimate").passed
 
 
 def test_paired_ul_srs_is_reciprocity_mapped_to_downlink_convention() -> None:
@@ -479,6 +483,10 @@ def test_company_presets_use_one_rbg_17_hop_10_ms_srs() -> None:
         )
         assert srs["rb_per_hop"] == 16
         assert srs["hopping_cycle_length"] == 17
+        assert srs["n_ports"] == 2
+        assert srs["configured_cyclic_shift_count"] == 4
+        assert srs["antenna_port_groups"] == [[0, 1], [2, 3]]
+        assert srs["srs_transmissions_per_full_4port_sweep"] == 34
         assert srs["periodicity_slots"] * 0.5 == pytest.approx(10.0)
 
 

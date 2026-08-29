@@ -228,8 +228,9 @@ SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且�
 SRS hopping 也不是通用旋钮：当前只有 272 RB 上的
 `C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0` 17-hop profile，顺序由 SuperRAN 本地合同给出；
 其他带宽或跳频参数直接拒绝，不调用外部 helper，也不退回恒等扫描。
-`srs_resource_allocation=True` 时每 UE 另分 period offset/symbol/comb/循环移位，
-offset 会进入 CSI 老化；PCI mod3 只是可溢出的候选优先顺序。体验模式默认
+`srs_resource_allocation=True`时按2T4R基线为每UE分配相邻两个2-port资源：
+排除BBL、固定4 CS、展开17个频域相位，只允许本PCI模3颜色。两个offset分别进入
+端口组CSI老化；全局周期默认自动选择最短可容纳的10/20/40 ms。体验模式默认
 `frequency_selective="auto"`，逐 RBG 字段齐全就启用且与 RB 功控解耦；MU 固定 PF anchor
 后枚举全部伙伴并按 useful bytes/RBG 评分。所有候选计划先过 RBG/层/逻辑 layer-PRB
 账本，再由统一 Finalizer 定稿；PDCCH/CCE 当前明确未建模。

@@ -204,8 +204,31 @@ print(f"  SRS b_srs=1: 跳频周期 {srs['hopping_cycle_length']}，"
       f"每跳 {srs['rb_per_hop']} RB，覆盖 {srs['coverage_ratio']:.0%}")
 check(srs["hopping_enabled"], "b_hop < b_srs 时跳频启用")
 check(srs["hopping_cycle_length"] == 17, "当前只支持 100 MHz 的 17-hop profile")
+check(srs["n_ports"] == 2 and srs["logical_antenna_ports"] == 4
+      and srs["configured_cyclic_shift_count"] == 4,
+      "2T4R单次只发2 ports，工程基线固定4个CS")
+check(srs["srs_transmissions_per_full_4port_sweep"] == 34,
+      "每个RBG完成两次2-port资源后再跳，全带共34次发送")
 check(srs["hop_order_rbg"] == [0, 8, 16, 7, 15, 6, 14, 5, 13, 4, 12, 3, 11, 2, 10, 1, 9],
       "17-hop 顺序由 SuperRAN 本地合同固定")
+_phase1 = ph.srs_config(
+    272, b_srs=1, b_hop=0, frequency_resource_id=1)
+check(_phase1["hop_order_rbg"][0] == 8
+      and sorted(_phase1["hop_order_rbg"]) == list(range(17)),
+      "frequency_resource_id旋转17-hop起点且仍不重不漏")
+for _bad_period, _bad_offset in ((10, 0), (20, 20)):
+    try:
+        ph.srs_config(
+            272, b_srs=1, b_hop=0,
+            periodicity=_bad_period, offset=_bad_offset)
+        check(False, "2T4R 17-hop周期/offset非法值必须硬失败")
+    except ValueError:
+        check(True, "2T4R 17-hop只接受10/20/40 ms且offset位于周期内")
+try:
+    ph.srs_config(272, b_srs=1, b_hop=0, frequency_resource_id=17)
+    check(False, "越界frequency_resource_id必须硬失败")
+except ValueError:
+    check(True, "越界frequency_resource_id硬失败")
 try:
     ph.srs_config(273, b_srs=1, b_hop=0)
     check(False, "非 272-RB 跳频必须硬失败")

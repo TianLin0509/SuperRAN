@@ -32,11 +32,15 @@ python tests/test_results.py                # 外部算法结果契约、预注�
 python tests/test_linkadapt.py              # 链路自适应、吞吐、并行生成
 python tests/test_mumimo.py                 # MU-MIMO、单码字、RBG 粒度
 python tests/test_system.py                 # 系统级 capacity / experience
+python tests/test_scheduler_p0.py           # 调度资源账本、频选、MU 评分与 Finalizer
+python tests/test_srs_resource.py           # PCI 模3、4 CS、2T4R 双腿与全局周期容量
+python tests/test_srs_waveform.py           # RE级波形、解扩、CFO/时偏与UL IoT证据
 python tests/test_interference.py           # IoT、预设、说明书、算法页、文档计数
 python tests/test_csi_aging.py              # CSI 时延、SRS 跳频、真实/估计视角
 python tests/test_rng.py                    # 随机数分流、重复实验、CRN、置信区间
 python tests/test_sysscenes.py              # 系统场景预设与成对受控性
 python tests/test_power_control.py          # EBF/PEBF/NEBF 与逐 RB 功率耦合
+python tests/test_physics_contract_extensions.py # 快照时钟、SRS测量口径与场景资产合同
 python tests/test_physics_invariants.py     # 极化、子阵、SRS/LMMSE 物理不变量
 python tests/test_channel_generation_contract.py # ChannelHub 生成合同与最小网格
 python tests/test_developer_guide.py         # 开发者文档覆盖、离线结构与漂移检查
@@ -46,7 +50,7 @@ python tests/test_system_sim_tool.py          # sr_system_sim 行为级（硬失
 python tests/test_benchmarks.py               # 预注册经典通信基准与 provenance
 ```
 
-当前共 **21 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
+当前共 **25 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
 pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` 不再是
 0 检查假绿）；脚本式文件必须在 pytest 收集/薄壳路径中同样以异常或非零退出
 传播失败，不能只在 `if __name__ == '__main__'` 里检查全局 FAILED。
@@ -63,8 +67,12 @@ pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` �
 改动 `mumimo.py` / `beamforming.py` / `power_control.py` 要跑 test_mumimo +
 test_power_control + test_physics_invariants；
 改动 `system.py` / `experience.py` / `traffic.py` / `kpi_view.py` / `kpi_compare.py` 要跑 test_system +
-test_csi_aging + test_rng；
-改动 `csi_aging.py` 要跑 test_csi_aging；改动 `rng.py` 要跑 test_rng + test_system；
+test_csi_aging + test_rng；改动 `scheduler_*.py` / `experience.py` 要额外跑 test_scheduler_p0；
+改动 `csi_aging.py` / `srs_resource.py` 要跑 test_csi_aging + test_srs_resource；
+改动 `srs_waveform.py` 或 SRS 的 `h_ul_true` 数据合同要跑 test_srs_waveform +
+test_physics_contract_extensions + test_channel_generation_contract + test_results；
+改动 `scenes.py` / `scene_assets.py` 要跑 test_physics_contract_extensions + test_raytracing；
+改动 `rng.py` 要跑 test_rng + test_system；
 改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）；
 改动开发者文档生成器要跑 `tests/test_developer_guide.py`。
 
@@ -93,6 +101,10 @@ KaTeX 未必收，光看 Python 源码看不出来。
 2. 再讲算法输入/输出、资源维度、公式逐符号解释、完整配置表、逐步例子和取舍边界。
 3. 标准定义与本项目工程预置必须分栏；不得把预置表冒充 3GPP 强制算法。
 4. 最后才给实现映射、类/函数/文件与反向测试，优先放进可折叠的“开发者实现”区域。
+5. 复杂因果链必须优先给一个可手算的 toy example：用最小维度、明确数字逐步走过
+   输入→中间量→输出，再说明怎样扩展到真实 64×4/多小区；不能只写抽象公式或字段。
+6. toy example 必须把“当前已端到端接通”“独立存在但未桥接”“仅验证方向的 proxy”
+   分开标注，避免用户把机制示例误读成现场收益或已实现能力。
 
 凡是表驱动算法（PCI 模3、MCS/CQI、BLER、TDD/SRS 资源等），文档表必须从代码的唯一
 真相源生成，并有逐格一致性测试。只写“见代码”、只给字段清单，或用 metadata 表替代
@@ -962,6 +974,24 @@ POST 回来被拒"或者反过来"页面没有的键也能塞进去"。
 `f'<td>{"<span class='a'>x</span>" if c else "..."}</td>'` 在 3.12 之前是
 语法错误。本项目要求 >= 3.10，**本机是 3.12 所以跑得通、别的机器直接崩**。
 把这类片段提成局部变量再插值。ruff 会报 `invalid-syntax`，别忽略它。
+
+### 2T4R 的 4 是待探测天线，不是 4Tx 同时发
+
+当前终端基线是 2T4R：数据张量仍保存 4 个 UE 逻辑天线端口以形成完整
+`64×4` 互易信道，但任一 SRS 机会只发送 2 ports。端口 0/1 在当前可用
+SRS 机会发送，端口 2/3 在下一个可用机会（如 slot7→17，间隔 5 ms）发送；
+两次 `64×2` 按天线身份拼成 `64×4`。两个端口组必须分别维护 CSI lag，
+不能先拼成一个同时刻矩阵再统一老化。
+
+工程资源 profile 只开放 **4 个 CS**，分成 `(0,1)` / `(2,3)` 两块，
+一个时频/RBG 叶子可承载两个 UE 的当次 2T 发送。38.211 在某些 comb 下
+允许更多 CS 是标准能力上限，不得据此把项目基线改回 8。加粗
+`symbol11/comb1` 与 `symbol13/comb0` 是 BBL 保留叶子，普通 H 必须排除。
+每个 UE 的两腿保持同一 frequency resource，完成后才推进 17-hop。
+
+全局周期从 10 ms 起在 10/20/40 ms 中选最短可容纳值；只能用本 PCI 模3颜色，
+本色不足就全局升周期，禁止跨色或占用 BBL。2T4R 每色容量依次为
+68/136/272 UE。
 
 ### preset 里不要写死 bs_panel
 

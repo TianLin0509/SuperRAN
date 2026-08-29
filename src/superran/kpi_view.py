@@ -17,6 +17,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+
 from . import bridge as br
 from . import webui
 from .paths import artifacts_root
@@ -172,6 +174,10 @@ def _json_ready(value: Any) -> Any:
         return {str(key): _json_ready(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_ready(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return [_json_ready(item) for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return _json_ready(value.item())
     if hasattr(value, "item"):
         try:
             return _json_ready(value.item())

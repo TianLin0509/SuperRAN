@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -43,6 +44,15 @@ KNOWN_METRICS: dict[str, str] = {
     "cosine_similarity": "1",
     "beam_hit_rate": "1",
     "capacity": "bit/s/Hz",
+    "cell_experienced_mbps": "Mbps",
+    "cell_head_inclusive_experienced_mbps": "Mbps",
+    "ue_experienced_p5_mbps": "Mbps",
+    "cell_served_mbps": "Mbps",
+    "first_packet_delay_ms_mean": "ms",
+    "first_packet_delay_ms_p95": "ms",
+    "serving_cell_prb_utilization": "1",
+    "mu_paired_prb_share_of_used": "1",
+    "bler_first_tx": "1",
 }
 
 
@@ -89,7 +99,10 @@ def _canonical_digest(payload: dict[str, Any]) -> str:
     ``sort_keys`` + 固定分隔符是必须的：字典顺序变一下摘要就变，
     那这个摘要就没法用来判断"是不是同一份口径"。
     """
-    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    blob = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -113,17 +126,43 @@ def lock(
     改主意时**再调一次这个函数**，会得到新的 ``prereg_id``；
     旧文件不动。这样"改过口径"这件事本身留了痕，而不是被覆盖掉。
     """
-    metric = str(primary_metric).strip()
-    unit = metric_unit or KNOWN_METRICS.get(metric, "")
+    if not isinstance(primary_metric, str) or not primary_metric.strip():
+        raise ValueError("primary_metric 必须是非空字符串")
+    metric = primary_metric.strip()
+    unit = metric_unit if metric_unit is not None else KNOWN_METRICS.get(metric, "")
+    if not isinstance(unit, str) or not unit.strip():
+        raise ValueError(
+            f"未知指标 {metric!r} 必须显式给 metric_unit；单位不能为空"
+        )
+    unit = unit.strip()
+    if not isinstance(higher_is_better, bool):
+        raise ValueError("higher_is_better 必须是布尔值")
+    effect = None
+    if expected_effect is not None:
+        if isinstance(expected_effect, bool):
+            raise ValueError("expected_effect 必须是有限正数，不能是布尔值")
+        effect = float(expected_effect)
+        if not math.isfinite(effect) or effect <= 0:
+            raise ValueError("expected_effect 必须是有限正数（效应幅度）")
+    raw_secondary = secondary_metrics or []
+    if not isinstance(raw_secondary, list) or any(
+            not isinstance(value, str) or not value.strip()
+            for value in raw_secondary):
+        raise ValueError("secondary_metrics 必须是非空字符串数组")
+    normalized_secondary = [value.strip() for value in raw_secondary]
+    if len(set(normalized_secondary)) != len(normalized_secondary):
+        raise ValueError("secondary_metrics 不能重复")
+    if metric in normalized_secondary:
+        raise ValueError("primary_metric 不能同时出现在 secondary_metrics")
     payload = {
         "draft_id": str(draft_id),
         "primary_metric": metric,
         "metric_unit": unit,
         "baseline": str(baseline),
         "csi_basis": str(csi_basis),
-        "expected_effect": (float(expected_effect) if expected_effect is not None else None),
-        "higher_is_better": bool(higher_is_better),
-        "secondary_metrics": sorted(secondary_metrics or []),
+        "expected_effect": effect,
+        "higher_is_better": higher_is_better,
+        "secondary_metrics": sorted(normalized_secondary),
         "note": str(note),
     }
     digest = _canonical_digest(payload)
@@ -134,7 +173,8 @@ def lock(
         **payload,
     )
     (prereg_dir() / f"{pr.prereg_id}.json").write_text(
-        json.dumps(pr.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(pr.as_dict(), ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8"
     )
     return pr
 

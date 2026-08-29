@@ -325,25 +325,23 @@ def _su_mu() -> Family:
         key="su_mu",
         name="SU / MU 自适应",
         stage="多用户",
-        current="cell_se",
+        current="useful_bytes",
         config_key="mu_enabled",
         intro="同一个 TTI 到底是给一个用户独占（SU），还是配对几个用户一起发（MU）？"
-              "**判据是小区谱效谁高**，不是用户间正交度。",
-        formula=r"\text{mode} = \arg\max \left( SE_{SU}, SE_{MU} \right),"
-                r"\quad SE_{MU} = \sum_u r_u \cdot SE(\text{MCS}_u)",
-        caveat="**别想当然认为配对总是更好。** 64 端口只服务 12 个用户时空间自由度富余，"
-               "实测 MU/SU 小区谱效比只有 0.755（密集城区）与 0.917（城区宏站），"
-               "自适应因此全程选 SU。SU 赢在无干扰且能开到 rank4，"
-               "MU 硬顶 rank2 且每人只分 1/K 功率。",
-        source="用户 2026-08-02 给的现场准则",
+              "**判据是完整计划真实能交付的业务字节**，不是名义谱效或第一个可行伙伴。",
+        formula=r"B_{\mathrm{useful}}=\sum_u\min(Q_u,TBS_u),\qquad "
+                r"\mathrm{mode}=\arg\max(B_{\mathrm{SU}},B_{\mathrm{MU}})",
+        caveat="**别想当然认为配对总是更好。** SU 无 MU 干扰且可到 rank4；"
+               "MU 每用户最多 rank2、均分功率并承受 CorrLoss。小包超出队列的 "
+               "TBS 是 padding，不能算 MU 收益。若 SU 已清空全部队列，直接 SU。",
+        source="当前 experience_v2 已确认调度合同",
         options=[
-            Option("cell_se", "比小区谱效",
-                   summary="两种发法都算一遍，取小区谱效高的",
-                   detail="现场没有明确的用户间相关性门限，实际做法就是直接比。"
-                          "**还有一条附加准则**：SU 一个 TTI 就能把数据传完时不触发 MU——"
-                          "数据都发完了，配对没有意义，还白白引入用户间干扰。",
+            Option("useful_bytes", "比真实可交付字节",
+                   summary="两套完整 TTI 计划都按队列封顶，取 useful bytes 更高者",
+                   detail="PF 先固定 anchor，MU 枚举全部伙伴并过相关性/层数/BLER门。"
+                          "若 SU 能清空全部可服务队列，直接 SU；否则平局归 MU。",
                    when="默认",
-                   cost="每次判决要算两遍谱效"),
+                   cost="每次判决构造两套无副作用计划"),
             Option("sus", "SUS 半正交用户选择",
                    formula=r"\text{drop } i \text{ if } \frac{|\tilde{h}_i "
                            r"\tilde{h}_j^H|}{\|\tilde{h}_i\| \|\tilde{h}_j\|} > \alpha",
@@ -361,11 +359,11 @@ def _su_mu() -> Family:
                    cost="每轮 K 次求逆"),
         ],
         flow=Flow(steps=[
-            ("算 SU 方案", "逐用户 rank 自适应（1~4），取谱效最高的那个用户"),
-            ("检查能否一个 TTI 传完", "能的话直接走 SU——配对没有意义"),
-            ("算 MU 方案", "按等效信道范数贪心加人，每人 rank 固定 2，逐个算小区谱效"),
-            ("比较", "SE_MU > SE_SU 就走 MU，否则走 SU"),
-            ("记录判决", "结果里报 MU 配对比例（占 RBG），现场经验值 5%~20%"),
+            ("PF 排序", "只做一次；固定 anchor，不让 MU 评分篡改公平顺序"),
+            ("算完整 SU plan", "按 PF 顺序和真实队列分配 RBG，累计 useful bytes"),
+            ("检查是否全部清空", "能的话直接 SU——配对不会再减少等待"),
+            ("算完整 MU plan", "枚举全部伙伴，按 useful bytes/RBG 选 pair，并处理剩余 RBG"),
+            ("比较与留证", "MU useful≥SU 才走 MU；保存两套字节数、伙伴评分和拒绝原因"),
         ], branches=[(2, "SU 一个 TTI 能传完", "直接 SU，跳过 MU 计算")]),
     )
 

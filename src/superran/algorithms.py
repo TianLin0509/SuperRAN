@@ -196,14 +196,14 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="su_mu_adaptation",
             name="SU/MU 自适应",
             stage="多用户",
-            choice="同一个 TTI 里两种发法都算一遍，取小区谱效高的",
-            formula="SU：单用户独占、无 MU 干扰、rank≤4；MU：配对多用户、有残余干扰、rank≤2",
-            why="现场没有明确的用户间相关性门限，实际做法就是直接比小区谱效。"
-                "SU 赢在无干扰且能开到 rank4，MU 赢在流数多，两者不是一个总压另一个。",
-            caveat="**别想当然认为配对总是更好**：64 端口只服务 12 个用户时空间自由度富余，"
-                   "实测全选 12 个（74.24）反而高于 SUS 选 4 个（46.07）。"
-                   "配对真正起作用是在用户数逼近端口数、或 CSI 有误差时。",
-            source="用户 2026-08-02 给的现场算法",
+            choice="PF排序后分别构造完整SU/MU计划，比较队列封顶的useful payload bytes",
+            formula="B_useful=Σmin(queue,TBS)；SU能清空全部队列时强制SU，否则MU≥SU才选MU",
+            why="SU赢在无MU干扰且可到rank4；MU赢在同一RBG并行两位rank2用户。"
+                "使用useful bytes可自动剔除超出业务包的padding，并保留实际队列收益。",
+            caveat="MU伙伴不是第一个相关性过门者：PF只固定anchor，全部伙伴仍需经过"
+                   "pair link、相关性、层数、预测BLER和useful bytes/RBG评分。"
+                   "当前仅支持两用户、每用户rank2。",
+            source="当前 experience_v2 已确认调度合同",
         ),
         Algorithm(
             key="scheduler",

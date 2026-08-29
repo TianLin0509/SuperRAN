@@ -166,6 +166,24 @@ def main() -> None:
     lo = la.qam_mi(4, -25.0)[0]
     check(abs(lo - np.log2(1 + 10 ** (-2.5))) < 1e-3, "低信噪比处与香农重合（口径正确）")
 
+    for bad_grid in (np.array([]), np.array([0.0, np.nan]),
+                     np.array([0.0, np.inf])):
+        try:
+            la.effective_sinr(bad_grid)
+        except ValueError:
+            check(True, "有效SINR拒绝空/非有限RB，不静默只保留较好RB")
+        else:
+            check(False, "有效SINR不应静默删除空/非有限RB")
+
+    for bad_grid in (np.array([]), np.array([10.0, np.nan]),
+                     np.array([10.0, np.inf])):
+        try:
+            la.link_adaptation(bad_grid, n_prb=2)
+        except ValueError:
+            check(True, "生产 link_adaptation 入口同样拒绝空/非有限RB")
+        else:
+            check(False, "生产入口不得在 effective_sinr 前静默删除坏RB")
+
     # 反解要能还原
     for m in (4, 64):
         g0 = 12.0
@@ -369,6 +387,12 @@ def main() -> None:
     )
     check(mapped_internal == expected_internal,
           "256QAM CQI 表行 0..14 逐项映射到版本化 MCS 离散表")
+
+    check(la.select_internal_cqi(float("inf")) == 14
+          and la.select_reported_cqi(float("inf")) == 15
+          and la.select_internal_cqi(float("-inf")) == 0
+          and la.select_reported_cqi(float("nan")) == 0,
+          "CQI 非有限边界与 MCS 口径一致：+Inf 最高档，NaN/-Inf 保守最低/越界")
 
     cqi0 = la.internal_cqi_to_mcs(0)
     check(cqi0["scheduled"] is True and cqi0["mcs"] == 0

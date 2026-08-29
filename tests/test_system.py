@@ -379,15 +379,18 @@ try:
 except ValueError:
     check(True, "邻区利用率与抖动范围在入口硬校验")
 
-# **快照间隔是 5 ms 不是一个 TTI。** ChannelHub 的多时隙输出是连续的
-# SRS/CSI-RS 机会（每快照推进 max(srs_per,csirs_per)×slot_duration），
-# 当成一个 TTI 会让所有时间相关的结论差 10 倍。
+# **快照间隔是独立时钟。** 新数据显式保存sample_interval_s；旧数据缺字段时
+# 才从SRS/CSI-RS周期回退推断。不能拿0.5-ms slot、5-ms双腿间隔或10-ms
+# 四端口SRS周期互相替代。
 check(abs(sysm.snapshot_interval_ms({}) - 5.0) < 1e-9,
-      f"默认快照间隔 5 ms（实得 {sysm.snapshot_interval_ms({})}）")
+      f"旧数据回退默认快照间隔 5 ms（实得 {sysm.snapshot_interval_ms({})}）")
 check(abs(sysm.snapshot_interval_ms({"srs_periodicity": 20}) - 10.0) < 1e-9,
-      "SRS 周期翻倍则快照间隔翻倍")
+      "旧数据回退时SRS周期翻倍使推断间隔翻倍")
 check(abs(sysm.snapshot_interval_ms({"subcarrier_spacing": 15000}) - 10.0) < 1e-9,
-      "15 kHz SCS 的 slot 是 1 ms，快照间隔 10 ms")
+      "旧数据回退时15 kHz SCS的slot是1 ms")
+check(abs(sysm.snapshot_interval_ms({"sample_interval_s": 0.0005,
+                                     "srs_periodicity": 80}) - 0.5) < 1e-9,
+      "显式0.5 ms快照不再被80-slot SRS周期覆盖")
 check(abs(sysm.SystemConfig().snapshot_update_ms - 5.0) < 1e-9,
       "默认值就是算出来的那个，不是拍脑袋的 10.0")
 
@@ -970,6 +973,101 @@ _true_of = {u: float(_mu_tables[u].sinr_db[_snap, _rank_of[u] - 1])
             for u in _ordered}
 _potential_of = {u: _lookup.tbs_bytes("D", _mcs_of[u], _rank_of[u], 17)
                  for u in _ordered}
+_mixed_queue_plan = expm._build_mu_plan(
+    _ordered[:2], queue_bytes={0: 1_000, 1: 500_000}, lookup=_lookup,
+    slot="D", num_rbg=17, rank_of=_rank_of, mcs_of=_mcs_of,
+    base_tx_sinr_of=_base_of, mcs_without_olla_of=_mcs_of,
+    true_sinr_of=_true_of, potential_of=_potential_of,
+    tables=_mu_tables, snap=_snap,
+    sched=sysm.SchedulerConfig(mu_enabled=True, mu_corr_threshold=1.0),
+    su_olla_db=np.zeros(len(_ordered)),
+    mu_olla_db=np.zeros(len(_ordered)), blocked_data=False)
+_mixed_mu = next(
+    grant for grant in _mixed_queue_plan.grants if grant.mode == "MU")
+check(_mixed_mu.n_rbg == min(max(_mixed_mu.required_rbg), 17)
+      and _mixed_mu.useful_bytes[0] == 1_000,
+      "小包+大包MU共享bitmap持续到两者都满足或资源耗尽，不在小包先完成时遗留RBG")
+_mu_frequency_rg = np.random.default_rng(2323)
+_mu_frequency_h = [
+    ((_mu_frequency_rg.standard_normal((2, 272, 8, 2))
+      + 1j * _mu_frequency_rg.standard_normal((2, 272, 8, 2))) / np.sqrt(2))
+    for _ in range(2)
+]
+_mu_frequency_tables = sysm.build_link_tables(
+    _mu_frequency_h, [15.0, 14.0], num_snapshots=2, rb_per_rbg=16,
+    csi=sysm.ca.CsiConfig(enabled=False), max_rank=2, mu_enabled=True)
+_mu_frequency_order = [0, 1]
+_mu_frequency_rank = {
+    u: int(_mu_frequency_tables[u].best_rank[0]) for u in _mu_frequency_order}
+_mu_frequency_mcs = {
+    u: int(_mu_frequency_tables[u].mcs_tx[0, _mu_frequency_rank[u] - 1])
+    for u in _mu_frequency_order}
+_mu_frequency_base = {
+    u: float(_mu_frequency_tables[u].sinr_tx_db[0, _mu_frequency_rank[u] - 1])
+    for u in _mu_frequency_order}
+_mu_frequency_true = {
+    u: float(_mu_frequency_tables[u].sinr_db[0, _mu_frequency_rank[u] - 1])
+    for u in _mu_frequency_order}
+_mu_frequency_potential = {
+    u: _lookup.tbs_bytes(
+        "D", _mu_frequency_mcs[u], _mu_frequency_rank[u], 17)
+    for u in _mu_frequency_order}
+_mixed_frequency_plan = expm._build_mu_plan(
+    _mu_frequency_order, queue_bytes={0: 1_000, 1: 500_000}, lookup=_lookup,
+    slot="D", num_rbg=17, rank_of=_mu_frequency_rank,
+    mcs_of=_mu_frequency_mcs, base_tx_sinr_of=_mu_frequency_base,
+    mcs_without_olla_of=_mu_frequency_mcs,
+    true_sinr_of=_mu_frequency_true,
+    potential_of=_mu_frequency_potential,
+    tables=_mu_frequency_tables, snap=0,
+    sched=sysm.SchedulerConfig(mu_enabled=True, mu_corr_threshold=1.0),
+    su_olla_db=np.zeros(2), mu_olla_db=np.zeros(2), blocked_data=False,
+    frequency_aware=True)
+_mixed_frequency_mu = next(
+    grant for grant in _mixed_frequency_plan.grants if grant.mode == "MU")
+check(_mixed_frequency_mu.n_rbg > min(_mixed_frequency_mu.required_rbg)
+      and _mixed_frequency_mu.useful_bytes[0] == 1_000
+      and _mixed_frequency_mu.useful_bytes[1] > 1_000,
+      "频选MU的all条件同样持续分配共享bitmap，不因小包先满足而提前停止")
+
+_serviceable_su = expm._build_su_plan(
+    _ordered[:2], queue_bytes={0: 100, 1: 100}, lookup=_lookup,
+    slot="D", num_rbg=17, rank_of=_rank_of, mcs_of=_mcs_of,
+    base_tx_sinr_of=_base_of, mcs_without_olla_of=_mcs_of,
+    true_sinr_of=_true_of, potential_of=_potential_of,
+    blocked_data=True, cursor=0, tables=_mu_tables, snap=_snap,
+    su_olla_db=np.zeros(len(_ordered)), olla_enabled=False,
+    frequency_aware=False)
+check(_serviceable_su.useful_bytes == 200
+      and _serviceable_su.clears_all_queues,
+      "系统别处有outage/错slot backlog时，SU清空全部可服务队列仍必须触发强制SU")
+
+_audit_scores = np.asarray([30.0] + [-20.0] * 16)[None, None, :]
+_audit_tables = [
+    SimpleNamespace(
+        sinr_tx_rbg_db=_audit_scores.copy(),
+        sinr_rbg_db=_audit_scores.copy(),
+        sinr_tx_db=np.asarray([[0.0]]), sinr_db=np.asarray([[0.0]]))
+    for _ in range(2)
+]
+_audit_plan = expm._build_su_plan(
+    [0, 1], queue_bytes={0: 1_900, 1: 1_900}, lookup=_lookup,
+    slot="D", num_rbg=17, rank_of={0: 1, 1: 1}, mcs_of={0: 10, 1: 10},
+    base_tx_sinr_of={0: 0.0, 1: 0.0},
+    mcs_without_olla_of={0: 10, 1: 10},
+    true_sinr_of={0: 0.0, 1: 0.0},
+    potential_of={
+        0: _lookup.tbs_bytes("D", 10, 1, 17),
+        1: _lookup.tbs_bytes("D", 10, 1, 17)},
+    blocked_data=False, cursor=0, tables=_audit_tables, snap=0,
+    su_olla_db=np.zeros(2), olla_enabled=False, frequency_aware=True)
+_audit_second = _audit_plan.grants[1]
+check(_audit_second.fits_in_fullband == (True,)
+      and _audit_second.fits_in_remaining_pool == (False,)
+      and _audit_second.required_rbg == (1,)
+      and _audit_second.required_rbg_from_remaining_pool == (16,)
+      and _audit_second.potential_fullband_bytes[0] >= 1_900,
+      "频选审计拆清完整载波池与当前剩余池，不再让fits_in_fullband冒充remaining")
 _floor_plan = expm._build_mu_plan(
     _ordered, queue_bytes={u: 500_000 for u in _ordered}, lookup=_lookup,
     slot="D", num_rbg=17, rank_of=_rank_of, mcs_of=_mcs_of,
@@ -1466,6 +1564,9 @@ check(_sched_src["olla_down_source"] == "auto_from_target_bler"
 
 # ---------------------------------------------------------------------------
 sect("16  多算法 KPI 工作台：CRN、Holm 与 TTI 钻取")
+check(kpi_view._json_ready(np.array([1.0, np.nan])) == [1.0, None]
+      and kcmp._json_ready(np.array([1, 2], dtype=np.int64)) == [1, 2],
+      "KPI JSON 导出保留 ndarray 结构并把非有限值显式写成 null，不退化成字符串")
 _old_kpi_root = kpi_view.artifacts_root
 _old_compare_root = kcmp.artifacts_root
 with tempfile.TemporaryDirectory() as _compare_tmp:

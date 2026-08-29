@@ -91,6 +91,9 @@ COMPANY_RB_PER_RBG = 16
 COMPANY_NUM_RB = COMPANY_NUM_RBG * COMPANY_RB_PER_RBG   # 272
 COMPANY_SC_PER_RB = 12            # 只作记录，仿真到 RB 为止
 NR_TABLE_NUM_RB_100M_30K = 273    # 38.104 标准表值，与上面的 272 口径不同
+# 系统信道快照默认每5 ms更新。它与0.5-ms NR slot、两条2T SRS腿的5-ms
+# 间隔、10-ms四端口SRS周期是三套不同的时钟，必须独立保存。
+COMPANY_SNAPSHOT_INTERVAL_S = 5e-3
 # 系统/体验层的 TDD 资源格栅是项目合同，不是页面参数。
 # 链路级仍可生成 10/20 MHz 等数据用于算法实验；但这些数据
 # 不能直接送入当前的 TDD 系统仿真并冒充预置 100 MHz 基线。
@@ -104,18 +107,23 @@ COMPANY_SRS_C_SRS = 63
 COMPANY_SRS_B_SRS = 1
 COMPANY_SRS_B_HOP = 0
 COMPANY_SRS_N_RRC = 0
+COMPANY_SRS_CONFIGURED_CS = 4
+COMPANY_SRS_TX_PORTS_PER_OCCASION = 2
+COMPANY_SRS_LOGICAL_ANTENNA_PORTS = 4
+COMPANY_SRS_RESOURCES_PER_UE = 2
 COMPANY_SRS_17_HOP_ORDER_RBG = (
     0, 8, 16, 7, 15, 6, 14, 5, 13, 4, 12, 3, 11, 2, 10, 1, 9,
 )
-SUPERRAN_SRS_HOPPING_PROFILE_ID = "superran-srs-c63-b1-17hop-v1"
+SUPERRAN_SRS_HOPPING_PROFILE_ID = "superran-srs-c63-b1-17hop-2t4r-4cs-v2"
 
 # --- 收发 -----------------------------------------------------------------
 
 COMPANY_UE_RX_ANT = 4             # 默认 4R 接收
-# 体验仿真的下行预编码来自 TDD SRS。若这里只给 2Tx，SRS 只能估到 64x2，
-# 却拿它去设计 64x4 下行权，维度与物理端口都对不上。预置 64T4R 基线因此
-# 明确采用 4Tx/4Rx UE；只有显式做 2Tx 终端课题时才覆盖成 2。
+# 数据张量仍需保存4个UE天线端口，才能形成完整64x4互易信道；这不代表终端
+# 有4条同时工作的Tx RF链。产品基线是2T4R：一次SRS只发2 ports，下一可用
+# SRS机会切到另两根天线。这里的4是“待探测逻辑天线端口数”。
 COMPANY_UE_TX_ANT = 4
+COMPANY_UE_SIMULTANEOUS_TX = 2
 COMPANY_LINK = "BOTH"             # DL 真值 + UL SRS 估计，TDD 成对生成
 
 # 预置面板采用交叉极化 +45/-45 度。即便 ChannelHub 当前也把它作为双极化

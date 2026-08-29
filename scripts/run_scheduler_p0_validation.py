@@ -10,10 +10,12 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from superran import experience as exp  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import system as sy  # noqa: E402
 from superran.scheduler_resource import ResourceBudget, ResourceLedger  # noqa: E402
 from superran.srs_resource import (  # noqa: E402
+    SrsResourceAllocator,
     allocate_basic_srs_resources,
     cross_cell_collision_report,
 )
@@ -133,13 +135,41 @@ def _srs_experiment() -> dict[str, object]:
     assert aligned_report.colliding_pair_count == 3
     assert staggered_report.colliding_pair_count == 0
     assert staggered_report.ls_nmse_proxy < aligned_report.ls_nmse_proxy
+    allocator = SrsResourceAllocator()
+    capacities = {
+        str(int(period)): allocator.capacity_ues(
+            period_ms=period, n_ports=4)
+        for period in (10.0, 20.0, 40.0)
+    }
+    assert capacities == {"10": 68, "20": 136, "40": 272}
+    adaptive_69 = allocate_basic_srs_resources(range(69), period_ms=10.0)
+    assert {item.period_ms for item in adaptive_69} == {20.0}
+    first = staggered[0]
+    assert first.antenna_port_groups == ((0, 1), (2, 3))
+    assert first.legs[1].offset_ms - first.legs[0].offset_ms == 5.0
+    assert first.legs[0].frequency_resource_id == first.legs[1].frequency_resource_id
     return {
-        "scenario": "three lightly loaded cells, one 4-port UE per cell",
+        "scenario": "three lightly loaded cells, one 2T4R UE per cell",
+        "profile": {
+            "configured_cs": 4,
+            "tx_ports_per_occasion": 2,
+            "logical_antenna_ports": 4,
+            "frequency_resources": 17,
+            "legs_per_ue": 2,
+            "leg_gap_ms": 5.0,
+            "hop_advance": "after_both_legs",
+        },
+        "capacity_ues_per_pci_colour": capacities,
+        "adaptive_boundary": {
+            "ue_count": 69,
+            "selected_global_period_ms": adaptive_69[0].period_ms,
+            "expected": "10ms capacity 68 -> atomically retry 20ms",
+        },
         "same_phase": aligned_report.as_dict(),
         "pci_mod3_staggered": staggered_report.as_dict(),
         "same_phase_assignments": [item.as_dict() for item in aligned],
         "staggered_assignments": [item.as_dict() for item in staggered],
-        "verdict": "PASS: PCI-mod3 preference removes exact pilot collisions in the light-load proxy",
+        "verdict": "PASS: PCI-mod3 hard partition removes exact two-leg pilot collisions in the light-load proxy",
     }
 
 
@@ -178,6 +208,29 @@ def _mu_experiment() -> dict[str, object]:
         str(item["partner_ue"]): item for item in decision["evaluations"]}
     assert evaluations["2"]["useful_bytes_per_rbg"] > \
         evaluations["1"]["useful_bytes_per_rbg"]
+    lookup = exp.TbsLookup.build(17, 16)
+    rank_of = {u: int(tables[u].best_rank[0]) for u in (0, 1)}
+    mcs_of = {
+        u: int(tables[u].mcs_tx[0, rank_of[u] - 1]) for u in (0, 1)}
+    base_of = {
+        u: float(tables[u].sinr_tx_db[0, rank_of[u] - 1]) for u in (0, 1)}
+    true_of = {
+        u: float(tables[u].sinr_db[0, rank_of[u] - 1]) for u in (0, 1)}
+    potential_of = {
+        u: lookup.tbs_bytes("D", mcs_of[u], rank_of[u], 17) for u in (0, 1)}
+    mixed_plan = exp._build_mu_plan(
+        [0, 1], queue_bytes={0: 1_000, 1: 500_000}, lookup=lookup,
+        slot="D", num_rbg=17, rank_of=rank_of, mcs_of=mcs_of,
+        base_tx_sinr_of=base_of, mcs_without_olla_of=mcs_of,
+        true_sinr_of=true_of, potential_of=potential_of,
+        tables=tables, snap=0,
+        sched=sy.SchedulerConfig(
+            mu_enabled=True, olla_enabled=False, mu_corr_threshold=1.0),
+        su_olla_db=np.zeros(3), mu_olla_db=np.zeros(3),
+        blocked_data=False)
+    mixed_grant = next(
+        grant for grant in mixed_plan.grants if grant.mode == "MU")
+    assert mixed_grant.n_rbg == min(max(mixed_grant.required_rbg), 17)
     return {
         "scenario": (
             "PF anchor UE0; UE1 is earlier but has CorrLoss -5 dB; "
@@ -186,6 +239,15 @@ def _mu_experiment() -> dict[str, object]:
         "first_tti_final_grants": first["grants"],
         "cell_mu_candidate_scoring": run.cell["mu_candidate_scoring"],
         "su_mu_plan": run.cell["su_mu_plan"],
+        "small_large_shared_bitmap": {
+            "queue_bytes": [1_000, 500_000],
+            "required_rbg": list(mixed_grant.required_rbg),
+            "allocated_rbg": mixed_grant.n_rbg,
+            "useful_bytes": list(mixed_grant.useful_bytes),
+            "rule": (
+                "continue shared MU bitmap until both queues fit "
+                "or RBGs exhaust"),
+        },
         "verdict": "PASS: the scorer skips the first feasible partner and selects the higher useful-byte-density pair",
     }
 

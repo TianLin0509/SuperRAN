@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from functools import cached_property
 from typing import Any
 
@@ -45,6 +46,8 @@ class Dataset:
     h_true / h_est : [N, T, RB, BS_ant, UE_ant] complex64
       h_true = 下行物理评估信道；h_est = 基站设计预编码时可见的 CSI。
       paired/BOTH 数据里 h_est 明确来自上行 SRS，而不是下行 CSI-RS。
+    h_ul_true      : 同形；新 paired/BOTH 数据保留的物理上行真值，用于
+      allocator 驱动的 SRS 波形接收。旧数据可能没有，不能静默用下行替代。
     ue_position    : [N, 3] 米
     sinr_dB 等标量 : [N]
     """
@@ -178,6 +181,11 @@ class Dataset:
         return self._npz["h_true"]
 
     @cached_property
+    def h_ul_true(self) -> np.ndarray | None:
+        """物理上行信道 [N,T,RB,BS,UE]；旧/单向数据可能没有。"""
+        return self._npz["h_ul_true"] if "h_ul_true" in self._npz.files else None
+
+    @cached_property
     def h_est(self) -> np.ndarray:
         """预编码侧 CSI，与 h_true 同形；paired/BOTH 时来自上行 SRS。"""
         return self._npz["h_est"]
@@ -304,6 +312,225 @@ class Dataset:
         if index is not None:
             return measure.srs_features(self.h_true[index])
         return [measure.srs_features(h) for h in self.h_true]
+
+    def _srs_ul_snapshot(
+        self,
+        index: int,
+        snapshot_index: int,
+        *,
+        allow_ideal_reciprocity: bool,
+    ) -> np.ndarray:
+        """Resolve a real UL snapshot or an explicitly requested ideal fallback."""
+        sample = int(index)
+        snapshot = int(snapshot_index)
+        if not 0 <= sample < self.n:
+            raise IndexError(f"sample index {sample} outside 0..{self.n - 1}")
+        source = self.h_ul_true
+        if source is None:
+            if not allow_ideal_reciprocity:
+                raise ValueError(
+                    "该数据集没有 h_ul_true；拒绝把下行真值静默冒充实际 SRS 上行。"
+                    "若只做理想互易机制诊断，请显式传 allow_ideal_reciprocity=True"
+                )
+            if not 0 <= snapshot < self.h_true.shape[1]:
+                raise IndexError(
+                    f"snapshot index {snapshot} outside 0..{self.h_true.shape[1] - 1}"
+                )
+            return np.conj(np.asarray(self.h_true[sample, snapshot]))
+        if not 0 <= snapshot < source.shape[1]:
+            raise IndexError(
+                f"snapshot index {snapshot} outside 0..{source.shape[1] - 1}"
+            )
+        return np.asarray(source[sample, snapshot])
+
+    def srs_waveform(
+        self,
+        index: int,
+        assignment: Any,
+        *,
+        n_srs_id: int,
+        leg_index: int = 0,
+        occurrence_index: int = 0,
+        snapshot_index: int = 0,
+        tx_power_linear: float = 1.0,
+        timing_offset_s: float = 0.0,
+        cfo_hz: float = 0.0,
+        interferers: Sequence[Any] = (),
+        config: Any = None,
+        allow_ideal_reciprocity: bool = False,
+    ) -> Any:
+        """运行一次 assignment 驱动的 SRS RE 波形接收。
+
+        ``interferers`` 中每项必须是 ``SrsWaveformSignal``，其信道是干扰 UE
+        到本受害 gNB 的 UL cross-link。没有该 cross-link 时宁可留空，也不能
+        拿 ``h_interferers`` 的邻区 BS→本 UE 下行链路代替。
+        """
+        from . import srs_waveform as sw  # noqa: PLC0415
+
+        desired = sw.SrsWaveformSignal(
+            assignment=assignment,
+            channel_ul_rb=self._srs_ul_snapshot(
+                index,
+                snapshot_index,
+                allow_ideal_reciprocity=allow_ideal_reciprocity,
+            ),
+            n_srs_id=int(n_srs_id),
+            tx_power_linear=float(tx_power_linear),
+            timing_offset_s=float(timing_offset_s),
+            cfo_hz=float(cfo_hz),
+            label=f"dataset:{self.dataset_id}:sample:{int(index)}",
+        )
+        return sw.observe_srs_leg(
+            desired,
+            leg_index=int(leg_index),
+            occurrence_index=int(occurrence_index),
+            interferers=interferers,
+            config=config,
+        )
+
+    def srs_waveform_pair(
+        self,
+        index: int,
+        assignment: Any,
+        *,
+        n_srs_id: int,
+        occurrence_index: int = 0,
+        snapshot_indices: tuple[int, int] = (0, 0),
+        tx_power_linear: float = 1.0,
+        interferers_by_leg: tuple[Sequence[Any], Sequence[Any]] = ((), ()),
+        config: Any = None,
+        allow_ideal_reciprocity: bool = False,
+    ) -> Any:
+        """分别接收两次 2T SRS，并拼成同一 16-RB 的 BS×4 估计。"""
+        from . import srs_waveform as sw  # noqa: PLC0415
+
+        if len(snapshot_indices) != 2:
+            raise ValueError("snapshot_indices must contain one snapshot for each 2T leg")
+        signals = tuple(
+            sw.SrsWaveformSignal(
+                assignment=assignment,
+                channel_ul_rb=self._srs_ul_snapshot(
+                    index,
+                    int(snapshot),
+                    allow_ideal_reciprocity=allow_ideal_reciprocity,
+                ),
+                n_srs_id=int(n_srs_id),
+                tx_power_linear=float(tx_power_linear),
+                label=(
+                    f"dataset:{self.dataset_id}:sample:{int(index)}:leg:{leg_index}"
+                ),
+            )
+            for leg_index, snapshot in enumerate(snapshot_indices)
+        )
+        return sw.simulate_srs_pair(
+            signals,  # type: ignore[arg-type]
+            occurrence_index=int(occurrence_index),
+            interferers_by_leg=interferers_by_leg,
+            config=config,
+        )
+
+    def srs_presinr(
+        self,
+        index: int | None = None,
+        *,
+        alpha: float = 0.2,
+    ) -> Any:
+        """由真实UL信道与SRS估计复算PreSINR，IIR始终在线性功率比上运行。"""
+        from . import srs_metrics as sm  # noqa: PLC0415
+
+        if self.h_ul_true is None:
+            raise ValueError("该数据集没有 h_ul_true，不能复算物理UL PreSINR")
+        ul_estimate = np.conj(self.h_est)
+        if index is not None:
+            return sm.presinr_summary(
+                self.h_ul_true[int(index)], ul_estimate[int(index)], alpha=alpha
+            )
+        return [
+            sm.presinr_summary(true, estimate, alpha=alpha)
+            for true, estimate in zip(self.h_ul_true, ul_estimate, strict=True)
+        ]
+
+    def srs_presinr_for_ue(self, ue_id: int, *, alpha: float = 0.2) -> Any:
+        """按落盘UE身份拼接连续样本，再做跨快照线性域PreSINR IIR。"""
+        from . import srs_metrics as sm  # noqa: PLC0415
+
+        if isinstance(ue_id, (bool, np.bool_)):
+            raise ValueError("ue_id must be an integer")
+        ue_value = float(ue_id)
+        if not np.isfinite(ue_value) or ue_value != np.floor(ue_value):
+            raise ValueError("ue_id must be an integer")
+        resolved_ue_id = int(ue_value)
+        if self.h_ul_true is None:
+            raise ValueError("该数据集没有 h_ul_true，不能复算物理UL PreSINR")
+        key = "meta__ue_id"
+        if key not in self._npz.files:
+            raise ValueError("该数据集没有可审计的逐样本 ue_id，拒绝跨用户做IIR")
+        identities = np.asarray(self._npz[key], dtype=np.float64)
+        if not np.all(np.isfinite(identities)) or not np.all(
+            identities == np.floor(identities)
+        ):
+            raise ValueError("逐样本 ue_id 含非有限或非整数值")
+        selected = np.flatnonzero(identities.astype(np.int64) == resolved_ue_id)
+        if selected.size < 1:
+            raise KeyError(f"dataset has no samples for ue_id={resolved_ue_id}")
+        true = np.concatenate([self.h_ul_true[i] for i in selected], axis=0)
+        estimate = np.concatenate([np.conj(self.h_est[i]) for i in selected], axis=0)
+        return sm.presinr_summary(true, estimate, alpha=alpha)
+
+    def srs_link_budget(
+        self,
+        index: int,
+        assignment: Any,
+        *,
+        occurrence_index: int = 0,
+        pathloss_db: float | None = None,
+        antenna_gain_db: float | None = None,
+        ue_max_power_dbm: float = 23.0,
+        p0_dbm: float = -96.0,
+        alpha: float = 0.8,
+        rru_noise_figure_db: float = 2.0,
+        tdd_rx_loss_db: float = 1.0,
+    ) -> Any:
+        """复算一次assignment的UL功控、per-active-RE接收功率与底噪。"""
+        from . import srs_metrics as sm  # noqa: PLC0415
+        from . import srs_waveform as sw  # noqa: PLC0415
+
+        sample = int(index)
+        if not 0 <= sample < self.n:
+            raise IndexError(f"sample index {sample} outside 0..{self.n - 1}")
+
+        def _stored(name: str) -> float | None:
+            key = f"meta__{name}"
+            if key not in self._npz.files:
+                return None
+            value = float(np.asarray(self._npz[key])[sample])
+            return value if np.isfinite(value) else None
+
+        resolved_pathloss = _stored("pathloss_dB") if pathloss_db is None else float(pathloss_db)
+        if resolved_pathloss is None:
+            raise ValueError("缺少pathloss_dB；不能构造绝对UL SRS链路预算")
+        resolved_gain = (
+            _stored("antenna_gain_serving_db")
+            if antenna_gain_db is None else float(antenna_gain_db)
+        )
+        if resolved_gain is None:
+            raise ValueError(
+                "缺少antenna_gain_serving_db；请显式给出0 dB才可采用各向同性参考"
+            )
+        rbs = sw.assignment_rb_indices(assignment, int(occurrence_index))
+        return sm.srs_link_budget(
+            pathloss_db=resolved_pathloss,
+            rb_indices=rbs,
+            k_tc=2,
+            comb_offset=int(assignment.legs[0].comb_offset),
+            antenna_gain_db=resolved_gain,
+            ue_max_power_dbm=ue_max_power_dbm,
+            p0_dbm=p0_dbm,
+            alpha=alpha,
+            subcarrier_spacing_hz=_carrier.scs_khz_from_config(self.config) * 1000.0,
+            rru_noise_figure_db=rru_noise_figure_db,
+            tdd_rx_loss_db=tdd_rx_loss_db,
+        )
 
     def pmi(self, index: int | None = None, *, max_rank: int = 4) -> Any:
         """Type-I-style 单面板列码本子集近似的索引、预编码矩阵与秩。"""

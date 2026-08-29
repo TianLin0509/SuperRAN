@@ -205,6 +205,9 @@ class ResourceLedger:
             raise ResourceLimitError(
                 "invalid_grant", "users and ranks must be non-empty and aligned",
                 structural=True)
+        if mode_value not in ("SU", "MU"):
+            raise ResourceLimitError(
+                "unknown_mode", f"mode={mode_value!r}", structural=True)
         if len(set(user_values)) != len(user_values):
             raise ResourceLimitError(
                 "duplicate_user", f"users={user_values}", structural=True)
@@ -220,7 +223,13 @@ class ResourceLedger:
                 "mode_user_mismatch",
                 f"mode={mode_value}, users={user_values}", structural=True)
 
-        used, layers, logical_used, _ = self._usage_without()
+        used, layers, logical_used, scheduled_users = self._usage_without()
+        repeated_users = sorted(scheduled_users.intersection(user_values))
+        if repeated_users:
+            raise ResourceLimitError(
+                "duplicate_user_in_tti",
+                f"UEs already have another grant in this TTI: {repeated_users}",
+                structural=True)
         overlap = sorted(used.intersection(rbg_values))
         if overlap:
             raise ResourceLimitError(

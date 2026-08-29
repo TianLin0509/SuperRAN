@@ -468,8 +468,10 @@ check(hw.COMPANY_NUM_RB == 272 == hw.COMPANY_NUM_RBG * hw.COMPANY_RB_PER_RBG,
 check(hw.NR_TABLE_NUM_RB_100M_30K == 273,
       "同时记住 38.104 标准表是 273（口径不同，不是笔误）")
 check(hw.COMPANY_UE_TX_ANT == hw.COMPANY_UE_RX_ANT == 4
+      and hw.COMPANY_UE_SIMULTANEOUS_TX == 2
+      and hw.COMPANY_SRS_CONFIGURED_CS == 4
       and hw.COMPANY_LINK == "BOTH",
-      "默认 4Tx/4Rx，成对生成 DL 真值与 UL SRS 预编码 CSI")
+      "默认2T4R：张量保留4端口、SRS一次只发2 ports且固定4 CS")
 _company_ant = hw.company_antenna_block()
 check(_company_ant["element_pattern"]["polarization_slant_angles_deg"] == [45.0, -45.0],
       "预置默认显式使用 +45/-45 度双极化且端口顺序固定")

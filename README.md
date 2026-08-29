@@ -238,7 +238,19 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 - **Agent 自适应 KPI 工作台** —— `sr_system_sim(evaluation_mode="experience")` 自动返回 `kpi_view.html_path/url`，顶层为“小区级 / 用户级”；用户级指标同时支持按 UE 图、跨 UE 经验 CDF 和明细表。调用 Agent 可传 `kpi_focus` 优先展示相关 KPI，其余折叠且不丢失，选择理由完整回传。页面含首包时延、含头速率、本小区 PRB 利用率、0..17 RBG 分布、MU 配对比例与用户级 PRB 归因，并可一键下载完整 JSON、小区 CSV、用户长表 CSV，复制摘要、导出页面截图、系统分享或打印/PDF；所有动作离线可用且只读结果
 - **2~5 算法对比与单 TTI 复盘** —— 每次 `sr_system_sim(..., algorithm_label=...)` 同步保存严格 JSON sidecar；`sr_compare_system_results` 将同一 dataset/话务/KPI/RngRun 的基线与候选放入同一工作台。算法保持固定颜色，六个 Tab 按“总览/KPI 矩阵/用户分布/TTI 趋势/单 TTI/统计门禁”分工；主 KPI 走配对 Gate 3 与多候选 Holm 校正，sampled trace 以均匀锚点加关键事件保存 RBG、MCS/rank、SINR、BLER/draw、ACK、OLLA 与 PF 证据。不同配置或 RngRun 会硬拒绝；没有生成前 prereg 时即使显著也保持 `exploratory_unregistered`
 - **体验仿真的冻结合同** —— 当前 TDD 系统只接受 100 MHz @ 30 kHz、272 RB = 17×16，标准 273 RB 在生成前明确舍去 1 RB；SRS hopping 只接受本地版本化的 C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0 17-hop profile。`experience_v2` 只用 `preset_20b_256qam / MCS table 3` 预置表；OLLA 默认由 `target_bler` 与 ACK 步长反解 NACK 步长，仍允许显式 override，结果会标注来源。通用载波/MCS 接口保留给链路级与未来扩展，不会静默混入当前体验结果
-- **SRS 资源与调度 P0 已闭环** —— 固定载波下按 UE 分配 period offset/symbol/comb/循环移位，offset 真正进入 CSI 老化；PCI mod3 是可溢出的候选优先顺序。体验调度的逐 RBG 频选已与 RB 功控解耦，MU 枚举全部伙伴并按 useful bytes/RBG 评分，SU/MU 计划先过物理 RBG/层/逻辑 layer-PRB 事务账，再由统一 GrantFinalizer 定稿。PDCCH/CCE、P-H/F、BWP2 与波形级跨小区导频污染仍明确未建模；方向性证据见 `artifacts/results/scheduler_p0_validation.json`
+- **SRS资源与调度P0已闭环** —— 固定载波下排除BBL叶子，按PCI模3硬分区、
+  4 CS、17频域相位给2T4R UE分配相邻两个2-port SRS资源；两个offset分别进入
+  端口组CSI老化并拼成64×4。全局周期自动选择最短可容纳的10/20/40 ms，
+  禁止跨颜色借资源。体验调度的逐RBG频选已与RB功控解耦，MU枚举全部伙伴并按
+  useful bytes/RBG评分。独立<code>srs_waveform</code>后端已经能用显式的UE→受害gNB
+  UL cross-link做RE级叠加、TA/CFO、解扩、双腿64×4与UL IoT证据；尚未完成的是
+  系统主循环自动生成这些cross-link并把波形H-hat注入调度。PDCCH/CCE、P-H/F、BWP2
+  也仍在范围外；方向性证据见`artifacts/results/scheduler_p0_validation.json`
+- **物理时钟、SRS测量与场景资产合同** —— 新数据显式保存`sample_interval_s`，默认5 ms，
+  不再从0.5-ms slot、SRS双腿或报告周期猜测。`srs_metrics`区分per-active-RE、per-RB
+  与全分配底噪，提供开环UL功控、绝对SRS链路预算和线性域PreSINR IIR；UL IoT可写入
+  原子NPZ sidecar并复算IoT/双SHA。城市RT缓存使用稳定进程锁、源/准备后双指纹及独立
+  RF材料revision，缓存手改自动重建，中断发布journal硬失败。
 - **[MU-MIMO 算法流程 `MU_MIMO.html`](MU_MIMO.html)** —— 配对/预编码/功率分配逐步展开，含六个待确认的设计选择与实测数字
 - **[通宵成果与待审 `TONIGHT.html`](TONIGHT.html)** —— 6 个 bug、5 个新需求提案、8 个待拍板的决策点
 - **[通宵进展与待审问题 `MORNING_REVIEW.html`](MORNING_REVIEW.html)** —— 3GPP/ITU 对标结果 + 12 个待拍板的问题
@@ -468,11 +480,15 @@ python tests/test_results.py
 python tests/test_linkadapt.py
 python tests/test_mumimo.py
 python tests/test_system.py
+python tests/test_scheduler_p0.py
+python tests/test_srs_resource.py
+python tests/test_srs_waveform.py
 python tests/test_interference.py
 python tests/test_csi_aging.py
 python tests/test_rng.py
 python tests/test_sysscenes.py
 python tests/test_power_control.py
+python tests/test_physics_contract_extensions.py
 python tests/test_physics_invariants.py
 python tests/test_channel_generation_contract.py
 python tests/test_developer_guide.py
@@ -482,7 +498,7 @@ python tests/test_system_sim_tool.py
 python tests/test_benchmarks.py
 ```
 
-当前共 **21 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
+当前共 **25 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
 容易失真的手写“总项数”；以实际运行输出和开发者文档的自动盘点为准。
 
 经典通信正确性套件先冻结判据再运行：

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
+from functools import wraps
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +16,7 @@ import pytest
 
 from superran import provenance
 from superran import server as srv
+from superran import system as sysm
 from superran.paths import datasets_dir
 
 _DS = "ds_sys_sim_tool_test"
@@ -21,9 +24,16 @@ _DS = "ds_sys_sim_tool_test"
 
 def _write_dataset(*, num_rb: int = 272, n_samples: int = 8, n_ues: int = 2,
                    csi_source: str = "ul_srs_estimate",
-                   ue_ids_ok: bool = True) -> None:
+                   ue_ids_ok: bool = True,
+                   include_ue_ids: bool = True,
+                   serving_cell_indices: np.ndarray | None = None,
+                   include_serving_cell_indices: bool = True,
+                   cells_configured: int = 1,
+                   ue_speed_kmh: float = 3.0) -> None:
     rng = np.random.default_rng(20260817)
-    shape = (n_samples, 1, num_rb, 64, 2)
+    # Baseline terminal is 2T4R: the channel tensor retains four logical UE
+    # antenna ports even though each SRS opportunity transmits only two.
+    shape = (n_samples, 1, num_rb, 64, 4)
     h = ((rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
          / np.sqrt(2)).astype(np.complex64)
     noise = (0.03 * ((rng.standard_normal(shape)
@@ -33,24 +43,32 @@ def _write_dataset(*, num_rb: int = 272, n_samples: int = 8, n_ues: int = 2,
     d.mkdir(parents=True, exist_ok=True)
     rotation = np.arange(n_samples) % n_ues
     ue_ids = rotation if ue_ids_ok else np.roll(rotation, 1)
-    np.savez(
-        d / "channels.npz",
+    arrays = dict(
         h_true=h,
         h_est=h + noise,
         ue_position=rng.standard_normal((n_samples, 3)) * 50,
         scalar__sinr_dB=np.full(n_samples, 18.0),
         scalar__sir_dB=np.full(n_samples, 30.0),
         scalar__snr_dB=np.full(n_samples, 20.0),
-        meta__ue_id=ue_ids.astype(float),
         metastr__precoding_csi_source=np.asarray([csi_source] * n_samples),
     )
+    if include_ue_ids:
+        arrays["meta__ue_id"] = ue_ids.astype(float)
+    if include_serving_cell_indices:
+        serving = (
+            np.zeros(n_samples, dtype=float)
+            if serving_cell_indices is None
+            else np.asarray(serving_cell_indices, dtype=float)
+        )
+        arrays["meta__serving_cell_index"] = serving
+    np.savez(d / "channels.npz", **arrays)
     (d / "summary.json").write_text(json.dumps({
         "dataset_id": _DS,
         "source": "internal_sim",
         "shape": {"N": n_samples, "T": 1, "RB": num_rb,
-                  "BS_ant": 64, "UE_ant": 2},
+                  "BS_ant": 64, "UE_ant": 4},
         "num_samples": n_samples,
-        "cells_configured": 1,
+        "cells_configured": int(cells_configured),
         "antenna_model": {"mode": "effective_subarray",
                           "port_order": "pol_h_v",
                           "vertical_index_order": "top_to_bottom"},
@@ -59,6 +77,7 @@ def _write_dataset(*, num_rb: int = 272, n_samples: int = 8, n_ues: int = 2,
             "num_rb": num_rb, "num_ues": n_ues,
             "srs_periodicity": 20, "csirs_periodicity": 20,
             "mobility_mode": "static", "scenario": "UMa_NLOS",
+            "ue_speed_kmh": float(ue_speed_kmh),
         },
     }, ensure_ascii=False), encoding="utf-8")
 
@@ -183,6 +202,71 @@ def test_ue_id_misalignment_hard_fails() -> None:
     _write_dataset(ue_ids_ok=False)
     out = _run()
     assert "error" in out and "轮转" in out["error"]
+
+
+def test_multi_ue_dataset_missing_identity_hard_fails() -> None:
+    _write_dataset(include_ue_ids=False)
+    out = _run()
+    assert "error" in out and "ue_id" in out["error"] and "静默" in out["error"]
+
+
+def test_multi_serving_cell_hard_fails_even_when_rb_power_control_is_off() -> None:
+    _write_dataset(
+        serving_cell_indices=np.asarray([0, 1] * 4),
+        cells_configured=2)
+    out = _run(rb_power_control_enabled=False)
+    assert "error" in out and "不同 serving cell" in out["error"]
+    assert "272-RB" in out["error"]
+
+
+def test_multicell_dataset_missing_serving_identity_hard_fails() -> None:
+    _write_dataset(
+        include_serving_cell_indices=False,
+        cells_configured=2)
+    out = _run(rb_power_control_enabled=False)
+    assert "error" in out and "serving_cell_index" in out["error"]
+
+
+def test_zero_speed_is_not_defaulted_to_three_kmh() -> None:
+    _write_dataset(ue_speed_kmh=0.0)
+    out = _run(evaluation_mode="capacity")
+    assert "error" not in out, out.get("error")
+    assert out["csi_aging"]["speed_kmh"] == 0.0
+    assert out["csi_aging"]["doppler_hz"] == 0.0
+    assert out["csi_aging"]["coherence_time_ms"] is None
+
+
+def test_result_reports_effective_allocator_period_not_request(monkeypatch) -> None:
+    _write_dataset()
+    original = sysm.build_link_tables
+
+    @wraps(original)
+    def _with_effective_period(*args, **kwargs):
+        tables = original(*args, **kwargs)
+        for table in tables:
+            assert table.srs_resource_assignment is not None
+            table.srs_resource_assignment = replace(
+                table.srs_resource_assignment, period_ms=20.0)
+        return tables
+
+    monkeypatch.setattr(sysm, "build_link_tables", _with_effective_period)
+    out = _run(evaluation_mode="capacity", srs_period_ms=10.0)
+    assert "error" not in out, out.get("error")
+    aging = out["csi_aging"]
+    assert aging["requested_config"]["srs_period_ms"] == 10.0
+    assert aging["effective_config"]["srs_period_ms"] == 20.0
+    assert aging["config"]["full_sweep_ms"] == 340.0
+    assert any("生效全局周期 20 ms" in note for note in out["notes"])
+
+
+def test_srs_capacity_error_returns_structured_tool_error() -> None:
+    _write_dataset(n_samples=5, n_ues=5)
+    out = _run(
+        evaluation_mode="capacity", srs_hopping=False,
+        srs_period_adaptive=False)
+    assert "error" in out
+    assert "srs_hopping=false" in out["error"]
+    assert "17 frequency-resource" in out["error"]
 
 
 if __name__ == "__main__":

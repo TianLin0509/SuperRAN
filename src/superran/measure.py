@@ -623,6 +623,12 @@ MEASUREMENT_CATALOG: dict[str, str] = {
     "pdp": "时延功率谱：未归一化功率 + 真实时延轴 + RMS 时延扩展",
     "paths": "每条径/簇的时延、功率、角度（CDL 才有角度）",
     "srs": "SRS 侧空间特征：完整协方差、全部特征值、每天线增益、波束域 RSRP",
+    "srs_waveform": (
+        "SRS 波形接收：assignment→RE→干扰/噪声→解扩→双腿 64×4 与 UL IoT 证据"
+    ),
+    "srs_metrics": (
+        "SRS测量口径：per-RE/RB底噪、开环功控、绝对链路预算与线性域PreSINR IIR"
+    ),
     "pmi": "Type-I-style 单面板列码本近似：列索引 + 预编码矩阵 + 秩",
     "rsrp": "每天线信道增益与波束域 RSRP（不截断）",
     "sinr": "信噪比 / 信干比 / 信干噪比等链路标量",
@@ -639,6 +645,11 @@ _ALIASES: dict[str, str] = {
     "paths": "paths", "径": "paths", "角度": "paths", "aoa": "paths", "aod": "paths",
     "簇": "paths", "cluster": "paths",
     "srs": "srs", "协方差": "srs", "covariance": "srs", "特征值": "srs",
+    "srs波形": "srs_waveform", "srs waveform": "srs_waveform",
+    "导频污染": "srs_waveform", "ul iot": "srs_waveform", "解扩": "srs_waveform",
+    "presinr": "srs_metrics", "pre-sinr": "srs_metrics",
+    "srs底噪": "srs_metrics", "srs链路预算": "srs_metrics",
+    "开环功控": "srs_metrics", "per-re": "srs_metrics",
     "pmi": "pmi", "码本": "pmi", "codebook": "pmi", "预编码": "pmi", "precoder": "pmi",
     # 注意：别用"功率"这种过泛的词——"时延功率谱"会被误命中
     "rsrp": "rsrp", "接收功率": "rsrp", "信号功率": "rsrp", "增益": "rsrp",

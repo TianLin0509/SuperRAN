@@ -166,7 +166,12 @@ def estimate_size_mb(cfg: dict[str, Any], num_samples: int) -> float:
     ue = int(cfg.get("num_ue_rx_ant", 4))
     t = int(cfg.get("num_slots_per_sample", 1) or 1)
     per = t * rb * bs * ue * 8  # complex64 = 8 字节
-    return per * num_samples * 2 / 1e6  # 理想 + 估计两份
+    # paired/BOTH now retains DL truth, DL estimate, UL truth and the
+    # reciprocity-mapped precoding estimate.  Single-direction data keeps the
+    # historical truth+estimate pair.  Optional interferer tensors remain a
+    # separate, explicitly disclosed storage multiplier.
+    arrays = 4 if str(cfg.get("link", "DL")).upper() == "BOTH" else 2
+    return per * num_samples * arrays / 1e6
 
 
 def _rb_from_bandwidth(cfg: dict[str, Any]) -> int:
@@ -493,6 +498,7 @@ def _collect(
     intf_mod.install_geometry_capture()
 
     h_true: list[np.ndarray] = []
+    h_ul_true: list[np.ndarray] = []
     h_est: list[np.ndarray] = []
     h_dl_est: list[np.ndarray] = []
     precoding_csi_sources: list[str] = []
@@ -551,6 +557,17 @@ def _collect(
         h_true.append(ht_arr)
         h_est.append(he_arr)
         precoding_csi_sources.append(csi_source)
+        hut = getattr(sample, "h_ul_true", None)
+        if hut is not None:
+            hut_arr = _slot_snapshot(hut)
+            if hut_arr.shape != ht_arr.shape:
+                raise RuntimeError(
+                    "h_ul_true 与 h_dl_true 的 canonical 轴不一致："
+                    f"{hut_arr.shape} vs {ht_arr.shape}"
+                )
+            if not np.isfinite(hut_arr).all():
+                raise RuntimeError("h_ul_true 含 NaN 或 Inf，拒绝落盘")
+            h_ul_true.append(hut_arr)
         if hde is not None:
             hde_arr = _slot_snapshot(hde)
             if hde_arr.shape != ht_arr.shape:
@@ -629,6 +646,8 @@ def _collect(
         "ue_position": np.stack(positions),
         "metastr__precoding_csi_source": np.asarray(precoding_csi_sources),
     }
+    if len(h_ul_true) == accepted:
+        payload["h_ul_true"] = np.stack(h_ul_true)
     if len(h_dl_est) == accepted:
         payload["h_dl_est"] = np.stack(h_dl_est)
     if len(h_intf) == accepted and h_intf and all(a.shape == h_intf[0].shape for a in h_intf):
@@ -654,6 +673,12 @@ def _collect(
     unique_sources = sorted(set(precoding_csi_sources))
     contract.update({
         "h_true_role": "downlink physical evaluation channel",
+        "h_ul_true_role": (
+            "physical uplink channel on canonical [time,rb,bs_port,ue_port] axes; "
+            "retained for allocator-driven SRS waveform reception"
+            if len(h_ul_true) == accepted else
+            "not available from this source; ideal reciprocity fallback must be explicit"
+        ),
         "h_est_role": (
             "gNB precoding CSI; canonical UL SRS estimate is "
             "reciprocity-mapped back to the DL complex convention for paired/BOTH data"
@@ -768,20 +793,48 @@ def generate(
     就保留（**不静默减少数据**）。实际耗时以返回的 ``elapsed_s`` 为准。
     """
     cfg = dict(cfg)
+    validated_prereg = None
+    if prereg_id:
+        from . import analysis as an  # noqa: PLC0415
+
+        validated_prereg = an.load(prereg_id)
+        if not an.verify(validated_prereg):
+            raise ValueError(
+                f"预注册 {prereg_id!r} 的摘要与内容不一致；"
+                "拒绝生成，不能把被手改的口径标成生成前锁定"
+            )
+        if (validated_prereg.draft_id and draft_id
+                and validated_prereg.draft_id != str(draft_id)):
+            raise ValueError(
+                f"预注册绑定 draft {validated_prereg.draft_id!r}，"
+                f"本次生成使用 {draft_id!r}；拒绝跨 Draft 复用"
+            )
     # 早期体验方案曾把 LMMSE 档写成 ``ls_lmmse``；ChannelHub 与公开配置的
     # 稳定枚举一直是 ``ls_mmse``（实现本质是 LS 后的频域 LMMSE）。保留别名
     # 只用于读旧配置，所有新产物都落 canonical 名称。
     if cfg.get("channel_est_mode") == "ls_lmmse":
         cfg["channel_est_mode"] = "ls_mmse"
     source_name = str(cfg.pop("source", "internal_sim"))
+    # 外部源的隐式默认曾从5 ms改成0.5 ms。系统层不能再从SRS/CSI-RS周期
+    # 猜快照间隔；新数据一律把SuperRAN的5-ms默认显式写进配置，用户显式值优先。
+    from . import hardware as hw  # noqa: PLC0415
+
+    raw_sample_interval = cfg.get("sample_interval_s")
+    if raw_sample_interval is None:
+        cfg["sample_interval_s"] = float(hw.COMPANY_SNAPSHOT_INTERVAL_S)
+    else:
+        if isinstance(raw_sample_interval, (bool, np.bool_)):
+            raise ValueError("sample_interval_s 必须是有限正秒数")
+        interval = float(raw_sample_interval)
+        if not np.isfinite(interval) or interval <= 0.0:
+            raise ValueError("sample_interval_s 必须是有限正秒数")
+        cfg["sample_interval_s"] = interval
     cfg["num_samples"] = int(num_samples)
     panel, panel_derived = _ensure_bs_panel(cfg)
     ue_panel, ue_panel_derived = _ensure_ue_panel(cfg)
 
     # 真实阵列模型：64T/256T 面板分别自动切到 1 驱 3 / 1 驱 6，二者统一
     # pol_h_v + top_to_bottom。显式 legacy_64 只用于历史兼容或对照。
-    from . import hardware as hw  # noqa: PLC0415
-
     hw.apply_array_defaults(cfg)
     array_applied = hw.strip_markers(cfg)
     array_block = hw.array_summary(cfg, array_applied)
@@ -967,28 +1020,28 @@ def generate(
     # 预注册口径随数据一起存档。**必须在生成时绑定，事后补绑没有意义**——
     # 预注册的全部价值就在于"看数据之前写下的"，事后写的只是记录。
     prereg_block = None
-    if prereg_id:
-        from . import analysis as an
-
-        try:
-            pr = an.load(prereg_id)
-            prereg_block = {
-                "prereg_id": pr.prereg_id,
-                "digest": pr.digest,
-                "primary_metric": pr.primary_metric,
-                "metric_unit": pr.metric_unit,
-                "baseline": pr.baseline,
-                "csi_basis": pr.csi_basis,
-                "expected_effect": pr.expected_effect,
-                "higher_is_better": pr.higher_is_better,
-                "secondary_metrics": pr.secondary_metrics,
-                "locked_before_generation": True,
-            }
-        except FileNotFoundError:
-            prereg_block = {"prereg_id": prereg_id, "error": "找不到该预注册，未绑定"}
+    if validated_prereg is not None:
+        pr = validated_prereg
+        prereg_block = {
+            "prereg_id": pr.prereg_id,
+            "digest": pr.digest,
+            "primary_metric": pr.primary_metric,
+            "metric_unit": pr.metric_unit,
+            "baseline": pr.baseline,
+            "csi_basis": pr.csi_basis,
+            "expected_effect": pr.expected_effect,
+            "higher_is_better": pr.higher_is_better,
+            "secondary_metrics": pr.secondary_metrics,
+            "locked_before_generation": True,
+        }
 
     channel_contract = dict(first_meta.get("channel_contract") or {})
     channel_contract.update({
+        "sample_interval_s": float(cfg["sample_interval_s"]),
+        "sample_interval_source": (
+            "explicit_config" if raw_sample_interval is not None
+            else "superran_fixed_default_5ms"
+        ),
         "dataset_axes": ["sample", "time_or_slot", "RB", "BS_port", "UE_port"],
         "dataset_shape": [int(v) for v in shape],
         "dataset_dtype": str(payload["h_true"].dtype),

@@ -101,20 +101,22 @@ def _mu_stress() -> dict[str, object]:
 def _srs_capacity_stress() -> dict[str, object]:
     allocator = SrsResourceAllocator()
     start = time.perf_counter()
-    for ue in range(32):
+    for ue in range(68):
         allocator.allocate(SrsResourceRequest(
             ue_id=ue, cell_id=0, period_ms=10.0, n_ports=4))
     exhausted = False
     try:
         allocator.allocate(SrsResourceRequest(
-            ue_id=32, cell_id=0, period_ms=10.0, n_ports=4))
+            ue_id=68, cell_id=0, period_ms=10.0, n_ports=4))
     except RuntimeError:
         exhausted = True
     wall = time.perf_counter() - start
-    assert exhausted and len(allocator.assignments) == 32
+    assert exhausted and len(allocator.assignments) == 68
     return {
-        "period_ms": 10.0, "ports": 4, "allocated_ues": 32,
-        "ue_33_hard_failed": exhausted, "wall_s": wall,
+        "period_ms": 10.0, "terminal": "2T4R",
+        "configured_cs": 4, "frequency_resources": 17,
+        "allocated_ues": 68,
+        "ue_69_hard_failed_when_period_fixed": exhausted, "wall_s": wall,
         "verdict": "PASS",
     }
 

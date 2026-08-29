@@ -243,7 +243,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
       <tr><td>192 AE → 64 RF</td><td><span class="status ok">已实现</span></td><td>1 驱 3、0.5λ/0.67λ、F 耦合、64 端口输出</td><td>实测阵元方向图已校准</td></tr>
       <tr><td>CDL 多径 MIMO</td><td><span class="status ok">已实现</span></td><td>20 rays、角度、Doppler、时延、极化耦合</td><td>完整 §7.5 场景簇生成</td></tr>
       <tr><td>双极化</td><td><span class="status warn">结构已实现</span></td><td>pol mask + XPR 2×2 ray coupling</td><td>实测 Jones/XPD 已贯通</td></tr>
-      <tr><td>64×4 UL 真值</td><td><span class="status ok">已实现</span></td><td>预置 BOTH preset 固定 4Tx/4Rx</td><td>任意 Tx/Rx 错配仍可配对</td></tr>
+      <tr><td>64×4 UL 真值</td><td><span class="status ok">已实现</span></td><td>2T4R：两次2-port SRS拼成4个逻辑天线端口</td><td>资源时序已建模；多端口波形仍需补齐</td></tr>
       <tr><td>四端口 SRS 估计</td><td><span class="status warn">接口有、物理观测待补</span></td><td>1/2/4-port 序列参数与 LS/频域 LMMSE 基线</td><td>物理端口叠加/污染已被真实建模</td></tr>
     </tbody>
   </table></div>
@@ -282,7 +282,7 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
   <div class="table-wrap"><table>
     <thead><tr><th>主题</th><th>文件与行</th><th>关键事实</th></tr></thead>
     <tbody>
-      <tr><td>预置硬件默认</td><td><div class="path">C:\Vibe\Wireless\SuperRAN\src\superran\hardware.py</div></td><td>8×4×2 RF、1 驱 3、192 AE、UE 4Tx/4Rx、±45°、canonical 端口合同</td></tr>
+      <tr><td>预置硬件默认</td><td><div class="path">C:\Vibe\Wireless\SuperRAN\src\superran\hardware.py</div></td><td>8×4×2 RF、1驱3、192 AE、UE 2T4R、4 CS、±45°、canonical端口合同</td></tr>
       <tr><td>默认 preset</td><td><div class="path">C:\Vibe\Wireless\SuperRAN\presets\presets.yaml</div></td><td><code>company_64t4r</code> 是 BOTH，UE Tx/Rx 均为 4</td></tr>
       <tr><td>F 与 steering</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\phy_sim\effective_array.py</div></td><td>端口索引、馈电归一、位置、192×64 coupling、Jones 基、Fᴴ/Fᵀ</td></tr>
       <tr><td>CDL H / 链路维度</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\data\sources\internal_sim.py</div></td><td>20 rays、极化矩阵、Doppler、簇求和、时延 DFT；DL/UL 天线轴选择</td></tr>

@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 from collections.abc import Iterator
@@ -134,6 +135,114 @@ class Capability:
         }
 
 
+@dataclass(frozen=True)
+class SourceContractReport:
+    """Structural handshake between a source checkout and SuperRAN's adapter."""
+
+    compatible: bool
+    checks: dict[str, dict[str, Any]]
+    blockers: tuple[str, ...]
+    contract_id: str = "superran-source-contract-v1"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "contract_id": self.contract_id,
+            "compatible": self.compatible,
+            "checks": self.checks,
+            "blockers": list(self.blockers),
+        }
+
+
+@lru_cache(maxsize=1)
+def probe_source_contract() -> SourceContractReport:
+    """Fail closed when imports exist but the adapter's physical API does not."""
+    checks: dict[str, dict[str, Any]] = {}
+    blockers: list[str] = []
+
+    def _record(name: str, passed: bool, detail: str) -> None:
+        checks[name] = {"passed": bool(passed), "detail": str(detail)}
+        if not passed:
+            blockers.append(name)
+
+    try:
+        _ensure_path()
+        from msg_embedding.channel_est import (  # noqa: PLC0415
+            lmmse_frequency_interpolate,
+        )
+
+        _record(
+            "lmmse_frequency_interpolate",
+            callable(lmmse_frequency_interpolate),
+            "pilot-to-full-RB LMMSE public export",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _record(
+            "lmmse_frequency_interpolate",
+            False,
+            f"{type(exc).__name__}: {exc}",
+        )
+
+    try:
+        from msg_embedding.ref_signals.srs import auto_select_c_srs  # noqa: PLC0415
+
+        parameters = inspect.signature(auto_select_c_srs).parameters
+        passed = {"B_SRS", "target_rb"}.issubset(parameters)
+        _record(
+            "srs_bandwidth_selector",
+            passed,
+            f"signature={inspect.signature(auto_select_c_srs)}; requires B_SRS/target_rb",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _record("srs_bandwidth_selector", False, f"{type(exc).__name__}: {exc}")
+
+    try:
+        from msg_embedding.phy_sim.effective_array import EffectiveArray  # noqa: PLC0415
+
+        parameters = inspect.signature(EffectiveArray).parameters
+        passed = {"port_order", "vertical_index_order"}.issubset(parameters)
+        _record(
+            "array_port_order",
+            passed,
+            f"signature={inspect.signature(EffectiveArray)}; requires canonical port-order controls",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _record("array_port_order", False, f"{type(exc).__name__}: {exc}")
+
+    try:
+        from msg_embedding.data.contract import ChannelSample  # noqa: PLC0415
+
+        fields = set(getattr(ChannelSample, "model_fields", {}))
+        if not fields:
+            fields = set(getattr(ChannelSample, "__fields__", {}))
+        required = {"h_ul_true", "h_ul_est", "h_dl_true", "h_dl_est"}
+        _record(
+            "paired_channel_roles",
+            required.issubset(fields),
+            f"required={sorted(required)}; present={sorted(required & fields)}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _record("paired_channel_roles", False, f"{type(exc).__name__}: {exc}")
+
+    try:
+        from msg_embedding.data.sources import SOURCE_REGISTRY  # noqa: PLC0415
+
+        required_sources = {"internal_sim", "sionna_rt", "quadriga_real"}
+        present = set(SOURCE_REGISTRY)
+        _record(
+            "source_registry",
+            required_sources.issubset(present),
+            f"required={sorted(required_sources)}; present={sorted(present)}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _record("source_registry", False, f"{type(exc).__name__}: {exc}")
+
+    return SourceContractReport(
+        compatible=not blockers,
+        checks=checks,
+        blockers=tuple(blockers),
+    )
+
+
 def _probe_module(mod: str) -> bool:
     import importlib.util
 
@@ -173,27 +282,54 @@ def probe_capabilities() -> tuple[Capability, ...]:
             ),
         )
 
-    _ensure_path()
+    try:
+        _ensure_path()
+    except Exception as exc:  # noqa: BLE001
+        why = (
+            "源码存在但初始化/标准表合同失败；拒绝继续探测："
+            f"{type(exc).__name__}: {exc}"
+        )
+        return (
+            Capability("internal_sim", False, why, ["source-initialization"]),
+            Capability("sionna_rt", False, why, ["source-initialization"]),
+            Capability(
+                "quadriga_real", False,
+                why + "；另需MATLAB或Octave运行时",
+                ["source-initialization", "octave"],
+            ),
+        )
     caps: list[Capability] = []
+    contract = probe_source_contract()
+    contract_missing = [f"source-contract:{name}" for name in contract.blockers]
 
     # internal_sim：纯 numpy 统计仿真，Phase 0 主力
     missing = [m for m in ("numpy", "scipy", "pydantic", "structlog") if not _probe_module(m)]
+    missing.extend(contract_missing)
     caps.append(
         Capability(
             "internal_sim",
             not missing,
-            "3GPP 38.901 统计信道仿真（CDL/TDL），纯 numpy，秒级" if not missing else "缺依赖",
+            (
+                "3GPP 38.901 统计信道仿真（CDL/TDL），源契约已握手"
+                if not missing else
+                "依赖或SuperRAN源契约不满足；拒绝把可import误报成可生成"
+            ),
             missing,
         )
     )
 
     # sionna_rt：射线追踪，Phase 2 才需要
     rt_missing = [m for m in ("sionna.rt", "mitsuba", "drjit") if not _probe_module(m)]
+    rt_missing.extend(contract_missing)
     caps.append(
         Capability(
             "sionna_rt",
             not rt_missing,
-            "射线追踪（真实城市地图）" if not rt_missing else "Phase 2 才需要；补装 sionna-rt 可启用",
+            (
+                "射线追踪（真实城市地图），源契约已握手"
+                if not rt_missing else
+                "缺射线追踪依赖或SuperRAN源契约不满足"
+            ),
             rt_missing,
         )
     )
@@ -223,6 +359,12 @@ def warmup() -> dict[str, Any]:
     _ensure_path()
     info: dict[str, Any] = {}
     try:
+        contract = probe_source_contract()
+        info["source_contract"] = contract.as_dict()
+        if not contract.compatible:
+            raise RuntimeError(
+                "source contract mismatch: " + ", ".join(contract.blockers)
+            )
         import msg_embedding.channel_est.interpolate  # noqa: F401,PLC0415
         import msg_embedding.data.sources._interference_estimation  # noqa: F401,PLC0415
         import msg_embedding.data.sources.internal_sim  # noqa: F401,PLC0415

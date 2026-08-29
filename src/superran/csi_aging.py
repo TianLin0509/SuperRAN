@@ -70,13 +70,16 @@ from . import mumimo as mu
 
 __all__ = [
     "SRS_PERIOD_CHOICES",
+    "SRS_RESOURCE_PERIOD_CHOICES",
     "CSI_REPORT_PERIOD_CHOICES",
     "CsiConfig",
     "hop_order",
     "rbg_csi_staleness_ms",
     "rbg_age_ms",
     "rbg_lag_snapshots",
+    "rbg_lag_snapshots_by_antenna_group",
     "stale_channel",
+    "stale_channel_by_antenna_group",
     "svd_precoder",
     "mmse_stream_sinr",
     "AgedRankChoice",
@@ -90,6 +93,11 @@ _EPS = 1e-12
 #: 现网典型 SRS 周期（ms）。**只允许这四个值**——它们对应 38.331 里
 #: ``periodicityAndOffset`` 在 30 kHz SCS 下的 sl10 / sl20 / sl40 / sl80 时隙。
 SRS_PERIOD_CHOICES: tuple[float, ...] = (5.0, 10.0, 20.0, 40.0)
+# The user-confirmed 2T4R allocation profile pairs consecutive 5-ms air
+# opportunities (slot7->17) into one logical four-port SRS period.  Therefore
+# its shortest allocatable period is 10 ms.  A 5-ms SRS remains available only
+# as an explicit no-allocation/full-band diagnostic upper bound.
+SRS_RESOURCE_PERIOD_CHOICES: tuple[float, ...] = (10.0, 20.0, 40.0)
 
 # 38.331 的 CSI-ReportPeriodicityAndOffset 按 slot 配置，并不存在“PMI 固定 5 ms”
 # 这一条标准结论。这里给 30 kHz SCS 下常用的工程扫描点；默认 20 ms = 40 slots。
@@ -122,13 +130,28 @@ class CsiConfig:
     #: 为每个 UE 分配独立的周期/符号/comb/循环移位资源，并把周期 offset
     #: 接入 CSI 老化。关闭仅用于复现旧的“所有 UE offset=0”上界。
     srs_resource_allocation: bool = True
+    #: 从 srs_period_ms 开始，在 10/20/40 ms 中选择能容纳全局 UE 的最短周期。
+    #: 关闭只用于显式固定周期的容量/老化消融。
+    srs_period_adaptive: bool = True
     #: 重放有限信道 trace 时，是否把上一轮 trace 当作预启动阶段的因果历史
     periodic_trace_history: bool = False
 
     def __post_init__(self) -> None:
+        for name in (
+            "enabled", "hopping", "srs_resource_allocation",
+            "srs_period_adaptive", "periodic_trace_history",
+        ):
+            if not isinstance(getattr(self, name), (bool, np.bool_)):
+                raise ValueError(f"{name} 必须是布尔值")
         if self.srs_period_ms not in SRS_PERIOD_CHOICES:
             raise ValueError(
                 f"srs_period_ms 只支持 {SRS_PERIOD_CHOICES}，收到 {self.srs_period_ms}"
+            )
+        if (self.srs_resource_allocation
+                and self.srs_period_ms not in SRS_RESOURCE_PERIOD_CHOICES):
+            raise ValueError(
+                "基础 2T4R SRS 资源分配只支持 10/20/40 ms 全局周期；"
+                "5 ms 只允许在 srs_resource_allocation=False 时作为显式诊断上界"
             )
         if (isinstance(self.hop_factor, (bool, np.bool_))
                 or not isinstance(self.hop_factor, (int, np.integer))
@@ -140,13 +163,17 @@ class CsiConfig:
         if (not np.isfinite(self.csi_report_period_ms)
                 or self.csi_report_period_ms <= 0):
             raise ValueError("csi_report_period_ms 必须是有限正数")
-        if not isinstance(self.srs_resource_allocation, (bool, np.bool_)):
-            raise ValueError("srs_resource_allocation 必须是布尔值")
 
     @property
     def full_sweep_ms(self) -> float:
         """扫完全带宽需要多久。不跳频时就是一个 SRS 周期。"""
         return self.srs_period_ms * (self.hop_factor if self.hopping else 1)
+
+    @property
+    def srs_transmissions_per_full_sweep(self) -> int:
+        """Physical SRS transmissions needed for all logical UE ports."""
+        hops = self.hop_factor if self.hopping else 1
+        return int(hops * (2 if self.srs_resource_allocation else 1))
 
     @property
     def mean_csi_staleness_ms(self) -> float:
@@ -171,9 +198,14 @@ class CsiConfig:
             "srs_period_ms": self.srs_period_ms,
             "hopping": self.hopping,
             "hop_factor": self.hop_factor if self.hopping else 1,
+            "srs_transmissions_per_full_sweep": (
+                self.srs_transmissions_per_full_sweep),
+            "antenna_group_measurement_skew_ms": (
+                5.0 if self.srs_resource_allocation else 0.0),
             "processing_delay_ms": self.processing_delay_ms,
             "csi_report_period_ms": self.csi_report_period_ms,
             "srs_resource_allocation": bool(self.srs_resource_allocation),
+            "srs_period_adaptive": bool(self.srs_period_adaptive),
             "csi_report_period_basis": (
                 "engineering_default_20ms; 38.331 configures periodicity in slots, "
                 "not a universal 5ms PMI period"),
@@ -274,7 +306,8 @@ def hop_order(num_rbg: int, *, rb_per_rbg: int = 16,
 
 def rbg_csi_staleness_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
                          rb_per_rbg: int = 16,
-                         opportunity_offset_ms: float = 0.0) -> np.ndarray:
+                         opportunity_offset_ms: float = 0.0,
+                         frequency_resource_id: int = 0) -> np.ndarray:
     """时刻 ``t_ms`` 上，每个 RBG 的 CSI 陈旧时长（ms）。返回 ``[num_rbg]``。
 
     这里不是“SRS 年龄”：SRS 的配置量是周期。返回值指“距最近一次覆盖该 RBG
@@ -310,26 +343,36 @@ def rbg_csi_staleness_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
 
     order, _ = hop_order(num_rbg, rb_per_rbg=rb_per_rbg, hop_factor=cfg.hop_factor)
     h = len(order)
+    if (isinstance(frequency_resource_id, (bool, np.bool_))
+            or not isinstance(frequency_resource_id, (int, np.integer))
+            or not 0 <= int(frequency_resource_id) < h):
+        raise ValueError(f"frequency_resource_id 必须是 0..{h - 1} 的整数")
+    phase = int(frequency_resource_id)
     # 同一个 RBG 在一个周期里可能被探多次，取最近的那次
     hops = np.full(num_rbg, h - 1, dtype=int)
-    for j, k in enumerate(order):
+    for occurrence_mod in range(h):
+        k = order[(occurrence_mod + phase) % h]
         if 0 <= int(k) < num_rbg:
-            hops[int(k)] = min(int(hops[int(k)]), (n - j) % h)
+            hops[int(k)] = min(
+                int(hops[int(k)]), (n - occurrence_mod) % h)
     return hops * per + within
 
 
 def rbg_age_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
                rb_per_rbg: int = 16,
-               opportunity_offset_ms: float = 0.0) -> np.ndarray:
+               opportunity_offset_ms: float = 0.0,
+               frequency_resource_id: int = 0) -> np.ndarray:
     """兼容旧 API；新代码请用 :func:`rbg_csi_staleness_ms`。"""
     return rbg_csi_staleness_ms(
         cfg, num_rbg, t_ms, rb_per_rbg=rb_per_rbg,
-        opportunity_offset_ms=opportunity_offset_ms)
+        opportunity_offset_ms=opportunity_offset_ms,
+        frequency_resource_id=frequency_resource_id)
 
 
 def rbg_lag_snapshots(cfg: CsiConfig, num_rbg: int, *, snapshot_ms: float,
                       snapshot_index: int, rb_per_rbg: int = 16,
-                      opportunity_offset_ms: float = 0.0) -> np.ndarray:
+                      opportunity_offset_ms: float = 0.0,
+                      frequency_resource_id: int = 0) -> np.ndarray:
     """把每个 RBG 的 CSI 陈旧时长折成**整数个信道快照**。
 
     信道快照之间隔 ``snapshot_ms``（由 :func:`system.snapshot_interval_ms` 算出，
@@ -351,12 +394,48 @@ def rbg_lag_snapshots(cfg: CsiConfig, num_rbg: int, *, snapshot_ms: float,
     staleness = rbg_csi_staleness_ms(
         cfg, num_rbg, snapshot_index * float(snapshot_ms),
         rb_per_rbg=rb_per_rbg,
-        opportunity_offset_ms=opportunity_offset_ms)
+        opportunity_offset_ms=opportunity_offset_ms,
+        frequency_resource_id=frequency_resource_id)
     # 必须向上取整。四舍五入会把 2 ms / 5 ms 量化成 0，等于在测量已经发生
     # 之前使用当前信道；例如 7 ms 还会被缩成 5 ms。离散快照无法表示精确时长
     # 时，只能取“不新于真实测量”的最近快照，才能守住因果性。
     ratio = np.maximum(staleness, 0.0) / max(float(snapshot_ms), _EPS)
     return np.maximum(0, np.ceil(ratio - 1e-12)).astype(int)
+
+
+def rbg_lag_snapshots_by_antenna_group(
+    cfg: CsiConfig,
+    num_rbg: int,
+    *,
+    snapshot_ms: float,
+    snapshot_index: int,
+    opportunity_offsets_ms: tuple[float, float],
+    frequency_resource_id: int = 0,
+    rb_per_rbg: int = 16,
+) -> np.ndarray:
+    """Return ``[2,RBG]`` lags for the two 2T legs of a 2T4R UE.
+
+    The first row belongs to logical antenna ports 0/1 and the second to 2/3.
+    Both legs share one hop counter but occur at consecutive available SRS
+    opportunities.  Calling the same hopping model with the two offsets gives
+    the desired behaviour: after leg 0 but before leg 1, the first pair has
+    already advanced to the new RBG while the second pair still carries its
+    previous-cycle estimate.
+    """
+    if len(opportunity_offsets_ms) != 2:
+        raise ValueError("2T4R SRS requires exactly two opportunity offsets")
+    offsets = tuple(float(value) for value in opportunity_offsets_ms)
+    if not offsets[1] > offsets[0]:
+        raise ValueError("second 2T SRS opportunity must follow the first")
+    return np.stack([
+        rbg_lag_snapshots(
+            cfg, num_rbg, snapshot_ms=snapshot_ms,
+            snapshot_index=snapshot_index, rb_per_rbg=rb_per_rbg,
+            opportunity_offset_ms=offset,
+            frequency_resource_id=frequency_resource_id,
+        )
+        for offset in offsets
+    ], axis=0)
 
 
 def stale_channel(snaps: list[np.ndarray], snapshot_index: int,
@@ -376,6 +455,49 @@ def stale_channel(snaps: list[np.ndarray], snapshot_index: int,
         raw = int(snapshot_index) - int(lags[k])
         s = raw % len(snaps) if periodic_history else max(0, raw)
         out[k] = np.asarray(snaps[s])[k]
+    return out
+
+
+def stale_channel_by_antenna_group(
+    snaps: list[np.ndarray],
+    snapshot_index: int,
+    lags_by_group: np.ndarray,
+    *,
+    antenna_port_groups: tuple[tuple[int, ...], tuple[int, ...]] = (
+        (0, 1), (2, 3)),
+    periodic_history: bool = False,
+) -> np.ndarray:
+    """Assemble a 2T4R channel from two independently aged 64x2 slices.
+
+    ``snaps[s]`` has shape ``[RBG,BS,UE-port]`` and ``lags_by_group`` has
+    shape ``[2,RBG]``.  Each antenna-port group is copied from the latest
+    causally available snapshot for its own SRS opportunity.  This preserves
+    the five-millisecond switching skew instead of pretending all four UE
+    columns were measured simultaneously.
+    """
+    if not snaps:
+        raise ValueError("snaps must not be empty")
+    cur = np.asarray(snaps[snapshot_index])
+    lags = np.asarray(lags_by_group)
+    if lags.shape != (len(antenna_port_groups), cur.shape[0]):
+        raise ValueError(
+            "lags_by_group must have shape "
+            f"({len(antenna_port_groups)},{cur.shape[0]}), got {lags.shape}"
+        )
+    flattened = [int(port) for group in antenna_port_groups for port in group]
+    if sorted(flattened) != list(range(cur.shape[-1])):
+        raise ValueError(
+            "antenna_port_groups must cover every UE port exactly once; "
+            f"groups={antenna_port_groups}, ue_ports={cur.shape[-1]}"
+        )
+    out = np.array(cur, copy=True)
+    for group_index, ports in enumerate(antenna_port_groups):
+        port_idx = list(ports)
+        for rbg in range(cur.shape[0]):
+            raw = int(snapshot_index) - int(lags[group_index, rbg])
+            source = raw % len(snaps) if periodic_history else max(0, raw)
+            src = np.asarray(snaps[source])
+            out[rbg][:, port_idx] = src[rbg][:, port_idx]
     return out
 
 
@@ -592,6 +714,14 @@ def aging_summary(cfg: CsiConfig, *, num_rbg: int = 17, snapshot_ms: float = 5.0
         "config": cfg.as_dict(),
         "hop_order": [int(x) for x in order],
         "hop_order_source": source,
+        "antenna_switching_profile": (
+            "2T4R_ports01_then23_next_srs_opportunity"
+            if cfg.srs_resource_allocation else None),
+        "antenna_group_measurement_skew_ms": (
+            5.0 if cfg.srs_resource_allocation else 0.0),
+        "srs_transmissions_per_full_4port_sweep": (
+            2 * int(cfg.hop_factor) if cfg.hopping
+            and cfg.srs_resource_allocation else int(cfg.hop_factor)),
         "rbg_csi_staleness_ms": [round(float(x), 2) for x in stale_ms],
         "rbg_lag_snapshots": [int(x) for x in lags],
         "snapshot_ms": snapshot_ms,

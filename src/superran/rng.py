@@ -285,6 +285,14 @@ class KpiStat:
         return int(len(self._finite))
 
     @property
+    def n_total(self) -> int:
+        return int(len(self.values))
+
+    @property
+    def n_nonfinite(self) -> int:
+        return self.n_total - self.n_rep
+
+    @property
     def _finite(self) -> np.ndarray:
         v = np.asarray(self.values, dtype=float)
         return v[np.isfinite(v)]
@@ -349,6 +357,9 @@ class KpiStat:
         d: dict[str, Any] = {
             "mean": _r(self.mean), "std": _r(self.std),
             "ci95": [_r(lo), _r(hi)], "n_rep": self.n_rep,
+            "n_total": self.n_total,
+            "n_nonfinite": self.n_nonfinite,
+            "coverage": _r(self.n_rep / self.n_total) if self.n_total else None,
             "cv": _r(self.cv), "rel_half_width": _r(self.rel_half_width),
             "min": _r(float(self._finite.min()) if self.n_rep else float("nan")),
             "max": _r(float(self._finite.max()) if self.n_rep else float("nan")),
@@ -358,6 +369,11 @@ class KpiStat:
                          "实测 9.4%（cell_experienced_mbps，64 次重复；"
                          "早先 8 个种子测出的 11.4% 与它统计上一致），"
                          "一次运行的数字最后一位是假的——把 num_replications 调到 ≥6。")
+        elif self.n_nonfinite:
+            d["note"] = (
+                f"{self.n_nonfinite}/{self.n_total} 次重复的该 KPI 无定义或非有限；"
+                "均值与区间只覆盖有限子集，不能把 coverage 缺口藏起来"
+            )
         return d
 
 
@@ -381,13 +397,23 @@ def summarize_runs(runs: list[dict[str, Any]], *,
     if not runs:
         return {}
     if keys is None:
-        keys = [k for k, v in runs[0].items()
-                if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        keys = sorted({
+            k
+            for run in runs
+            for k, value in run.items()
+            if isinstance(value, (int, float, np.integer, np.floating))
+            and not isinstance(value, (bool, np.bool_))
+        })
     out: dict[str, dict[str, Any]] = {}
     for k in keys:
-        vals = [float(r[k]) for r in runs
-                if isinstance(r.get(k), (int, float)) and not isinstance(r.get(k), bool)]
-        if vals:
+        vals = [
+            float(r[k])
+            if isinstance(r.get(k), (int, float, np.integer, np.floating))
+            and not isinstance(r.get(k), (bool, np.bool_))
+            else float("nan")
+            for r in runs
+        ]
+        if any(np.isfinite(vals)):
             out[k] = summarize(vals, k).as_dict()
     return out
 
@@ -475,8 +501,16 @@ def compare_replications(
     """
     from . import gates as gt  # noqa: PLC0415
 
-    a = np.asarray(values_a, dtype=float).ravel()
-    b = np.asarray(values_b, dtype=float).ravel()
+    a = np.asarray(values_a, dtype=float)
+    b = np.asarray(values_b, dtype=float)
+    if a.ndim != 1 or b.ndim != 1 or a.size == 0 or b.size == 0:
+        raise ValueError(
+            f"两臂必须是非空一维逐replication数组，收到 {a.shape} 与 {b.shape}"
+        )
+    if not np.all(np.isfinite(a)) or not np.all(np.isfinite(b)):
+        raise ValueError(
+            "配对比较不接受NaN/Inf；不能静默删除某些replication后缩窄区间"
+        )
 
     # **没给 books 就不能声称是 CRN。** 这里的三态是有意的：
     # True = 查过且成立、False = 查过不成立、None = 没法查。

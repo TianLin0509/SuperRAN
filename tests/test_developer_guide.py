@@ -144,6 +144,12 @@ def test_guide_is_offline_utf8_hash_routed_and_accessible() -> None:
     assert 'data = sr_generate(preset=&quot;company_64t4r_multicell&quot;' not in text
     assert "统计检验无法发现样本错配" in text
     assert "当前没有未分类模块" in text
+    assert "共享 bitmap 修复后，旧 50% MU 证据只保留作历史 provenance" in text
+    assert "50.77%" not in text and "3.3%～12.7%" not in text
+    assert "SRS 请求/生效周期" in text
+    assert "单小区资源池身份" in text
+    assert "频选全带/剩余池审计" in text
+    assert "SU 清空全部可服务队列" in text
     assert "search-panel" in text and "#/experience" in text
     assert 'data-reading-mode="compact"' in text
     assert 'id="reading-toggle"' in text and 'data-reading-choice="detailed"' in text
@@ -174,7 +180,19 @@ def test_every_chapter_has_two_reading_depths_and_every_formula_is_explained() -
         {page["key"] for page in pages})
     rendered_formulas = set(re.findall(r'data-formula="([^"]+)"', text))
     assert meta["annotated_formulas"] == len(rendered_formulas)
+    assert 'data-formula="F_SRS_2T4R_STITCH"' in text
+    srs_lag_card = re.search(
+        r'<figure class="formula-card" data-formula="F_SRS_LAG".*?</figure>',
+        text, re.S,
+    )
+    assert srs_lag_card is not None
+    assert "u+D_{\\mathrm{proc}}\\le t" in srs_lag_card.group(0)
+    assert "t-t^{\\star}_{m,b}(t)" in srs_lag_card.group(0)
+    assert "t-t_{\\mathrm{last\\ SRS},b}-D" not in srs_lag_card.group(0)
     assert 'data-formula="F_SRS_RESOURCE_COLLISION"' in text
+    assert 'data-formula="F_SRS_TOY_CONTAMINATION"' in text
+    assert 'data-formula="F_SRS_TOY_BEAM"' in text
+    assert 'data-formula="F_SRS_TOY_LINK_ADAPT"' in text
     assert 'data-formula="F_MU_CANDIDATE_SCORE"' in text
     assert meta["detailed_module_exemptions"] == 3
     assert meta["detailed_module_coverage"] == (
@@ -192,6 +210,9 @@ def test_every_chapter_has_two_reading_depths_and_every_formula_is_explained() -
         assert article, f"missing article for {page['key']}"
         fragment = article.group(0)
         assert f'data-detail-for="{page["key"]}"' in fragment
+        assert fragment.count('class="worked-example"') == 1, (
+            page["key"], "each compact/detailed chapter needs one concrete worked example"
+        )
         assert page["detailed_chars"] > page["compact_chars"] >= 500
         if page["reading_kind"] == "chapter":
             # 带宽是防"详情段失控膨胀"的漂移哨兵，不是物理断言；第四轮审查
@@ -324,6 +345,26 @@ def test_every_module_public_symbol_tool_test_skill_and_preset_is_carried() -> N
     assert meta["skill_files"] == len(skill_files)
     assert preset_count > 0
 
+    # Human-maintained entry documents must not lag the generator's actual scan.
+    for rel in ("README.md", "CLAUDE.md"):
+        entry = (ROOT / rel).read_text(encoding="utf-8")
+        match = re.search(r"当前共 \*\*(\d+) 个可执行测试文件\*\*", entry)
+        assert match and int(match.group(1)) == len(test_files), rel
+
+    matrix_source = (ROOT / "scripts" / "run_test_matrix.py").read_text(
+        encoding="utf-8")
+    matrix_tree = ast.parse(matrix_source)
+    catalogued: list[str] = []
+    for node in matrix_tree.body:
+        if isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            if set(names) & {"QUICK", "PHYSICS"} and isinstance(node.value, ast.Tuple):
+                catalogued.extend(
+                    value.value for value in node.value.elts
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                )
+    assert sorted(catalogued) == [path.name for path in test_files]
+
 
 def test_public_docs_and_source_do_not_expose_restricted_provenance_labels() -> None:
     roots = [
@@ -366,23 +407,76 @@ def test_srs_allocation_chapter_is_algorithm_first_and_carries_the_pci_table() -
         "sym10 / C0",
         "sym13 / C1",
         "多个小区到底在哪些维度错开",
-        "周期档位与容量",
+        "全局周期自适应：先保隔离，再换容量",
+        "BBL专用叶子",
+        "工程基线4 CS",
+        "68个2T4R UE",
+        "136个2T4R UE",
+        "272个2T4R UE",
+        "slot7→17",
+        "Toy example：两个接收维度就能看见“方向被带偏”",
+        "SRS资源分配影响预编码MCS与BLER的因果链",
+        "基站估计的 SVD−PMI BF Gain",
+        "发送 MCS 看估计，误块判断看真实接收 SINR",
+        "双腿assignment → 两组逐RBG lag → 拼接陈旧64×4 h_prec",
+        "assignment → 绝对RE → Y=HsXs+ΣHiXi+N → LS+时延窗",
+        "raw SIR与post-despread SIR",
+        "UL IoT=10log10((I+N)/N)",
+        "波形H-hat → CSI老化 → 系统调度与BLER/KPI",
+        "尚未自动接通",
+        "当前不得给最终收益百分比",
         "开发者实现映射与反向测试（通信原理读者可跳过）",
     )
     assert all(item in page for item in required)
     assert page.index("为什么必须分配 SRS 资源") < page.index(
         "开发者实现映射与反向测试")
-    # Four SRS opportunities each render the exact table-driven 0/1/2/0/1/2/1/0 row.
-    expected_row = [0, 1, 2, 0, 1, 2, 1, 0]
-    from superran import srs_resource as srsres  # noqa: PLC0415
+    # Four SRS opportunities each render the exact table-driven row, including
+    # the two bold BBL leaves that must never enter the ordinary pool.
+    expected_row = [0, 1, 2, "bbl", 1, 2, "bbl", 0]
     from superran import spec as specm  # noqa: PLC0415
+    from superran import srs_resource as srsres  # noqa: PLC0415
 
     assert [
-        srsres.pci_mod3_resource_color(symbol, comb)
+        srsres.srs_leaf_role(symbol, comb)
         for symbol in range(10, 14) for comb in (0, 1)
     ] == expected_row
+    assert srsres.SRS_CYCLIC_SHIFT_COUNT == 4
+    assert srsres.SrsResourceAllocator().capacity_ues(
+        period_ms=10.0, n_ports=4) == 68
+    # The toy BLER figures are rendered from the live preset curve, not stale prose.
+    import math  # noqa: PLC0415
+
+    from superran import bler_curves as bc  # noqa: PLC0415
+
+    polluted_sinr = 15.0 + 10.0 * math.log10(0.8)
+    curve = bc.get_curve(16, "newtx")
+    clean_bler = float(curve.evaluate(15.0)[0])
+    polluted_bler = float(curve.evaluate(polluted_sinr)[0])
+    assert f"{polluted_sinr:.2f} dB" in page
+    assert f"{curve.required_sinr_db(0.1):.4f} dB" in page
+    assert f"{100 * clean_bler:.2f}%" in page
+    assert f"{100 * polluted_bler:.2f}%" in page
     srs_control = next(row for row in specm._EDITABLE if row[0] == "srs_period_ms")
     assert srs_control[3] == [10.0, 20.0, 40.0]
+    adaptive_control = next(
+        row for row in specm._EDITABLE if row[0] == "srs_period_adaptive")
+    assert adaptive_control[3] == ["on", "off"]
+
+
+def test_time_noise_presinr_and_scene_asset_contracts_are_visible() -> None:
+    text = _html()
+    assert "PreSINR、底噪与UL IoT是三套可复算口径" in text
+    assert "−126.23 dBm" in text
+    assert "−115.44 dBm" in text
+    assert "sample_interval_s独立落盘" in text
+    assert "外部信道源即使把自己的隐式默认改成0.5 ms" in text
+    assert "源资产/准备后资产双SHA-256" in text
+    assert "radio_config_revision" in text
+    assert "L0_geometry" in text and "L1_semantic" in text
+    assert "能 import 不等于能被 SuperRAN 正确消费" in text
+    assert "probe_source_contract()" in text
+    assert 'data-module="srs_metrics"' in text
+    assert 'data-module="scene_assets"' in text
 
 
 if __name__ == "__main__":

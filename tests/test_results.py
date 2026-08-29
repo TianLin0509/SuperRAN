@@ -53,6 +53,23 @@ check(pr.prereg_id.startswith("pr_"), "生成了 prereg_id")
 check(len(pr.digest) == 64, "摘要是 SHA-256")
 check(an.verify(pr), "摘要与内容自校验通过")
 check(pr.metric_unit == "bit/s/Hz", "已知指标自动带单位")
+check(an.lock(
+    primary_metric="cell_experienced_mbps", baseline="PF"
+).metric_unit == "Mbps", "系统级体验主KPI也能预注册并自动带正确单位")
+
+for _kwargs, _label in (
+    ({"primary_metric": ""}, "空主指标"),
+    ({"primary_metric": "custom"}, "自定义指标缺单位"),
+    ({"expected_effect": float("nan")}, "NaN期望效应"),
+    ({"expected_effect": 0.0}, "零期望效应"),
+    ({"higher_is_better": "yes"}, "字符串方向开关"),
+    ({"secondary_metrics": ["sinr_db", "sinr_db"]}, "重复次指标"),
+):
+    try:
+        an.lock(baseline="type1", **_kwargs)
+        check(False, f"{_label}应当被预注册前门拒绝")
+    except (TypeError, ValueError):
+        check(True, f"{_label}被拒，预注册JSON保持有限且语义唯一")
 
 # 同样的输入应当给同样的摘要（确定性序列化）
 pr2 = an.lock(
@@ -114,9 +131,13 @@ check(ds.prereg["prereg_id"] == pr_gen.prereg_id, "prereg_id 正确")
 check(ds.prereg["digest"] == pr_gen.digest, "摘要一并存档")
 check(ds.prereg["locked_before_generation"] is True, "标记为生成前锁定")
 
-# 绑一个不存在的预注册要如实记下来，不能静默忽略
-summ_bad = gen.generate(cfg, num_samples=8, prereg_id="pr_doesnotexist")
-check(load(summ_bad["dataset_id"]).prereg.get("error"), "绑不存在的预注册时如实报错")
+# 不存在/不可核验的预注册必须在昂贵生成开始前硬失败，不能生成完再写 error。
+try:
+    gen.generate(cfg, num_samples=8, prereg_id="pr_doesnotexist")
+    check(False, "不存在的预注册不应继续生成数据")
+except FileNotFoundError:
+    check(True, "不存在的预注册在生成前硬失败")
+summ_other = gen.generate(cfg, num_samples=8)
 
 # ---------------------------------------------------------------------------
 sect("4  数据集摘要与样本 ID")
@@ -187,6 +208,26 @@ except ValueError as e:
 part = ds.register_results("部分", mine_vals[:10], ids=ids[:10])
 check(part.n == 10, "显式传 ids 时允许只覆盖部分样本")
 
+for _values, _ids, _label in (
+    (mine_vals.reshape(4, 6), None, "二维values静默flatten"),
+    (mine_vals[:2], [ids[0], "other_dataset#1"], "跨数据集显式ID"),
+):
+    try:
+        rs.register(ds.dataset_id, _label, _values,
+                    metric="spectral_efficiency", ids=_ids)
+        check(False, f"{_label}应当被拒")
+    except ValueError:
+        check(True, f"{_label}被拒，逐样本语义未改变")
+
+try:
+    rs.register(
+        ds.dataset_id, "事后换绑", mine_vals,
+        metric="spectral_efficiency", prereg_id=pr2.prereg_id,
+    )
+    check(False, "register阶段不应允许换绑另一份预注册")
+except ValueError:
+    check(True, "register只能继承数据生成前绑定的预注册，事后换绑被拒")
+
 # ---------------------------------------------------------------------------
 sect("6  错配必须被拦住")
 
@@ -211,7 +252,7 @@ print(f"  指标不同 → 拦截 {[i['check'] for i in iss3]}")
 check(any(i["check"] == "指标一致" for i in iss3), "指标不同被拦")
 
 # ④ 不同数据集
-ds2 = load(summ_bad["dataset_id"])
+ds2 = load(summ_other["dataset_id"])
 art_ds2 = ds2.register_results("别的数据集", rng.normal(12, 3, ds2.n))
 iss4 = rs.check_pairable(art_a, art_ds2)
 print(f"  不同数据集 → 拦截 {[i['check'] for i in iss4]}")

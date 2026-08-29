@@ -17,10 +17,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import scene_assets as scene_contract
 from .channelhub import channelhub_resource_roots, channelhub_root
 from .paths import artifacts_root
 
@@ -191,42 +193,91 @@ def prepare_scene(scene_id: str, *, force: bool = False) -> dict[str, Any]:
 
     dst = scene_cache_dir() / scene_id
     stamp = dst / ".prepared"
+    cache_root = scene_cache_dir().resolve()
 
-    if stamp.is_file() and not force:
+    def _assert_cache_child(path: Path) -> None:
+        resolved = path.resolve(strict=False)
+        if resolved.parent != cache_root or resolved == cache_root:
+            raise RuntimeError(f"refusing unsafe scene-cache mutation target: {resolved}")
+
+    _assert_cache_child(dst)
+    source_fingerprint = scene_contract.scene_tree_fingerprint(src)
+    with scene_contract.scene_asset_lock(dst):
+        if dst.exists():
+            scene_contract.assert_scene_assets_recovered(dst)
+        if stamp.is_file() and not force:
+            try:
+                cached_meta = json.loads(stamp.read_text(encoding="utf-8"))
+                cache_valid = (
+                    (dst / "scene.xml").is_file()
+                    and cached_meta.get("schema") == "superran-scene-cache-v2"
+                    and cached_meta.get("source_fingerprint") == source_fingerprint
+                    and cached_meta.get("prepared_fingerprint")
+                    == scene_contract.scene_tree_fingerprint(dst)
+                )
+            except (OSError, ValueError, json.JSONDecodeError):
+                cache_valid = False
+                cached_meta = {}
+            if cache_valid:
+                return {
+                    "scene_id": scene_id,
+                    "builtin": False,
+                    "prepared": True,
+                    "cached": True,
+                    "osm_path": str(dst / "scene.xml"),
+                    **cached_meta,
+                }
+
+        stage = Path(tempfile.mkdtemp(prefix=f".{scene_id}.stage-", dir=cache_root))
+        _assert_cache_child(stage)
+        stage.rmdir()
+        try:
+            shutil.copytree(src, stage)
+            ply_files = list(stage.rglob("*.ply"))
+            fixed = sum(1 for path in ply_files if _strip_obj_info(path))
+            prepared_fingerprint = scene_contract.scene_tree_fingerprint(stage)
+            radio_revision = None
+            scene_fidelity = None
+            scene_meta_path = stage / "meta.json"
+            if scene_meta_path.is_file():
+                scene_meta = json.loads(scene_meta_path.read_text(encoding="utf-8"))
+                if isinstance(scene_meta, dict):
+                    radio_revision = scene_contract.radio_config_revision(scene_meta)
+                    scene_fidelity = scene_contract.scene_fidelity_from_meta(scene_meta)
+            meta = {
+                "schema": "superran-scene-cache-v2",
+                "source_fingerprint": source_fingerprint,
+                "prepared_fingerprint": prepared_fingerprint,
+                "radio_config_revision": radio_revision,
+                "scene_fidelity": scene_fidelity,
+                "ply_total": len(ply_files),
+                "ply_fixed": fixed,
+                "note": (
+                    "已复制到独立缓存、清理不兼容PLY头并冻结源/缓存/RF指纹；"
+                    "源资产未修改。缓存指纹不一致时自动重建，中断发布journal会硬失败。"
+                ),
+            }
+            (stage / ".prepared").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            if dst.exists():
+                _assert_cache_child(dst)
+                shutil.rmtree(dst)
+            stage.rename(dst)
+        except BaseException:
+            if stage.exists():
+                _assert_cache_child(stage)
+                shutil.rmtree(stage)
+            raise
+
         return {
             "scene_id": scene_id,
             "builtin": False,
             "prepared": True,
-            "cached": True,
+            "cached": False,
             "osm_path": str(dst / "scene.xml"),
-            **json.loads(stamp.read_text(encoding="utf-8")),
+            **meta,
         }
-
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.copytree(src, dst)
-
-    ply_files = list(dst.rglob("*.ply"))
-    fixed = sum(1 for p in ply_files if _strip_obj_info(p))
-
-    meta = {
-        "ply_total": len(ply_files),
-        "ply_fixed": fixed,
-        "note": (
-            "已复制到缓存并清理 PLY 头部的 obj_info 字段"
-            "（VTK 导出的写法，Mitsuba 3.8 不接受）。ChannelHub 原文件未改动。"
-        ),
-    }
-    stamp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-
-    return {
-        "scene_id": scene_id,
-        "builtin": False,
-        "prepared": True,
-        "cached": False,
-        "osm_path": str(dst / "scene.xml"),
-        **meta,
-    }
 
 
 def resolve_scene_config(scene_id: str, preset: str | None = None) -> dict[str, Any]:
@@ -247,6 +298,10 @@ def resolve_scene_config(scene_id: str, preset: str | None = None) -> dict[str, 
     else:
         cfg["scenario"] = "custom_osm"
         cfg["osm_path"] = prep["osm_path"]
+        cfg["scene_source_fingerprint"] = prep.get("source_fingerprint")
+        cfg["scene_prepared_fingerprint"] = prep.get("prepared_fingerprint")
+        cfg["scene_radio_config_revision"] = prep.get("radio_config_revision")
+        cfg["scene_fidelity"] = prep.get("scene_fidelity")
         name = preset or info.default_preset
         if name:
             cfg["scene_preset"] = f"{scene_id}_{name}"

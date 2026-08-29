@@ -274,6 +274,16 @@ check(not _wrong_direction.passed
       and any(i.name == "差异方向符合预注册" for i in _wrong_direction.blockers),
       "负向预注册会拦住统计显著但方向相反的劣化")
 
+for _bad_a, _bad_b in (
+    (np.array([[1.0, 2.0]]), np.array([[0.0, 1.0]])),
+    (np.array([1.0, np.nan]), np.array([0.0, 1.0])),
+):
+    try:
+        g.paired_compare(_bad_a, _bad_b)
+        check(False, "门3统计不应flatten二维或静默删除非有限pair")
+    except ValueError:
+        check(True, "门3统计拒绝二维/非有限pair，coverage必须由上游显式处理")
+
 # ⑤ statement 与 gate3.passed 不得矛盾
 for name, pp in (("冲突", pc), ("全零", pz)):
     res_dict = g.gate_conclusion(pp).as_dict()

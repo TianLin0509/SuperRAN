@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,21 @@ def test_resource_ledger_can_block_on_explicit_logical_budget() -> None:
     assert admission.rejections[0].reason == "logical_prb_budget"
 
 
+def test_resource_ledger_rejects_unknown_mode_and_duplicate_user_in_one_tti() -> None:
+    ledger = ResourceLedger(ResourceBudget(4, (16,) * 4))
+    with pytest.raises(ResourceLimitError, match="unknown_mode"):
+        ledger.reserve(
+            grant_index=0, mode="mystery", users=(0,), ranks=(1,),
+            rbg_indices=(0,))
+    ledger.commit(ledger.reserve(
+        grant_index=0, mode="SU", users=(0,), ranks=(1,),
+        rbg_indices=(0,)).reservation_id)
+    with pytest.raises(ResourceLimitError, match="duplicate_user_in_tti"):
+        ledger.reserve(
+            grant_index=1, mode="SU", users=(0,), ranks=(1,),
+            rbg_indices=(1,))
+
+
 def _candidate(**overrides) -> CandidateGrant:
     base = dict(
         mode="SU", users=(0,), rbg_indices=(0, 1), ranks=(1,),
@@ -92,6 +108,27 @@ def test_finalizer_is_single_source_for_mcs_tbs_and_useful_bytes() -> None:
         "D", final.mcs[0], 1, (0, 1))
     assert final.useful_bytes[0] == min(10_000, final.tbs_bytes[0])
     assert final.one_codeword_per_user
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"mode": "mystery"}, "mode must be SU or MU"),
+        ({"mode": "MU", "users": (0,), "ranks": (1,),
+          "base_predicted_sinr_db": (10.0,), "receive_sinr_db": (9.0,),
+          "corr_loss_db": (0.0,), "olla_mcs": (0.0,),
+          "queue_bytes": (1,), "required_rbg": (1,),
+          "fits_in_fullband": (True,),
+          "potential_fullband_bytes": (1,)}, "mode and user count"),
+        ({"base_predicted_sinr_db": (float("nan"),)}, "finite"),
+        ({"frequency_incremental_useful_bytes": -1}, "non-negative"),
+    ],
+)
+def test_candidate_grant_rejects_structurally_invalid_inputs(
+    override: dict, message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _candidate(**override)
 
 
 def test_finalizer_mu_formula_and_harq_identity() -> None:
@@ -133,6 +170,35 @@ def test_frequency_selection_uses_fewer_rbg_than_sequential_counterfactual() -> 
     assert len(selected.selected_indices) == 2
     assert len(selected.baseline_indices) == 3
     assert selected.selected_useful_bytes >= selected.baseline_useful_bytes
+
+
+def test_frequency_selection_randomized_safety_net_never_loses_useful_bytes() -> None:
+    rng = np.random.default_rng(20260827)
+    for case in range(300):
+        scores = rng.normal(3.0, 5.0, size=17)
+        keep = np.sort(rng.choice(17, size=int(rng.integers(1, 18)), replace=False))
+        target = int(rng.integers(200, 20_000))
+
+        def evaluate(
+            indices: tuple[int, ...],
+            *,
+            _scores: np.ndarray = scores,
+            _target: int = target,
+        ):
+            # Positive but nonlinear toy TBS: each extra RBG contributes a
+            # quality-dependent amount, then integer quantization and queue cap.
+            raw = int(sum(max(float(_scores[index]) + 8.0, 0.1) ** 1.3
+                          for index in indices) * 37)
+            return SimpleNamespace(useful_bytes=(min(_target, raw),))
+
+        selected = select_frequency_subset(
+            tuple(int(x) for x in keep), scores, cursor=case % 17,
+            evaluate=evaluate,
+            sufficient=lambda grant, _target=target: grant.useful_bytes[0] >= _target)
+        assert selected.incremental_useful_bytes >= 0
+        assert selected.selected_useful_bytes >= selected.baseline_useful_bytes
+        assert set(selected.selected_indices).issubset(set(int(x) for x in keep))
+        assert len(selected.selected_indices) == len(set(selected.selected_indices))
 
 
 def test_mu_scorer_selects_later_better_partner_not_first_feasible() -> None:

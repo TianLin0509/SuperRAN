@@ -12,6 +12,7 @@ import inspect
 import math
 import os
 import sys
+from dataclasses import replace
 from typing import Any
 
 import anyio
@@ -237,6 +238,7 @@ def sr_capabilities() -> dict[str, Any]:
 
     return {
         "channelhub_root": str(ch.channelhub_root()),
+        "source_contract": ch.probe_source_contract().as_dict(),
         "engines": caps,
         "channel_models": models,
         # 本地默认硬件与载波。**面板是 8x4x2 时自动生效**，不需要调用方写。
@@ -1827,6 +1829,7 @@ def sr_system_sim(
     srs_period_ms: float = 10.0,
     srs_hopping: bool | str = True,
     srs_resource_allocation: bool | str = True,
+    srs_period_adaptive: bool | str = True,
     srs_pci_mod3: int = 0,
     csi_processing_delay_ms: float = 2.0,
     csi_report_period_ms: float = 20.0,
@@ -1948,13 +1951,16 @@ def sr_system_sim(
         恒定负载会让所有快照的干扰完全一样，结果比现网干净。
     csi_aging : **是否建模 CSI 反馈时延与老化**，默认开。关掉退化成零时延完美 CSI
         ——那是个上界不是现网，MU 增益会被系统性高估。
-    srs_period_ms : 固定 100 MHz 系统的 SRS 周期，资源分配开启时只接受
-        10 / 20 / 40 ms。5 ms 仅保留在不启用该资源表的链路级老化接口中。
+    srs_period_ms : 固定 100 MHz 系统的最短候选 SRS 周期，资源分配开启时只接受
+        10 / 20 / 40 ms。默认从10 ms开始；资源不足时全局升到20/40 ms。
+        5 ms仅保留在不启用该资源表的链路级老化接口中。
     srs_hopping : SRS 跳频。默认开，对应 38.211 Table 6.4.1.4.3-1 的 C_SRS=63
         （每跳 16 RB = 1 个 RBG，**17 跳**扫完 272 RB）。
         **这是老化的主导项**：10 ms 周期下全带扫一遍要 170 ms。
-    srs_resource_allocation : 为每个 UE 分配周期 offset、symbol、comb 与循环移位；
-        PCI mod3 只控制候选优先顺序。默认开；关闭仅用于复现旧的全 UE offset=0 上界。
+    srs_resource_allocation : 为每个2T4R UE分配相邻两个SRS机会、4-CS中的2-CS块
+        与17个频域相位；BBL叶子排除且只能使用本PCI模3颜色。默认开。
+    srs_period_adaptive : 默认开，从 ``srs_period_ms`` 起选择全局最短可容纳周期；
+        关闭后资源不足直接失败，不跨颜色借资源。
     srs_pci_mod3 : 当前服务小区的 PCI 模 3 颜色，取 0/1/2；系统结果仍是单小区。
     csi_processing_delay_ms : 信道估计 + 预编码计算 + 调度下发的固定时延。
     csi_report_period_ms : 宽带 CQI/PMI 报告周期，默认 20 ms。它与 5 ms 的信道
@@ -2063,17 +2069,71 @@ def sr_system_sim(
     # 轮转分组会把不同 UE 混进同一"用户"、把同一 UE 拆成多个——静默无报错。
     if n_ue is not None:
         try:
-            _ue_ids = np.asarray(ds.scalar("ue_id")).ravel().astype(int)
-        except Exception:  # noqa: BLE001
-            _ue_ids = None
-        if _ue_ids is not None and _ue_ids.size == int(h.shape[0]):
-            _rotation = np.arange(int(h.shape[0])) % int(n_ue)
-            if not np.array_equal(_ue_ids, _rotation):
+            _ue_raw = np.asarray(ds.scalar("ue_id")).ravel()
+        except (KeyError, OSError, ValueError) as exc:
+            if int(n_ue) > 1:
                 return {"error": (
-                    "数据集的 ue_id 与样本轮转布局不一致（常见于 SINR 拒绝采样："
-                    "ue_id 按 attempted_index 合成，接受后序号不再轮转）。"
-                    "按轮转分组会静默混 UE；请关闭筛选重新生成，"
-                    "或先按 ue_id 归并样本。")}
+                    "多 UE 系统仿真缺少可核验的 ue_id；不能静默假设样本按 UE 轮转。"
+                    f"请用当前生成器重建数据集，或补齐逐样本 ue_id（{type(exc).__name__}）。")}
+            _ue_raw = np.zeros(int(h.shape[0]), dtype=int)
+        if (_ue_raw.size != int(h.shape[0])
+                or not np.issubdtype(_ue_raw.dtype, np.number)
+                or not np.all(np.isfinite(_ue_raw.astype(float)))
+                or not np.allclose(
+                    _ue_raw.astype(float), np.round(_ue_raw.astype(float)),
+                    rtol=0.0, atol=1e-9)):
+            return {"error": (
+                "逐样本 ue_id 必须与信道样本等长，并且全部是有限整数；"
+                f"收到 {int(_ue_raw.size)} 个标签、{int(h.shape[0])} 个样本。")}
+        _ue_ids = np.round(_ue_raw.astype(float)).astype(int)
+        _rotation = np.arange(int(h.shape[0])) % int(n_ue)
+        if not np.array_equal(_ue_ids, _rotation):
+            return {"error": (
+                "数据集的 ue_id 与样本轮转布局不一致（常见于 SINR 拒绝采样："
+                "ue_id 按 attempted_index 合成，接受后序号不再轮转）。"
+                "按轮转分组会静默混 UE；请关闭筛选重新生成，"
+                "或先按 ue_id 归并样本。")}
+    configured_cells = int(
+        ds.summary.get("cells_configured")
+        or (int(ds.config.get("num_sites", 1) or 1)
+            * int(ds.config.get("sectors_per_site", 1) or 1)))
+    serving_identity_inferred = False
+    try:
+        _serving_raw = np.asarray(ds.scalar("serving_cell_index")).ravel()
+    except (KeyError, OSError, ValueError) as exc:
+        if configured_cells > 1:
+            return {"error": (
+                "当前 SystemResult 是单小区资源池，但多小区数据集缺少逐样本 "
+                "serving_cell_index；不能静默把不同小区 UE 合并。"
+                f"请用当前生成器重建数据集（{type(exc).__name__}）。")}
+        _serving_raw = np.zeros(int(h.shape[0]), dtype=int)
+        serving_identity_inferred = True
+    if (_serving_raw.size != int(h.shape[0])
+            or not np.issubdtype(_serving_raw.dtype, np.number)
+            or not np.all(np.isfinite(_serving_raw.astype(float)))
+            or not np.allclose(
+                _serving_raw.astype(float), np.round(_serving_raw.astype(float)),
+                rtol=0.0, atol=1e-9)):
+        return {"error": (
+            "逐样本 serving_cell_index 必须与信道样本等长，并且全部是有限整数；"
+            f"收到 {int(_serving_raw.size)} 个标签、{int(h.shape[0])} 个样本。")}
+    _serving_ids = np.round(_serving_raw.astype(float)).astype(int)
+    serving_groups = sysm.group_samples_by_ue(
+        int(h.shape[0]), int(n_ue) if n_ue is not None else int(h.shape[0]))
+    serving_cell_ids_by_ue: list[int] = []
+    for ue, indices in enumerate(serving_groups):
+        cells = sorted({int(_serving_ids[index]) for index in indices})
+        if len(cells) != 1:
+            return {"error": (
+                f"UE {ue} 的时间快照跨越多个 serving cell {cells}；"
+                "当前系统仿真没有实现切换，拒绝混表。")}
+        serving_cell_ids_by_ue.append(int(cells[0]))
+    distinct_serving_cells = sorted(set(serving_cell_ids_by_ue))
+    if len(distinct_serving_cells) != 1:
+        return {"error": (
+            "当前 SystemResult 是单小区调度结果，不能把不同 serving cell 的 UE "
+            f"放进同一 272-RB 资源池（实得 {distinct_serving_cells}）。"
+            "请按 serving cell 筛选后分别运行；联合调度属于下一阶段。")}
     try:
         sir = [float(x) for x in np.asarray(ds.scalar("sir_dB"))]
     except Exception:  # noqa: BLE001
@@ -2085,6 +2145,13 @@ def sr_system_sim(
         snap_ms = sysm.snapshot_interval_ms(ds.config)
     except (TypeError, ValueError) as exc:
         return {"error": f"快照间隔解析失败（旧数据集字段可能不规范）：{exc}"}
+    try:
+        _speed_raw = ds.config.get("ue_speed_kmh", 3.0)
+        ue_speed_kmh = 3.0 if _speed_raw is None else float(_speed_raw)
+    except (TypeError, ValueError) as exc:
+        return {"error": f"ue_speed_kmh 必须是有限非负数：{exc}"}
+    if not np.isfinite(ue_speed_kmh) or ue_speed_kmh < 0:
+        return {"error": "ue_speed_kmh 必须是有限非负数"}
     # **TDD 系统载波是产品合同，不是调参项。** 信道张量必须实际为
     # 272 RB，配置标签也必须是 100 MHz / 30 kHz。不符时拒绝运行，既不把
     # 51 RB 假当 272 RB，也不在系统层临时发明 7-RBG 口径。
@@ -2131,6 +2198,7 @@ def sr_system_sim(
             enabled=_flag(csi_aging), srs_period_ms=float(srs_period_ms),
             hopping=_flag(srs_hopping),
             srs_resource_allocation=_flag(srs_resource_allocation),
+            srs_period_adaptive=_flag(srs_period_adaptive),
             processing_delay_ms=float(csi_processing_delay_ms),
             csi_report_period_ms=float(csi_report_period_ms),
             periodic_trace_history=(mode == "experience" and float(warmup_s) > 0))
@@ -2141,6 +2209,10 @@ def sr_system_sim(
     # 比较门已对 csi='srs' 硬校验 provenance，这条更常用的主链路同等对待：
     # 来源不是 ul_srs_estimate 时，开老化硬失败、不开老化显式告警进 notes。
     _pre_notes: list[str] = []
+    if serving_identity_inferred:
+        _pre_notes.append(
+            "**serving-cell 身份由单小区配置推断**：数据集未落逐样本 "
+            "serving_cell_index，但配置只含一个小区，按 cell 0 处理。")
     _csi_src = [str(x) for x in ds.precoding_csi_sources]
     if _csi_src and any(x != "ul_srs_estimate" for x in _csi_src):
         _src_kinds = sorted(set(_csi_src))
@@ -2257,11 +2329,28 @@ def sr_system_sim(
             mu_csi_error_variance=float(mu_csi_error_variance),
             rb_power_control=power_cfg, power_geometry=power_geometry,
             bs_panel=ds.config.get("bs_panel"),
+            srs_cell_ids=serving_cell_ids_by_ue,
             srs_pci_mod3=int(srs_pci_mod3),
             port_order=_port_order,
             vertical_index_order=_v_order)
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}
+    effective_csi_cfg = csi_cfg
+    if csi_cfg.enabled and csi_cfg.srs_resource_allocation:
+        assignments = [table.srs_resource_assignment for table in tables]
+        if any(assignment is None for assignment in assignments):
+            return {"error": "SRS 资源分配已开启，但链路表缺少逐 UE assignment"}
+        effective_periods = {
+            float(assignment.period_ms)
+            for assignment in assignments
+            if assignment is not None
+        }
+        if len(effective_periods) != 1:
+            return {"error": (
+                "SRS allocator 未形成唯一全局生效周期："
+                f"{sorted(effective_periods)}")}
+        effective_csi_cfg = replace(
+            csi_cfg, srs_period_ms=float(next(iter(effective_periods))))
     mu_gain = (sysm.measure_mu_gain(
         h_users, [float(x) for x in sinr], num_ues=n_ue,
         h_for_precoding_users=h_est_users,
@@ -2371,9 +2460,11 @@ def sr_system_sim(
     }
     out["mu_gain"] = mu_gain
     aging = sysm.ca.aging_summary(
-        csi_cfg, num_rbg=carrier["num_rbg"], snapshot_ms=snap_ms,
+        effective_csi_cfg, num_rbg=carrier["num_rbg"], snapshot_ms=snap_ms,
         rb_per_rbg=carrier["rb_per_rbg"],
-        speed_kmh=float(ds.config.get("ue_speed_kmh", 3.0) or 3.0))
+        speed_kmh=ue_speed_kmh)
+    aging["requested_config"] = csi_cfg.as_dict()
+    aging["effective_config"] = effective_csi_cfg.as_dict()
     out["csi_aging"] = aging
     out["carrier"] = carrier
     out["precoder"] = {
@@ -2437,14 +2528,21 @@ def sr_system_sim(
             "生成时把 num_slots_per_sample 调到 8 以上，或让 num_samples 是 num_ues 的倍数。")
     else:
         notes.append(
-            f"CSI 老化已开：SRS {csi_cfg.srs_period_ms:g} ms"
-            f"{f'、{csi_cfg.hop_factor} 倍跳频' if csi_cfg.hopping else '、不跳频'}，"
-            f"全带扫一遍 {csi_cfg.full_sweep_ms:g} ms，平均 CSI 陈旧时长 "
-            f"{csi_cfg.mean_csi_staleness_ms:.0f} ms。")
+            f"CSI 老化已开：SRS请求下限 {csi_cfg.srs_period_ms:g} ms、"
+            f"生效全局周期 {effective_csi_cfg.srs_period_ms:g} ms"
+            f"{'、全局周期自适应' if csi_cfg.srs_period_adaptive else '、周期固定'}"
+            f"{f'、{effective_csi_cfg.hop_factor} 倍跳频' if effective_csi_cfg.hopping else '、不跳频'}，"
+            f"全带扫一遍 {effective_csi_cfg.full_sweep_ms:g} ms，平均 CSI 陈旧时长 "
+            f"{effective_csi_cfg.mean_csi_staleness_ms:.0f} ms；完整4端口需"
+            f"{effective_csi_cfg.srs_transmissions_per_full_sweep}次2-port SRS发送。")
         notes.append(
-            "SRS 基础资源分配已开启：每 UE 的周期 offset/symbol/comb/循环移位"
-            "会落入链路表，其中 offset 已进入 CSI 老化；当前只覆盖固定载波普通 H "
-            "资源，P-H/F、BWP2 与跨小区波形级导频污染未建模。"
+            "SRS基础资源分配已开启：BBL排除、4 CS、17频域相位；每个2T4R UE"
+            "用相邻两个SRS机会发送两组2T，两个offset分别进入端口组CSI老化；"
+            "只使用本PCI模3颜色。独立srs_waveform后端已支持显式UL cross-link"
+            "驱动的RE级污染、TA/CFO、解扩和UL IoT证据；但本次系统主循环没有"
+            "自动生成邻区UE→受害gNB cross-link，也未把波形H-hat注入调度。"
+            "因此当前结果仍只覆盖固定载波普通H资源的时序/老化，不能据此声称"
+            "PCI模3带来BLER或吞吐收益。"
             if csi_cfg.srs_resource_allocation else
             "SRS 资源分配已显式关闭：所有 UE 复现旧的 offset=0 上界。")
     if float(olla_speedup) != 1.0:

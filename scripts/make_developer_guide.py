@@ -159,8 +159,20 @@ F_EFFECTIVE = M(
     r"H_{\mathrm{port}}=H_{\mathrm{AE}}F",
 )
 F_SRS_RX = M(
-    r"Y_{\mathrm{SRS}}[k]=H_{\mathrm{UL}}[k]X_{\mathrm{SRS}}[k]+I[k]+N[k],"
-    r"\quad H_{\mathrm{UL}}[k]\in\mathbb C^{64\times4}",
+    r"\begin{aligned}"
+    r"Y_{\mathrm{SRS}}[k]&=H_{\mathrm{UL}}[k]X_{\mathrm{SRS}}[k]+I[k]+N[k],\\[3pt]"
+    r"H_{\mathrm{UL}}[k]&\in\mathbb C^{64\times4}"
+    r"\end{aligned}",
+)
+F_SRS_2T4R_STITCH = M(
+    r"\begin{aligned}"
+    r"t_1&=t_0+5\,\mathrm{ms},\\[3pt]"
+    r"\widehat H_{\mathrm{UL}}[k]&=\left[\,"
+    r"\widehat H_{01}[k,t_0]\ \middle|\ "
+    r"\widehat H_{23}[k,t_1]\,\right],\\[3pt]"
+    r"\widehat H_{\mathrm{UL}}&\in\mathbb C^{64\times4},\qquad "
+    r"\widehat H_{01},\widehat H_{23}\in\mathbb C^{64\times2}"
+    r"\end{aligned}",
 )
 F_LS = M(
     r"\widehat H_{\mathrm{LS}}[k]=Y_{\mathrm{SRS}}[k]X_{\mathrm{SRS}}[k]^{\dagger}",
@@ -170,21 +182,55 @@ F_LMMSE = M(
     r"\widehat h_{p,\mathrm{LS}}",
 )
 F_SRS_LAG = M(
-    r"\tau_b(t)=t-t_{\mathrm{last\ SRS},b}-D_{\mathrm{proc}},\qquad "
-    r"\widehat H_b(s)=H_b\!\left(\max(0,s-\lceil\tau_b/\Delta t_{\mathrm{snap}}\rceil)\right)",
+    r"\begin{aligned}"
+    r"t^{\star}_{m,b}(t)&=\max\{u\in\mathcal T_b:\ u+D_{\mathrm{proc}}\le t\},\\[3pt]"
+    r"\tau_b(t)&=t-t^{\star}_{m,b}(t),\\[3pt]"
+    r"q_b(t)&=\left\lceil\tau_b(t)/\Delta t_{\mathrm{snap}}\right\rceil,\\[3pt]"
+    r"\widehat H_b(s)&=H_b\!\left(\max(0,s-q_b)\right)"
+    r"\end{aligned}",
 )
 F_SRS_RESOURCE_COLLISION = M(
-    r"\operatorname{collide}(a,b)=\mathbf 1\!\left[s_a=s_b,\ c_a=c_b,\ "
-    r"\mathcal C_a\cap\mathcal C_b\ne\varnothing,\ "
-    r"(o_a-o_b)\bmod\gcd(T_a,T_b)=0\right]",
+    r"\operatorname{collide}(a,b)=\mathbf 1\!\left[\exists\,i,j\in\{0,1\}:"
+    r"\ s_{a,i}=s_{b,j},\ c_{a,i}=c_{b,j},\ f_{a,i}=f_{b,j},\ "
+    r"\mathcal C_{a,i}\cap\mathcal C_{b,j}\ne\varnothing,\ "
+    r"(o_{a,i}-o_{b,j})\bmod\gcd(T_a,T_b)=0\right]",
+)
+F_SRS_TOY_CONTAMINATION = M(
+    r"\widehat{\boldsymbol h}_A="
+    r"\frac{\boldsymbol y_A x_A^{*}}{|x_A|^2}="
+    r"\boldsymbol h_A+\boldsymbol h_B\frac{x_Bx_A^{*}}{|x_A|^2}"
+    r"+\frac{\boldsymbol n x_A^{*}}{|x_A|^2}",
+)
+F_SRS_TOY_BEAM = M(
+    r"\begin{aligned}"
+    r"\boldsymbol w_A&=\frac{\widehat{\boldsymbol h}_A}"
+    r"{\|\widehat{\boldsymbol h}_A\|_2},\\[3pt]"
+    r"\Delta G_{\mathrm{est}}&=10\log_{10}"
+    r"\frac{|\widehat{\boldsymbol h}_A^H\boldsymbol w_A|^2}"
+    r"{|\widehat{\boldsymbol h}_A^H\boldsymbol w_{\mathrm{PMI}}|^2},\\[3pt]"
+    r"\Delta G_{\mathrm{true}}&=10\log_{10}"
+    r"\frac{|\boldsymbol h_A^H\boldsymbol w_A|^2}"
+    r"{|\boldsymbol h_A^H\boldsymbol w_{\mathrm{PMI}}|^2}"
+    r"\end{aligned}",
+)
+F_SRS_TOY_LINK_ADAPT = M(
+    r"\begin{aligned}"
+    r"m_{\mathrm{base}}&=f_{\mathrm{MCS}}"
+    r"(\theta_{\mathrm{CQI}}+\Delta G_{\mathrm{est}}),\\[3pt]"
+    r"m_{\mathrm{TX}}&=\operatorname{clip}"
+    r"\!\left(\operatorname{round}(m_{\mathrm{base}}+\Delta m_{\mathrm{OLLA}}),0,27\right),\\[3pt]"
+    r"P_{\mathrm{NACK}}&=\operatorname{BLER}_{m_{\mathrm{TX}}}"
+    r"(\gamma_{\mathrm{RX}})"
+    r"\end{aligned}",
 )
 F_PCI_MOD3 = M(
     r"g_c=N_{\mathrm{ID}}^{\mathrm{cell}}\bmod 3\in\{0,1,2\},\qquad "
-    r"\Pi_c=(g_c,(g_c+1)\bmod3,(g_c+2)\bmod3)",
+    r"\mathcal A_c=\{g_c\}",
 )
 F_SRS_POOL_CAPACITY = M(
-    r"N_{\mathrm{UE,max}}=N_{\mathrm{offset}}\,N_{\mathrm{sym}}\,"
-    r"N_{\mathrm{comb}}\left\lfloor\frac{N_{\mathrm{CS}}}{N_{\mathrm{port}}}\right\rfloor",
+    r"N_{\mathrm{UE},c}(T)=N_{\mathrm{pair}}(T)\,N_{\mathrm{leaf},c}\,"
+    r"N_{\mathrm{FDM}}\left\lfloor\frac{N_{\mathrm{CS}}}"
+    r"{N_{\mathrm{Tx/occasion}}}\right\rfloor",
 )
 F_CSI_SWEEP = M(
     r"T_{\mathrm{sweep}}=H_{\mathrm{hop}}T_{\mathrm{SRS}},\qquad "
@@ -1077,25 +1123,30 @@ def ray_construction_svg() -> str:
 
 
 def srs_matrix_svg() -> str:
-    body = svg_box(25, 38, 185, 80, "UE 4Tx", "4 路正交 SRS 端口", "accent")
-    body += svg_box(280, 38, 210, 80, "空口", "ZC/短序列 + comb + hopping", "b")
-    body += svg_box(560, 38, 210, 80, "gNB 64Rx", "每端口观测 4 个 UE 端口", "good")
-    body += svg_box(840, 38, 230, 80, "ĤSRS[64,4]", "LS → 频时插值 / LMMSE", "accent")
-    body += arrow(210, 78, 280, 78, "X[4]")
-    body += arrow(490, 78, 560, 78, "Y[64]")
-    body += arrow(770, 78, 840, 78, "估计")
-    body += '<text class="ds" x="550" y="142">目标物理链路；当前 serving pilot 仍固定 N_ap=1，观测按 BS×UE 系数广播</text>'
+    body = svg_box(22, 26, 190, 94, "UE 2T4R", "4根待测天线 · 2条同时Tx链", "accent")
+    body += svg_box(268, 18, 210, 54, "slot7 · leg 0", "ports 0/1 · CS pair · RBG k", "b")
+    body += svg_box(268, 88, 210, 54, "slot17 · leg 1", "ports 2/3 · 同一 RBG k", "b")
+    body += svg_box(540, 18, 205, 54, "Ĥ01[64,2]", "第一次 LS/LMMSE", "good")
+    body += svg_box(540, 88, 205, 54, "Ĥ23[64,2]", "5 ms 后第二次估计", "good")
+    body += svg_box(815, 40, 250, 82, "ĤSRS[64,4]", "按天线身份拼列 · 再推进 hop", "accent")
+    body += arrow(212, 66, 268, 45, "2 ports")
+    body += arrow(212, 80, 268, 115, "切换")
+    body += arrow(478, 45, 540, 45)
+    body += arrow(478, 115, 540, 115)
+    body += arrow(745, 45, 815, 68)
+    body += arrow(745, 115, 815, 96)
+    body += '<text class="ds" x="550" y="166">资源/老化链已按两个64×2时刻拼接；导频观测生成器仍待升级成真正多端口 Y=HX</text>'
     colors = ["#2563eb", "#0f766e", "#7c3aed", "#c2410c", "#64748b"]
     order = [0, 8, 16, 7, 15, 6, 14, 5, 13, 4, 12, 3, 11, 2, 10, 1, 9]
     for i, value in enumerate(order):
         x = 30 + i * 61
-        body += f'<rect x="{x}" y="190" width="52" height="48" rx="8" fill="{colors[i % len(colors)]}" opacity=".9"/>'
-        body += f'<text class="slot" x="{x + 26}" y="220">{value}</text>'
-        body += f'<text class="tiny" x="{x + 26}" y="256">{i * 10} ms</text>'
-    body += '<text class="dt" x="30" y="166">17-hop order · C_SRS=63 / B_SRS=1 · 16 RB per hop</text>'
-    body += '<path class="brace" d="M30,278 L30,292 L1058,292 L1058,278"/>'
-    body += '<text class="ds" x="544" y="318">10 ms SRS 周期时，扫完整带约 170 ms；再加处理时延</text>'
-    return svg_wrap(body, 1100, 350, "目标 64×4 SRS 物理链路与当前 17 RBG 跳频时间线")
+        body += f'<rect x="{x}" y="208" width="52" height="48" rx="8" fill="{colors[i % len(colors)]}" opacity=".9"/>'
+        body += f'<text class="slot" x="{x + 26}" y="238">{value}</text>'
+        body += f'<text class="tiny" x="{x + 26}" y="274">pair {i}</text>'
+    body += '<text class="dt" x="30" y="190">17-hop order · 每格先发2次2-port SRS，再进入下一 RBG</text>'
+    body += '<path class="brace" d="M30,296 L30,310 L1058,310 L1058,296"/>'
+    body += '<text class="ds" x="544" y="336">10 ms完整4端口周期：17个pair≈170 ms、共34次SRS发送；每个pair内部相差5 ms</text>'
+    return svg_wrap(body, 1100, 365, "2T4R通过相邻两个SRS机会拼成64×4，并在两腿完成后推进17跳")
 
 
 def pdp_pipeline_svg() -> str:
@@ -2292,6 +2343,13 @@ def architecture_page() -> Page:
             ("证据层", "校准、Gate、预注册、结果合同", "validate / calibration / gates / analysis / results", "Gate 不通过不得发布强结论"),
         ],
     )
+    body += callout(
+        "warn", "能 import 不等于能被 SuperRAN 正确消费",
+        "<p><code>probe_source_contract()</code>现在检查五个结构合同：paired UL/DL角色、"
+        "三种source注册、pilot→全RB LMMSE公开出口、按B_SRS/目标RB选择SRS带宽的签名，"
+        "以及64T/256T端口顺序控制。任一缺失都会把对应engine标成unavailable；"
+        "这允许单独借鉴新模块，却阻止整仓路径在shape正常时静默换掉物理语义。</p>",
+    )
     body += """
 <h2>ChannelHub 边界</h2>
 <p>superran 复用 ChannelHub 的物理算法与数据源，但不复用其产品壳。适配层负责发现源码、
@@ -2431,7 +2489,7 @@ def hardware_page() -> Page:
     body = metric_cards((
         ("RF 端口", "64", "8H × 4V × 2pol"),
         ("物理阵子", "192", "8H × 12V × 2pol"),
-        ("终端", "4Tx / 4Rx", "BOTH：UL SRS + DL 真值"),
+        ("终端", "2T4R（4个待探测端口）", "两次2-port SRS拼64×4；BOTH含UL估计与DL真值"),
         ("载波", "2.6 GHz", "n41 · 100 MHz · 30 kHz"),
         ("频域", "272 RB", "17 RBG × 16 RB"),
     ))
@@ -2591,7 +2649,7 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
         "旧 checkout。启动时会按安装版本支持的 dataclass 字段安全覆盖并逐表核对；若校准异常，"
         "<code>channelhub._ensure_path()</code> 硬失败，不再吞掉异常后继续产出伪标准数据。</p>",
     )
-    body += "<p class=source-row>适配入口：" + source_ref("src/superran/channelhub.py", "def probe_capabilities") + " · " + source_ref("src/superran/scenes.py", "class SceneInfo") + "</p>"
+    body += "<p class=source-row>适配入口：" + source_ref("src/superran/channelhub.py", "def probe_source_contract") + " · " + source_ref("src/superran/scenes.py", "class SceneInfo") + "</p>"
     return Page(
         "channel", "信道、场景与传播状态", "物理内核", "CHANNEL MODEL",
         "H 的路径公式、极化耦合、同站/异站状态与 ChannelHub/Sionna 分工。", body,
@@ -2608,6 +2666,14 @@ Mitsuba 3.8 不接受的 <code>obj_info</code>；<code>prepare_scene()</code> �
 绝不修改上游原文件。<code>resolve_scene_config()</code> 再把 scene/preset 展开成 OSM 路径、站点数、
 站高、ISD 与载频。结果中必须读取 <code>channel_generation_mode</code> 区分真实 RT 与
 <code>tdl_fallback</code>，不能仅看一个 channel_model 标签。</p>
+<p>场景缓存现在还具备进程级稳定锁、源资产/准备后资产双SHA-256和独立RF配置revision。
+缓存文件被手改或源场景升级会自动重建；检测到未完成的几何/材质发布journal则硬失败，
+不会猜当前目录应算新版本还是旧版本。RF revision覆盖材料参数、玻璃比例和逐建筑无线覆写，
+因此同一几何但不同材料不再被误当作同一物理场景。</p>
+<p><code>scene_fidelity</code>还把资产分成<code>L0_geometry</code>与<code>L1_semantic</code>：
+只有道路、水体、绿地或植被既进入点云语义又有实际RT材质/mesh时，相关layer才为true；
+OSM里看见标签但三角化失败不能算已建模。<code>calibration_status</code>单独说明材料是未校准
+还是经过测量holdout验证，避免“有材质参数”被写成“材料已可信”。</p>
 <h2>Paths 到 CFR 的物理时间轴</h2>
 """ + F_CHANNEL + F_MAX_DOPPLER
     body += """
@@ -2639,7 +2705,7 @@ PDP、协方差、PMI 与几何量仍可从现有合同计算。这是当前数�
         "<p>它只覆盖 8.64 MHz，并非对 100 MHz 稀疏抽样。即使 shape 看起来像普通数据集，也不能拿去算 "
         "PDP、频选 rank 或吞吐；<code>not_available</code> 是硬边界清单，不是建议项。</p>",
     )
-    body += "<p class=source-row>场景资产：" + source_ref("src/superran/scenes.py", "def prepare_scene") + " · 快速探测：" + source_ref("src/superran/scenario.py", "def probe") + " · RT 适配：" + source_ref("src/superran/channelhub.py", "sionna_rt") + "</p>"
+    body += "<p class=source-row>场景资产：" + source_ref("src/superran/scenes.py", "def prepare_scene") + " · 资产合同：" + source_ref("src/superran/scene_assets.py", "def scene_tree_fingerprint") + " · 快速探测：" + source_ref("src/superran/scenario.py", "def probe") + " · RT 适配：" + source_ref("src/superran/channelhub.py", "sionna_rt") + "</p>"
     return Page(
         "raytracing", "射线追踪、场景资产与快速探测", "物理内核", "RAY TRACING",
         "Sionna RT 场景如何准备、形成时变 CFR，以及 InternalSim probe 的严格可用边界。", body,
@@ -2738,19 +2804,35 @@ def srs_page() -> Page:
     body = srs_matrix_svg()
     body += """
 <h2>64×4 到底怎么来</h2>
-<p>上行 SRS 时 UE 有 4 个发射端口，gNB 有 64 个接收端口。每个 UE 端口使用可分离的
-参考信号资源，gNB 在每个接收端口上解扩四路，因此得到 64×4 的上行端口信道估计。
+<p>终端是 <strong>2T4R</strong>：有4根需要探测的天线，但任一SRS机会最多同时启用2条Tx链。
+第一次资源发送逻辑端口0/1，得到64×2；下一个可用SRS机会（例如slot7→slot17）切到端口2/3，
+再得到64×2。两份估计按天线身份拼成64×4，而不是把4根天线同时发出去。</p>
+""" + F_SRS_2T4R_STITCH + """
+<p>每个2-port资源占4码分中的2个CS，所以同一时频/RBG叶子可由两个UE分别使用CS0/1与CS2/3。
+两个天线组保持同一个频域资源相位，完成第二腿以后17跳索引才推进到下一个RBG。</p>
+<p>gNB有64个接收端口，因此每次得到64×2，最终得到64×4的上行端口信道估计。
 TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定；不是“凭空把 4×64 复制一份”。
 当前 SuperRAN 把两个方向都存成 <code>[time,rb,bs_port,ue_port]</code>，因此
 <code>h_precoding_est=conj(h_ul_est)</code>。该约定由 SuperRAN 自己版本化；数据源若带
 <code>w_dl</code> 也会被忽略，发射权统一由本地 EBF/PEBF/NEBF 重算。</p>
 """ + F_SRS_RX + F_LS
     body += callout(
-        "danger", "当前观测边界：仍不是物理多端口 Y=HX",
-        "<p>底层 <code>srs_sequence()</code> 能生成 1/2/4 端口序列，但 serving pilot 调用当前仍固定 "
-        "<code>N_ap=1,n_ap_index=0</code>；观测端再把标量 X 广播到每个 BS×UE 系数。这样可以验证 "
-        "LS/频域 LMMSE 数值，却无法真实产生端口 rank 不足、同码污染或空间协方差抑制。下一阶段必须先"
-        "构造同一接收向量上的 <code>Y=HX+I+N</code>，再讨论时频空 LMMSE。</p>",
+        "note", "波形接收后端已经落地，但不会偷造干扰 cross-link",
+        "<p>现在可以把一个真实 <code>SrsResourceAssignment</code> 直接展开成绝对slot、symbol、"
+        "16个RB、96个comb-2 RE和两条端口序列；每个UE先通过自己的UL信道到达同一个受害gNB，"
+        "再做相干叠加、热噪声、整4096点OFDM栅格上的CFO/ICI、时偏相位、LS解扩和时延窗。"
+        "两次2T结果最终拼成<code>[16 RB,64 Rx,4 ports]</code>。但跨小区干扰必须显式提供"
+        "“干扰UE→受害gNB”的UL信道；系统不会拿邻区BS→本UE的下行链路冒充它。</p>",
+    )
+    body += table(
+        ["一次波形接收的阶段", "保留下来的物理量", "当前输出"],
+        [
+            ("资源展开", "绝对slot / symbol / RBG / comb RE / 每端口CS", "两腿同RBG，第二腿晚5 ms，完成后才hop"),
+            ("序列与传播", "每端口低PAPR/ZC序列、UL H、发射功率、TA、CFO", "期望信号与每个干扰UE先独立传播再相干求和"),
+            ("接收分解", "Y_signal、Y_interference、Y_noise、Y_total", "全部保留在96 RE×64 Rx上，可逐项复算"),
+            ("解扩与时延窗", "期望/干扰/噪声各自的H-hat分量", "同时报告raw SIR与post-despread SIR，禁止混成一个数"),
+            ("证据落盘", "逐slot×逐RB干扰功率、噪声参考、RB/slot轴", "UL IoT=10log10((I+N)/N)并附SHA-256"),
+        ],
     )
     body += """
 <h2>当前是 ZC 吗</h2>
@@ -2763,7 +2845,8 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
 <code>0,8,16,7,...,1,9</code> 的 17-hop 镜像序列，不依赖外部 helper，也不提供
 恒等扫描兜底。默认预设使用
 <code>T_SRS=20 slot</code>；在 30 kHz SCS 下 1 slot=0.5 ms，故发送周期为 10 ms，
-17 跳的完整宽带采集窗为 170 ms。非 272 RB / 17×16 配置直接报错，
+每个RBG先经过两次相邻2-port发送，再推进hop；完整宽带仍需17个10 ms配对周期、约170 ms，
+但空口上发生34次SRS发送，并且64×4的两列组天然相差5 ms。非272 RB / 17×16配置直接报错，
 后续获得新带宽的明确资源参数后再扩展。可对照
 <a href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138211/18.07.00_60/ts_138211v180700p.pdf" target="_blank" rel="noreferrer">ETSI TS 138 211 V18.7.0 §6.4.1.4.3</a>。</p>
 <h2>LS、LMMSE 与方向性</h2>
@@ -2783,7 +2866,8 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
         "<p>在正确的多端口 <code>Y=HX+I+N</code> 中，LS 只是用已知导频解扩；污染项仍携带干扰"
         "信道的 64 维空间向量，所以 LS 本身不会把方向抹掉。当前逐系数观测抽象却不能用来证明"
         "这件事，因为干扰在物理接收合成之前已经被分开。当前 LMMSE prior 主要是频域指数 PDP；"
-        "它不等价于完整的时频空 MMSE/IRC。</p>",
+        "它不等价于完整的时频空 MMSE/IRC。新波形后端已能直接证明：异CS用户即使raw RE上有能量，"
+        "理想对齐时也可在解扩后分开；加入TA/CFO后残余重新出现。</p>",
     )
     body += callout(
         "warn", "LMMSE 不是每个 realization、每个 SNR 都必胜",
@@ -2792,17 +2876,34 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
         "统计性质、有限性和高 SNR 极限，不写不成立的逐样本万能不等式。</p>",
     )
     body += """
+<h2>PreSINR、底噪与UL IoT是三套可复算口径</h2>
+<p><code>PreSINR=sum(|H_true|²)/sum(|H_true−H_est|²)</code>衡量估计质量；先在线性功率域求比，
+跨快照IIR也在线性域做<code>state=α·ratio+(1−α)·state</code>，最后才转dB。实现不向分子/分母
+加固定绝对epsilon，因此同时缩放H真值与估计不会改变结果。新paired/BOTH数据保留
+<code>h_ul_true</code>，而<code>h_est</code>要先按互易合同共轭回UL估计后才能复算。</p>
+"""
+    body += table(
+        ["功率参考面", "30 kHz / NF=2 dB / TDD loss=1 dB", "用途与禁忌"],
+        [
+            ("thermal noise / active RE", "−126.23 dBm", "一个30-kHz子载波；SRS波形噪声入口"),
+            ("thermal noise / RB", "−115.44 dBm", "12个子载波；不能与per-RE底噪互换，差10.79 dB"),
+            ("SRS RX / active RE", "P_UE−PL+G−10log10(N_active_RE)", "N_active_RE来自绝对comb tone，不用固定每RB整数"),
+            ("raw UL IoT", "10log10((I+N)/N)", "解扩前active RE；sidecar保存slot×RB矩阵、轴与双SHA-256"),
+            ("post-despread SIR", "S/I after local sequence + delay gate", "衡量接收机残余；不能反推raw IoT"),
+        ],
+    )
+    body += """
 <h2>周期、报告与处理时延是三件事</h2>
 """ + F_SRS_LAG
     body += table(
         ["参数", "当前默认", "物理含义"],
         [
-            ("srs_period_ms", "10 ms", "UE 发 SRS 的周期；hopping 时每次只覆盖一部分带宽"),
-            ("ChannelHub srs_periodicity", "20 slot", "30 kHz SCS 下等于 10 ms；不要把 slot 数直接写成 ms"),
-            ("srs hopping", "on；固定 17-hop", "只支持 100 MHz / 272 RB；C_SRS=63/B_SRS=1/b_hop=0 每次 16 RB"),
+            ("srs_period_ms", "最短候选10 ms", "全局自适应选10/20/40 ms；每个端口组各按该周期发送"),
+            ("2T4R switching", "slot7→17", "端口0/1与2/3相差一个可用SRS机会，即5 ms"),
+            ("srs hopping", "on；固定17-hop", "两次2-port资源测完同一16-RB RBG后再推进；全带34次发送"),
             ("csi_processing_delay_ms", "2 ms", "估计到权值可用于调度的处理延迟"),
             ("csi_report_period_ms", "20 ms", "宽带 PMI/CQI 何时更新并保持；不是 5 ms 快照"),
-            ("snapshot_ms", "由链路表配置", "物理信道采样间隔，只用于把毫秒 lag 离散成快照索引"),
+            ("sample_interval_s", "默认0.005 s，显式落盘", "物理信道采样间隔；不由slot/SRS/report周期猜测"),
         ],
     )
     body += callout(
@@ -2811,7 +2912,7 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
         "它不是宣称所有商用网都固定 20 ms；若现场 RRC/日志给出周期，应覆盖并记录。"
         "SRS 周期和 CSI report 周期不可合并成一个旋钮。</p>",
     )
-    body += "<p class=source-row>实现入口：" + source_ref("src/superran/physical.py", "def srs_config") + " · " + source_ref("src/superran/csi_aging.py", "class CsiConfig") + "</p>"
+    body += "<p class=source-row>实现入口：" + source_ref("src/superran/physical.py", "def srs_config") + " · " + source_ref("src/superran/srs_waveform.py", "def observe_srs_leg") + " · " + source_ref("src/superran/srs_metrics.py", "def srs_link_budget") + " · " + source_ref("src/superran/csi_aging.py", "class CsiConfig") + "</p>"
     return Page(
         "srs", "SRS、64×4 与信道估计", "物理内核", "SRS & CHANNEL ESTIMATION",
         "ZC 序列、LS/LMMSE、17 跳频、周期/报告/处理时延的清晰边界。", body,
@@ -2834,19 +2935,57 @@ def srs_resource_allocation_page() -> Page:
             + pci_style[int(colour)] + '">' + label + "</span>"
         )
 
+    def resource_badge(role: int | str) -> str:
+        if role == "bbl":
+            return (
+                '<span style="display:inline-block;min-width:36px;text-align:center;'
+                'padding:4px 8px;border-radius:8px;font-weight:800;'
+                'background:#e4e7eb;color:#4b5563;border:1px dashed #7b8490">'
+                'BBL</span>'
+            )
+        return pci_badge(int(role), short=True)
+
     resource_headers = [
         "SRS 机会", "sym10 / C0", "sym10 / C1", "sym11 / C0", "sym11 / C1",
         "sym12 / C0", "sym12 / C1", "sym13 / C0", "sym13 / C1",
     ]
-    resource_colours = [
-        srsres.pci_mod3_resource_color(symbol, comb)
+    resource_roles = [
+        srsres.srs_leaf_role(symbol, comb)
         for symbol in range(10, 14) for comb in (0, 1)
     ]
     resource_rows = [
         (f"slot {slot}（{slot * 0.5:g} ms）", *[
-            pci_badge(colour, short=True) for colour in resource_colours])
+            resource_badge(role) for role in resource_roles])
         for slot in (7, 17, 27, 37)
     ]
+    srs_capacity = {
+        int(period): srsres.SrsResourceAllocator().capacity_ues(
+            period_ms=period, n_ports=4)
+        for period in (10.0, 20.0, 40.0)
+    }
+
+    # Hand-computable rank-1 toy example.  Keep the BLER figures tied to the
+    # actual preset curve rather than copying numbers into prose.
+    toy_h_hat = (1.6, 0.8)  # h_A=[1,0], h_B=[0.6,0.8], x_A=x_B=1
+    toy_norm = math.sqrt(sum(value * value for value in toy_h_hat))
+    toy_w = tuple(value / toy_norm for value in toy_h_hat)
+    toy_true_gain = toy_w[0] ** 2
+    toy_true_gain_db = 10.0 * math.log10(toy_true_gain)
+    toy_est_svd_power = toy_norm ** 2
+    toy_est_pmi_power = toy_h_hat[0] ** 2
+    toy_est_gain_db = 10.0 * math.log10(
+        toy_est_svd_power / toy_est_pmi_power)
+    toy_clean_sinr_db = 15.0
+    toy_polluted_sinr_db = toy_clean_sinr_db + toy_true_gain_db
+    toy_mcs = 16
+    toy_curve = bc.get_curve(toy_mcs, "newtx")
+    toy_threshold_db = float(toy_curve.required_sinr_db(0.1))
+    toy_clean_bler = float(toy_curve.evaluate(toy_clean_sinr_db)[0])
+    toy_polluted_bler = float(toy_curve.evaluate(toy_polluted_sinr_db)[0])
+    toy_neighbor_clean_power = 0.6 ** 2
+    toy_neighbor_polluted_power = (0.6 * toy_w[0] + 0.8 * toy_w[1]) ** 2
+    toy_neighbor_delta_db = 10.0 * math.log10(
+        toy_neighbor_polluted_power / toy_neighbor_clean_power)
 
     body = """
 <div class="callout note"><span class="callout-icon">i</span><div><strong>先回答使用者真正关心的问题</strong>
@@ -2860,7 +2999,9 @@ def srs_resource_allocation_page() -> Page:
 权值也会朝错误方向打。资源分配因此直接决定 CSI 是否干净、MU 零陷是否可信以及 MCS 是否会被高估。</p>
 <p>可用资源并不只有“周期”一个维度。标准的 SRS-Resource 同时配置周期与 slot offset、slot 内
 symbol、transmission comb、cyclic shift、频域位置/跳频和序列相关参数。当前固定载波先实现普通
-周期 H 资源的核心子集；P-H/F、BWP2、intra-slot antenna switching 与根序列规划仍明确在范围外。</p>
+周期H资源的核心子集；2T4R跨相邻SRS机会的资源、老化和显式UL cross-link驱动的多端口波形接收
+已经建模。P-H/F、BWP2与全网n_SRS_ID/root规划仍在范围外；系统主循环也尚未自动生成邻区UE到
+受害gNB的UL cross-link。</p>
 
 <h2>2 · PCI 模3是什么，为什么能用于小区间错开</h2>
 <p>PCI 是 Physical Cell ID。NR 中相邻小区通常配置不同 PCI；“PCI 模3”就是把 PCI 除以 3，
@@ -2868,46 +3009,52 @@ symbol、transmission comb、cyclic shift、频域位置/跳频和序列相关�
 分别是 1、2、0。它本身不会产生正交性；真正的隔离来自颜色背后对应的 symbol/comb 资源。</p>
 """ + F_PCI_MOD3
     body += table(
-        ["小区 PCI 模3", "第一优先色", "资源不足后的溢出顺序", "工程含义"],
+        ["小区 PCI 模3", "每个SRS机会的本色普通叶子", "20 ms图中可见叶子", "资源不足时"],
         [
-            ("0", "0（黄色）", "0 → 1 → 2", "优先使用黄色时频叶子"),
-            ("1", "1（绿色）", "1 → 2 → 0", "优先使用绿色时频叶子"),
-            ("2", "2（蓝色）", "2 → 0 → 1", "优先使用蓝色时频叶子"),
+            ("0（黄色）", "sym10/C0、sym13/C1", "2×4 = 8", "全局周期10→20→40 ms；禁止借绿色/蓝色"),
+            ("1（绿色）", "sym10/C1、sym12/C0", "2×4 = 8", "全局周期10→20→40 ms；禁止借蓝色/黄色"),
+            ("2（蓝色）", "sym11/C0、sym12/C1", "2×4 = 8", "全局周期10→20→40 ms；禁止借黄色/绿色"),
         ],
     )
     body += callout(
         "warn", "标准能力与工程预置必须分开",
         "<p>3GPP 定义 PCI 和 SRS 的周期、symbol、comb、循环移位、频域与序列配置；"
-        "下方这张具体的黄色/绿色/蓝色映射表是本项目采用的工程预置，不是 3GPP 强制算法。"
-        "这一区分很重要：标准说明资源能怎样配，预置表决定当前系统具体怎样错开。</p>",
+        "下方具体三色映射、两个BBL保留格、只开放4个CS以及2T4R跨机会切换，"
+        "都是当前工程预置，不是3GPP强制算法。标准说明资源能怎样配，预置表决定"
+        "当前系统具体怎样用。</p>",
     )
 
     body += """
+<section class="srs-grid-table">
 <h2>3 · 当前 100 MHz 普通 H 资源的 PCI 模3表</h2>
-<p>下表从给定资源图中抽取当前已实现的普通 H 部分。每个格子的数字表示该
-<code>symbol + comb</code> 时频叶子的首选 PCI 模3颜色。颜色附着在时频叶子上，
-同一叶子下面的不同循环移位仍属于同一种颜色。</p>
+<p>每个SRS机会有8个<code>symbol + comb</code>格。加粗的
+<code>symbol11/comb1</code>和<code>symbol13/comb0</code>是BBL专用叶子，
+不进入普通SRS资源池；剩下6格由三个PCI模3颜色各取2格。四个机会合计后，
+每种颜色正好8个可见普通叶子，BBL也正好8格。</p>
 """
     body += table(resource_headers, resource_rows, raw=set(range(1, 9)))
     body += """
-<p><b>如何读表：</b>绿色小区（PCI mod3=1）优先找绿色格，例如 symbol13/comb0；
-蓝色小区优先找 symbol12/comb1 等蓝色格；黄色小区优先找 symbol13/comb1 等黄色格。
-四个 SRS 机会重复同一普通 H 着色规则；完整资源图中被 P-H/F、BWP2 或长周期专用资源占用的格子
-应灰显处理，但这些特殊资源当前没有进入基础分配器。</p>
+<p><b>如何读表：</b>绿色小区只能使用绿色普通格，例如symbol12/comb0；
+蓝色小区只能使用symbol11/comb0或symbol12/comb1；黄色小区只能使用
+symbol10/comb0或symbol13/comb1。灰色BBL格无论背景原来是什么颜色都直接排除，
+也不会在资源不足时被普通用户借用。</p>
 <p>30 kHz SCS 下一个 slot 是 0.5 ms，所以 slot7/17/27/37 对应 3.5/8.5/13.5/18.5 ms。
-对 10 ms 周期而言，slot7 与 slot27 属于同一 offset 类，slot17 与 slot37 属于另一类；
-因此 20 ms 图上虽看到四次发送，实际只有两个不同的 10 ms 周期 offset 配置。</p>
+2T4R UE把相邻两个可用机会绑定成一对：slot7→17、slot27→37；第一腿发端口0/1，
+第二腿发端口2/3。10 ms周期只有一组独立pair，20 ms有两组，40 ms有四组。</p>
+</section>
 
 <h2>4 · 多个小区到底在哪些维度错开</h2>
 """
     body += table(
         ["资源维度", "物理作用", "本小区内", "相邻小区之间的当前策略"],
         [
-            ("slot offset", "把 SRS 放到不同时间机会", "资源扩容与周期错开", "PCI 表本身不强制错时；负载增加后分配器可使用其他 offset"),
+            ("SRS机会pair", "把2T4R的两对天线分时探测", "slot7→17等相邻机会；两腿相差5 ms", "pair内部保持同一颜色/频域相位"),
             ("OFDM symbol", "同一 slot 内的时分隔离", "symbol10..13", "PCI 颜色优先错开 symbol/comb 组合"),
             ("comb offset", "在频域交错使用偶/奇梳齿子载波", "comb0/1 可正交复用", "PCI 颜色优先错开 symbol/comb 组合"),
-            ("cyclic shift", "同一时频叶子上的码域分离", "8 个 CS 按 1/2/4 ports 成块", "不作为 PCI 首选着色维度；跨小区定时误差会削弱其正交性"),
-            ("频域 hopping", "每次探测不同 RBG，最终覆盖全带", "当前 17-hop，每次 16 RB", "三类小区当前共用同一 hopping profile，尚未按 PCI 再分频"),
+            ("cyclic shift", "同一时频/RBG叶子的码域分离", "工程基线4 CS；每次2T占2 CS，所以可放2 UE", "跨小区不依赖CS，先由PCI颜色避开"),
+            ("frequency resource", "同一时刻在不同16-RB RBG上频分", "17个frequency_resource_id", "不同相位同一机会不碰撞"),
+            ("17-hop", "逐次覆盖全带", "两腿测完同一RBG后才推进hop", "10 ms时17个pair约170 ms、共34次发送"),
+            ("UE antenna ports", "形成完整64×4空间信道", "ports0/1与2/3分别形成64×2", "5 ms列间偏差进入CSI老化"),
             ("序列/root", "提供额外序列域隔离", "标准具备", "当前基础模型未规划，不能把它算成已有抗污染能力"),
         ],
     )
@@ -2919,53 +3066,61 @@ symbol、transmission comb、cyclic shift、频域位置/跳频和序列相关�
 <circle cx="430" cy="88" r="62" fill="#2384ad" fill-opacity=".2" stroke="#126181" stroke-width="3"/><text x="430" y="72" text-anchor="middle" font-weight="750">小区 B · PCI 101</text><text x="430" y="98" text-anchor="middle">101 mod 3 = 2</text><text x="430" y="122" text-anchor="middle" font-size="13">首选蓝色</text>
 <circle cx="725" cy="88" r="62" fill="#f2c84b" fill-opacity=".28" stroke="#c49d18" stroke-width="3"/><text x="725" y="72" text-anchor="middle" font-weight="750">小区 C · PCI 102</text><text x="725" y="98" text-anchor="middle">102 mod 3 = 0</text><text x="725" y="122" text-anchor="middle" font-size="13">首选黄色</text>
 <path d="M135 152V205" stroke="#60758d" stroke-width="2" marker-end="url(#srs-pci-arrow)"/><path d="M430 152V205" stroke="#60758d" stroke-width="2" marker-end="url(#srs-pci-arrow)"/><path d="M725 152V205" stroke="#60758d" stroke-width="2" marker-end="url(#srs-pci-arrow)"/>
-<rect x="48" y="216" width="174" height="58" rx="12" fill="#75be62" fill-opacity=".22" stroke="#4b9440"/><text x="135" y="241" text-anchor="middle" font-weight="700">slot7 · sym13 · comb0</text><text x="135" y="261" text-anchor="middle" font-size="12">CS 0..3</text>
-<rect x="343" y="216" width="174" height="58" rx="12" fill="#2384ad" fill-opacity=".18" stroke="#126181"/><text x="430" y="241" text-anchor="middle" font-weight="700">slot7 · sym12 · comb1</text><text x="430" y="261" text-anchor="middle" font-size="12">CS 0..3</text>
-<rect x="638" y="216" width="174" height="58" rx="12" fill="#f2c84b" fill-opacity=".28" stroke="#c49d18"/><text x="725" y="241" text-anchor="middle" font-weight="700">slot7 · sym13 · comb1</text><text x="725" y="261" text-anchor="middle" font-size="12">CS 0..3</text>
-</svg><figcaption>轻载三小区实例：三者时间 offset 相同，但优先使用不同 symbol/comb；循环移位相同也不会发生时频碰撞</figcaption></figure>
+<rect x="48" y="216" width="174" height="58" rx="12" fill="#75be62" fill-opacity=".22" stroke="#4b9440"/><text x="135" y="241" text-anchor="middle" font-weight="700">slot7→17 · sym12/C0</text><text x="135" y="261" text-anchor="middle" font-size="12">CS0/1 · freq0 · 两个2T legs</text>
+<rect x="343" y="216" width="174" height="58" rx="12" fill="#2384ad" fill-opacity=".18" stroke="#126181"/><text x="430" y="241" text-anchor="middle" font-weight="700">slot7→17 · sym12/C1</text><text x="430" y="261" text-anchor="middle" font-size="12">CS0/1 · freq0 · 两个2T legs</text>
+<rect x="638" y="216" width="174" height="58" rx="12" fill="#f2c84b" fill-opacity=".28" stroke="#c49d18"/><text x="725" y="241" text-anchor="middle" font-weight="700">slot7→17 · sym13/C1</text><text x="725" y="261" text-anchor="middle" font-size="12">CS0/1 · freq0 · 两个2T legs</text>
+</svg><figcaption>三个PCI颜色只用本色普通叶子；每个UE在下一SRS机会切换到另两根天线，完成后再推进RBG</figcaption></figure>
 
 <h2>5 · 一个 UE 的资源是怎样选出来的</h2>
 """
     body += steps([
-        ("计算小区颜色", "<p>由服务小区 PCI 计算 <code>PCI mod 3</code>，得到首选色和溢出顺序。</p>"),
-        ("确定周期与 offset 候选", "<p>当前 100 MHz 基础实现直接接受 10/20/40 ms 周期，并列出周期内所有 slot-phase-7 机会。</p>"),
-        ("按颜色表筛时频叶子", "<p>先找本色的 <code>symbol + comb</code> 格，symbol 从靠近 slot 末尾的 13 向 10 搜索，以减少探测到可用 CSI 的等待。</p>"),
-        ("按端口数占循环移位块", "<p>1/2/4-port UE 分别占连续 1/2/4 个 CS。4-port UE 先拿 CS0..3，同一时频叶子的第二个 UE 拿 CS4..7。</p>"),
-        ("检查周期碰撞", "<p>与同小区已分配资源检查 offset 同余、symbol、comb 和 CS 交集；任何一维可分离就不算基础模型中的碰撞。</p>"),
-        ("本色用完后溢出", "<p>按 0→1→2、1→2→0 或 2→0→1 使用后续颜色。这样轻载优先抗干扰，重载仍能复用完整资源池。</p>"),
+        ("从10 ms全局试分配", "<p>所有小区、所有UE先使用同一个10 ms周期；每次失败都会丢弃整次试分配，不留下半张资源表。</p>"),
+        ("锁定本小区PCI颜色", "<p>只展开本色的两个普通<code>symbol+comb</code>叶子；两个加粗BBL格和另外两种颜色都不进入候选。</p>"),
+        ("展开17个频域相位与4个CS", "<p>每叶子有17个<code>frequency_resource_id</code>；4个CS固定分成CS0/1与CS2/3，可供两个UE共享。</p>"),
+        ("为一个2T4R UE绑定两腿", "<p>第一腿在当前SRS机会发ports0/1，第二腿在下一个可用机会发ports2/3；两腿保持相同symbol/comb、CS块和频域相位。</p>"),
+        ("检查两个leg的完整碰撞", "<p>任意leg只要在周期时间、symbol、comb、frequency id和CS上全部重合就冲突；检查不能只看第一腿。</p>"),
+        ("容量不足整体升周期", "<p>10 ms不够就全局重试20 ms，再不够重试40 ms；40 ms仍失败则硬报错，绝不借其他PCI颜色。</p>"),
     ])
 
     body += """
-<h2>6 · 周期档位与容量：开销、用户数和 CSI 新鲜度的交换</h2>
-<p>参考全表通过档位逐步取消短周期：UE 越多时，允许更长周期可增加 offset 资源并降低上行开销，
-代价是 CSI 更新变慢。当前基础实现尚未实现“按 UE 数自动选档”，只支持直接请求周期。</p>
+<section class="srs-capacity-model">
+<h2>6 · 全局周期自适应：先保隔离，再换容量</h2>
+<p>本阶段不实现档位0～4，也不为不同UE配置不同周期。所有UE共享一个周期，
+从10 ms开始选择能在<strong>本色普通资源</strong>中容纳全部小区的最短值。
+周期变长增加的是互不重叠的SRS机会pair，代价是每个RBG更久才重新探测。</p>
 """
     body += table(
-        ["参考档位", "普通 H 可选周期", "设计含义", "当前基础实现"],
+        ["全局周期", "不重叠机会pair数", "每色每pair容量", "每个PCI模3小区容量", "触发条件"],
         [
-            ("档位 0", "10 / 20 / 40 / 80 ms", "低负载允许短周期", "直接支持 10/20/40；80 ms 未实现"),
-            ("档位 1", "20 / 40 / 80 ms", "资源吃紧时取消 10 ms", "未实现自动档位"),
-            ("档位 2", "40 / 80 ms", "继续扩容并降低开销", "未实现自动档位"),
-            ("档位 3", "80 / 160 ms", "高 UE 数/低更新频率", "80/160 ms 未实现"),
-            ("档位 4", "160 ms", "最大容量、最慢更新", "未实现"),
+            ("10 ms", "1：slot7→17", "2叶子×17频域×2个CS块 = 68",
+             f"{srs_capacity[10]}个2T4R UE", "默认首选"),
+            ("20 ms", "2：7→17、27→37", "68",
+             f"{srs_capacity[20]}个2T4R UE", f"任一小区超过{srs_capacity[10]}"),
+            ("40 ms", "4", "68",
+             f"{srs_capacity[40]}个2T4R UE", f"任一小区超过{srs_capacity[20]}"),
+            ("失败", "—", "—", f">{srs_capacity[40]}", "硬失败；不跨颜色、不占BBL"),
         ],
     )
     body += F_SRS_POOL_CAPACITY
     body += """
-<p>当前 10 ms、4-port 示例：两个不同 offset × 4 个 symbol × 2 个 comb ×
-<code>floor(8/4)=2</code> 个循环移位块，共 <b>32 个 UE</b>。注意这是整个池的硬容量，
-不是每个 PCI 颜色的无干扰容量；开始跨颜色溢出后，小区间碰撞概率会增加。</p>
+<p>以10 ms为例：一个pair里，每种PCI颜色有2个普通叶子；每叶子有17个频域相位；
+4个CS按每次2T切成两个块。因此<code>1×2×17×floor(4/2)=68</code>个UE。
+一个UE虽然要发两次，但两次已经绑定在同一个pair候选里，不能再额外乘或除一次。</p>
+<p>原图的20 ms窗口中每种颜色可见8个普通叶子是正确的：四个机会×每机会2格。
+对10 ms周期，其中slot7→17形成一个资源pair并在下一10 ms重复；20 ms周期才有
+两组独立pair，所以容量正好从68翻到136。</p>
+</section>
 
-<h2>7 · 什么情况下两份资源仍会碰撞</h2>
+<h2>7 · allocator碰撞与物理接收干扰不是同一个判据</h2>
 """ + F_SRS_RESOURCE_COLLISION
     body += table(
         ["条件", "为什么"],
         [
-            ("周期机会在某一时刻重合", "混合周期不能只比 offset 数字；用 gcd 同余判断未来是否相遇"),
-            ("OFDM symbol 相同", "否则在 slot 内已经时分"),
-            ("comb offset 相同", "否则使用不同梳齿子载波"),
-            ("循环移位集合有交集", "否则基础模型可在码域解扩"),
-            ("频域也重合", "当前三类 PCI 共用同一 17-hop profile，所以碰撞代理按同频处理"),
+            ("两个UE的任意一对leg在周期时间上重合", "不能只看第一腿；混合周期用gcd同余判断未来相遇"),
+            ("OFDM symbol与comb都相同", "否则已经在slot内时分或梳齿频分"),
+            ("frequency_resource_id相同", "17个频域相位不同则当前RBG不同"),
+            ("2-CS集合有交集", "allocator proxy才把它记为不可分离碰撞；异CS仍会把能量送到同一组RE"),
+            ("以上条件同时成立", "只定义基础collision proxy；物理后端会先叠加所有同RE波形，再由解扩决定残余"),
         ],
     )
     body += table(
@@ -2978,35 +3133,188 @@ symbol、transmission comb、cyclic shift、频域位置/跳频和序列相关�
     body += callout(
         "warn", "方向验证不等于现场性能承诺",
         "<p>该反例证明表驱动错开确实减少基础模型中的精确导频碰撞。它仍假设等功率污染者、"
-        "非碰撞维度理想正交，没有展开根序列、TA、时延扩展、非理想 CS、接收滤波和真实邻区功率。"
-        "因此 2.01→0.01 只能作为分配器方向门，不能当作现场 NMSE 数字。</p>",
+        "非碰撞维度理想正交，因此 2.01→0.01 只能作为分配器方向门，不能当作现场 NMSE 数字。"
+        "波形后端另行展开真实序列、TA、CFO、时延窗与输入的邻区功率，并同时输出raw IoT和解扩后残余；"
+        "两种数字回答不同问题，不能互相替代。</p>",
     )
 
     body += """
-<h2>8 · 资源分配如何影响后续仿真</h2>
-<p>分配结果中的周期 offset 会改变“最近一次可用 SRS”发生在何时，从而改变每个 UE、每个 RBG
-的 CSI 陈旧时长；symbol/comb/CS 决定导频是否碰撞；频域 hopping 决定某个 RBG 多久才被重新探测。
-因此资源分配最终会传导到预编码失配、MU 残余干扰、MCS、BLER 与体验 KPI，而不是一张只供展示的表。</p>
+<h2>8 · 从一格 SRS 资源到最终 BLER：先看完整因果链</h2>
+<p>一份 assignment 里有两类会向后传导的信息。第一类是<strong>什么时候测</strong>：period、offset
+和 17-hop 决定每个 RBG 的 CSI 新鲜度。第二类是<strong>这次测量干不干净</strong>：symbol、comb、CS、
+序列与邻区是否重合，决定接收导频里是否混入别人的信道。两条路径最终都汇合到同一个
+<code>h_prec</code>，但当前实现的接通程度不同，下一节会逐项标清。</p>
+
+<figure class="diagram"><svg viewBox="0 0 980 250" role="img" aria-label="SRS资源分配影响预编码MCS与BLER的因果链">
+<defs><marker id="srs-chain-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#60758d"/></marker></defs>
+<rect x="20" y="68" width="142" height="104" rx="14" fill="#edf4ff" stroke="#5c88c5"/><text x="91" y="95" text-anchor="middle" font-weight="750">SRS assignment</text><text x="91" y="121" text-anchor="middle" font-size="13">period / offset</text><text x="91" y="143" text-anchor="middle" font-size="13">symbol / comb / CS</text>
+<path d="M162 99H220" stroke="#60758d" stroke-width="2" marker-end="url(#srs-chain-arrow)"/><path d="M162 145H220" stroke="#60758d" stroke-width="2" marker-end="url(#srs-chain-arrow)"/>
+<rect x="230" y="25" width="145" height="72" rx="12" fill="#fff7df" stroke="#c49d18"/><text x="302" y="53" text-anchor="middle" font-weight="700">测量时刻</text><text x="302" y="76" text-anchor="middle" font-size="13">CSI lag / hopping</text>
+<rect x="230" y="135" width="145" height="88" rx="12" fill="#fff0ee" stroke="#c85b51"/><text x="302" y="161" text-anchor="middle" font-weight="700">导频观测</text><text x="302" y="184" text-anchor="middle" font-size="13">Y = HₐXₐ + ΣHᵢXᵢ + N</text><text x="302" y="205" text-anchor="middle" font-size="12">LS / 频域 LMMSE</text>
+<path d="M375 61H435V112" fill="none" stroke="#60758d" stroke-width="2" marker-end="url(#srs-chain-arrow)"/><path d="M375 179H435V140" fill="none" stroke="#60758d" stroke-width="2" marker-end="url(#srs-chain-arrow)"/>
+<rect x="445" y="78" width="142" height="94" rx="14" fill="#eef8f0" stroke="#4b9440"/><text x="516" y="106" text-anchor="middle" font-weight="750">可用 h_prec</text><text x="516" y="130" text-anchor="middle" font-size="13">有噪声 / 被污染</text><text x="516" y="151" text-anchor="middle" font-size="13">并且可能已经陈旧</text>
+<path d="M587 125H645" stroke="#60758d" stroke-width="2" marker-end="url(#srs-chain-arrow)"/>
+<rect x="655" y="78" width="142" height="94" rx="14" fill="#f4f0ff" stroke="#8063b4"/><text x="726" y="105" text-anchor="middle" font-weight="750">预编码与调度</text><text x="726" y="130" text-anchor="middle" font-size="13">SVD / PMI / MU</text><text x="726" y="151" text-anchor="middle" font-size="13">BF Gain → MCS</text>
+<path d="M797 125H855" stroke="#60758d" stroke-width="2" marker-end="url(#srs-chain-arrow)"/>
+<rect x="865" y="78" width="95" height="94" rx="14" fill="#eef6f8" stroke="#2384ad"/><text x="912" y="105" text-anchor="middle" font-weight="750">真实下行</text><text x="912" y="130" text-anchor="middle" font-size="13">RX SINR</text><text x="912" y="151" text-anchor="middle" font-size="13">BLER / KPI</text>
+</svg><figcaption>资源分配不是结果终点：它通过“测量时刻”和“导频纯净度”两条路径改变基站用于求权的信道</figcaption></figure>
+
+<section class="srs-toy-example">
+<h2>9 · Toy example：两个接收维度就能看见“方向被带偏”</h2>
+<p>先把真实的 64×4 MIMO 压缩成只有两个基站接收维度的 rank-1 例子，目的不是替代真实阵列，
+而是让每一步都能手算。服务 UE A 的真实信道取 <code>hA=[1, 0]ᵀ</code>；相邻小区 UE B 到本基站的
+信道取 <code>hB=[0.6, 0.8]ᵀ</code>，两者范数都为 1。忽略热噪声，且两 UE 在完全相同的
+symbol/comb/CS 上发送同一个标量导频 <code>xA=xB=1</code>。</p>
+""" + F_SRS_TOY_CONTAMINATION
+    body += """
+<p>若 PCI 模3把 B 错开到另一个 symbol 或 comb，A 的资源上只看到 <code>yA=hA</code>，LS 恢复
+<code>[1,0]ᵀ</code>。若没有错开，基站看到 <code>yA=hA+hB=[1.6,0.8]ᵀ</code>，LS 无法知道
+第二项属于别的小区，于是把混合向量当成 A 的信道。这里的“干扰有方向”非常具体：它把波束从第一根轴
+拉向了 B，而不是只给每个天线加一个没有空间结构的随机数。</p>
+""" + F_SRS_TOY_BEAM
+    body += table(
+        ["手算量", "PCI 模3错开：无碰撞", "同资源碰撞", "它说明什么"],
+        [
+            ("A 的 LS 估计", "[1.000, 0.000]ᵀ", "[1.600, 0.800]ᵀ", "干扰信道直接留在估计中"),
+            ("归一化 SVD 波束", "[1.000, 0.000]ᵀ",
+             f"[{toy_w[0]:.3f}, {toy_w[1]:.3f}]ᵀ", "发射方向被拉向邻区 UE"),
+            ("基站估计的 SVD−PMI BF Gain", "0.00 dB",
+             f"+{toy_est_gain_db:.2f} dB", "基站在污染后的 h-hat 上觉得 SVD 更好"),
+            ("真实信道上的 SVD−PMI Gain", "0.00 dB",
+             f"{toy_true_gain_db:.2f} dB", "同一权在真实 hA 上反而掉功率"),
+            ("估计乐观偏差", "0.00 dB",
+             f"{toy_est_gain_db - toy_true_gain_db:.2f} dB", "estimated BF Gain 与真实增益出现反号"),
+            ("打向邻区 UE B 的功率", f"{toy_neighbor_clean_power:.2f}",
+             f"{toy_neighbor_polluted_power:.2f}（+{toy_neighbor_delta_db:.2f} dB）",
+             "污染还会增加波束向污染源方向的泄漏"),
+        ],
+    )
+    body += callout(
+        "note", "LMMSE 能降噪，但不能凭空把同码碰撞者认出来",
+        "<p>当前 <code>ls_mmse</code> 使用指数 PDP 构造频域协方差，对 pilot→全 RB 做维纳插值。"
+        "它能利用频率相关性压低热噪声和插值误差；但若 A/B 在同一资源上不可分离，且没有额外空间协方差或"
+        "序列信息告诉估计器哪一项属于 B，频域平滑会同时平滑 <code>hA+hB</code>。因此先做资源正交，"
+        "再用 LMMSE 提升估计质量，二者不是替代关系。完整 LS/LMMSE 推导见 <a href=\"#/srs\">"
+        "SRS、64×4 与信道估计</a>。</p>",
+    )
+
+    body += """
+<h2>10 · 这 0.97 dB 为什么可能变成一次 NACK</h2>
+<p>当前系统严格区分“基站据什么选 MCS”和“接收端据什么判错”。发送 MCS 不直接偷看真实接收 SINR：
+它先由 CQI 找到参考 MCS/门限，再叠加<strong>在 h_prec 上计算的 BF Gain</strong>，重新映射 MCS，
+最后在 MCS 编号域叠加用户 OLLA。真正的 ACK/NACK 则用真实下行信道和实际发射权算出的
+<code>receive SINR</code>查预置 BLER 曲线。</p>
+""" + F_SRS_TOY_LINK_ADAPT
+    body += table(
+        ["固定发送 MCS16 的演示", "干净估计", "碰撞后仍按原预测发送", "变化"],
+        [
+            ("真实接收 SINR", f"{toy_clean_sinr_db:.2f} dB",
+             f"{toy_polluted_sinr_db:.2f} dB", f"{toy_true_gain_db:.2f} dB"),
+            ("MCS16 的 10% BLER 门限", f"{toy_threshold_db:.4f} dB",
+             f"{toy_threshold_db:.4f} dB",
+             f"干净侧高 {toy_clean_sinr_db - toy_threshold_db:.2f} dB；"
+             f"碰撞侧低 {toy_threshold_db - toy_polluted_sinr_db:.2f} dB"),
+            ("预置 NewTx BLER", f"{100 * toy_clean_bler:.2f}%",
+             f"{100 * toy_polluted_bler:.2f}%",
+             "跨过 MCS16 的瀑布区，变化高度非线性"),
+        ],
+    )
+    body += callout(
+        "warn", "为什么这里固定 MCS16，而不是用真实 SINR重选 MCS",
+        "<p>这正是在模拟“估计不准”的后果：基站不知道真实接收 SINR 已经下降，可能仍按被污染的 CSI "
+        "发送 MCS16。示例的 15.00 dB→"
+        f"{toy_polluted_sinr_db:.2f} dB 只表示真实物理链路下降；BLER 从 "
+        f"{100 * toy_clean_bler:.2f}%→{100 * toy_polluted_bler:.2f}% "
+        "来自当前预置 MCS16 NewTx 曲线。随后 NACK 会推动 OLLA 下调，使后续发送更保守。"
+        "它是可复算的机制例，不代表任意信道都会刚好掉这么多，也不把预置曲线冒充标准曲线。</p>",
+    )
+
+    body += """
+</section>
+<section class="srs-implementation-status">
+<h2>11 · 当前代码到底接通了哪几段</h2>
+<p>为避免把“规划中的端到端能力”写成“已经实现”，下面按数据流逐段标状态。用户只要看这一张表，
+就能判断某个实验结论目前能不能成立。</p>
+<p><b>新增接收证据口径：</b><code>raw SIR与post-despread SIR</code>必须同时报告；前者看解扩前RE上的
+能量重合，后者看接收机实际留下多少污染。<code>UL IoT=10log10((I+N)/N)</code>由逐slot×RB的原始干扰
+功率矩阵和同一归一化下的热噪声重算，不能由post-despread SINR反推。</p>
+"""
+    body += table(
+        ["数据流", "当前状态", "现在可以得出什么结论"],
+        [
+            ("双腿assignment → 两组逐RBG lag → 拼接陈旧64×4 h_prec",
+             "已端到端接通",
+             "端口0/1与2/3分别取各自历史快照；5 ms切换偏差真实进入预编码与KPI"),
+            ("assignment → 绝对RE → Y=HsXs+ΣHiXi+N → LS+时延窗",
+             "已接通独立物理波形后端",
+             "可研究端口序列、同/异CS、TA、CFO、raw IoT、post-despread SIR与两腿64×4 NMSE"),
+            ("新paired/BOTH数据 → 保留h_ul_true → Dataset波形入口",
+             "已接通",
+             "波形后端读取真实UL真值；旧数据缺字段时默认硬失败，理想互易回退必须显式开启"),
+            ("h_ul_est → 本地互易映射 h_prec；h_dl_true → 真实接收评估",
+             "已端到端接通",
+             "权值只看估计，SINR/BLER 看真值；可以观察估计乐观、NACK 与 OLLA 回拉"),
+            ("波形H-hat → CSI老化 → 系统调度与BLER/KPI",
+             "尚未自动接通",
+             "当前系统默认仍消费数据源h_est；未显式跑波形后端并注入H-hat前，不得声称PCI模3改善吞吐/BLER"),
+            ("商用PDP64/eDFT/归一化RSRP token",
+             "未并入物理真值主链",
+             "这些是特定接收后处理/特征口径；需单独命名，不能替换未归一化PDP、真实功率和物理PreSINR"),
+        ],
+    )
+    body += callout(
+        "warn", "还缺的不是接收机，而是系统级cross-link人口",
+        "<p>assignment→波形→解扩→双腿H-hat已经存在；剩余关键桥是为每个SRS时刻生成或导入"
+        "“每个邻区UE→受害gNB”的UL信道与功控，再把波形H-hat送入现有CSI老化和系统主循环。"
+        "只有这一步也接通并通过同数据、同RNG、同KPI的三道门，才能比较“同色强制碰撞 vs PCI模3错开”"
+        "的BLER/体验结果。当前仍必须把allocator proxy、波形NMSE和系统性能三层分开。</p>",
+    )
+
+    body += """
+<h2>12 · 用户应该怎样选实验，才不会问错问题</h2>
+"""
+    body += table(
+        ["要回答的问题", "当前应使用的证据", "不能越界的结论"],
+        [
+            ("分配表是否把轻载三小区错开", "逐 assignment 表 + cross-cell collision report",
+             "只证明当前精确碰撞判据，不是现场 NMSE"),
+            ("2T4R两腿是否真的改变CSI新鲜度", "逐UE的[S,2,RBG] lag与h_prec端口列来源反查",
+             "已经可追到BF/MCS/BLER，但仍只代表资源时序/老化路径"),
+            ("SRS 导频污染是否进入估计", "波形后端的Y三分量、raw IoT、post-despread SIR、H-hat与NMSE",
+             "可以验证物理接收机制；干扰cross-link与功率必须来自明确输入"),
+            ("PCI 模3最终提升多少吞吐", "待波形H-hat→CSI老化→系统主循环接通后做成对仿真",
+             "当前不得给最终收益百分比"),
+        ],
+    )
+    body += """
+<p>相关章节可按因果链继续阅读：<a href="#/srs">SRS、64×4 与 LS/LMMSE</a>解释观测和估计；
+<a href="#/csi">CSI 生命周期</a>解释 offset、hopping、报告周期与老化；BLER 章节解释曲线查询和 OLLA。</p>
+</section>
 
 <details><summary><b>开发者实现映射与反向测试（通信原理读者可跳过）</b></summary>
-<ul><li><code>PCI_MOD3_COLOR_BY_SYMBOL_COMB</code> 是上方普通 H 颜色表的唯一代码真相源。</li>
-<li>profile v2 把颜色固定在 symbol/comb 时频叶子；不同 CS block 不再被误着成不同小区颜色。</li>
-<li><code>offset_ms</code> 进入 CSI lag，而不是只写 metadata。</li>
-<li>测试锁定完整 4×2 表、CS 与颜色独立、三小区首选时频叶子互异、32/33 容量边界和混合周期 gcd 碰撞。</li></ul>
+<ul><li><code>SRS_LEAF_ROLE_BY_SYMBOL_COMB</code>逐格保存三色/BBL角色，是上表唯一真相源。</li>
+<li>profile v3固定4 CS、17个frequency id、2T4R双腿和禁止跨颜色溢出。</li>
+<li>两个<code>offset_ms</code>分别进入端口组lag，<code>stale_channel_by_antenna_group</code>拼出64×4。</li>
+<li><code>srs_waveform</code>按assignment展开RE，保留Y的signal/interference/noise三分量，并输出raw/post-despread与可哈希UL IoT证据。</li>
+<li>新数据集保留<code>h_ul_true</code>；缺失时Dataset默认拒绝把下行真值静默当上行。</li>
+<li>测试锁定BBL排除、68/136/272容量、17-hop、64×4拼接、同CS污染、异CS分离、TA/CFO失配和证据防篡改。</li></ul>
 <p class=source-row>实现：""" + source_ref(
-        "src/superran/srs_resource.py", "PCI_MOD3_COLOR_BY_SYMBOL_COMB") + " · " + source_ref(
-        "src/superran/system.py", "def build_link_tables") + " · 反向测试：" + source_ref(
-        "tests/test_srs_resource.py", "test_user_confirmed_pci_mod3_table_is_exact") + "</p></details>"
+        "src/superran/srs_resource.py", "SRS_LEAF_ROLE_BY_SYMBOL_COMB") + " · " + source_ref(
+        "src/superran/srs_waveform.py", "def observe_srs_leg") + " · " + source_ref(
+        "src/superran/system.py", "def build_link_tables") + " · " + source_ref(
+        "src/superran/channelhub.py", "def downlink_and_precoding_channels") + " · 反向测试：" + source_ref(
+        "tests/test_srs_waveform.py", "test_raw_overlap_and_post_despread_interference_are_separate_evidence") + "</p></details>"
     body += (
         '<p class="source-row">标准资源字段参考：'
         '<a class="src" href="https://www.etsi.org/deliver/etsi_ts/138300_138399/138331/19.01.00_60/ts_138331v190100p.pdf" target="_blank" rel="noreferrer">3GPP TS 38.331 SRS-Resource</a> · '
-        '<a class="src" href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138211/19.02.00_60/ts_138211v190200p.pdf" target="_blank" rel="noreferrer">3GPP TS 38.211 §6.4.1.4</a></p>'
+        '<a class="src" href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138211/19.02.00_60/ts_138211v190200p.pdf" target="_blank" rel="noreferrer">3GPP TS 38.211 §6.4.1.4</a> · '
+        '<a class="src" href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138214/17.13.00_60/ts_138214v171300p.pdf" target="_blank" rel="noreferrer">3GPP TS 38.214 §6.2.1.2 · 2T4R antenna switching</a></p>'
     )
     return Page(
         "srsallocation", "SRS 资源分配与 PCI 模 3", "物理内核",
         "SRS RESOURCE ALLOCATION",
-        "从多小区导频污染问题出发，解释 PCI 模3资源表、六维正交、周期档位、容量与碰撞边界。",
-        body, ("SRS原理", "PCI模3表", "多小区", "symbol/comb", "循环移位", "周期档位"),
+        "从资源表一路追到 LS/LMMSE、波束方向、MCS 与 BLER，并用可手算 toy example 标清已接通链路与缺口。",
+        body, ("SRS原理", "PCI模3表", "BBL", "2T4R", "4 CS", "17 FDM", "全局周期自适应"),
     )
 
 
@@ -3194,7 +3502,7 @@ def csi_page() -> Page:
     body += table(
         ["时间量", "当前工程基线", "角色"],
         [
-            ("channel snapshot", "例如 5 ms", "物理 H(t) 的采样间隔；只负责离散时间，不触发报告"),
+            ("channel snapshot", "默认5 ms；sample_interval_s独立落盘", "物理H(t)采样间隔；不由slot/SRS/report周期反推"),
             ("SRS period", "10 ms", "UE 发 SRS 的周期；项目不使用“SRS 年龄”这个说法"),
             ("SRS full sweep", "17×10=170 ms", "跳频覆盖 17 RBG 的完整采集窗"),
             ("processing delay", "2 ms", "估计、算权到调度可用的固定时延"),
@@ -3207,6 +3515,9 @@ def csi_page() -> Page:
 平均，不意味着某几个 RBG 永远更旧。<code>rbg_csi_staleness_ms()</code> 用 SuperRAN 本地版本化的
 38.211 C_SRS=63/B_SRS=1 17-hop 次序得到每个时刻每个 RBG 的 staleness；当前不支持其他带宽，
 也没有外部 helper 或 identity fallback。连续时延换 snapshot lag 时必须向上取整，防止偷用尚未完成处理的 CSI。</p>
+<p><strong>时间轴迁移合同：</strong>新数据集显式保存<code>sample_interval_s</code>，SuperRAN默认冻结为5 ms；
+外部信道源即使把自己的隐式默认改成0.5 ms，也不能悄悄改变系统老化。旧数据没有该字段时才按
+<code>max(SRS周期, CSI-RS周期)×slot时长</code>回退，结果应标为legacy inferred。</p>
 <h2>报告到达后只能因果保持</h2>
 """ + F_CSI_REPORT_HOLD
     body += """
@@ -4010,21 +4321,22 @@ def mu_page() -> Page:
     body += """
 <h2>Phase B 为什么比较 useful bytes</h2>
 <p>PF 先排一次优先级，然后分别构造“全 SU”和“允许 MU”的完整 TTI 计划。两者都按队列实际剩余
-字节截断收益：TBS 超出业务包的 padding 不算谱效收益。若 SU 能传完所有当前队列，强制 SU；否则
+字节截断收益：TBS 超出业务包的 padding 不算谱效收益。若 SU 能传完所有当前可服务队列，强制 SU；否则
 MU useful bytes ≥ SU 时走 MU。这个规则避免在轻载/小包场景为了理论空间复用而引入无意义干扰。</p>
+<section class="toy-example"><h2>Toy example：相关性更低的后到伙伴为什么能胜出</h2>
+<p>PF先固定UE0。更早的UE1吃CorrLoss −5 dB，配对后两人MCS为12/11，密度约3,315.8 B/RBG；
+更晚的UE2只有−1 dB，MCS为17/14，密度约4,701.6 B/RBG。因此选UE2。完整SU计划交付54,285 B，
+MU计划交付79,927 B，最终走MU。若SU在本TTI能清空全部队列，则即使MU数字更高也先走SU——
+因为此时额外空间复用不会减少任何等待。</p></section>
 """
     body += callout(
-        "warn", "50% 话务已经校准，MU 正式收益仍被收敛门阻断",
-        "<p>独立校准阶段以 8 次 replication 搜索到 "
-        "<code>inter_arrival_scale=0.36206688</code>（负载倍率 2.761921），"
-        "参考臂测得平均 PRB 利用率 <strong>50.77%</strong>，命中 50%±3% 目标；随后冻结同一份话务"
-        "给 SU/MU 两臂，避免各臂各自校准污染 A/B。</p>"
-        "<p>但 8/8 个 adaptive-MU pilot 都没有通过 MU OLLA 收敛门，SU OLLA 则全部通过。"
-        "MU 用户 grant share 约 3.3%～12.7%，大多数重复的预期 MU BLER 约 0.07%，远低于 10% 目标。"
-        "因此正式 16 次重复没有启动，当前不能声称 MU 带来体验收益。"
-        "校准与门禁证据分别在 <code>experience_mu_50pct_load_calibration.json</code> 和 "
-        "<code>experience_mu_power_pilot_gate2_diagnostics.json</code>；这也暴露出用户级、非 pair-specific "
-        "MU OLLA 在动态配对下的下一阶段边界。</p>",
+        "warn", "共享 bitmap 修复后，旧 50% MU 证据只保留作历史 provenance",
+        "<p>历史 50% 话务校准和 pilot 产物生成于共享 bitmap 的 "
+        "<code>any/min</code> 提前停止问题修复之前；该问题会系统性压低大包用户获得的 RBG，"
+        "因此旧 grant share、MU BLER、PRB 利用率和校准倍率都不能继续支撑正向或负向结论。</p>"
+        "<p>当前只允许说：正式收益尚未建立。修复后必须重新做独立负载校准，冻结新话务，"
+        "再依次通过 OLLA 收敛、CRN 配对与 Gate 3；在新证据完成前不启动或引用正式收益数字。"
+        "旧 JSON 文件继续保留用于追溯，不作为当前版本门禁输入。</p>",
     )
     body += table(
         ["对象", "当前口径", "常见错误"],
@@ -4074,6 +4386,13 @@ def modes_page() -> Page:
         "两边必须共享 evaluation profile、话务、CSI、功率、warmup 和 KPI 定义。"
         "同名字段若语义不同，结果 JSON 会带 profile/version/notes。</p>",
     )
+    body += """
+<section class="toy-example"><h2>Toy example：同一个1,500 B小包，两种模式回答不同问题</h2>
+<p>capacity模式把当前用户当作持续有数据，问题是“独占全带能达到多少”；它不会因为队列只有
+1,500 B就把剩余RBG让给别人。experience模式先看真实队列，可能只给小包1个RBG，再把其余16个
+分给第二位用户，并记录小包从到达到首次调度的等待。前者适合链路容量基线，后者才回答小包是否
+偷走整个TTI。两者数字不同不是精度差异，也不能直接相减成算法收益。</p></section>
+"""
     body += """
 <h2>为什么要预热</h2>
 <p>例如总仿真 5 s、<code>warmup_s=1</code>：业务、SRS、CSI/PMI、PF 平均和 OLLA 从 0 s 开始运行，
@@ -4231,15 +4550,41 @@ PDCCH/CCE 按已确认范围暂不建模；除此之外，物理 RBG、逐 RBG �
         "最大 grant/UE 控制预算和可选 MU 降 rank，不得藏进“已完成”三个字里。</p>",
     )
     body += """
+<h2>参考串行调度流水线与当前实现的逐段对应</h2>
+<p>当前实现吸收的是资源与决策机制，不是把一套27步产品调度器逐行搬过来。
+下表把“已经等价承载”“按已确认口径重写”和“明确不做”分开，避免看到相同名词就误以为语义完全相同。</p>
+"""
+    body += table(
+        ["参考阶段", "当前对应实现", "状态", "关键差异"],
+        [
+            ("初始化、权值与功控", "build_link_tables + 每TTI只读snapshot", "部分承载",
+             "权值/SINR预计算到快照；没有CA数据分流、HBF实时模拟波束选择"),
+            ("重传/初传优先级", "HARQ first_tti优先 + 一次经典PF排序", "按已确认口径重写",
+             "默认经典PF，不复制来源未明确的EPF α或XR保障队列"),
+            ("逻辑RB与层预算", "ResourceLedger", "核心承载",
+             "物理RBG、layer-PRB与事务完整；PDCCH/CCE和最大grant/UE数未建模"),
+            ("SU串行分配", "_build_su_plan + frequency selector", "核心承载",
+             "按需最小够用RBG并重算单码字TBS；不是固定RBG顺序的原样复刻"),
+            ("空域/频域MU", "_build_mu_plan + MuPairLink + 全伙伴评分", "典型范围承载",
+             "固定两用户rank2；没有五种波束分组、>2用户MU和频域并行单元公式"),
+            ("SU/MU自适应", "两套完整plan比较queue-limited useful bytes", "按用户规则重写",
+             "SU能清空全部队列时强制SU；否则MU≥SU才选MU，不使用固定TBS比值门限"),
+            ("BF、MCS与TBS后处理", "pair link + GrantFinalizer", "核心承载",
+             "统一CQI/BF/CorrLoss/powerLoss/OLLA与冻结HARQ；未做小包降阶、MU后降rank和功率回收"),
+            ("统计与平均速率", "scheduled-TBS PF更新 + KPI/TTI trace", "核心承载",
+             "PF只按本UE实际调度TBS记账；不拿全带潜在速率更新RU"),
+        ],
+    )
+    body += """
 <h2>审查与复现证据</h2>
 """
     body += table(
         ["证据层", "本轮结果", "它证明什么"],
         [
-            ("P0 专项", "8/8 通过（当前树再次运行）", "事务回滚、频选 safety net、Finalizer、MU 后到优选与端到端方向实验"),
+            ("P0 专项", "当前树专项回归通过", "事务回滚、非法mode/重复UE硬失败、频选safety net、Finalizer与MU后到优选"),
             ("系统主回归", "通过（当前树再次运行）", "PF、话务、HARQ、字节/PRB 守恒、SU/MU 选择与 KPI 没被新模块破坏"),
-            ("完整干扰/说明书联动", "通过；最终冻结树实测 477.6 s", "预设、配置白名单、页面默认值、物理/测量域和说明书全链仍闭合"),
-            ("浏览器 QA", "41 页、108 个公式；桌面/平板/手机均通过", "新章节公式、图、精简/详细切换、路由和响应式布局可用"),
+            ("完整干扰/说明书联动", "通过；本轮长回归约519 s", "预设、配置白名单、页面默认值、物理/测量域和说明书全链仍闭合"),
+            ("浏览器 QA", "41页、114个公式；桌面/平板/手机均通过", "公式、图、精简/详细切换、路由和响应式布局可用"),
             ("压力", "10,000 次资源事务；5,720 个频选 grant；6,832 个 MU 候选", "overlap=0，plan/final mismatch=0；同时暴露 MU 全候选计算热点"),
         ],
     )
@@ -4269,6 +4614,15 @@ PDCCH/CCE 按已确认范围暂不建模；除此之外，物理 RBG、逐 RBG �
 <p><code>reserve</code> 后资源立即从事务视图中占用；<code>rollback</code> 必须精确恢复；
 <code>commit</code> 只改变 reservation 状态，不触碰队列。物理 bitmap 重叠属于结构 bug 直接硬失败；
 层数或显式逻辑预算不足属于资源拒绝，进入 KPI 的 rejection reason。</p>
+"""
+    body += callout(
+        "note", "Toy example：RBG不重叠，也可能是非法grant",
+        "<p>先给UE0一个SU grant占RBG0，再给同一UE0另一个SU grant占RBG1。"
+        "两张bitmap没有交集，但若都被执行，队列、HARQ和PF会对同一UE更新两次。"
+        "资源账本现在以<code>duplicate_user_in_tti</code>硬拒绝；未知mode也以"
+        "<code>unknown_mode</code>拒绝。正确做法是把同一UE的RBG合并成一份grant。</p>",
+    )
+    body += """
 <h2>逐 RBG 频选：与 RB 功控彻底解耦</h2>
 """ + F_FREQUENCY_OBJECTIVE
     body += """
@@ -4304,6 +4658,20 @@ PDCCH/CCE 按已确认范围暂不建模；除此之外，物理 RBG、逐 RBG �
 所以最终原因是 <code>MU_useful_bytes_ge_SU</code>。两个用户共享 17 RBG、总层数 4，
 同属 reservation <code>tti0-res0</code>。如果 SU 已能排空全部可服务队列，仍会先走 SU，
 避免为了名义 MU 层数制造无效 padding。</p>
+<h3>Toy example：1,000 B小包与500,000 B大包配成MU</h3>
+"""
+    body += table(
+        ["用户", "队列", "单独满足所需RBG", "共享17 RBG后的useful bytes"],
+        [
+            ("小包UE", "1,000 B", "1", "1,000 B（其余是padding，但不增加PRB占用）"),
+            ("大包UE", "500,000 B", "17且仍未清空", "26,647 B"),
+        ],
+    )
+    body += """
+<p>MU两用户必须共享同一bitmap。旧实现取<code>min(required_rbg)=1</code>，小包一完成就把两位用户
+都移出候选，剩余16 RBG可能直接闲置；这不是“照顾小包”，而是把大包的可用资源丢了。
+现在取<code>min(max(required_rbg), available_rbg)=17</code>：直到两人都满足或资源耗尽。
+该例同时解释了为什么MU的“恰够”条件必须是<strong>两位用户都够</strong>，不能写成任意一人够。</p>
 <h3>伙伴逐个经历什么</h3>
 <ol class="steps"><li><b>1</b><span>是否存在预计算 <code>MuPairLink</code>。</span></li>
 <li><b>2</b><span>相关性是否 ≤ 门限、rank 总层数是否 ≤ 账本上限。</span></li>
@@ -4320,14 +4688,14 @@ HARQ 走同一入口，但 MCS、RBG 数、rank、TBS 用初传冻结值，并�
     body += table(
         ["压力项", "规模", "实测", "结论"],
         [
-            ("资源事务", "10,000 次 reserve/commit/rollback", "0.345 s", "两本账与回滚全通过"),
-            ("SU 频选", "12 UE、1 s、2,000 TTI", "3.00 s", "5,720 grants，overlap/mismatch=0"),
-            ("MU 全伙伴", "8 UE、0.5 s、1,000 TTI", "7.79 s", "6,832 candidates，overlap/mismatch=0"),
+            ("资源事务", "10,000 次 reserve/commit/rollback", "0.357 s", "两本账与回滚全通过"),
+            ("SU 频选", "12 UE、1 s、2,000 TTI", "3.09 s", "5,720 grants，overlap/mismatch=0"),
+            ("MU 全伙伴", "8 UE、0.5 s、1,000 TTI", "7.96 s", "6,832 candidates，overlap/mismatch=0"),
         ],
     )
     body += callout(
         "warn", "MU 全候选频选是当前新热点",
-        "<p>8 UE/0.5 s 已要约 7.8 s；5 s×8 repetitions 应使用进程并行，并把实际 elapsed 写进结果。"
+        "<p>8 UE/0.5 s 已要约8.0 s；5 s×8 repetitions 应使用进程并行，并把实际 elapsed 写进结果。"
         "这不是正确性问题，但说明下一轮最高 ROI 性能工作是缓存/批量化候选前缀，而不是再加伙伴维度。</p>",
     )
     body += table(
@@ -4389,6 +4757,13 @@ def traffic_page() -> Page:
             ("UE profile mix", "改变小/大包比例", "RBG 占用直方图与用户级公平性"),
         ],
     )
+    body += """
+<section class="toy-example"><h2>Toy example：两个CDF标量为什么不是一回事</h2>
+<p>假设包长只取1,000/9,000 B且各50%，平均5,000 B；平均来包间隔100 ms，则单UE offered load
+约为<code>5,000×8/0.1=0.4 Mbps</code>。包长乘0.5后约0.2 Mbps；间隔乘0.5后到达加倍，
+反而约0.8 Mbps。两者都能调负载，但前者改变每包所需RBG/完成时延，后者改变并发队列与MU触发概率，
+所以校准器必须把两个标量分别保存，不能合成一个“业务倍率”。</p></section>
+"""
     body += """
 <h2>按目标 PRB 利用率校准</h2>
 <p><code>target_prb_utilization=0.30</code> 不是把结果字段硬写成 30%。校准器用公共随机数重复运行，
@@ -4590,6 +4965,11 @@ def interference_page() -> Page:
 信号/功率/聚合口径时才有意义；当前 first-party 后端恰好共享“预数字波束、每 RB”参考，
 所以差值可作一致性旁证。项目主契约仍用同一样本的几何 SIR 与 SINR 反解 S/I/N，兼容
 参考面未声明的外部/旧数据。SIR≈SINR 表示干扰可忽略，此时 IoT→0 dB，而不是无穷。</p>
+<section class="toy-example"><h2>Toy example：同一个SINR，先拆清噪声与干扰</h2>
+<p>取S=1、N=0.01、I=0.09：SNR=20 dB，SIR≈10.46 dB，SINR=10 dB；
+IoT=<code>10log10((I+N)/N)=10 dB</code>。若邻区PRB利用率降到30%，只把I缩为0.027，
+新IoT约5.68 dB，而S和N不变。若直接把10 dB SINR乘0.3，既改错了信号也无法重建SIR，
+后续功控和负载比较都会失去物理意义。</p></section>
 <h2>邻区 PRB 负载</h2>
 <p>ChannelHub 几何 SINR默认邻区都在发，相当于 100% 资源负载。系统场景通过
 <code>neighbor_prb_util=η</code> 把干扰项缩为 ηI，同时保持 SIR/SINR 同口径；30% 是默认中载
@@ -4659,6 +5039,13 @@ comparison = rng.compare_replications(run_a, run_b, books_a=books, books_b=books
         "否则 A/B 调度路径一分叉，后续随机数立即错位，公共随机数名存实亡。</p>",
     )
     body += """
+<section class="toy-example"><h2>Toy example：CRN为什么能把算法差异从噪声里拿出来</h2>
+<p>同四个RngRun下，基线吞吐为[100,80,120,90]，候选在同一事件上都提升2，配对差值就是
+[2,2,2,2]。若候选改用独立事件，哪怕边际分布相同，例如[122,92,102,82]，逐项差值会变成
+[22,12,−18,−8]。算法真实效应仍是+2，却被信道/话务 realization淹没。这就是为什么A/B必须
+复用同一(master seed, replication, stream, event index)，而不是只把两个均值拿来相减。</p></section>
+"""
+    body += """
 <h2>两类 workers：生成样本与重复实验</h2>
 <p>static <code>internal_sim</code> 的所有 worker 共享同一个 seed，并用不重叠的
 <code>sample_index_offset</code> 切全局事件流；串行/并行的复信道、SINR、LSP 和 SRS 时序必须
@@ -4715,6 +5102,10 @@ def gates_page() -> Page:
 <h2>门 2：比较口径与统计</h2>
 <p>两臂必须逐样本/逐 replication 可配对，除被测变量外配置一致；优先按独立 drop/position 聚类，
 再对 cluster difference 做置信区间与 Wilcoxon。CI 跨 0、样本不足或 CRN 无法核实时，强结论阻断。</p>
+<section class="toy-example"><h2>Toy example：5次全赢也过不了双侧Wilcoxon 5%门</h2>
+<p>只有5个独立配对且五个差值全为正时，双侧符号/Wilcoxon离散检验可达到的最小p值仍是
+<code>2/2⁵=0.0625</code>，大于0.05。此时“5/5全赢”可以作为方向证据，却不能发布显著提升。
+至少6个独立配对才有理论可能过门；默认8次还要同时查看效应量与95%区间。</p></section>
 <h2>门 3：可发布性</h2>
 <p>生成前锁主指标/基线；报告效应绝对值、相对值、CI、n、检验和适用边界；支持性 KPI 不能替代
 预注册主指标。失败时结论句必须写“不成立/证据不足”，不能用“总体来看”“趋势上”绕门。</p>
@@ -4753,6 +5144,9 @@ SVD vs Type-I 全链路。</p>
 <p><code>analysis.lock()</code> 每次生成新的不可原地修改 prereg 文件；<code>sr_generate</code> 把其 ID
 与摘要绑定进数据集 summary。换指标需要新 prereg 与新数据，不能在同一批结果上挑一个赢的再改名为
 主指标。没有绑定时状态是 <code>unregistered</code>，不是默认 primary；指标方向也必须随合同保持一致。</p>
+<p>这个时间边界由代码硬守：不存在、摘要被改或绑定到另一 Draft 的 prereg 会在信道生成开始前失败；
+<code>register()</code> 只能继承数据集已经绑定的同一 ID，不能事后补绑。期望效应必须是有限正数，自定义
+指标必须带单位，主/次指标不能重复，否则连 prereg JSON 都不会写出。</p>
 <h2>ResultArtifact 锁住数据、顺序、指标与代码版本</h2>
 """ + F_RESULT_CONTRACT + F_CRN
     body += table(
@@ -4760,6 +5154,7 @@ SVD vs Type-I 全链路。</p>
         [
             ("dataset_digest", "同名 dataset_id 的 NPZ 或物理语义 summary 仍可能被替换", "摘要不同，硬阻断"),
             ("ordered sample_ids", "长度相同也可能排序或筛选不同", "报告首个错位及集合是否相同"),
+            ("values shape", "一行必须对应一个样本；二维矩阵没有唯一的flatten语义", "非一维直接拒绝，不替用户猜轴"),
             ("values_sha256", "逐样本值保存在压缩 NPZ，不进入 MCP JSON", "文件内容可复核；非有限值注册时拒绝"),
             ("code_sha256", "三个月后定位真正跑数的脚本版本", "未提供可为空，但复现证据变弱"),
             ("method_metadata", "声明算法超参和 CSI 角色", "外部进程不可观测，缺声明只能告警而不能假装查过"),
@@ -5065,7 +5460,7 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         mapping_rows.append((f'<code>{esc(module.name)}.py</code>', chapter_links, status))
     body += (
         '<details class="api"><summary><code>module → chapter</code>'
-        '<span>展开查看全部 43 个模块的主题章归属</span></summary><div>'
+        f'<span>展开查看全部 {len(modules)} 个模块的主题章归属</span></summary><div>'
         + table(["模块", "详细章节", "状态"], mapping_rows, raw={0, 1, 2})
         + "</div></details>"
     )
@@ -5112,11 +5507,25 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         ("TDD 系统载波", "通用 Type-0 工具被直接暴露给系统入口，使 51/106/273 RB 也会自动变成新的系统口径", "对外冻结 100 MHz@30 kHz、272 RB=17×16；张量宽度与标签任一不符就硬失败；通用工具仅保留为内部数学能力", "fixed-profile 合同 + UI 无 num_rb/rbg_size_config 控件"),
         ("UL→DL 互易映射", "若跟随外部 helper/w_dl 的轴序与共轭约定，数据源演进可悄悄改变发射权", "SuperRAN 版本化 [time,rb,bs,ue] 合同，h_precoding_est=conj(h_ul_est)；新数据忽略 source w_dl，权值由本地 EBF/PEBF/NEBF 重算", "复数逐位哨兵 + 轴形状反例 + source-w_dl 忽略测试"),
         ("SRS 17-hop 所有权", "老化模型运行时调外部 srs_rb_indices，依赖失败时还可退回恒等扫描", "SuperRAN 固化 C_SRS=63/B_SRS=1/b_hop=0 的 0,8,16,...,1,9 序列；只接受 17×16，无外部 helper、无 fallback", "17 跳不重不漏 + 非标 profile 硬失败"),
+        ("SRS 5 ms 三义性", "5 ms可能被同时当作信道snapshot、单腿空口机会和四端口SRS周期；错误到建表深处才暴露", "基础2T4R资源profile只接受10/20/40 ms全局周期；5 ms仅在关闭资源分配的诊断上界中可用", "CsiConfig前门反例 + 129项CSI回归"),
+        ("SRS批量UE身份", "同一cell重复ue_id会命中allocator幂等返回，却在批量结果中被计成两个UE", "批量入口先校验(cell_id,ue_id)唯一；跨cell相同本地UE号仍允许", "同cell拒绝/跨cell允许反例"),
+        ("SRS lag文档公式", "公式把处理时延从t-lastSRS中减掉，与代码‘选择已处理完成的最近测量’相反", "先求max{t_m:t_m+D_proc≤t}，再令staleness=t-t_m并向上量化snapshot", "周期边界因果测试 + 公式语义哨兵"),
         ("PF 平均速率", "按需 1 RBG 用户若用全带 best_se 记账会被约 17×过罚", "默认用实际 scheduled TBS credit，ACK bytes 只作独立 KPI", "确定性反控：小包均值等待 +0.9525 ms、P95 +9.5 ms；真实 mixed 差异为 0 并被 Gate 3 拦截"),
         ("比较样本独立性", "80 个 snapshot 被直接当 80 个独立统计样本，但实际只有 10 个 UE 位置；实现修正后，test_gates 的旧断言仍期待 raw n=30", "内置 compare_arms 先按 UE position 聚类；回归改为期待 10 个独立位置，并反向断言 n 必须小于 30 个快照", "Hello World 80→10；Gate E2E 30→10；主实验 CI 跨零、Wilcoxon p=0.846"),
         ("并行 worker 上限", "请求 worker 数超过 UE batch 数时会产生空块/额外 spawn，并让并行摘要看起来像真的使用了全部 worker", "worker 数钳到实际 UE batch 数并写 parallel.cap_reason，不改变样本、seed 或排序", "worker cap 合同测试"),
-        ("MU 50% 正式门禁", "只看单次 PRB 利用率或 MU grant 数就可能在 OLLA 未稳态时报告虚假收益", "独立 8-rep 校准后冻结 50.77% 话务；8/8 MU pilot 未收敛即停止，不启动正式 16-rep A/B", "Gate 1 全过；Gate 2 正确 fail；无正式收益结论"),
+        ("MU 50% 旧证据失效", "共享 bitmap 修复前的 any/min 会让小包先满足时提前停分，旧 grant share、BLER 与负载校准均带实现偏差", "旧 JSON 仅保留 provenance；修后重新校准、冻结话务并过 OLLA/CRN/Gate 3", "当前无正向或负向正式收益结论"),
+        ("SRS 请求/生效周期", "allocator 已把 69+ UE 全局周期升到20/40 ms，结果摘要仍按请求下限10 ms报告老化", "从逐UE assignment 提取唯一 effective period；结果同时保存 requested/effective config；0 km/h 不再被 or 3.0 覆盖", "69 UE 周期与0 km/h行为测试"),
+        ("单小区资源池身份", "关闭RB功控时不读取 serving_cell_index，不同小区UE可被合进同一272-RB池", "serving-cell校验独立于功控；多小区缺身份或多 serving cell 一律硬失败", "sr_system_sim 功控关闭反例"),
+        ("SU 清空可服务队列", "任一outage或错slot HARQ backlog会把 clears_all_queues 置假，平票错误转MU", "清空分母只含当TTI serviceable candidates；blocked backlog单独诊断", "两条100B队列+一个阻塞UE反例"),
+        ("频选全带/剩余池审计", "fits_in_fullband实际只在当前available上计算，potential又沿用频选前宽带MCS", "保留全载波池 required/fits/potential，并新增 remaining-pool required/fits 字段", "30/-20 dB两用户竞争反例"),
         ("BLER/TDD 极端输入", "NaN/−Inf SINR 插值可能传播非有限 KPI，+Inf 可能误落低端；纯 UUU pattern 又让下行统计分母失真", "NaN/−Inf 保守判 BLER=1、+Inf 走高端曲线；TDD pattern 必须至少含一个 D/S 机会", "边界单测 + 系统合同"),
+        ("CQI/有效SINR非有限值", "+Inf CQI被量化成CQI0；MIESM/EESM又会静默丢掉NaN/Inf RB后只算剩余好RB", "+Inf CQI明确到最高档，NaN/−Inf保守；有效SINR要求所有RB有限，否则硬失败", "15,006个MCS/CQI网格点 + 空/非有限RB反例"),
+        ("多UE样本身份", "旧数据缺ue_id时仍按样本序号轮转归组，可能把不同UE混在一起", "n_ue>1时逐样本ue_id缺失、非整数、数量不等或轮转错位全部硬失败", "sr_system_sim行为测试9/9"),
+        ("Gate 1来源标签完整性", "对象只有一条有利CSI来源标签、却没有n或h_est样本数时会被当作完整并通过", "样本总数不可核验即block；必须逐样本标签数量与n/h_est第一轴严格相等", "来源正确/错误/缺行/总数未知四反例"),
+        ("预注册时间边界", "不存在/篡改的prereg仍会在生成结束后写error；register还可事后补绑任意prereg_id", "生成前验证存在性/digest/draft并硬失败；ResultArtifact只能继承数据集已绑定的同一id", "预注册前门 + 不存在/跨draft/事后换绑反例"),
+        ("KPI严格JSON", "NumPy ndarray在导出层item()失败后被str()成一段文本，数组结构静默丢失", "ndarray递归转list、NumPy标量转Python标量、NaN/Inf显式null", "系统第16章导出反例"),
+        ("全量测试矩阵漏项", "--tier full仍是旧21文件清单，新SRS资源与调度P0测试没有被运行", "QUICK/PHYSICS登记全部25个test_*.py；启动前检查缺失、重复和失效文件并硬失败", "文档回归逐文件对账 + full matrix"),
+        ("replication删样", "KpiStat只保留有限值却不报告原始总数；配对API还会flatten二维数组并由统计层删除NaN行", "单臂输出n_total/n_nonfinite/coverage；A/B只接受非空一维全有限数组", "2/3覆盖toy + 二维/NaN配对反例"),
         ("文档合同漂移", "33/34 tools、273/272 RB、17/18 Gate、默认弹浏览器等旧说法", "README/Skill/算法卡与源码统一，并加语义哨兵", "test_interference"),
         ("说明书 RB 粒度合同", "独立 algo_defs2 页面仍宣称‘RB 级没有算法使用’，与已上线的逐 RB 功控精确路径矛盾；且未说明几何量的预数字波束参考面", "明确区分功控关闭的中心 RB 快路径与功控开启的 272-RB→post-MMSE→RBG 路径，并写出 prebeam/per-RB/EESM 边界", "说明书关键短语哨兵 + 完整 interference 回归"),
         ("代码根/场景资产根", "当前 MSG-Platform 代码可用但不带 configs/scenes，能力探测报 Sionna 可用而场景列表为 0", "代码与资产独立发现；SUPERRAN_SCENES 可显式覆盖，候选目录必须真的含 JSON 才接受", "10 场景恢复 + prepare_scene 资产回归"),
@@ -5131,12 +5540,13 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         "<p>本轮新增的体验随机属性压力覆盖 18 个 case×12 条不变量，共 <strong>216/216</strong>；"
         "话务校准压力覆盖 5 类边界，共 <strong>40/40</strong>。<code>test_system.py</code> 的 14 个章节全部通过，"
         "其中包含 100,000 TTI×8 UE；<code>test_rng.py</code> 为 <strong>125/125</strong>；"
-        "MU、物理不变量与开发手册定向回归均通过。MSG-Platform 的多 UE static 位置轮转回归也已通过。</p>"
+        "MU、物理不变量与开发手册定向回归均通过；外部信道源只作为可替换输入适配器，不作为本仓测试计数或算法真相源。</p>"
         "<p>这些证据证明合同、守恒、机制反例与边界处理，不等价于所有性能假设已经成立。"
         "SRS/PMI Hello World 的 Gate 3 仍阻断，50% MU pilot 的 Gate 2 仍阻断；实测方向图、"
-        "完整 Type-I 多层码本和现场标定的 EESM/MIESM 仍是外部校准边界。主手册浏览器 QA 已覆盖"
-        "桌面/平板/手机：38/38 页、89/89 个 KaTeX 公式、276 条路由、36 张图、0 px 页面级溢出、"
-        "0 个控制台错误；真实 KPI 工作台另通过双 Tab 点击、桌面/手机与 19 个用户指标面板检查。</p>",
+        "完整 Type-I 多层码本和现场标定的 EESM/MIESM 仍是外部校准边界。主手册的页数、模块数、"
+        "公式数和测试文件数由构建器实时扫描；桌面/平板/手机的路由、KaTeX、图形、溢出与控制台错误"
+        "由 <code>artifacts/developer-guide-qa/qa.json</code> 记录，禁止再把某次人工计数写成永久事实。"
+        "真实 KPI 工作台另做 Tab 点击、桌面/手机与用户指标面板检查。</p>",
     )
     return Page(
         "tests", "测试、压力验证与本次审计", "可信度", "VERIFICATION",
@@ -5379,7 +5789,7 @@ details.api,details.preset{border:1px solid var(--line);background:var(--paper);
 @media(max-width:820px){.menu-btn{display:inline-block}.brand{width:auto;flex:1}.brand-text{display:none}.topbar{padding:0 10px}.search-wrap{position:absolute;left:57px;right:174px}.kbd{display:none}.sidebar{transform:translateX(-102%);transition:transform .2s ease;box-shadow:var(--shadow)}body.menu-open .sidebar{transform:none}.backdrop{display:block;position:fixed;inset:var(--header-h) 0 0;background:rgba(0,0,0,.38);z-index:19;opacity:0;pointer-events:none;transition:opacity .2s}body.menu-open .backdrop{opacity:1;pointer-events:auto}.main{margin-left:0;padding:calc(var(--header-h) + 30px) 22px 70px}.search-panel{left:12px;right:12px;width:auto}.page-hero h1{font-size:36px}.lead{font-size:17px}.surface-grid{grid-template-columns:1fr}.surface-copy{min-height:0;margin-bottom:14px}html[data-reading-mode="detailed"] .formula-card{grid-template-columns:1fr}html[data-reading-mode="detailed"] .formula-expression{position:static}html[data-reading-mode="detailed"] .formula-explain{border-left:0;border-top:3px solid var(--brand);padding:14px 0 0}.detail-checks{grid-template-columns:1fr}}
 @media(max-width:820px){.paths-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:500px){.main{padding-left:15px;padding-right:15px}.top-actions .print-btn{display:none}.depth-top{padding:0;width:38px;font-size:0;gap:4px}.depth-top:after{content:"详";font-size:12px}.depth-top[aria-pressed="true"]:after{content:"简"}.search-wrap{right:100px}.page-hero h1{font-size:31px}.metrics{grid-template-columns:1fr 1fr}.metric b{font-size:20px}.product-showcase{padding:17px;margin-left:-4px;margin-right:-4px}.product-showcase-head h2,.hello-world h2{font-size:25px}.surface-card{padding:11px}.mock-spec-grid{grid-template-columns:1fr}.mock-topology{min-height:120px}.mock-priority{grid-template-columns:1fr}.mock-priority span{grid-column:1;grid-row:auto}.hello-world{padding:20px}.callout{grid-template-columns:27px 1fr;padding:14px}.page-nav{grid-template-columns:1fr}.glossary>div{grid-template-columns:1fr;gap:4px}.diagram{margin-left:-5px;margin-right:-5px;padding:8px}.diagram::before{content:"\2194  \5de6\53f3\6ed1\52a8\67e5\770b\5b8c\6574\56fe";display:block;position:sticky;left:0;width:max-content;margin:0 0 7px;padding:4px 8px;border:1px solid var(--line);border-radius:999px;background:var(--paper);color:var(--muted);font-size:11px;letter-spacing:.02em}.table-wrap{margin-left:-4px;margin-right:-4px}.page-nav a.next{text-align:left}.reading-control{width:100%;align-items:flex-start}.reading-status{flex-basis:100%}.detail-opening,.worked-example{padding:19px}.symbol-list>div{grid-template-columns:1fr;gap:2px}}
-@media(max-width:500px){.paths-grid{grid-template-columns:1fr}.paths-grid a{min-height:0}}
+@media(max-width:500px){.doc-page{overflow-x:hidden}.formula-expression .katex{font-size:.9em}.diagram{margin-left:0;margin-right:0}.paths-grid{grid-template-columns:1fr}.paths-grid a{min-height:0}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
 @media print{.topbar,.sidebar,.toc,.search-panel,.backdrop,.page-nav,.heading-link,.reading-control{display:none!important}.main{margin:0;padding:0}.doc-page[hidden]{display:block!important;page-break-before:always}.doc-page:first-child{page-break-before:auto}.diagram,.metric,.callout,details,.formula-card,.surface-card,.hello-world{break-inside:avoid;box-shadow:none}details>div{display:block!important}body{background:#fff;color:#111}.page-hero{padding-top:15mm}html[data-reading-mode="detailed"] .formula-card{display:block}html[data-reading-mode="detailed"] .formula-explain{margin-top:8px}}
 """

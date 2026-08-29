@@ -140,9 +140,13 @@ def effective_sinr(
     逐 MCS 标定；这里的默认值按调制阶数分组，是近似，用前请自行标定。
     """
     g = np.asarray(sinr_db, dtype=float).ravel()
-    g = g[np.isfinite(g)]
     if g.size == 0:
-        return float("nan")
+        raise ValueError("sinr_db 不能为空")
+    if not np.all(np.isfinite(g)):
+        raise ValueError(
+            "sinr_db 的每个 RB 都必须是有限值；不能静默丢弃 NaN/Inf 后"
+            "用剩余好 RB 计算有效 SINR"
+        )
 
     if method == "miesm":
         mi = qam_mi(m_order, g)
@@ -837,8 +841,10 @@ def select_internal_cqi(
     if not (math.isfinite(target) and 0.0 < target < 1.0):
         raise ValueError(f"target_bler must be in (0,1), got {target_bler!r}")
     value = float(sinr_eff_db)
-    if not math.isfinite(value):
+    if math.isnan(value) or value == float("-inf"):
         return 0
+    if value == float("inf"):
+        return len(INTERNAL_CQI_TO_MCS) - 1
     best = 0
     for cqi, threshold in enumerate(_internal_cqi_thresholds(target, int(mcs_table))):
         if threshold <= value:
@@ -857,8 +863,10 @@ def select_reported_cqi(
     if not (math.isfinite(target) and 0.0 < target < 1.0):
         raise ValueError(f"target_bler must be in (0,1), got {target_bler!r}")
     value = float(sinr_eff_db)
-    if not math.isfinite(value):
+    if math.isnan(value) or value == float("-inf"):
         return 0
+    if value == float("inf"):
+        return len(INTERNAL_CQI_TO_MCS)
     thresholds = _internal_cqi_thresholds(target, int(mcs_table))
     if value < thresholds[0]:
         return 0
@@ -1487,9 +1495,11 @@ def link_adaptation(
     if max_harq_tx not in (1, 2):
         raise ValueError("SuperRAN 只允许初传 + 最多一次重传（max_harq_tx=1/2）")
     g = np.asarray(sinr_per_rb_db, dtype=float).ravel()
-    g = g[np.isfinite(g)]
     if g.size == 0:
-        raise ValueError("sinr_per_rb_db 里没有有效值")
+        raise ValueError("sinr_per_rb_db 不能为空")
+    if not np.all(np.isfinite(g)):
+        raise ValueError(
+            "sinr_per_rb_db 每个 RB 都必须有限；禁止删除坏 RB 后只用剩余好 RB")
 
     n_re = re_per_slot(n_prb, n_symbols=n_symbols)
     n_layers = max(1, int(layers))

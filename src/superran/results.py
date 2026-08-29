@@ -120,6 +120,12 @@ def sample_ids(dataset_id: str, n: int) -> list[str]:
     两臂只要都用 ``ds.sample_ids()`` 取，顺序天然一致。
     带上 dataset_id 是为了跨数据集也能一眼看出错配。
     """
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)):
+        raise ValueError("n 必须是非负整数")
+    if int(n) < 0:
+        raise ValueError("n 必须是非负整数")
+    if not isinstance(dataset_id, str) or not dataset_id.strip():
+        raise ValueError("dataset_id 必须是非空字符串")
     return [f"{dataset_id}#{i}" for i in range(int(n))]
 
 
@@ -195,15 +201,29 @@ def register(
     """
     from . import analysis as an
 
-    v = np.asarray(values, dtype=float).ravel()
+    raw_values = np.asarray(values, dtype=float)
+    if raw_values.ndim != 1:
+        raise ValueError(
+            f"values 必须是一维逐样本数组，收到 shape={raw_values.shape}；"
+            "禁止静默 flatten 后改变样本语义"
+        )
+    v = raw_values
     if v.size == 0:
         raise ValueError("values 是空的")
+    if not isinstance(arm_name, str) or not arm_name.strip():
+        raise ValueError("arm_name 必须是非空字符串")
+    if not isinstance(metric, str) or not metric.strip():
+        raise ValueError("metric 必须是非空字符串")
 
     ds_digest = dataset_digest(dataset_id)
     summary = json.loads((dataset_dir(dataset_id) / "summary.json").read_text(encoding="utf-8"))
     n_ds = int(summary.get("num_samples") or summary.get("shape", {}).get("N") or 0)
 
-    sids = list(ids) if ids is not None else sample_ids(dataset_id, v.size)
+    if ids is not None and (
+            not isinstance(ids, list)
+            or any(not isinstance(value, str) or not value for value in ids)):
+        raise ValueError("ids 必须是非空字符串数组")
+    sids = list(ids) if ids is not None else sample_ids(dataset_id, int(v.size))
     if len(sids) != v.size:
         raise ValueError(f"sample_ids 与 values 长度不符：{len(sids)} vs {v.size}")
     if len(set(sids)) != len(sids):
@@ -215,6 +235,14 @@ def register(
             f"values 长度 {v.size} 与数据集样本数 {n_ds} 不符。"
             f"只算了一部分样本时请显式传 ids=，否则两臂会错位对齐"
         )
+    if ids is not None and n_ds:
+        valid_ids = set(sample_ids(dataset_id, n_ds))
+        unknown = [value for value in sids if value not in valid_ids]
+        if unknown:
+            raise ValueError(
+                "显式 ids 必须是当前数据集逐样本 ID 的子集；"
+                f"发现 {len(unknown)} 个越界/跨数据集 ID，首个为 {unknown[0]!r}"
+            )
 
     n_bad = int((~np.isfinite(v)).sum())
     if n_bad:
@@ -223,25 +251,44 @@ def register(
             f"配对检验会把它们整行丢掉，导致两臂样本数悄悄变少——请先处理"
         )
 
-    unit = metric_unit or an.KNOWN_METRICS.get(metric, "")
+    metric_name = metric.strip()
+    unit = metric_unit if metric_unit is not None else an.KNOWN_METRICS.get(
+        metric_name, "")
+    if not isinstance(unit, str) or not unit.strip():
+        raise ValueError(
+            f"未知指标 {metric_name!r} 必须显式给 metric_unit；单位不能为空"
+        )
+    unit = unit.strip()
     rid = "res_" + uuid.uuid4().hex[:8]
     out = results_dir() / f"{rid}.npz"
     np.savez_compressed(out, values=v, sample_ids=np.asarray(sids, dtype=object).astype(str))
 
     pr_digest = None
+    bound_prereg = summary.get("prereg") or {}
     if prereg_id:
-        pr_digest = an.load(prereg_id).digest
-    elif summary.get("prereg", {}).get("prereg_id"):
+        if bound_prereg.get("prereg_id") != prereg_id:
+            raise ValueError(
+                "结果只能继承数据生成前绑定的 prereg_id；"
+                "禁止在看完数据后于 register 阶段补绑或换绑预注册"
+            )
+        bound = an.load(prereg_id)
+        if not an.verify(bound) or bound_prereg.get("digest") != bound.digest:
+            raise ValueError("数据集绑定的预注册摘要不可核验或已被修改")
+        pr_digest = bound.digest
+    elif bound_prereg.get("prereg_id"):
         # 数据集生成时绑过预注册，直接继承——用户不必重复传
-        prereg_id = summary["prereg"]["prereg_id"]
-        pr_digest = summary["prereg"].get("digest")
+        prereg_id = bound_prereg["prereg_id"]
+        bound = an.load(prereg_id)
+        if not an.verify(bound) or bound_prereg.get("digest") != bound.digest:
+            raise ValueError("数据集绑定的预注册摘要不可核验或已被修改")
+        pr_digest = bound.digest
 
     art = ResultArtifact(
         result_id=rid,
         dataset_id=dataset_id,
         dataset_digest=ds_digest,
-        arm_name=str(arm_name),
-        metric=str(metric),
+        arm_name=arm_name.strip(),
+        metric=metric_name,
         metric_unit=unit,
         n=int(v.size),
         values_path=str(out),

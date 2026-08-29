@@ -116,14 +116,17 @@ def srs_config(
     b_hop: int = 0,
     comb: int = 2,
     n_rrc: int = 0,
-    periodicity: int = 10,
+    periodicity: int = 20,
     offset: int = 0,
-    n_ports: int = 1,
+    n_ports: int = 2,
+    frequency_resource_id: int = 0,
 ) -> dict[str, Any]:
     """SRS 资源配置与跳频参数（38.211 §6.4.1.4）。
 
     跳频当前只支持预置 100 MHz profile：272 RB、C_SRS=63、B_SRS=1、
-    b_hop=0、n_RRC=0，每次 16 RB、17 跳覆盖全带。其他跳频组合直接拒绝，
+    b_hop=0、n_RRC=0，每次 16 RB、17 跳覆盖全带。一个资源承载2个
+    SRS端口；2T4R终端用相邻两个SRS机会分别发送端口对(0,1)/(2,3)，
+    完成两腿后才推进一次跳频索引。其他跳频组合直接拒绝，
     避免看似成功却套用了未验证的资源映射。非跳频配置仍保留为链路级工具。
     返回里的 ``hopping_cycle_length`` 是跳完整个带宽所需的 SRS 发送次数——
     信道老化分析要用它换算总的获取时延：
@@ -139,7 +142,7 @@ def srs_config(
             ("num_rb", num_rb), ("c_srs", c_srs), ("b_srs", b_srs),
             ("b_hop", b_hop), ("n_rrc", n_rrc), ("comb", comb),
             ("periodicity", periodicity), ("offset", offset),
-            ("n_ports", n_ports),
+            ("n_ports", n_ports), ("frequency_resource_id", frequency_resource_id),
         ):
             if value is None and name == "c_srs":
                 continue
@@ -149,8 +152,23 @@ def srs_config(
                 raise ValueError(f"{name} 必须是整数")
         if int(comb) not in (2, 4):
             raise ValueError("comb 只支持 2 / 4")
-        if int(periodicity) < 1 or int(offset) < 0 or int(n_ports) < 1:
-            raise ValueError("periodicity/n_ports 必须为正整数，offset 必须为非负整数")
+        if int(periodicity) not in (20, 40, 80):
+            raise ValueError(
+                "预置2T4R 17-hop资源的periodicity只支持20/40/80 slots"
+                "（30 kHz下10/20/40 ms全局周期）"
+            )
+        if not 0 <= int(offset) < int(periodicity) or int(n_ports) < 1:
+            raise ValueError(
+                "n_ports必须为正整数，offset必须位于[0, periodicity)"
+            )
+        if int(n_ports) != 2:
+            raise ValueError(
+                "预置17-hop资源的单次SRS只支持2 ports；2T4R通过两个相邻"
+                "SRS机会完成，不能把4个逻辑天线端口同时发送"
+            )
+        if not 0 <= int(frequency_resource_id) < hw.COMPANY_NUM_RBG:
+            raise ValueError(
+                f"frequency_resource_id只支持0..{hw.COMPANY_NUM_RBG - 1}")
         actual = {
             "num_rb": int(num_rb),
             "c_srs": hw.COMPANY_SRS_C_SRS if c_srs is None else int(c_srs),
@@ -171,7 +189,9 @@ def srs_config(
                 "C_SRS=63 / B_SRS=1 / b_hop=0 / n_RRC=0 的 17-hop profile；"
                 f"实得 {actual}"
             )
-        order = list(hw.COMPANY_SRS_17_HOP_ORDER_RBG)
+        base_order = list(hw.COMPANY_SRS_17_HOP_ORDER_RBG)
+        phase = int(frequency_resource_id)
+        order = base_order[phase:] + base_order[:phase]
         return {
             "profile_id": hw.SUPERRAN_SRS_HOPPING_PROFILE_ID,
             "source": "SuperRAN-owned fixed 38.211 profile",
@@ -180,24 +200,41 @@ def srs_config(
             "b_srs": hw.COMPANY_SRS_B_SRS,
             "b_hop": hw.COMPANY_SRS_B_HOP,
             "n_rrc": hw.COMPANY_SRS_N_RRC,
+            "frequency_resource_id": phase,
             "comb": int(comb),
             "periodicity_slots": int(periodicity),
             "offset_slots": int(offset),
             "n_ports": int(n_ports),
+            "logical_antenna_ports": hw.COMPANY_SRS_LOGICAL_ANTENNA_PORTS,
+            "tx_ports_per_occasion": hw.COMPANY_SRS_TX_PORTS_PER_OCCASION,
+            "configured_cyclic_shift_count": hw.COMPANY_SRS_CONFIGURED_CS,
+            "cyclic_shift_blocks": [[0, 1], [2, 3]],
+            "antenna_port_groups": [[0, 1], [2, 3]],
+            "srs_resources_per_ue": hw.COMPANY_SRS_RESOURCES_PER_UE,
+            "second_resource_offset_slots": (
+                int(offset) + 10) % int(periodicity),
+            "hop_advance": "after_both_2port_resources",
             "hopping_enabled": True,
             "hopping_cycle_length": len(order),
+            "srs_transmissions_per_full_4port_sweep": 2 * len(order),
             "hop_order_rbg": order,
             "rb_per_hop": hw.COMPANY_RB_PER_RBG,
             "coverage_ratio": round(
                 hw.COMPANY_RB_PER_RBG / hw.COMPANY_NUM_RB, 3
             ),
-            "first_hop_rb_range": [0, hw.COMPANY_RB_PER_RBG - 1],
+            "first_hop_rb_range": [
+                order[0] * hw.COMPANY_RB_PER_RBG,
+                (order[0] + 1) * hw.COMPANY_RB_PER_RBG - 1],
             "note": (
-                "固定 17-hop 轮转；一次测 16 RB，17 次 SRS 机会覆盖 272 RB。"
-                "获取时延需计入 hopping_cycle_length × periodicity × 时隙长度。"
+                "固定17-hop轮转；每个RBG先用两个相邻SRS机会分别测量两对"
+                "UE天线，再推进hop。完整64x4全带需要17个配对周期/34次2-port"
+                "发送；时间跨度仍按17 × 资源周期计算，并额外保留两腿5 ms偏差。"
             ),
         }
 
+    if int(frequency_resource_id) != 0:
+        raise ValueError(
+            "不跳频配置只有frequency_resource_id=0；不存在17档频域相位")
     _ensure_path()
     from msg_embedding.ref_signals.srs import (  # noqa: PLC0415
         SRSResourceConfig,

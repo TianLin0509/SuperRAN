@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 import zlib
 from collections import deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -453,6 +453,8 @@ class Allocation:
     required_rbg: int
     fits_in_fullband: bool
     potential_fullband_bytes: int
+    required_rbg_from_remaining_pool: int
+    fits_in_remaining_pool: bool
     pf_average_before_bytes: float
     scheduler_metric: float
     base_tx_sinr_db: float
@@ -620,6 +622,8 @@ class _PlannedGrant:
     tbs_bytes: tuple[int, ...]
     useful_bytes: tuple[int, ...]
     potential_fullband_bytes: tuple[int, ...]
+    required_rbg_from_remaining_pool: tuple[int, ...] = ()
+    fits_in_remaining_pool: tuple[bool, ...] = ()
     pair_correlation: float | None = None
     candidate_score: float | None = None
     candidate_count: int = 0
@@ -1081,6 +1085,44 @@ def _frequency_mu_values(
     return out
 
 
+def _frequency_pool_audit(
+    indices: Sequence[int], score: Sequence[float], *, cursor: int,
+    evaluate: Callable[[tuple[int, ...]], Any],
+    tbs_of: Callable[[Any], int], queue_bytes: int,
+) -> tuple[int, bool, int]:
+    """Audit minimum sufficient RBGs and maximum TBS on one resource pool.
+
+    Frequency-aware MCS can change when another RBG joins the bitmap, so TBS is
+    not assumed monotonic in prefix length.  Examine the same sequential and
+    quality prefixes as the selector, deduplicate identical bitmaps, and keep
+    the smallest fitting count plus the maximum achievable TBS.
+    """
+    pool = tuple(int(value) for value in indices)
+    if not pool:
+        raise ValueError("frequency audit pool cannot be empty")
+    orders = (
+        sfreq.rotated_order(pool, cursor=cursor, total_rbg=len(score)),
+        sfreq.quality_order(pool, score, cursor=cursor),
+    )
+    seen: set[frozenset[int]] = set()
+    rows: list[tuple[int, int]] = []
+    for order in orders:
+        for count in range(1, len(order) + 1):
+            bitmap = tuple(order[:count])
+            key = frozenset(bitmap)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append((count, int(tbs_of(evaluate(bitmap)))))
+    potential = max(tbs for _count, tbs in rows)
+    fitting = [count for count, tbs in rows if tbs >= int(queue_bytes)]
+    return (
+        min(fitting) if fitting else len(pool),
+        bool(fitting),
+        int(potential),
+    )
+
+
 def _build_su_plan(
     ordered_users: Sequence[int], *, queue_bytes: dict[int, int],
     lookup: TbsLookup, slot: str, num_rbg: int,
@@ -1108,15 +1150,19 @@ def _build_su_plan(
         frequency_incremental = 0
         frequency_evaluated = 0
         frequency_source = "wideband_or_sequential"
+        full_need = remaining_need = int(num_rbg)
+        full_fits = remaining_fits = False
+        full_potential = int(potential_of[u])
         if pending is not None:
             if q < int(pending.payload_bytes):
                 raise RuntimeError(
                     f"UE {u} HARQ 队列只剩 {q} B，小于冻结 payload "
                     f"{pending.payload_bytes} B")
-            need, fits = int(pending.n_rbg), True
-            if need > remaining:
+            full_need = remaining_need = int(pending.n_rbg)
+            full_fits = remaining_fits = True
+            if remaining_need > remaining:
                 continue
-            n = need
+            n = remaining_need
             if frequency_aware:
                 if tables[u].sinr_rbg_db is None:
                     raise ValueError("频选重传需要逐 RBG true SINR")
@@ -1157,6 +1203,7 @@ def _build_su_plan(
             if base_rows is None:
                 raise ValueError("频选调度需要逐 RBG predicted SINR")
             score = np.asarray(base_rows[snap, rank - 1], dtype=float)
+            trial_cache: dict[tuple[int, ...], dict[str, Any]] = {}
 
             def _evaluate_su(
                 indices_value: tuple[int, ...],
@@ -1165,15 +1212,21 @@ def _build_su_plan(
                 rank_value: int = rank,
                 user_value: int = u,
                 queue_value: int = q,
+                cache: dict[tuple[int, ...], dict[str, Any]] = trial_cache,
             ) -> dict[str, Any]:
+                key = tuple(sorted(int(value) for value in indices_value))
+                cached = cache.get(key)
+                if cached is not None:
+                    return cached
                 trial = _frequency_su_values(
                     table=table_value, snap=snap, rank=rank_value,
-                    indices=indices_value,
+                    indices=key,
                     olla_db=float(su_olla_db[user_value]),
                     olla_enabled=olla_enabled,
                     lookup=lookup, slot=slot)
                 trial["useful_bytes"] = (
                     min(queue_value, int(trial["tbs"])),)
+                cache[key] = trial
                 return trial
 
             selection = sfreq.select_frequency_subset(
@@ -1184,8 +1237,17 @@ def _build_su_plan(
             indices = tuple(selection.selected_indices)
             n = len(indices)
             values = selection.selected_grant
-            fits = int(values["tbs"]) >= q
-            need = n if fits else int(num_rbg)
+            remaining_need, remaining_fits, _remaining_potential = (
+                _frequency_pool_audit(
+                    tuple(available), score, cursor=cursor,
+                    evaluate=_evaluate_su,
+                    tbs_of=lambda trial: int(trial["tbs"]),
+                    queue_bytes=q))
+            full_need, full_fits, full_potential = _frequency_pool_audit(
+                tuple(range(int(num_rbg))), score, cursor=cursor,
+                evaluate=_evaluate_su,
+                tbs_of=lambda trial: int(trial["tbs"]),
+                queue_bytes=q)
             frequency_score_gain = float(selection.selection_score_gain)
             frequency_incremental = int(selection.incremental_useful_bytes)
             frequency_evaluated = int(selection.evaluated_subset_count)
@@ -1197,11 +1259,14 @@ def _build_su_plan(
             true_sinr = float(values["true"])
         else:
             full_order = _grant_indices(cursor, offset, num_rbg, num_rbg)
-            need, fits = lookup.required_rbg_for_indices(
+            full_need, full_fits = lookup.required_rbg_for_indices(
                 slot, mcs, rank, q, full_order)
-            n = min(int(need), remaining)
-            indices = tuple(sfreq.rotated_order(
-                tuple(available), cursor=cursor, total_rbg=num_rbg)[:n])
+            remaining_order = sfreq.rotated_order(
+                tuple(available), cursor=cursor, total_rbg=num_rbg)
+            remaining_need, remaining_fits = lookup.required_rbg_for_indices(
+                slot, mcs, rank, q, remaining_order)
+            n = min(int(remaining_need), remaining)
+            indices = tuple(remaining_order[:n])
             tbs = lookup.tbs_bytes_for_indices(slot, mcs, rank, indices)
             base_tx = float(base_tx_sinr_of[u])
             no_olla_mcs = int(mcs_without_olla_of[u])
@@ -1216,10 +1281,12 @@ def _build_su_plan(
             base_tx_sinr_db=(base_tx,),
             mcs_without_olla=(no_olla_mcs,),
             true_sinr_db=(true_sinr,), corr_loss_db=(0.0,),
-            power_loss_db=0.0, required_rbg=(int(need),),
-            fits_in_fullband=(bool(fits),), tbs_bytes=(int(tbs),),
+            power_loss_db=0.0, required_rbg=(int(full_need),),
+            fits_in_fullband=(bool(full_fits),), tbs_bytes=(int(tbs),),
             useful_bytes=(int(useful),),
-            potential_fullband_bytes=(int(potential_of[u]),),
+            potential_fullband_bytes=(int(full_potential),),
+            required_rbg_from_remaining_pool=(int(remaining_need),),
+            fits_in_remaining_pool=(bool(remaining_fits),),
             frequency_selection_score_gain=frequency_score_gain,
             frequency_incremental_useful_bytes=frequency_incremental,
             frequency_evaluated_subsets=frequency_evaluated,
@@ -1231,7 +1298,10 @@ def _build_su_plan(
     return _TtiPlan(
         name="SU", grants=tuple(grants), useful_bytes=useful_total,
         used_rbg=int(num_rbg) - remaining, has_mu=False,
-        clears_all_queues=(not blocked_data and useful_total == total_q))
+        # ``total_q``只含本 TTI 的 serviceable candidates。outage UE 或错
+        # slot HARQ 已在 cand 前门排除，不能再用系统别处的 blocked backlog
+        # 否决“SU 清空全部可服务队列则强制 SU”的产品合同。
+        clears_all_queues=(useful_total == total_q))
 
 
 def _build_mu_plan(
@@ -1264,6 +1334,9 @@ def _build_mu_plan(
         incremental = 0
         evaluated = 0
         source = "wideband_or_sequential"
+        full_need = remaining_need = int(num_rbg)
+        full_fits = remaining_fits = False
+        full_potential = int(potential_of[user])
         if frequency_aware:
             table = tables[user]
             base_rows = (table.sinr_tx_rbg_db if table.sinr_tx_rbg_db is not None
@@ -1271,13 +1344,19 @@ def _build_mu_plan(
             if base_rows is None:
                 raise ValueError("频选调度需要逐 RBG predicted SINR")
             score = np.asarray(base_rows[snap, rank - 1], dtype=float)
+            trial_cache: dict[tuple[int, ...], dict[str, Any]] = {}
 
             def _evaluate(indices_value: tuple[int, ...]) -> dict[str, Any]:
+                key = tuple(sorted(int(value) for value in indices_value))
+                cached = trial_cache.get(key)
+                if cached is not None:
+                    return cached
                 value = _frequency_su_values(
-                    table=table, snap=snap, rank=rank, indices=indices_value,
+                    table=table, snap=snap, rank=rank, indices=key,
                     olla_db=float(su_olla_db[user]),
                     olla_enabled=olla_enabled, lookup=lookup, slot=slot)
                 value["useful_bytes"] = (min(q, int(value["tbs"])),)
+                trial_cache[key] = value
                 return value
 
             selection = sfreq.select_frequency_subset(
@@ -1286,8 +1365,17 @@ def _build_mu_plan(
             indices = tuple(selection.selected_indices)
             value = selection.selected_grant
             n = len(indices)
-            fits = int(value["tbs"]) >= q
-            need = n if fits else int(num_rbg)
+            remaining_need, remaining_fits, _remaining_potential = (
+                _frequency_pool_audit(
+                    tuple(available), score, cursor=cursor,
+                    evaluate=_evaluate,
+                    tbs_of=lambda trial: int(trial["tbs"]),
+                    queue_bytes=q))
+            full_need, full_fits, full_potential = _frequency_pool_audit(
+                tuple(range(int(num_rbg))), score, cursor=cursor,
+                evaluate=_evaluate,
+                tbs_of=lambda trial: int(trial["tbs"]),
+                queue_bytes=q)
             mcs = int(value["mcs"])
             tbs = int(value["tbs"])
             base_tx = float(value["base"])
@@ -1299,11 +1387,14 @@ def _build_mu_plan(
             source = str(selection.selected_source)
         else:
             full_order = _grant_indices(cursor, offset, num_rbg, num_rbg)
-            need, fits = lookup.required_rbg_for_indices(
+            full_need, full_fits = lookup.required_rbg_for_indices(
                 slot, mcs, rank, q, full_order)
-            n = min(int(need), len(available))
-            indices = tuple(sfreq.rotated_order(
-                tuple(available), cursor=cursor, total_rbg=num_rbg)[:n])
+            remaining_order = sfreq.rotated_order(
+                tuple(available), cursor=cursor, total_rbg=num_rbg)
+            remaining_need, remaining_fits = lookup.required_rbg_for_indices(
+                slot, mcs, rank, q, remaining_order)
+            n = min(int(remaining_need), len(available))
+            indices = tuple(remaining_order[:n])
             tbs = int(lookup.tbs_bytes_for_indices(slot, mcs, rank, indices))
             base_tx = float(base_tx_sinr_of[user])
             no_olla = int(mcs_without_olla_of[user])
@@ -1316,9 +1407,12 @@ def _build_mu_plan(
             ranks=(rank,), mcs=(mcs,), base_tx_sinr_db=(base_tx,),
             mcs_without_olla=(no_olla,), true_sinr_db=(true_sinr,),
             corr_loss_db=(0.0,), power_loss_db=0.0,
-            required_rbg=(int(need),), fits_in_fullband=(bool(fits),),
+            required_rbg=(int(full_need),),
+            fits_in_fullband=(bool(full_fits),),
             tbs_bytes=(int(tbs),), useful_bytes=(int(useful),),
-            potential_fullband_bytes=(int(potential_of[user]),),
+            potential_fullband_bytes=(int(full_potential),),
+            required_rbg_from_remaining_pool=(int(remaining_need),),
+            fits_in_remaining_pool=(bool(remaining_fits),),
             frequency_selection_score_gain=score_gain,
             frequency_incremental_useful_bytes=incremental,
             frequency_evaluated_subsets=evaluated,
@@ -1421,26 +1515,35 @@ def _build_mu_plan(
 
             selection = sfreq.select_frequency_subset(
                 tuple(available), score, cursor=cursor, evaluate=_evaluate,
-                sufficient=lambda value: any(
+                sufficient=lambda value: all(
                     int(value["values"][side]["tbs"]) >= int(queue_bytes[user])
                     for side, user in enumerate(users)))
             indices = tuple(selection.selected_indices)
             actual = selection.selected_grant["values"]
-            needs: list[int] = []
-            fits_list: list[bool] = []
-            quality = sfreq.quality_order(tuple(available), score, cursor=cursor)
+            remaining_needs: list[int] = []
+            remaining_fits: list[bool] = []
+            needs = []
+            fits_list = []
+            potentials = []
             for side, user in enumerate(users):
-                found = int(num_rbg)
-                fit = False
-                for count in range(1, len(quality) + 1):
-                    trial = _evaluate(tuple(quality[:count]))["values"]
-                    if int(trial[side]["tbs"]) >= int(queue_bytes[user]):
-                        found, fit = count, True
-                        break
-                needs.append(found)
-                fits_list.append(fit)
-            full_values = _evaluate(tuple(range(int(num_rbg))))["values"]
-            potentials = [int(value["tbs"]) for value in full_values]
+                remaining_need, remaining_fit, _remaining_potential = (
+                    _frequency_pool_audit(
+                        tuple(available), score, cursor=cursor,
+                        evaluate=_evaluate,
+                        tbs_of=lambda trial, side_value=side: int(
+                            trial["values"][side_value]["tbs"]),
+                        queue_bytes=int(queue_bytes[user])))
+                full_need, full_fit, full_potential = _frequency_pool_audit(
+                    tuple(range(int(num_rbg))), score, cursor=cursor,
+                    evaluate=_evaluate,
+                    tbs_of=lambda trial, side_value=side: int(
+                        trial["values"][side_value]["tbs"]),
+                    queue_bytes=int(queue_bytes[user]))
+                remaining_needs.append(int(remaining_need))
+                remaining_fits.append(bool(remaining_fit))
+                needs.append(int(full_need))
+                fits_list.append(bool(full_fit))
+                potentials.append(int(full_potential))
             score_gain = float(selection.selection_score_gain)
             incremental = int(selection.incremental_useful_bytes)
             evaluated = int(selection.evaluated_subset_count)
@@ -1450,7 +1553,11 @@ def _build_mu_plan(
             actual = []
             needs = []
             fits_list = []
+            remaining_needs = []
+            remaining_fits = []
             potentials = []
+            remaining_order = sfreq.rotated_order(
+                tuple(available), cursor=cursor, total_rbg=num_rbg)
             for user in users:
                 side = int(link.side(user))
                 base_rows = (tables[user].sinr_tx_db
@@ -1466,17 +1573,25 @@ def _build_mu_plan(
                     if olla_enabled else no_olla)
                 need, fits = lookup.required_rbg_for_indices(
                     slot, mcs, mu_rank, int(queue_bytes[user]), full_order)
+                remaining_need, remaining_fit = lookup.required_rbg_for_indices(
+                    slot, mcs, mu_rank, int(queue_bytes[user]), remaining_order)
                 actual.append({
                     "base": base, "corr": corr,
                     "true": float(link.true_sinr_db[snap, side]),
                     "mcs": mcs, "mcs_without_olla": no_olla})
                 needs.append(int(need))
                 fits_list.append(bool(fits))
+                remaining_needs.append(int(remaining_need))
+                remaining_fits.append(bool(remaining_fit))
                 potentials.append(int(lookup.tbs_bytes_for_indices(
                     slot, mcs, mu_rank, full_order)))
-            n = min(min(needs), len(available))
-            indices = tuple(sfreq.rotated_order(
-                tuple(available), cursor=cursor, total_rbg=num_rbg)[:n])
+            # One MU grant owns a shared RBG bitmap.  The pair must therefore
+            # keep allocating until both queues fit (or resources run out).
+            # Stopping when the first/small queue fits leaves the larger user
+            # unfinished, removes both from pending, and can strand the
+            # remaining RBGs—an especially damaging small+large packet bug.
+            n = min(max(remaining_needs), len(available))
+            indices = tuple(remaining_order[:n])
             for value in actual:
                 value["tbs"] = int(lookup.tbs_bytes_for_indices(
                     slot, int(value["mcs"]), mu_rank, indices))
@@ -1514,6 +1629,10 @@ def _build_mu_plan(
             tbs_bytes=tuple(int(value["tbs"]) for value in actual),
             useful_bytes=useful,
             potential_fullband_bytes=tuple(int(value) for value in potentials),
+            required_rbg_from_remaining_pool=tuple(
+                int(value) for value in remaining_needs),
+            fits_in_remaining_pool=tuple(
+                bool(value) for value in remaining_fits),
             pair_correlation=correlation,
             frequency_selection_score_gain=score_gain,
             frequency_incremental_useful_bytes=incremental,
@@ -1566,7 +1685,9 @@ def _build_mu_plan(
         name="MU", grants=tuple(grants), useful_bytes=useful_total,
         used_rbg=int(num_rbg) - len(available),
         has_mu=any(grant.mode == "MU" for grant in grants),
-        clears_all_queues=(not blocked_data and useful_total == total_q),
+        # 与 SU 使用同一 serviceable-queue 分母；blocked_data 只作诊断，
+        # 不改变当前候选计划是否已经清空所有可服务队列。
+        clears_all_queues=(useful_total == total_q),
         mu_candidate_decisions=tuple(decisions))
 
 
@@ -1651,6 +1772,10 @@ def _finalize_selected_plan(
             fits_in_fullband=tuple(bool(value) for value in grant.fits_in_fullband),
             potential_fullband_bytes=tuple(
                 int(value) for value in grant.potential_fullband_bytes),
+            required_rbg_from_remaining_pool=tuple(
+                int(value) for value in grant.required_rbg_from_remaining_pool),
+            fits_in_remaining_pool=tuple(
+                bool(value) for value in grant.fits_in_remaining_pool),
             pair_correlation=grant.pair_correlation,
             frozen_mcs=tuple(frozen_mcs),
             frozen_tbs_bytes=tuple(frozen_tbs),
@@ -2414,6 +2539,10 @@ def simulate_experience(
                     required_rbg=int(grant.required_rbg[side]),
                     fits_in_fullband=bool(grant.fits_in_fullband[side]),
                     potential_fullband_bytes=int(grant.potential_fullband_bytes[side]),
+                    required_rbg_from_remaining_pool=int(
+                        grant.required_rbg_from_remaining_pool[side]),
+                    fits_in_remaining_pool=bool(
+                        grant.fits_in_remaining_pool[side]),
                     pf_average_before_bytes=float(r_avg[u]),
                     scheduler_metric=float(metric[pos]),
                     base_tx_sinr_db=float(grant.base_tx_sinr_db[side]),
@@ -3125,6 +3254,12 @@ def simulate_experience(
                 frequency_incremental_useful),
             "evaluated_subset_count": int(frequency_evaluated_subsets),
             "effective_sinr": "arithmetic mean in dB over granted RBGs and rank streams",
+            "allocation_audit_fields": {
+                "required_rbg/fits_in_fullband/potential_fullband_bytes": (
+                    "re-evaluated against the complete carrier RBG pool"),
+                "required_rbg_from_remaining_pool/fits_in_remaining_pool": (
+                    "re-evaluated against the RBGs still available to this PF user"),
+            },
         },
         "mu_candidate_scoring": {
             "candidate_count": int(mu_candidate_count),

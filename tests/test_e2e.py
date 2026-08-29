@@ -130,6 +130,10 @@ print(f"  视距比例     {summary.get('los_ratio')}")
 check(summary["num_samples"] == 4, "生成了 4 个样本")
 check(summary["shape"]["BS_ant"] == 4, "天线维度正确")
 check("pathloss_dB" in summary, "路损等物理量已接出（无需改 ChannelHub）")
+check(summary["config"]["sample_interval_s"] == 0.005,
+      "新数据显式冻结5 ms快照时钟，不继承外部源的隐式默认")
+check(summary["channel_contract"]["sample_interval_s"] == 0.005,
+      "快照时钟进入不可变channel contract")
 
 ds_id = summary["dataset_id"]
 

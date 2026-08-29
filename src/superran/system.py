@@ -1043,6 +1043,9 @@ class UeLinkTable:
     reported_cqi_codepoint: np.ndarray | None = None  # [rank] 4-bit CQI 0..15
     reported_cqi_codepoint_per_snapshot: np.ndarray | None = None  # [snapshot,rank]
     csi_lag_snapshots: np.ndarray | None = None  # [snapshot] 平均 CSI 滞后（快照数）
+    # 2T4R 两个天线组分别在相邻 SRS 机会测量；保留逐 RBG lag 才能审计
+    # 64x4 是否真的由两个不同时间的 64x2 片段拼成。
+    csi_lag_snapshots_by_antenna_group_rbg: np.ndarray | None = None  # [S,2,RBG]
     # **基站以为的谱效**：rank 自适应与 PF 调度都只能看它，不能看真实值。
     # 拿真实谱效去调度等于让基站预知信道，老化损失会被凭空抹掉一大半。
     # 零时延时它与 ``se`` / ``best_se`` 逐位相同。
@@ -1223,13 +1226,24 @@ def _iot(sinr_db: float, sir_db: float) -> float:
 def snapshot_interval_ms(cfg: dict[str, Any]) -> float:
     """由配置算出信道快照之间隔多久（ms）。
 
-    ChannelHub 的多时隙输出不是连续 TTI，而是**连续的 SRS/CSI-RS 机会**：
-    ``internal_sim.py:3252`` 把 UE 每个时隙推进
-    ``speed × max(srs_periodicity, csirs_periodicity) × slot_duration_s``。
+    新数据集把 ``sample_interval_s`` 作为独立真相源。它不能由0.5-ms NR slot、
+    两条2T SRS腿的5-ms间隔或10-ms四端口SRS周期反推；混用这些时钟会让
+    CSI老化、多普勒和移动距离整体错一个数量级。
 
-    默认 10 × 0.5 ms = 5 ms。**把它当成一个 TTI（0.5 ms）会让所有
-    时间相关的结论差 10 倍**——CSI 老化、多普勒、移动性全部受影响。
+    旧数据没有显式字段时才保留历史回退：
+    ``max(srs_periodicity, csirs_periodicity) × slot_duration``。
     """
+    explicit = cfg.get("sample_interval_s")
+    if explicit is not None:
+        if isinstance(explicit, (bool, np.bool_)):
+            raise ValueError("sample_interval_s 必须是有限正秒数")
+        try:
+            interval_s = float(explicit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sample_interval_s 必须是有限正秒数") from exc
+        if not np.isfinite(interval_s) or interval_s <= 0.0:
+            raise ValueError("sample_interval_s 必须是有限正秒数")
+        return 1000.0 * interval_s
     scs_khz = carrier_grid.scs_khz_from_config(cfg)
     slot_ms = 15.0 / float(scs_khz)
     periods: list[int] = []
@@ -1311,10 +1325,14 @@ def build_link_tables(
     评估用当前快照。逐 RBG 的滞后由 SRS 周期与跳频决定，见 :mod:`csi_aging`。
     不给的话是零时延完美 CSI——**那是个上界，不是现网**。
 
-    ``csi.srs_resource_allocation`` 开启时，每个 UE 先从本地固定载波资源池
-    分到周期 offset、symbol、comb 与循环移位；其中 offset 会真正进入 CSI
-    老化时间轴。``srs_cell_ids`` / ``srs_pci_mod3`` 是结果 UE 粒度，默认单小区
-    cell 0 / PCI mod3=0；当前不在这里伪造跨小区导频污染。
+    ``csi.srs_resource_allocation``开启时，每个2T4R UE从本地固定载波资源池
+    分到相邻两个SRS机会：ports0/1与2/3分别使用一个2-port leg。BBL排除，
+    4个CS切成两块，17个frequency id进入候选；只能使用本PCI模3颜色。
+    全局周期从配置下限开始自动选择10/20/40 ms中最短可容纳值。两个leg的
+    offset与频域相位分别进入端口组CSI老化，再拼成64×4。``srs_cell_ids`` /
+    ``srs_pci_mod3``是结果UE粒度。RE级接收由 :mod:`srs_waveform` 提供；本函数
+    没有邻区UE到受害gNB的UL cross-link，因此不会在这里伪造导频波形污染或
+    静默替换数据集已有的 ``h_est``。
 
     ``load_jitter_rng`` 只用来抽邻区负载的逐快照抖动，抖动幅度由
     ``neighbor_load_jitter`` 给出；它**应当来自
@@ -1560,10 +1578,28 @@ def build_link_tables(
         geo_sinr_db = [_nan_safe(np.mean, v) for v in per_snap_sinr]
         sir_in = [_nan_safe(np.mean, v) for v in per_snap_sir]
 
+    n_link_ue = len(h_users)
+    resolved_serving_cell_values: list[int] | None = None
+    if srs_cell_ids is not None:
+        if isinstance(srs_cell_ids, (int, np.integer)) and not isinstance(
+                srs_cell_ids, (bool, np.bool_)):
+            raw_cell_values = [int(srs_cell_ids)] * n_link_ue
+        else:
+            try:
+                raw_cell_values = list(srs_cell_ids)
+            except TypeError as exc:
+                raise ValueError(
+                    "srs_cell_ids 必须是整数或逐 UE 整数数组") from exc
+        if len(raw_cell_values) != n_link_ue or any(
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, np.integer))
+            for value in raw_cell_values
+        ):
+            raise ValueError(f"srs_cell_ids 必须包含 {n_link_ue} 个逐 UE 整数")
+        resolved_serving_cell_values = [int(value) for value in raw_cell_values]
+
     srs_assignments: tuple[srsr.SrsResourceAssignment, ...] | None = None
     if csi is not None and csi.enabled and bool(csi.srs_resource_allocation):
-        n_link_ue = len(h_users)
-
         def _expand_srs_values(
             name: str,
             raw: list[int] | tuple[int, ...] | int | None,
@@ -1589,10 +1625,12 @@ def build_link_tables(
 
         default_cells = (
             [int(value) if value is not None else 0 for value in serving_cell_by_ue]
-            if serving_cell_by_ue is not None else [0] * n_link_ue
+            if serving_cell_by_ue is not None else
+            (list(resolved_serving_cell_values)
+             if resolved_serving_cell_values is not None else [0] * n_link_ue)
         )
         cell_values = _expand_srs_values(
-            "srs_cell_ids", srs_cell_ids, default_cells)
+            "srs_cell_ids", resolved_serving_cell_values, default_cells)
         pci_values = _expand_srs_values(
             "srs_pci_mod3", srs_pci_mod3,
             [int(value) % 3 for value in cell_values])
@@ -1602,7 +1640,20 @@ def build_link_tables(
         srs_assignments = srsr.allocate_basic_srs_resources(
             list(range(n_link_ue)), period_ms=float(csi.srs_period_ms),
             n_ports_by_ue=port_values, cell_ids=cell_values,
-            pci_mod3_by_ue=pci_values, hopping=bool(csi.hopping))
+            pci_mod3_by_ue=pci_values, hopping=bool(csi.hopping),
+            adaptive_period=bool(csi.srs_period_adaptive))
+
+    effective_csi = csi
+    if srs_assignments:
+        selected_periods = {float(row.period_ms) for row in srs_assignments}
+        if len(selected_periods) != 1:
+            raise RuntimeError(
+                "SRS resource allocator violated the one-global-period contract: "
+                f"{sorted(selected_periods)}"
+            )
+        assert csi is not None
+        effective_csi = replace(
+            csi, srs_period_ms=float(next(iter(selected_periods))))
 
     out: list[UeLinkTable] = []
     aging = csi is not None and csi.enabled
@@ -1685,6 +1736,9 @@ def build_link_tables(
         pmi_sinr_rbg = np.zeros((n_s, max_rank, n_rbg_eff))
         sinr_tx_rbg = np.zeros((n_s, max_rank, n_rbg_eff))
         lag_used = np.zeros(n_s)
+        lag_by_group_rbg = (
+            np.zeros((n_s, 2, n_rbg_eff), dtype=int)
+            if srs_assignments is not None else None)
         se_gnb = np.zeros((n_s, max_rank))       # 基站以为的谱效，rank 与调度都看它
         rank_gnb = np.ones(n_s, dtype=int)
         report_source = np.zeros(n_s, dtype=int)
@@ -1697,22 +1751,47 @@ def build_link_tables(
         h_prec_seq: list[np.ndarray] = []
         for s in range(n_s):
             if aging:
-                assert csi is not None
-                lag_rbg = ca.rbg_lag_snapshots(
-                    csi, n_rbg_eff, snapshot_ms=snapshot_ms,
-                    snapshot_index=s, rb_per_rbg=rb_per_rbg,
-                    opportunity_offset_ms=(
-                        float(srs_assignments[i].offset_ms)
-                        if srs_assignments is not None else 0.0))
-                lags = (
-                    carrier_grid.expand_rbg_values(
-                        lag_rbg, resolved_boundaries, num_rows=n_rows)
-                    if raw_frequency_rows else np.asarray(lag_rbg, dtype=int)
-                )
-                h_prec_seq.append(ca.stale_channel(
-                    prec_snaps_u, s, lags,
-                    periodic_history=bool(csi.periodic_trace_history)))
-                lag_used[s] = float(np.mean(lag_rbg))
+                assert effective_csi is not None
+                if srs_assignments is not None:
+                    assignment = srs_assignments[i]
+                    group_lag_rbg = ca.rbg_lag_snapshots_by_antenna_group(
+                        effective_csi, n_rbg_eff, snapshot_ms=snapshot_ms,
+                        snapshot_index=s, rb_per_rbg=rb_per_rbg,
+                        opportunity_offsets_ms=tuple(
+                            float(leg.offset_ms) for leg in assignment.legs),
+                        frequency_resource_id=int(
+                            assignment.frequency_resource_id))
+                    assert lag_by_group_rbg is not None
+                    lag_by_group_rbg[s] = group_lag_rbg
+                    group_lags = (
+                        np.stack([
+                            carrier_grid.expand_rbg_values(
+                                group_lag_rbg[g], resolved_boundaries,
+                                num_rows=n_rows)
+                            for g in range(group_lag_rbg.shape[0])
+                        ])
+                        if raw_frequency_rows else group_lag_rbg)
+                    h_prec_seq.append(ca.stale_channel_by_antenna_group(
+                        prec_snaps_u, s, group_lags,
+                        antenna_port_groups=assignment.antenna_port_groups,
+                        periodic_history=bool(
+                            effective_csi.periodic_trace_history)))
+                    lag_used[s] = float(np.mean(group_lag_rbg))
+                else:
+                    lag_rbg = ca.rbg_lag_snapshots(
+                        effective_csi, n_rbg_eff, snapshot_ms=snapshot_ms,
+                        snapshot_index=s, rb_per_rbg=rb_per_rbg,
+                        opportunity_offset_ms=0.0)
+                    lags = (
+                        carrier_grid.expand_rbg_values(
+                            lag_rbg, resolved_boundaries, num_rows=n_rows)
+                        if raw_frequency_rows else np.asarray(lag_rbg, dtype=int)
+                    )
+                    h_prec_seq.append(ca.stale_channel(
+                        prec_snaps_u, s, lags,
+                        periodic_history=bool(
+                            effective_csi.periodic_trace_history)))
+                    lag_used[s] = float(np.mean(lag_rbg))
             else:
                 h_prec_seq.append(prec_snaps_u[s])
 
@@ -1903,13 +1982,16 @@ def build_link_tables(
             reported_cqi_codepoint=reported_cqi,
             reported_cqi_codepoint_per_snapshot=reported_cqi_by_snapshot,
             csi_lag_snapshots=lag_used, se_gnb=se_gnb,
+            csi_lag_snapshots_by_antenna_group_rbg=lag_by_group_rbg,
             best_se_gnb=se_gnb[np.arange(n_s), best], mcs_table=int(table),
             target_bler=float(target_bler),
             power_constraint=str(power_constraint).lower(),
             frequency_rows_per_rbg=int(grp),
             frequency_rbg_boundaries=aggregation_boundaries,
-            serving_cell_index=(serving_cell_by_ue[i]
-                                if serving_cell_by_ue is not None else None),
+            serving_cell_index=(
+                serving_cell_by_ue[i] if serving_cell_by_ue is not None else
+                (resolved_serving_cell_values[i]
+                 if resolved_serving_cell_values is not None else None)),
             rb_power_control_fingerprint=pc.config_fingerprint(power_cfg),
             rb_power_coupling_diagnostics=(power_coupling_diag[i]
                                            if power_coupling_diag is not None else None),
@@ -2664,6 +2746,10 @@ def simulate(
     # 步长反解。显式 down 值是有意的研究 override，不会被覆盖。
     sched = sched.resolved_for_target(_target_bler)
     _mcs_table = la.MCS_TABLES[_table_id]
+    serving_cells = {
+        int(table.serving_cell_index) for table in tables
+        if table.serving_cell_index is not None
+    }
     if sys_cfg.rb_power_control.enabled:
         expected_power_fingerprint = pc.config_fingerprint(sys_cfg.rb_power_control)
         mismatched = [
@@ -2674,16 +2760,17 @@ def simulate(
             raise ValueError(
                 "RB 功控链路表与系统配置不是同一份 profile；"
                 f"错配 UE={mismatched}。请按当前 override 重新 build_link_tables")
-        serving_cells = {
-            int(table.serving_cell_index) for table in tables
-            if table.serving_cell_index is not None
-        }
-        if len(serving_cells) != 1 or any(
-                table.serving_cell_index is None for table in tables):
-            raise ValueError(
-                "当前 SystemResult 是单小区调度结果，不能把不同 serving cell 的 UE "
-                f"放进同一资源池（实得 {sorted(serving_cells)}）。请生成/筛选同一服务"
-                "小区的 UE；逐小区联合调度属于下一阶段网络级仿真")
+    if serving_cells and (
+            len(serving_cells) != 1
+            or any(table.serving_cell_index is None for table in tables)):
+        raise ValueError(
+            "当前 SystemResult 是单小区调度结果，不能把不同 serving cell 的 UE "
+            f"放进同一资源池（实得 {sorted(serving_cells)}）。请生成/筛选同一服务"
+            "小区的 UE；逐小区联合调度属于下一阶段网络级仿真")
+    if sys_cfg.rb_power_control.enabled and len(serving_cells) != 1:
+        raise ValueError(
+            "RB 功控要求链路表带唯一 serving_cell_index；"
+            "请按当前数据集 metadata 重新 build_link_tables")
     if sys_cfg.evaluation_mode == "experience":
         # 独立路径把两种 profile 的资源分配与 KPI 语义彻底隔开。
         from . import experience as ex  # noqa: PLC0415
@@ -3545,11 +3632,15 @@ def simulate_replications(
             and not isinstance(value, (bool, np.bool_))
         })
         for k in numeric_keys:
-            vals = [r.users[u].get(k) for r in runs]
-            vals = [float(x) for x in vals
-                    if isinstance(x, (int, float, np.integer, np.floating))
-                    and not isinstance(x, (bool, np.bool_)) and np.isfinite(x)]
-            if vals:
+            vals = [
+                float(x)
+                if isinstance((x := run.users[u].get(k)),
+                              (int, float, np.integer, np.floating))
+                and not isinstance(x, (bool, np.bool_)) and np.isfinite(x)
+                else float("nan")
+                for run in runs
+            ]
+            if any(np.isfinite(vals)):
                 row[k] = rg.summarize(vals, k).as_dict()
         users.append(row)
 

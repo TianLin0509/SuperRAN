@@ -274,7 +274,8 @@ def main() -> None:
                 "referencesignals": 3,
                 "bler": 6,
                 "externalresults": 4,
-                "srsallocation": 3,
+                "srs": 5,
+                "srsallocation": 6,
                 "schedulerp0": 3,
             }
             new_chapter_checks = {}
@@ -297,6 +298,13 @@ def main() -> None:
                     f'.doc-page[data-page="{chapter_key}"] '
                     '.formula-explain:visible'
                 ).count()
+                chapter_formula_overflow = page.locator(
+                    f'.doc-page[data-page="{chapter_key}"] '
+                    '.formula-card:visible .formula-expression'
+                ).evaluate_all(
+                    "els => els.length ? Math.max(...els.map(e => "
+                    "e.scrollWidth - e.clientWidth)) : 0"
+                )
                 chapter_diagram = page.locator(
                     f'.doc-page[data-page="{chapter_key}"] '
                     'figure.diagram:visible'
@@ -333,6 +341,10 @@ def main() -> None:
                 chapter_formula_shot = None
                 chapter_atlas_shot = None
                 chapter_threshold_shot = None
+                chapter_toy_shot = None
+                chapter_status_shot = None
+                chapter_grid_shot = None
+                chapter_capacity_shot = None
                 if name == "desktop":
                     chapter_shot = OUT / f"{chapter_key}-desktop.png"
                     page.evaluate("window.scrollTo(0, 0)")
@@ -350,10 +362,44 @@ def main() -> None:
                         page.locator(
                             '.doc-page[data-page="bler"] .bler-curve-atlas'
                         ).screenshot(path=str(chapter_atlas_shot))
+                    if chapter_key == "srsallocation":
+                        # Locator screenshots stitch tall elements across viewports;
+                        # hide the fixed top bar so it is not repeated inside the
+                        # captured toy example and mistaken for content overlap.
+                        page.locator(".topbar").evaluate(
+                            "el => { el.dataset.qaVisibility = el.style.visibility; "
+                            "el.style.visibility = 'hidden'; }"
+                        )
+                        chapter_grid_shot = OUT / "srsallocation-resource-grid.png"
+                        page.locator(
+                            '.doc-page[data-page="srsallocation"] '
+                            '.srs-grid-table'
+                        ).screenshot(path=str(chapter_grid_shot))
+                        chapter_capacity_shot = OUT / "srsallocation-capacity.png"
+                        page.locator(
+                            '.doc-page[data-page="srsallocation"] '
+                            '.srs-capacity-model'
+                        ).screenshot(path=str(chapter_capacity_shot))
+                        chapter_toy_shot = OUT / "srsallocation-toy-example.png"
+                        page.locator(
+                            '.doc-page[data-page="srsallocation"] '
+                            '.srs-toy-example'
+                        ).screenshot(path=str(chapter_toy_shot))
+                        chapter_status_shot = OUT / "srsallocation-status.png"
+                        page.locator(
+                            '.doc-page[data-page="srsallocation"] '
+                            '.srs-implementation-status'
+                        ).screenshot(path=str(chapter_status_shot))
+                        page.locator(".topbar").evaluate(
+                            "el => { el.style.visibility = "
+                            "el.dataset.qaVisibility || ''; "
+                            "delete el.dataset.qaVisibility; }"
+                        )
                 new_chapter_checks[chapter_key] = {
                     "formula_count": chapter_formula_count,
                     "minimum_formulas": minimum_formulas,
                     "formula_explanations_visible": chapter_explanations,
+                    "formula_internal_overflow_px": chapter_formula_overflow,
                     "diagram_visible": chapter_diagram,
                     "detail_visible": chapter_detail,
                     "horizontal_overflow_px": chapter_overflow,
@@ -367,10 +413,23 @@ def main() -> None:
                     "threshold_screenshot": (
                         str(chapter_threshold_shot) if chapter_threshold_shot else None
                     ),
+                    "toy_screenshot": (
+                        str(chapter_toy_shot) if chapter_toy_shot else None
+                    ),
+                    "status_screenshot": (
+                        str(chapter_status_shot) if chapter_status_shot else None
+                    ),
+                    "resource_grid_screenshot": (
+                        str(chapter_grid_shot) if chapter_grid_shot else None
+                    ),
+                    "capacity_screenshot": (
+                        str(chapter_capacity_shot) if chapter_capacity_shot else None
+                    ),
                     **chapter_extra,
                     "pass": bool(
                         chapter_formula_count >= minimum_formulas
                         and chapter_explanations >= minimum_formulas
+                        and chapter_formula_overflow <= 1
                         and chapter_diagram
                         and chapter_detail
                         and chapter_overflow <= 1

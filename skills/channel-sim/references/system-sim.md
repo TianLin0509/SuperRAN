@@ -385,28 +385,35 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 **默认开。** 关掉退化成零时延完美 CSI——那是个上界不是现网，MU 增益会被系统性高估。
 保留这个开关是为了能做 A/B，把老化的代价量出来，而不是让它悄悄混进所有结果。
 
-- 固定 100 MHz 系统且 `srs_resource_allocation=on` 时，`srs_period_ms`
-  **只接受 10 / 20 / 40 ms**；5 ms 属于较窄 BWP 资源表，只保留在关闭该资源分配的
-  链路级老化敏感性接口中
+- 固定100 MHz系统且`srs_resource_allocation=on`时，`srs_period_ms`是最短候选，
+  `srs_period_adaptive=on`默认从10 ms起选择能容纳全部小区的全局最短10/20/40 ms；
+  5 ms只保留在关闭资源分配的链路级老化敏感性接口
 - `srs_hopping` 默认开，对应 38.211 Table 6.4.1.4.3-1 的 `C_SRS=63` / `B_SRS=1`：
   `m_SRS=(272,16,8,4)`、`N=(1,17,2,2)`，每跳 16 RB 正好一个 RBG，
   按 `0,8,16,7,15,6,14,5,13,4,12,3,11,2,10,1,9` **17 跳**扫完 272 RB
 - 这是当前唯一 hopping profile；`b_hop=0/n_RRC=0` 与顺序由 SuperRAN 本地版本化，
   非 272 RB 或其他跳频参数硬失败，不调用外部 helper、不做 identity fallback
-- **跳频是老化的主导项**：10 ms 周期下全带扫一遍要 170 ms，某个 RBG 的年龄在
+- 2T4R终端一次只发送2个SRS ports：当前机会测端口0/1，下一可用机会
+  （slot7→17，间隔5 ms）测端口2/3；同一RBG两腿完成后才推进hop。因此10 ms周期下
+  全带仍约170 ms，但共有34次2-port SRS发送，64×4两列组有5 ms测量偏差
+- **跳频是老化的主导项**：10 ms周期下某个RBG的端口组年龄在
   0~160 ms 之间轮转（平均 80 ms），而 2.6 GHz、30 km/h 的相干时间只有约 3 ms。
   实测 MU/SU 比值 0.816 → 0.449（−45%），SU 谱效 −27%
 - `csi_processing_delay_ms=2.0` 是信道估计 + 预编码计算 + 调度下发的固定时延
-- `srs_resource_allocation` 默认开：固定 profile 为每个 UE 分配 period offset、
-  symbol 10..13、comb 0/1 与连续循环移位块。PCI mod3 只控制候选优先顺序；
-  资源不足允许跨颜色溢出，不承诺重载时绝对无碰撞
-- `srs_pci_mod3=0/1/2` 选择当前单小区的候选颜色；不同小区实验应显式给各自值
-- 分配结果不是 metadata-only：`offset_ms` 会进入 `rbg_lag_snapshots()`，用户级
-  结果保存完整 assignment。10 ms/4-port 同小区基础池容量 32，第 33 个硬失败
-- P-H/F、BWP2、intra-slot antenna switching、根序列规划和波形级跨小区污染
+- `srs_resource_allocation`默认开：每个机会8个symbol/comb格中排除两个加粗BBL格，
+  每色保留2格；工程基线只开放4 CS，每次2T使用2 CS，同一叶子可放两个UE；
+  再展开17个frequency resource。禁止跨PCI颜色借资源
+- `srs_pci_mod3=0/1/2`是硬颜色分区；不同小区实验应显式给各自值
+- 分配结果不是metadata-only：两个leg的offset和frequency id分别生成
+  `[snapshot,2,RBG]` lag，再从不同历史快照拼端口0/1与2/3。10/20/40 ms
+  每个PCI颜色容量为68/136/272个2T4R UE
+- P-H/F、BWP2、根序列规划和真正的多端口导频波形/跨小区污染
   当前未建模。`scheduler_p0_validation.json` 中的 PCI 模3结论是等功率 LS-NMSE proxy
 
-返回里的 `csi_aging` 块给出 `full_sweep_ms` 与 `mean_age_ms`，可以直接转述。
+返回里的 `csi_aging.requested_config` 保存用户请求下限，`effective_config` / `config`
+保存 allocator 真正采用的全局周期；全带扫描时间读 `config.full_sweep_ms`，平均年龄读
+`mean_csi_staleness_ms`。只能转述 effective 值，并同时说明 requested→effective 是否升档。
+显式 `ue_speed_kmh=0` 是合法静止条件，不得当成缺省 3 km/h。
 
 **快照间隔不是一个 TTI。** ChannelHub 的多时隙输出是连续的 SRS/CSI-RS 机会，
 默认 `10 × 0.5 ms = 5 ms`，由 `system.snapshot_interval_ms(cfg)` 从配置算出。
