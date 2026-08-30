@@ -244,10 +244,23 @@ def probe_source_contract() -> SourceContractReport:
 
 
 def _probe_module(mod: str) -> bool:
+    """判断某个模块装没装。**只按顶层包名判断，不执行任何模块。**
+
+    ⚠ 2026-08-29 的坑：`find_spec("sionna.rt")` 为了拿父包的 ``__path__``
+    会**真的 import sionna**，而 sionna 连带拉起 mitsuba / drjit / matplotlib /
+    IPython / pythreejs 一整套可视化栈（实测 +455 MB）。MCP 服务端是每个 CLI
+    会话一个进程，探一下"装没装"就付这个价钱完全不划算；更糟的是这次 import
+    发生在事件循环里（sr_capabilities 工具内），首次载入重 C 扩展有死锁风险。
+
+    顶层名字的 find_spec 不触发任何 import，所以这里把带点的名字截到顶层。
+    代价是分辨不出"装了 sionna 但缺 sionna.rt 子模块"这种破损安装 —— 真用的时候
+    照样会报错，而且报得更具体，不值得为它每次付 455 MB。
+    """
     import importlib.util
 
+    top = mod.split(".")[0]
     try:
-        return importlib.util.find_spec(mod) is not None
+        return importlib.util.find_spec(top) is not None
     except (ImportError, ValueError):
         return False
 

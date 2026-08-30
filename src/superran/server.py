@@ -122,14 +122,20 @@ def _resolve_lazy_modules() -> None:
             → numpy/_core/multiarray.py <module>
               → importlib._bootstrap_external.create_module   ← 卡死在这里
 
-    改成只在这里预载 numpy/scipy 之后，卡点前移到了下一个"首次载入的 C 扩展"：
+    改成只在这里预载 numpy/scipy 之后，卡点前移到了下一个"首次载入的 scipy 子模块"：
 
         sr_capabilities → channelhub.probe_source_contract
-          → msg_embedding/channel_est/interpolate.py <module>   ← 换个地方卡死
+          → msg_embedding/channel_est/interpolate.py <module>（import scipy.interpolate）
+            ← 换个地方卡死
 
-    也就是说这不是某个库的问题，而是**事件循环跑起来之后，首次载入任何 C 扩展
-    都不安全**。channelhub.warmup() 的注释里早就写明了这一点并标了"别删"，
-    它存在的意义就是在主线程把整张依赖图导完 —— 所以 main() 里它必须无条件跑。
+    边界在哪（2026-08-29 补测，别把结论用过头）：危险的是 **numpy / scipy 及其
+    子模块**的首次加载。同一个进程里，事件循环 + anyio 线程池都跑起来之后再
+    ``import torch`` / ``import sionna.rt``，实测**不会**死锁（分别 1.4s / 1.0s
+    正常导完）—— 前提是 numpy/scipy 已经在主线程预热过。
+    这与 channelhub.warmup() 里那段标了"别删"的注释完全一致：它预热的就是
+    numpy 和那一串 scipy 子模块。所以 main() 里它必须无条件跑；
+    而 sionna/torch 这类可以安全地按需加载（也确实是按需的，见 MSG-Platform
+    的 sionna_rt._ensure_sionna）。
 
     省内存要靠 _apply_blas_thread_cap()（那才是 1.3 GB 的真正来源），
     不能靠推迟 import。文件头部的占位模块只用来让"不跑服务端"的场景

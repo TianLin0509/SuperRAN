@@ -16,9 +16,14 @@ superran 的 MCP 服务端是**每个 CLI 会话各起一个进程**。改动之
     ④ + superran.server     1323 MB     ← superran 自己只占 35 MB
 
 **最初的方案（把 numpy 也懒加载）行不通**，两次死锁的栈见
-test_warmup_stays_unconditional_and_has_no_skip_switch 的说明：事件循环起来之后
-首次载入任何 C 扩展都会挂死。所以服务端仍然在主线程预载整张依赖图，
-省内存改为限制 BLAS 线程池（服务端空转 2718 MB → 1677 MB）。
+test_warmup_stays_unconditional_and_has_no_skip_switch 的说明：numpy/scipy 及其
+子模块的首次加载必须发生在主线程。所以服务端仍然在主线程预载它们。
+
+服务端真正的省法是另外两条（都不动 import 时机）：
+  1. 限制 BLAS 线程池（SUPERRAN_BLAS_THREADS，默认 4）；
+  2. 不再为一个从不使用的 PyTorch 买单 —— sionna/torch 由 MSG-Platform 侧改成
+     按需加载，能力探测改用 find_spec 只探顶层包名。
+合起来：服务端空转 2718 MB → 365 MB。
 
 懒加载保留下来的价值是「不跑服务端」的场景：``import superran`` 从 658 MB 降到
 10 MB，``import superran.server`` 从 1323 MB 降到 49 MB —— 测试、工具链、
@@ -111,9 +116,12 @@ def test_warmup_stays_unconditional_and_has_no_skip_switch():
         sr_capabilities → channelhub.probe_source_contract
           → msg_embedding/channel_est/interpolate.py   ← 卡死
 
-    即：事件循环起来之后，**首次载入任何 C 扩展都不安全**。限制 BLAS 线程数也
-    绕不开（实测照样挂）。channelhub.warmup() 的注释里早就写了这一点并标了
-    「别删」—— 它是正确性依赖，不是性能优化。省内存请调 SUPERRAN_BLAS_THREADS。
+    边界（别把结论用过头）：危险的是 **numpy / scipy 及其子模块**的首次加载，
+    限制 BLAS 线程数也绕不开（实测照样挂）。而 torch / sionna.rt 在事件循环里
+    首次 import 实测**不会**挂（1.4s / 1.0s），前提是 numpy/scipy 已主线程预热 ——
+    所以它们可以、也确实是按需加载的。channelhub.warmup() 的注释里早就写了
+    这一点并标了「别删」：它是正确性依赖，不是性能优化。
+    省内存请调 SUPERRAN_BLAS_THREADS。
     """
     source = (SRC / "superran" / "server.py").read_text(encoding="utf-8")
     assert "info = ch.warmup()" in source, "main() 里必须仍然调用 ch.warmup()"
@@ -130,10 +138,9 @@ def test_warmup_stays_unconditional_and_has_no_skip_switch():
 def test_blas_thread_cap_is_applied_before_any_numpy_import():
     """BLAS 线程上限必须早于 numpy 第一次 import，否则不生效。
 
-    实测（20 逻辑核，服务端空转提交内存）::
+    实测（20 逻辑核，服务端空转提交内存；已含 torch 不再被拉起的收益）::
 
-        auto（旧行为） 2718 MB      4 线程 1677 MB
-        2 线程         1547 MB      1 线程 1483 MB
+        auto（不限） 2718 MB   4 线程 365 MB   2 线程 236 MB   1 线程 172 MB
 
     这是**性能取舍不是精度取舍**：只影响大矩阵运算的墙钟时间，数值逐位不变。
     """

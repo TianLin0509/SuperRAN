@@ -148,21 +148,35 @@ KaTeX 未必收，光看 Python 源码看不出来。
 
 调试时设 `SUPERRAN_DEBUG=1`，会开 faulthandler 并打点到 stderr。
 
-### MCP 服务端的内存：省在线程 arena，不能省在 import
+### MCP 服务端的内存：先别为没用的依赖买单，再压线程 arena
 
 MCP 服务端是**每个 CLI 会话各起一个进程**。2026-08-29 在 20 逻辑核 / 32 GB 的机器上
 实测：一个进程恒定提交 **2.72 GB**，而实占只有 20–30 MB。并存 13 个 Claude 会话时
 单是 superran 就锁掉 34.6 GB 提交内存（系统总额度的三分之一），最后表现成一个
 看起来毫不相干的故障——AI Hub 文件预览打不开（提交内存见底，Chromium 起不了渲染进程）。
 
-分级测量（纯 import，未 warmup）：
+拆开之后钱花在两处，第二处才是大头：
 
-    裸 python 8 MB → +numpy 658 MB → +scipy 1288 MB → +superran.server 1323 MB
+    到 scipy 全部子模块为止              330 MB   ← 其中 numpy/scipy 的 BLAS 线程 arena 占 ~250 MB
+    + msg_embedding.data.sources      1645 MB   ← **+1314 MB，全是 PyTorch**
 
-**superran 自己只占 35 MB**，1.28 GB 全是 OpenBLAS 按核数预留的线程 arena。
-所以唯一有效的杠杆是压线程数（和「多进程必须先压 BLAS 线程数」同一个道理）：
-`SUPERRAN_BLAS_THREADS`，默认 4，服务端空转 2718 MB → 1677 MB；设 `auto` 完全不干预。
-这是**性能取舍不是精度取舍**，数值逐位不变。
+PyTorch 是被 MSG-Platform 的 `sionna_rt.py` 一段**模块级可选依赖探测**拉进来的：
+它 `try: import sionna / sionna.rt / torch` 只为算出一个 `_SIONNA_AVAILABLE` 布尔值，
+而这台机器装了 CUDA 版 torch（单独 import = 提交 1507 MB）。**superran 一行 torch 都不用。**
+
+两条修法（都在 MSG-Platform 侧 + 本仓库 `_probe_module`）：
+
+1. 可用性改用 `importlib.util.find_spec`，**只探顶层包名**。
+   `find_spec("sionna.rt")` 会为了拿父包 `__path__` 真的 import sionna，
+   连带拉起 mitsuba / drjit / matplotlib / IPython / pythreejs（+455 MB）——
+   顶层名字则完全不触发 import。
+2. 真正的 `import sionna/torch` 推迟到确实要跑 RT 时（`_ensure_sionna()`）。
+
+再叠上 `SUPERRAN_BLAS_THREADS`（默认 4，压 OpenBLAS 按核数预留的线程 arena）：
+
+    auto（不限） 2718 MB → 4 线程 365 MB → 2 线程 236 MB → 1 线程 172 MB
+
+线程数是**性能取舍不是精度取舍**，数值逐位不变；和「多进程必须先压 BLAS 线程数」同理。
 
 **别想着把 numpy 改成懒加载**——试过，两次死锁：
 
@@ -170,13 +184,13 @@ MCP 服务端是**每个 CLI 会话各起一个进程**。2026-08-29 在 20 逻�
     # 只预载 numpy/scipy 后，卡点换个地方：
     sr_capabilities → probe_source_contract → msg_embedding/.../interpolate.py ← 卡死
 
-即事件循环起来之后**首次载入任何 C 扩展都不安全**，压线程数也绕不开。
-这正是上一节「scipy 子模块必须在主线程预热」的推广版：`main()` 里的
-`ch.warmup()` 是正确性依赖不是性能优化，所以**不提供跳过它的开关**。
+危险的**只是 numpy / scipy 及其子模块**的首次加载，这正是上一节「scipy 子模块必须在
+主线程预热」说的事，所以 `main()` 里的 `ch.warmup()` 是正确性依赖、**不提供跳过开关**。
+边界要说清楚：事件循环起来之后再 import torch / sionna.rt 实测**不会**挂
+（1.4s / 1.0s 正常导完），前提是 numpy/scipy 已预热——所以它们可以安全地按需加载。
 
 `_lazy.py` 的占位模块只服务「不跑服务端」的场景：`import superran` 658→10 MB、
-`import superran.server` 1323→49 MB，测试和取数脚本因此变轻；服务端进程里它们
-在 `main()` 开头就被解析掉了。
+`import superran.server` 1323→49 MB，测试和取数脚本因此变轻。
 
 ### 系统级 KPI 不带置信区间就是在报噪声
 

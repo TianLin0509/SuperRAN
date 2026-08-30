@@ -29,11 +29,15 @@ faulthandler 抓到的主线程栈依次是::
     sr_capabilities → channelhub.probe_source_contract
       → msg_embedding/channel_est/interpolate.py    ← 卡死
 
-即：事件循环跑起来之后，**首次载入任何 C 扩展都不安全**；限制 OpenBLAS 线程数
-也绕不开（实测照样挂）。``channelhub.warmup()`` 的注释里早就写了这一点并标了
-「别删」—— 它是正确性依赖，不是性能优化。所以 ``server.main()`` 仍然在主线程把
-整张依赖图预载完，服务端省内存改由 ``SUPERRAN_BLAS_THREADS`` 限制线程 arena
-（空转 2718 MB → 1677 MB）。
+边界（2026-08-29 补测，别把结论用过头）：危险的是 **numpy / scipy 及其子模块**
+的首次加载；限制 OpenBLAS 线程数也绕不开（实测照样挂）。同一进程里事件循环起来
+之后再 ``import torch`` / ``sionna.rt`` 实测**不会**挂（1.4s / 1.0s 正常导完），
+前提是 numpy/scipy 已在主线程预热。``channelhub.warmup()`` 的注释里早就写了这
+一点并标了「别删」—— 它是正确性依赖，不是性能优化。所以 ``server.main()`` 仍然在主线程把
+整张依赖图预载完。服务端真正的省法是另外两条：限制 BLAS 线程 arena
+（``SUPERRAN_BLAS_THREADS``），以及不再为从不使用的 PyTorch 买单
+（sionna/torch 改按需加载，能力探测只用 find_spec 探顶层包名）。
+合起来空转 2718 MB → 365 MB。
 
 那这个模块还有什么用？**给"不跑服务端"的场景省钱**：
 
