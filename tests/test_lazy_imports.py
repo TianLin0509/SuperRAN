@@ -142,6 +142,10 @@ def test_blas_thread_cap_is_applied_before_any_numpy_import():
 
         auto（不限） 2718 MB   4 线程 365 MB   2 线程 236 MB   1 线程 172 MB
 
+    默认取 1：按 SuperRAN 真实矩阵尺寸（逐 RB 的 4×64 / 4×256 SVD、64×64 eigh、
+    2048×64 ifft）实测，多线程 BLAS 没有可测收益甚至更慢；脚本模式跑
+    tests/test_gates.py 也是 1 线程 87.5s vs 4 线程 88.1s，差异在噪声内。
+
     这是**性能取舍不是精度取舍**：只影响大矩阵运算的墙钟时间，数值逐位不变。
     """
     source = (SRC / "superran" / "server.py").read_text(encoding="utf-8")

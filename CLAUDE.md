@@ -172,11 +172,23 @@ PyTorch 是被 MSG-Platform 的 `sionna_rt.py` 一段**模块级可选依赖探�
    顶层名字则完全不触发 import。
 2. 真正的 `import sionna/torch` 推迟到确实要跑 RT 时（`_ensure_sionna()`）。
 
-再叠上 `SUPERRAN_BLAS_THREADS`（默认 4，压 OpenBLAS 按核数预留的线程 arena）：
+再叠上 `SUPERRAN_BLAS_THREADS`（默认 **1**，压 OpenBLAS 按核数预留的线程 arena）：
 
     auto（不限） 2718 MB → 4 线程 365 MB → 2 线程 236 MB → 1 线程 172 MB
 
-线程数是**性能取舍不是精度取舍**，数值逐位不变；和「多进程必须先压 BLAS 线程数」同理。
+差额**全部**落在 numpy 与 scipy.special 的 import 上（逐段量过，其余步骤逐字节相同）。
+
+**默认 1 不是保守，是实测最快的一档。** 按真实矩阵尺寸测（273 个 RB 的 4×64 / 4×256
+SVD、64×64 eigh、2048×64 ifft），多线程只剩调度开销：4 线程在其中三项上都比 1 线程慢，
+只有人造的 2000×2000 GEMM 才吃多线程，而 SuperRAN 不做那种运算。脚本模式跑
+`tests/test_gates.py` 复核：1 线程 87.5s / 2 线程 96.2s / 4 线程 88.1s，差异在噪声内。
+真正的并行度来自 generate 的多进程分块，那些 worker 本来就各自压成 1 线程
+（见「多进程必须先压 BLAS 线程数」）。要放开就设 `SUPERRAN_BLAS_THREADS=auto`。
+这是**性能取舍不是精度取舍**，数值逐位不变。
+
+剩下的 172 MB 基本就是地板了：Python 8 + numpy 40 + scipy.special 19 +
+scipy 其余子模块 35 + superran 自己 36 + msg_embedding 2 + BLAS/FFT 池初始化 32。
+后两项里的 scipy 子模块与池初始化都是主线程预热的防死锁动作，不能省。
 
 **别想着把 numpy 改成懒加载**——试过，两次死锁：
 

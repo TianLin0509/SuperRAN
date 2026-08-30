@@ -65,9 +65,13 @@ _DEBUG = bool(os.environ.get("SUPERRAN_DEBUG"))
 # 注：这里**刻意没有**「跳过 warmup」的开关。warmup 是正确性依赖不是性能优化
 # （见 _resolve_lazy_modules），给一个能关掉它的旋钮只会制造一个必然踩中的坑。
 #
-# BLAS 线程池上限。这是本次省内存的**唯一**有效手段，实测数据见下。
-# 设成 auto / off / 0 就完全不干预，交给 OpenBLAS 自己按核数决定。
-_BLAS_THREADS = os.environ.get("SUPERRAN_BLAS_THREADS", "4").strip()
+# BLAS 线程池上限。设成 auto / off / 0 就完全不干预，交给 OpenBLAS 按核数决定。
+#
+# 默认取 1，不是保守，是实测下来最快的一档 —— 见 _apply_blas_thread_cap 的数据。
+# SuperRAN 的矩阵都很小（逐 RB 的 4×64 / 4×256 SVD、64×64 eigh），多线程 BLAS
+# 只剩线程调度开销；真正的并行度来自 generate 的多进程分块，而那些 worker
+# 本来就各自把线程数压成 1（见 CLAUDE.md「多进程必须先压 BLAS 线程数」）。
+_BLAS_THREADS = os.environ.get("SUPERRAN_BLAS_THREADS", "1").strip()
 
 _BLAS_ENV_VARS = (
     "OPENBLAS_NUM_THREADS",
@@ -81,25 +85,34 @@ _BLAS_ENV_VARS = (
 def _apply_blas_thread_cap() -> str | None:
     """在 numpy 第一次被 import **之前**限制 BLAS 线程池大小。
 
-    2026-08-29 在 20 逻辑核的机器上分级实测（提交内存）::
+    2026-08-29 在 20 逻辑核的机器上实测，服务端空转的提交内存::
 
-        裸 python                          8 MB
-        + numpy                          658 MB   ← 几乎全是 OpenBLAS 的线程 arena
-        + scipy                         1288 MB
-        + superran.server               1323 MB   ← superran 自己只占 35 MB
+        1 线程 172 MB    2 线程 236 MB    4 线程 365 MB    不限(auto) 2718 MB
 
-    换成限制线程数之后（同样测到 superran.server 这一级）::
+    差额**全部**落在 numpy 与 scipy.special 的 import 上（逐段量过，其余每一步
+    逐字节相同），也就是 OpenBLAS 按核数预留的线程 arena —— 跟 superran 的代码量
+    毫无关系，而且实占从来没涨（提交了却没碰过）。MCP 服务端是每个 CLI 会话一个
+    进程，这笔钱要乘以会话数。
 
-        1 线程   102 MB       2 线程   166 MB
-        4 线程   295 MB       8 线程   552 MB      不限   1323 MB
+    **默认取 1 不是保守，是实测最快的一档。** 按 SuperRAN 真实矩阵尺寸测：
 
-    也就是说这些内存跟 superran 的代码量毫无关系，纯粹是按核数预留的线程 arena，
-    而且**实占只有 20–30 MB** —— 提交了却从来没碰过。MCP 服务端是每个 CLI 会话
-    一个进程，这笔钱要乘以会话数：当时 13 个会话就锁掉 34.6 GB 提交内存。
+        场景                          1线程    2线程    4线程   auto(20)
+        273×(4×64) SVD 逐 RB 预编码   23.3ms  16.7ms  20.0ms   16.2ms
+        273×(4×256) SVD 256 端口面板  47.4    37.1    50.2     38.4
+        64×(64×64) eigh 协方差         102.5   110.4   122.1    117.3
+        (2048×64) ifft 时延域          314.5   332.6   382.4    325.9
+        (2000×2000) GEMM（人造对照）    2897    1579     894      481
 
-    这是**性能取舍不是精度取舍**：BLAS 并行度降低只影响大矩阵乘的墙钟时间，
-    数值结果逐位不变。需要跑重活时用 SUPERRAN_BLAS_THREADS=auto 放开。
-    用户自己显式设过这些环境变量的话一律尊重，这里只补没设的。
+    只有那个人造的大 GEMM 吃多线程，而 SuperRAN 根本不做那种运算。真实负载复核
+    （脚本模式跑 tests/test_gates.py，全部通过）：1 线程 87.5s / 2 线程 96.2s /
+    4 线程 88.1s —— 差异都在噪声内。
+
+    真正的并行度来自 generate 的多进程分块，而那些 worker 本来就各自把线程数压成 1
+    （见 CLAUDE.md「多进程必须先压 BLAS 线程数」）。
+
+    这是**性能取舍不是精度取舍**：数值结果逐位不变。确实要放开就设
+    SUPERRAN_BLAS_THREADS=auto。用户自己显式设过这些环境变量的话一律尊重，
+    这里只补没设的。
     """
     if _BLAS_THREADS.lower() in {"", "0", "auto", "off", "none"}:
         return None
