@@ -50,7 +50,7 @@ python tests/test_system_sim_tool.py          # sr_system_sim 行为级（硬失
 python tests/test_benchmarks.py               # 预注册经典通信基准与 provenance
 ```
 
-当前共 **25 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
+当前共 **26 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
 pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` 不再是
 0 检查假绿）；脚本式文件必须在 pytest 收集/薄壳路径中同样以异常或非零退出
 传播失败，不能只在 `if __name__ == '__main__'` 里检查全局 FAILED。
@@ -147,6 +147,36 @@ KaTeX 未必收，光看 Python 源码看不出来。
 `scipy/interpolate/_fitpack_impl.py` 的 `create_module`。
 
 调试时设 `SUPERRAN_DEBUG=1`，会开 faulthandler 并打点到 stderr。
+
+### MCP 服务端的内存：省在线程 arena，不能省在 import
+
+MCP 服务端是**每个 CLI 会话各起一个进程**。2026-08-29 在 20 逻辑核 / 32 GB 的机器上
+实测：一个进程恒定提交 **2.72 GB**，而实占只有 20–30 MB。并存 13 个 Claude 会话时
+单是 superran 就锁掉 34.6 GB 提交内存（系统总额度的三分之一），最后表现成一个
+看起来毫不相干的故障——AI Hub 文件预览打不开（提交内存见底，Chromium 起不了渲染进程）。
+
+分级测量（纯 import，未 warmup）：
+
+    裸 python 8 MB → +numpy 658 MB → +scipy 1288 MB → +superran.server 1323 MB
+
+**superran 自己只占 35 MB**，1.28 GB 全是 OpenBLAS 按核数预留的线程 arena。
+所以唯一有效的杠杆是压线程数（和「多进程必须先压 BLAS 线程数」同一个道理）：
+`SUPERRAN_BLAS_THREADS`，默认 4，服务端空转 2718 MB → 1677 MB；设 `auto` 完全不干预。
+这是**性能取舍不是精度取舍**，数值逐位不变。
+
+**别想着把 numpy 改成懒加载**——试过，两次死锁：
+
+    sr_mcs_info → linkadapt.py → numpy/_core/multiarray.py → create_module   ← 卡死
+    # 只预载 numpy/scipy 后，卡点换个地方：
+    sr_capabilities → probe_source_contract → msg_embedding/.../interpolate.py ← 卡死
+
+即事件循环起来之后**首次载入任何 C 扩展都不安全**，压线程数也绕不开。
+这正是上一节「scipy 子模块必须在主线程预热」的推广版：`main()` 里的
+`ch.warmup()` 是正确性依赖不是性能优化，所以**不提供跳过它的开关**。
+
+`_lazy.py` 的占位模块只服务「不跑服务端」的场景：`import superran` 658→10 MB、
+`import superran.server` 1323→49 MB，测试和取数脚本因此变轻；服务端进程里它们
+在 `main()` 开头就被解析掉了。
 
 ### 系统级 KPI 不带置信区间就是在报噪声
 

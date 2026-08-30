@@ -25,6 +25,7 @@ QUICK = (
     "test_channel_generation_contract.py",
     "test_company_256t.py",
     "test_developer_guide.py",
+    "test_lazy_imports.py",
     "test_mcp_server.py",
     "test_mumimo.py",
     "test_power_control.py",

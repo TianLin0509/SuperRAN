@@ -52,7 +52,7 @@ sys.path.insert(0, str(ROOT / "src"))
 # by standalone wireless chapters.  Every other top-level module must be named
 # by at least one detailed chapter, so a new capability cannot disappear into
 # the API reference without an explicit documentation decision.
-DETAILED_MODULE_EXEMPTIONS = {"__init__", "katex", "mathml"}
+DETAILED_MODULE_EXEMPTIONS = {"__init__", "katex", "mathml", "_lazy"}
 
 from superran import bler_curves as bc  # noqa: E402
 from superran import katex as kx  # noqa: E402

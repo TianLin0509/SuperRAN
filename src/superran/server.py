@@ -16,7 +16,21 @@ from dataclasses import replace
 from typing import Any
 
 import anyio
-import numpy as np
+
+from ._lazy import lazy_module
+
+# 这里的 ``np`` 是占位模块：只是让 ``import superran.server`` 本身保持便宜
+# （49 MB 而不是 1323 MB），方便测试、工具链和 --help 之类的场景。
+#
+# ⚠ 但**服务端运行时 numpy 仍然是预载的**，见 main() 里的 _preload_native_stack()：
+# 事件循环起来之后再第一次载入 numpy 的 C 扩展会死锁（2026-08-29 实测，栈见那个
+# 函数的注释）。所以这个占位模块在服务端进程里其实一启动就被解析掉了，
+# 它省的是"不跑服务端时"的开销。真正省服务端内存的是 BLAS 线程上限。
+#
+# 用代理对象而不是 PEP 562 的模块 __getattr__，是因为本文件有 40 多个工具、
+# 上千处 ``np.xxx`` / ``ch.xxx`` 调用，走的是**模块内的全局名字查找**，
+# 那条路径不经过 PEP 562。用占位模块则一个字都不用改函数体。
+np = lazy_module("numpy")
 
 # mcp 1.x 与 2.x 的服务端类改了名字和位置：
 #   1.x  mcp.server.fastmcp.FastMCP
@@ -34,17 +48,95 @@ except ImportError:  # mcp 1.x
 
     MCP_MAJOR = 1
 
-from . import carrier as carrier_grid
-from . import channelhub as ch
-from . import decisions as dec
-from . import deliver as dlv
-from . import generate as gen
-from . import plan as pl
-from . import provenance
+# 同上：这几个子模块几乎都在顶层 import numpy，eager import 会把上面省下的
+# 又全部拉回来。名字和用法与之前逐字一致，只是推迟到第一次访问属性时才真正加载。
+carrier_grid = lazy_module(".carrier", __package__)
+ch = lazy_module(".channelhub", __package__)
+dec = lazy_module(".decisions", __package__)
+dlv = lazy_module(".deliver", __package__)
+gen = lazy_module(".generate", __package__)
+pl = lazy_module(".plan", __package__)
+provenance = lazy_module(".provenance", __package__)
 
 mcp = _ServerClass("superran")
 
 _DEBUG = bool(os.environ.get("SUPERRAN_DEBUG"))
+
+# 注：这里**刻意没有**「跳过 warmup」的开关。warmup 是正确性依赖不是性能优化
+# （见 _resolve_lazy_modules），给一个能关掉它的旋钮只会制造一个必然踩中的坑。
+#
+# BLAS 线程池上限。这是本次省内存的**唯一**有效手段，实测数据见下。
+# 设成 auto / off / 0 就完全不干预，交给 OpenBLAS 自己按核数决定。
+_BLAS_THREADS = os.environ.get("SUPERRAN_BLAS_THREADS", "4").strip()
+
+_BLAS_ENV_VARS = (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+
+
+def _apply_blas_thread_cap() -> str | None:
+    """在 numpy 第一次被 import **之前**限制 BLAS 线程池大小。
+
+    2026-08-29 在 20 逻辑核的机器上分级实测（提交内存）::
+
+        裸 python                          8 MB
+        + numpy                          658 MB   ← 几乎全是 OpenBLAS 的线程 arena
+        + scipy                         1288 MB
+        + superran.server               1323 MB   ← superran 自己只占 35 MB
+
+    换成限制线程数之后（同样测到 superran.server 这一级）::
+
+        1 线程   102 MB       2 线程   166 MB
+        4 线程   295 MB       8 线程   552 MB      不限   1323 MB
+
+    也就是说这些内存跟 superran 的代码量毫无关系，纯粹是按核数预留的线程 arena，
+    而且**实占只有 20–30 MB** —— 提交了却从来没碰过。MCP 服务端是每个 CLI 会话
+    一个进程，这笔钱要乘以会话数：当时 13 个会话就锁掉 34.6 GB 提交内存。
+
+    这是**性能取舍不是精度取舍**：BLAS 并行度降低只影响大矩阵乘的墙钟时间，
+    数值结果逐位不变。需要跑重活时用 SUPERRAN_BLAS_THREADS=auto 放开。
+    用户自己显式设过这些环境变量的话一律尊重，这里只补没设的。
+    """
+    if _BLAS_THREADS.lower() in {"", "0", "auto", "off", "none"}:
+        return None
+    for var in _BLAS_ENV_VARS:
+        os.environ.setdefault(var, _BLAS_THREADS)
+    return _BLAS_THREADS
+
+
+def _resolve_lazy_modules() -> None:
+    """在主线程把本模块的占位模块全部解析掉（必须早于 mcp.run）。
+
+    ⚠⚠ 别把这一步挪到"第一次调用工具时"，也别以为限制线程数能绕开 ——
+    2026-08-29 完整踩过一遍：
+
+    把 numpy 也做成懒加载之后，服务端能正常 initialize、能列出全部 35 个工具，
+    但**第一次调用任何工具就永久挂死**，无异常无日志。抓到的主线程栈是::
+
+        mcp_server.py <module> → server.main → mcp.run → ... → sr_mcs_info
+          → superran/linkadapt.py <module>
+            → numpy/_core/multiarray.py <module>
+              → importlib._bootstrap_external.create_module   ← 卡死在这里
+
+    改成只在这里预载 numpy/scipy 之后，卡点前移到了下一个"首次载入的 C 扩展"：
+
+        sr_capabilities → channelhub.probe_source_contract
+          → msg_embedding/channel_est/interpolate.py <module>   ← 换个地方卡死
+
+    也就是说这不是某个库的问题，而是**事件循环跑起来之后，首次载入任何 C 扩展
+    都不安全**。channelhub.warmup() 的注释里早就写明了这一点并标了"别删"，
+    它存在的意义就是在主线程把整张依赖图导完 —— 所以 main() 里它必须无条件跑。
+
+    省内存要靠 _apply_blas_thread_cap()（那才是 1.3 GB 的真正来源），
+    不能靠推迟 import。文件头部的占位模块只用来让"不跑服务端"的场景
+    （测试、工具链）保持便宜，服务端进程里它们在这里就被解析掉了。
+    """
+    for placeholder in (carrier_grid, ch, dec, dlv, gen, pl, provenance):
+        placeholder._load()  # noqa: SLF001  占位模块自己的接口
 
 
 # ---------------------------------------------------------------------------
@@ -2655,7 +2747,6 @@ def sr_compare_system_results(
 
 
 def main() -> None:
-    # 启动即预热：依赖问题在这里暴露，且不拖慢第一次调用。
     # 注意只能写 stderr —— stdio 传输下 stdout 是 JSON-RPC 通道。
     if _DEBUG:
         import faulthandler
@@ -2663,10 +2754,19 @@ def main() -> None:
         faulthandler.enable(file=sys.stderr)
         faulthandler.dump_traceback_later(25, repeat=True, file=sys.stderr, exit=False)
 
+    # ① BLAS 线程池上限必须**早于任何 numpy import**，晚一步就不生效了。
+    #    这是本次省内存的唯一有效杠杆：1323 MB → 295 MB（4 线程档）。
+    cap = _apply_blas_thread_cap()
+
+    # ② 占位模块在主线程解析掉，③ warmup 把整张重依赖图导完。两步都不能省，
+    #    也都不能推迟到请求处理路径上 —— 见 _resolve_lazy_modules 的注释与
+    #    channelhub.warmup 里那段标了「别删」的说明。
+    _resolve_lazy_modules()
     info = ch.warmup()
     print(
         f"[superran] warmup {'ok' if info.get('ok') else 'FAILED'} "
-        f"{info.get('elapsed_s')}s {info.get('error', '')}",
+        f"{info.get('elapsed_s')}s {info.get('error', '')} | BLAS 线程上限 "
+        + (f"{cap}（SUPERRAN_BLAS_THREADS=auto 放开）" if cap else "不限（auto）"),
         file=sys.stderr,
         flush=True,
     )

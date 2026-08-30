@@ -194,7 +194,8 @@ def test_every_chapter_has_two_reading_depths_and_every_formula_is_explained() -
     assert 'data-formula="F_SRS_TOY_BEAM"' in text
     assert 'data-formula="F_SRS_TOY_LINK_ADAPT"' in text
     assert 'data-formula="F_MU_CANDIDATE_SCORE"' in text
-    assert meta["detailed_module_exemptions"] == 3
+    # __init__ / katex / mathml / _lazy —— 四个纯基础设施模块由 API 图谱承载。
+    assert meta["detailed_module_exemptions"] == 4
     assert meta["detailed_module_coverage"] == (
         meta["modules"] - meta["detailed_module_exemptions"]
     )
@@ -293,7 +294,10 @@ def test_every_module_public_symbol_tool_test_skill_and_preset_is_carried() -> N
     meta = _meta(text)
 
     module_paths = sorted((ROOT / "src" / "superran").glob("*.py"))
-    detailed_exemptions = {"__init__", "katex", "mathml"}
+    # _lazy 是纯基础设施（模块懒加载代理），没有无线物理内容，与 katex/mathml 同类：
+    # 由 API 图谱承载，不需要独立的详细章节。名单要与 make_developer_guide.py 的
+    # DETAILED_MODULE_EXEMPTIONS 保持一致。
+    detailed_exemptions = {"__init__", "katex", "mathml", "_lazy"}
     public_symbols: list[str] = []
     for path in module_paths:
         assert f'data-module="{path.stem}"' in text
