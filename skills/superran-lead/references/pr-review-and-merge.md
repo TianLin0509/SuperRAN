@@ -37,6 +37,16 @@ Return only:
 | 剩余风险 | |
 | 结论 | BLOCKED / REVISE / MERGE-CANDIDATE / REHEARSAL-PASS |
 
+For every material blocker or residual risk, preserve the technical term and add:
+
+- one plain-language impact sentence;
+- one concrete example from this PR when useful;
+- what the cited test proves and what it does not prove;
+- the recommended action and tradeoff.
+
+Keep code facts, lead decisions, recommendations, and unresolved assumptions distinct.
+An illustrative example is never review evidence.
+
 Post review comments or a change request only when the lead asks. Send fixes back to the
 original member; do not implement them yourself.
 

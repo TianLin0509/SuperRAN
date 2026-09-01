@@ -38,6 +38,7 @@ def validate() -> list[str]:
 
     workflow = json.loads(_read("docs/team/workflow.json"))
     expected = {
+        "schema_version": "1.1.0",
         "development_branch": "develop",
         "release_branch": "main",
         "merge_method": "squash",
@@ -76,7 +77,9 @@ def validate() -> list[str]:
     for item in (
         "upstream/develop", "--role member", "probe_source_contract",
         "superran-member-task/SKILL.md", "channel-sim/SKILL.md", "35 个工具",
-        "[REHEARSAL]", "不得代替组长"):
+        "[REHEARSAL]", "不得代替组长", "技术术语", "白话解释", "具体例子",
+        "我理解你要的是", "不等于", "证明了什么、没有证明什么",
+        "不能当作实现或性能证据"):
         if item not in member_prompt:
             errors.append(f"member prompt missing: {item}")
     if "--role lead" in member_prompt or "同意合并 PR" in member_prompt:
@@ -87,7 +90,9 @@ def validate() -> list[str]:
     for item in (
         "--role lead", "probe_source_contract", "superran-lead/SKILL.md",
         "channel-sim/SKILL.md", "同意合并 PR #N，HEAD <完整 SHA>",
-        "[REHEARSAL]", "永远不得合并", "full regression", "35 个工具"):
+        "[REHEARSAL]", "永远不得合并", "full regression", "35 个工具",
+        "技术术语", "白话解释", "具体例子", "我理解为", "不等于",
+        "证明了什么、没有证明什么", "不能冒充当前证据"):
         if item not in lead_prompt:
             errors.append(f"lead prompt missing: {item}")
     if 'href="member-start.html"' not in lead_page:

@@ -416,7 +416,9 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
     for required in (
         "upstream/develop", "--role member", "probe_source_contract",
         "superran-member-task/SKILL.md",
-        "channel-sim/SKILL.md", "35 个工具", "[REHEARSAL]", "不得代替组长"):
+        "channel-sim/SKILL.md", "35 个工具", "[REHEARSAL]", "不得代替组长",
+        "技术术语", "白话解释", "具体例子", "我理解你要的是", "不等于",
+        "证明了什么、没有证明什么", "不能当作实现或性能证据"):
         assert required in member_prompt
     assert "--role lead" not in member_prompt
     assert "同意合并 PR" not in member_prompt
@@ -426,12 +428,14 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
     for required in (
         "--role lead", "probe_source_contract", "superran-lead/SKILL.md", "channel-sim/SKILL.md",
         "同意合并 PR #N，HEAD <完整 SHA>", "[REHEARSAL]", "永远不得合并",
-        "full regression", "35 个工具"):
+        "full regression", "35 个工具", "技术术语", "白话解释", "具体例子",
+        "我理解为", "不等于", "证明了什么、没有证明什么", "不能冒充当前证据"):
         assert required in lead_prompt
     assert 'href="member-start.html"' in lead_html
 
     workflow = json.loads(
         (ROOT / "docs" / "team" / "workflow.json").read_text(encoding="utf-8"))
+    assert workflow["schema_version"] == "1.1.0"
     assert workflow["development_branch"] == "develop"
     assert workflow["release_branch"] == "main"
     assert workflow["merge_method"] == "squash"

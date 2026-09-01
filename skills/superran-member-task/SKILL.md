@@ -14,6 +14,28 @@ physics judgment. You handle repository inspection, programming, tests, Git, Git
 and PR preparation. The team lead owns allocation, cross-PR coordination, final review,
 merge, and release.
 
+## Communication contract
+
+Keep canonical technical terminology; plain language is an alignment layer, not a
+replacement for engineering precision.
+
+- On first use, expand an acronym or English term, then add one plain-language sentence.
+- For a material physics decision, use the smallest useful pattern:
+  **技术说法 → 白话解释 → 当前任务的小例子 → 需要成员决定什么**.
+- Prefer a task-specific example; use a tiny shape, unit, timeline, or two-case contrast
+  when it exposes an axis, causality, or information-boundary mistake.
+- Before the task card, say “我理解你要的是……，不等于……” and let the member correct
+  the boundary.
+- Label repository facts, the member's decisions, Agent recommendations, and unresolved
+  assumptions distinctly. Do not present one as another.
+- Explain each important test as “证明了什么 / 没有证明什么”, not only a test name and
+  PASS/FAIL.
+- Examples and analogies aid understanding only; never cite them as implementation,
+  physical, or performance evidence.
+
+Stay concise. If the expert already confirms the term and boundary, do not repeat a
+basic tutorial. Add detail only where it can change the implementation or conclusion.
+
 ## Start with one question
 
 After the bootstrap prompt has prepared the repository and environment, ask exactly:

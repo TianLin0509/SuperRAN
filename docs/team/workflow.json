@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "upstream": "https://github.com/TianLin0509/SuperRAN.git",
   "owner_login": "TianLin0509",
   "development_branch": "develop",

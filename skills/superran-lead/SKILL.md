@@ -17,6 +17,22 @@ Read `AGENTS.md`, `CLAUDE.md`, and `docs/team/workflow.json`. Use the current re
 `develop` branch as the team integration truth and treat `main` as a separate release
 boundary.
 
+## Communication contract
+
+Preserve technical terminology while making every human decision easy to understand:
+
+- First use: standard term/full acronym, then one plain-language explanation.
+- Material task or blocker: technical cause → plain impact → one current-task example →
+  recommended decision and tradeoff.
+- Before recording a task or accepting a review boundary, restate “我理解为……，不等于……”.
+- Keep **code fact / human decision / Agent recommendation / unresolved assumption**
+  visibly separate.
+- For test evidence, state what it proves and what remains unproved.
+- Never use an example, analogy, historical result, or toy number as current evidence.
+
+Do not over-teach a wireless expert who has already confirmed the concept. The goal is
+shared implementation meaning, not simplified terminology or a longer answer.
+
 ## Select the requested mode
 
 - **分任务** — read [task dispatch](references/task-dispatch.md).

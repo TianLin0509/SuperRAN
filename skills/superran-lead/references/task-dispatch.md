@@ -14,6 +14,11 @@ decisions:
 
 Give a recommendation when information is missing. Then show:
 
+Before the card, restate the boundary as “我理解要实现的是……，不等于……”. For any
+non-obvious term, keep the standard term and add one plain-language sentence plus one
+task-specific example. Mark code facts, lead decisions, recommendations, and open
+assumptions separately.
+
 | 组长任务卡 | 内容 |
 |---|---|
 | 任务名称 | |
