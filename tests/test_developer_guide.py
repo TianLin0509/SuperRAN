@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import ast
+import html as html_lib
 import importlib.util
 import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -349,12 +351,38 @@ def test_every_module_public_symbol_tool_test_skill_and_preset_is_carried() -> N
     assert meta["skill_files"] == len(skill_files)
     assert preset_count > 0
 
+    install_text = (ROOT / "INSTALL_AGENT.md").read_text(encoding="utf-8")
+    install_tool_count = re.search(r"# 期望：tools: (\d+)", install_text)
+    assert install_tool_count and int(install_tool_count.group(1)) == len(tools)
+    for role_skill in ("superran-member-task", "superran-lead", "channel-sim"):
+        assert role_skill in install_text
+
     # Human-maintained entry documents must not lag the generator's actual scan.
     for rel in ("README.md", "CLAUDE.md"):
         entry = (ROOT / rel).read_text(encoding="utf-8")
         match = re.search(r"当前共 \*\*(\d+) 个可执行测试文件\*\*", entry)
         assert match and int(match.group(1)) == len(test_files), rel
 
+
+def test_team_skill_installer_copies_role_scoped_verified_skills() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "install_agent_skills.py"),
+             "--role", "lead", "--codex-home", temp_dir],
+            cwd=ROOT, text=True, capture_output=True, encoding="utf-8",
+            errors="strict", timeout=30, check=False,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        payload = json.loads(proc.stdout)
+        assert payload["status"] == "pass"
+        assert {row["name"] for row in payload["installed"]} == {
+            "channel-sim", "superran-member-task", "superran-lead"}
+        for row in payload["installed"]:
+            assert (Path(row["path"]) / "SKILL.md").is_file()
+            assert len(row["sha256"]) == 64
+        assert Path(payload["manifest"]).is_file()
+
+    test_files = sorted((ROOT / "tests").glob("test_*.py"))
     matrix_source = (ROOT / "scripts" / "run_test_matrix.py").read_text(
         encoding="utf-8")
     matrix_tree = ast.parse(matrix_source)
@@ -368,6 +396,57 @@ def test_every_module_public_symbol_tool_test_skill_and_preset_is_carried() -> N
                     if isinstance(value, ast.Constant) and isinstance(value.value, str)
                 )
     assert sorted(catalogued) == [path.name for path in test_files]
+
+
+def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> None:
+    member_html = (ROOT / "docs" / "team" / "member-start.html").read_text(
+        encoding="utf-8", errors="strict")
+    lead_html = (ROOT / "docs" / "team" / "lead-start.html").read_text(
+        encoding="utf-8", errors="strict")
+    assert member_html.startswith("<!doctype html>\n")
+    assert lead_html.startswith("<!doctype html>\n")
+
+    member_match = re.search(
+        r'<pre id="member-prompt">(.*?)</pre>', member_html, re.S)
+    lead_match = re.search(r'<pre id="lead-prompt">(.*?)</pre>', lead_html, re.S)
+    assert member_match and lead_match
+    member_prompt = html_lib.unescape(member_match.group(1))
+    lead_prompt = html_lib.unescape(lead_match.group(1))
+
+    for required in (
+        "upstream/develop", "--role member", "probe_source_contract",
+        "superran-member-task/SKILL.md",
+        "channel-sim/SKILL.md", "35 个工具", "[REHEARSAL]", "不得代替组长"):
+        assert required in member_prompt
+    assert "--role lead" not in member_prompt
+    assert "同意合并 PR" not in member_prompt
+    assert not re.search(r"\b[0-9a-f]{40}\b", member_prompt), \
+        "member bootstrap must follow current develop, not a stale pinned SHA"
+
+    for required in (
+        "--role lead", "probe_source_contract", "superran-lead/SKILL.md", "channel-sim/SKILL.md",
+        "同意合并 PR #N，HEAD <完整 SHA>", "[REHEARSAL]", "永远不得合并",
+        "full regression", "35 个工具"):
+        assert required in lead_prompt
+    assert 'href="member-start.html"' in lead_html
+
+    workflow = json.loads(
+        (ROOT / "docs" / "team" / "workflow.json").read_text(encoding="utf-8"))
+    assert workflow["development_branch"] == "develop"
+    assert workflow["release_branch"] == "main"
+    assert workflow["merge_method"] == "squash"
+    assert workflow["mcp_tool_count"] == 35
+    assert workflow["rehearsal_merge_allowed"] is False
+    for key in ("member_skill", "lead_skill", "simulation_skill"):
+        assert (ROOT / workflow[key]).is_file(), key
+
+    validator = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "validate_team_contract.py")],
+        cwd=ROOT, text=True, capture_output=True, encoding="utf-8",
+        errors="strict", timeout=30, check=False,
+    )
+    assert validator.returncode == 0, validator.stdout + validator.stderr
+    assert json.loads(validator.stdout)["status"] == "pass"
 
 
 def test_public_docs_and_source_do_not_expose_restricted_provenance_labels() -> None:

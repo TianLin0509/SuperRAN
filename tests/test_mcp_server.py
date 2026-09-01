@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -40,7 +41,13 @@ def _payload(result) -> dict:
 
 async def main() -> None:
     # Windows 上必须继承默认环境（SystemRoot 等），只传自定义 env 会让子进程挂死
-    env = {**get_default_environment(), "PYTHONPATH": str(ROOT / "src"), "PYTHONIOENCODING": "utf-8"}
+    env = {
+        **get_default_environment(),
+        **{key: value for key, value in os.environ.items() if key.startswith("SUPERRAN_")},
+        "PYTHONPATH": str(ROOT / "src"),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+    }
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "superran.server"],

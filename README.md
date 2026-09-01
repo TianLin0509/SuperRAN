@@ -288,6 +288,15 @@ PMI 给码本索引而非嵌入向量。
 | 把香农谱效当吞吐报 | 真实系统要打 4~6 折，差的是调制受限+码率离散+码长 |
 | 声称实测 BLER | 表 1/2 是分析模型；表 3 是用户曲线插值，二者都不是 3GPP 实测 |
 
+## 团队 Agent 开发
+
+- 组员只需打开 `docs/team/member-start.html`，复制唯一 Prompt，随后用无线专业语言回答 Agent。
+- 组长使用 `docs/team/lead-start.html` 分任务、看状态、审核 PR，并按当前完整 SHA 决定合并。
+- `develop` 是组员 PR 的目标分支；`main` 是组长单独控制的发布分支。
+
+两份页面会自动引导 Agent 安装仓库版本的 `channel-sim`、`superran-member-task` 与
+`superran-lead`，无需人手改 Prompt 或复制 Skill 文件。
+
 ## 安装
 
 ### 最省事：让 agent 自己装
@@ -329,7 +338,7 @@ python scripts/make_offline_bundle.py --thin   # 轻量包 17 MB，要求目标�
 需要 Python ≥ 3.10。
 
 ```bash
-git clone https://github.com/wangxz0803-lab/ChannelHub_main   # 物理内核
+git clone https://github.com/wangxz0803-lab/ChannelHub_main   # 候选物理内核，必须通过 source contract
 git clone https://github.com/TianLin0509/superran
 cd superran && pip install -e .
 
@@ -338,13 +347,16 @@ pip install sionna-rt      # 可选，射线追踪（约 300 MB）
 
 ChannelHub 会自动在同级/上级目录查找；放在别处就设 `SUPERRAN_CHANNELHUB`。
 不装射线追踪也能用，`sr_capabilities` 会如实报告缺什么。
+能 import 不代表当前物理接口兼容；安装后必须让 Agent 运行
+`channelhub.probe_source_contract()`，只有 `compatible=true` 才能生成正式数据。
 
 ```bash
 claude mcp add superran -- python /path/to/superran/scripts/mcp_server.py
 codex  mcp add superran -- python /path/to/superran/scripts/mcp_server.py
 
-cp -r skills/channel-sim ~/.claude/skills/     # 可选：工作流编排
-cp -r skills/channel-sim ~/.codex/skills/
+# Codex 团队 Skill（按当前角色选一个）
+python scripts/install_agent_skills.py --role member
+python scripts/install_agent_skills.py --role lead
 ```
 
 ## 评审门控

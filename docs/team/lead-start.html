@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>SuperRAN 组长：项目管理与审核工作台</title>
+  <style>
+    :root{--ink:#182e43;--muted:#667b8e;--line:#d9e4eb;--blue:#105d91;--green:#147a58;--red:#a53b32;--gold:#ad6800;--bg:#edf2f5;--paper:#fff;--dark:#10283d}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif;line-height:1.62}main{max-width:980px;margin:auto;padding:28px 20px 64px}header{background:linear-gradient(135deg,#102f4f,#176d78);color:#fff;border-radius:22px;padding:35px 40px;box-shadow:0 16px 36px #1c40521c}header h1{font-size:36px;line-height:1.22;margin:6px 0 10px}header p{font-size:17px;margin:0;opacity:.94}.eyebrow{font-size:12px;letter-spacing:.16em;font-weight:800;opacity:.76}
+    section{background:var(--paper);border:1px solid var(--line);border-radius:18px;padding:25px 28px;margin-top:18px;box-shadow:0 8px 24px #1b3d520a}h2{font-size:24px;margin:0 0 15px}h3{font-size:17px;margin:0 0 7px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.cmd{border:1px solid var(--line);border-radius:13px;padding:15px 16px;background:#f7fafc}.cmd b{display:block;color:var(--blue);margin-bottom:5px}.cmd code{display:block;background:#e8f1f6;border-radius:7px;padding:7px 9px;color:#25465f;white-space:normal}
+    .role{display:grid;grid-template-columns:1fr 1fr;gap:13px}.box{border-radius:13px;padding:15px 17px}.you{background:#e9f7f1;border-left:4px solid var(--green)}.agent{background:#edf4f8;border-left:4px solid var(--blue)}.box ul{margin:5px 0 0;padding-left:21px}.copybar{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:10px}.copybar p{margin:0;color:var(--muted);font-size:13px}.copy{border:0;border-radius:10px;background:var(--blue);color:#fff;font-weight:800;padding:10px 17px;cursor:pointer;white-space:nowrap}.copy:hover{background:#0a4d79}details{border:1px solid var(--line);border-radius:13px;background:#f7fafc}summary{cursor:pointer;padding:12px 15px;font-weight:800;color:#38556c}pre{white-space:pre-wrap;word-break:break-word;margin:0;background:var(--dark);color:#eaf4fb;border-radius:0 0 12px 12px;padding:20px;font:12.5px/1.68 Consolas,"Microsoft YaHei",monospace;max-height:620px;overflow:auto}
+    .merge{background:#fff4e1;border-left:4px solid var(--gold);border-radius:12px;padding:14px 16px}.merge code{background:#fff;padding:3px 6px;border-radius:5px}.rehearsal{background:#f9eeee;border-left:4px solid var(--red);border-radius:12px;padding:14px 16px}.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}.step{border:1px solid var(--line);border-radius:12px;padding:14px}.step span{display:inline-grid;place-items:center;width:29px;height:29px;border-radius:8px;background:var(--blue);color:#fff;font-weight:900;margin-bottom:8px}.tiny{font-size:12px;color:var(--muted)}footer{text-align:center;color:#80909d;font-size:12px;padding:24px}
+    @media(max-width:760px){.grid,.role,.steps{grid-template-columns:1fr}header{padding:28px 24px}header h1{font-size:29px}section{padding:21px 18px}.copybar{align-items:flex-start;flex-direction:column}.copy{width:100%}}@media print{body{background:#fff}main{padding:0}header,section{box-shadow:none}.copy{display:none}pre{color:#111;background:#f2f4f5;border:1px solid #ccd5dc;max-height:none}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">SUPERRAN · LEAD WORKBENCH</div>
+    <h1>你做判断，Agent 管项目和审核</h1>
+    <p>同一段 Prompt 建立你的组长工作台。之后直接说人话：分任务、看状态、审核 PR、合并，或先体验一次组员流程。</p>
+  </header>
+
+  <section>
+    <h2>你只需要说这 5 类话</h2>
+    <div class="grid">
+      <div class="cmd"><b>分任务</b><code>“我要让一名组员完善 SRS 信道构建。”</code></div>
+      <div class="cmd"><b>看状态</b><code>“现在有哪些 PR，分别卡在哪里？”</code></div>
+      <div class="cmd"><b>审核</b><code>“审核这个 PR：&lt;链接&gt;”</code></div>
+      <div class="cmd"><b>合并</b><code>“同意合并 PR #N，HEAD &lt;完整 SHA&gt;”</code></div>
+      <div class="cmd"><b>体验</b><code>“我想先体验一次组员完整流程。”</code></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>你负责什么，Agent 负责什么</h2>
+    <div class="role">
+      <div class="box you"><h3>你只负责</h3><ul><li>任务优先级和人员</li><li>无线原理争议与工程假设</li><li>接受或退回 Reviewer 结论</li><li>明确批准某个完整 SHA 合并</li></ul></div>
+      <div class="box agent"><h3>你的 Agent 负责</h3><ul><li>整理任务卡和项目状态</li><li>隔离拉取并审核 PR</li><li>运行当前 SHA 的测试与反证</li><li>评论、退回修改、合并和远端核验</li></ul></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>第一次：把下面整段发给你的 Agent</h2>
+    <div class="copybar"><p>一个字不用改。Agent 会安装组长、组员和仿真 Skill，并停在工作台等待你发指令。</p><button class="copy" onclick="copyPrompt(this)">复制组长 Prompt</button></div>
+    <details><summary>想看内容可以展开；不看也不影响使用</summary><pre id="lead-prompt">你是我的 SuperRAN 组长 Agent。请完整执行，不要让我修改本 Prompt，也不要把 Git、安装、测试或 PR 操作推回给我。
+
+我的角色：SuperRAN 唯一项目负责人，决定优先级、物理口径、审核结论和最终合并。
+你的角色：项目管理、状态、独立 Reviewer 和 SHA 绑定合并 Agent。
+边界：组员只做实现；你不得替组员修改 Author 分支，也不得未经我明确批准当前完整 SHA 就合并。
+
+固定仓库：C:\Vibe\Wireless\SuperRAN
+上游：https://github.com/TianLin0509/SuperRAN.git
+团队开发分支：develop
+发布分支：main
+
+先自动建立组长工作台：
+1. 检查 gh auth status，必须确认当前 GitHub 登录账号是上游 Owner TianLin0509；不一致就只引导我完成一次登录切换。
+2. 检查真实仓库、所有 git worktree 和未提交修改。不得切换、覆盖或清理我正在使用的工作区。fetch origin/develop；如果需要检出或审核，使用 C:\Vibe\Worktrees\SuperRAN 下明确、隔离的 worktree。
+3. 完整读取 origin/develop 当前版本的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md。若本机尚无干净 develop worktree，安全创建；已存在则验证后复用。
+4. 使用仓库可用 Python 环境；必要时按 INSTALL_AGENT.md 准备 .venv、ChannelHub 和 superran MCP。必须运行 channelhub.probe_source_contract() 并确认 compatible=true，不能把能 import 当成物理内核可用。然后运行“<对应 Python> scripts/install_agent_skills.py --role lead”，确认 status=pass。
+5. 当前会话完整读取 skills/superran-lead/SKILL.md、skills/superran-member-task/SKILL.md 和 skills/channel-sim/SKILL.md。用同一 Python 的绝对路径注册或校正 superran MCP，并验证实际有 35 个工具。
+6. 运行 python tests/test_lazy_imports.py 与 python tests/test_carrier.py。不要向我粘贴安装日志；成功只报告“组长工作台已就绪”，失败只问我唯一必须亲自处理的动作。
+7. 初始化过程中只允许本机环境和只读 GitHub 查询，不得改 Issue、PR、分支、Ruleset 或代码；等我给出具体指令后再按 superran-lead Skill 执行。
+
+就绪后只问：
+“你今天要分任务、看项目状态、审核 PR、合并已审核 PR，还是体验一次组员流程？”
+
+分任务时：检查当前代码和活跃 PR，最多问一轮无线/优先级问题，给我短任务卡和一段可直接发给组员的话；只有我明确说“建任务”才创建 GitHub Issue。
+看状态时：查询当前 GitHub 的真实 Issue、PR、head SHA、checks 和阻塞，给我一屏摘要。
+审核时：在隔离 worktree 对当前 PR HEAD 做物理审和集成审，不修改 Author 分支；新 commit 使旧审核失效。
+合并时：只有我说“同意合并 PR #N，HEAD <完整 SHA>”后，才重新核对远端 HEAD、develop base、非 Draft、非 [REHEARSAL]、当前测试和 Reviewer 结论，然后按仓库约定 squash merge。develop 发布到 main 是另一件事，必须另行获得明确授权并跑当前 full regression。
+体验时：让我在另一个全新 Codex 会话打开 docs/team/member-start.html 并复制组员 Prompt。组员流程会识别 Owner 账号，自动建立 [REHEARSAL] Draft PR；你可以正常审核它，但永远不得合并。</pre></details>
+  </section>
+
+  <section>
+    <h2>审核回来后，你只看一张卡</h2>
+    <div class="steps">
+      <div class="step"><span>1</span><h3>物理审</h3><p>因果、轴、单位、时钟、真值/估计值、反向对照。</p></div>
+      <div class="step"><span>2</span><h3>集成审</h3><p>范围、上下游、错误传播、当前测试、静默降级。</p></div>
+      <div class="step"><span>3</span><h3>结论</h3><p>BLOCKED、REVISE 或 MERGE-CANDIDATE。</p></div>
+    </div>
+    <p class="tiny">任何新 commit 都会让旧审核失效，Agent 必须重新审核新的 HEAD。</p>
+  </section>
+
+  <section>
+    <h2>真正合并前的唯一口令</h2>
+    <div class="merge">Reviewer 给出 <b>MERGE-CANDIDATE</b> 后，你确认风险可接受，再回复：<br><code>同意合并 PR #N，HEAD &lt;Reviewer 给出的完整 SHA&gt;</code></div>
+  </section>
+
+  <section id="rehearsal">
+    <h2>你怎样先扮演一次组员</h2>
+    <div class="rehearsal"><b>开一个全新的 Codex session</b>，打开同目录的 <a href="member-start.html">组员快速开始页</a>，复制组员 Prompt。因为登录账号是 Owner，Agent 会自动进入体验模式，创建 `[REHEARSAL]` Draft PR。把链接交回组长 session 审核即可；该 PR 永不合并。</div>
+  </section>
+  <footer>组长掌握方向和最终权限；Agent 承担项目管理、证据检查和 GitHub 体力活。</footer>
+</main>
+<script>
+function copyPrompt(button){var text=document.getElementById('lead-prompt').innerText;function ok(){var old=button.textContent;button.textContent='已复制，可以粘贴给 Agent';setTimeout(function(){button.textContent=old;},6000);}function fallback(){var a=document.createElement('textarea');a.value=text;a.setAttribute('readonly','');a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);ok();}if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(ok).catch(fallback);}else{fallback();}}
+</script>
+</body>
+</html>

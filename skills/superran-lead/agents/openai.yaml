@@ -1,0 +1,6 @@
+interface:
+  display_name: "SuperRAN 组长工作台"
+  short_description: "分任务、看状态、审核 PR，并按指定 SHA 安全合并"
+  default_prompt: "Use $superran-lead to manage my SuperRAN team, review PRs, and merge only after my explicit SHA-bound approval."
+policy:
+  allow_implicit_invocation: true

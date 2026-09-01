@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>SuperRAN 组员：复制一段 Prompt 开工</title>
+  <style>
+    :root{--ink:#183047;--muted:#687b8d;--line:#dbe5ec;--blue:#0b67a3;--green:#087f6e;--bg:#edf3f6;--paper:#fff;--dark:#102b42}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif;line-height:1.62}main{max-width:930px;margin:auto;padding:28px 20px 64px}
+    header{background:linear-gradient(135deg,#103e66,#07878b);color:#fff;border-radius:22px;padding:34px 38px;box-shadow:0 16px 36px #1d42541c}header h1{font-size:36px;line-height:1.22;margin:6px 0 10px}header p{font-size:17px;margin:0;opacity:.94}.eyebrow{font-size:12px;letter-spacing:.16em;font-weight:800;opacity:.76}
+    section{background:var(--paper);border:1px solid var(--line);border-radius:18px;padding:25px 27px;margin-top:18px;box-shadow:0 8px 24px #1b3d520a}h2{font-size:24px;margin:0 0 15px}h3{font-size:17px;margin:0 0 7px}.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}.step{border:1px solid var(--line);border-radius:14px;padding:17px}.num{width:33px;height:33px;border-radius:10px;background:var(--blue);color:#fff;display:grid;place-items:center;font-weight:900;margin-bottom:10px}.step p{margin:0;color:var(--muted)}
+    .yesno{display:grid;grid-template-columns:1fr 1fr;gap:13px}.box{border-radius:13px;padding:15px 17px}.yes{background:#e9f8f3;border-left:4px solid var(--green)}.no{background:#f2f5f7;border-left:4px solid #8395a4}.box ul{margin:5px 0 0;padding-left:21px}.callout{background:#fff7e6;border-left:4px solid #d07a00;border-radius:12px;padding:13px 16px;margin-top:14px}
+    .copybar{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:10px}.copybar p{margin:0;color:var(--muted);font-size:13px}.copy{border:0;border-radius:10px;background:var(--blue);color:#fff;font-weight:800;padding:10px 17px;cursor:pointer;white-space:nowrap}.copy:hover{background:#075887}details{border:1px solid var(--line);border-radius:13px;background:#f7fafc}summary{cursor:pointer;padding:12px 15px;font-weight:800;color:#38556c}pre{white-space:pre-wrap;word-break:break-word;margin:0;background:var(--dark);color:#eaf4fb;border-radius:0 0 12px 12px;padding:20px;font:12.5px/1.68 Consolas,"Microsoft YaHei",monospace;max-height:620px;overflow:auto}
+    .questions{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.q{background:#f5f9fb;border:1px solid var(--line);border-radius:11px;padding:12px 14px}.q b{color:var(--blue)}.finish{font-size:17px;background:#e9f8f3;border:1px solid #bfe5d5;border-radius:13px;padding:15px 17px}.tiny{font-size:12px;color:var(--muted)}footer{text-align:center;color:#80909d;font-size:12px;padding:24px}
+    @media(max-width:720px){.steps,.yesno,.questions{grid-template-columns:1fr}header{padding:28px 24px}header h1{font-size:29px}section{padding:21px 18px}.copybar{align-items:flex-start;flex-direction:column}.copy{width:100%}}@media print{body{background:#fff}main{padding:0}header,section{box-shadow:none}.copy{display:none}pre{color:#111;background:#f2f4f5;border:1px solid #ccd5dc;max-height:none}}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">SUPERRAN · MEMBER QUICK START</div>
+    <h1>复制一段 Prompt，剩下交给 Agent</h1>
+    <p>你不用学 Git、安装环境或写代码。只需要用无线专业知识告诉 Agent：想完善什么、怎样才算物理上正确。</p>
+  </header>
+
+  <section>
+    <h2>只做 3 步</h2>
+    <div class="steps">
+      <div class="step"><div class="num">1</div><h3>打开新 Agent 会话</h3><p>打开 Codex，不用先下载任何东西。</p></div>
+      <div class="step"><div class="num">2</div><h3>复制完整 Prompt</h3><p>点击下面蓝色按钮，整段粘贴，一个字都不用改。</p></div>
+      <div class="step"><div class="num">3</div><h3>回答无线问题</h3><p>正常聊天。完成后把 Agent 给你的 PR 链接发给组长。</p></div>
+    </div>
+    <div class="callout"><b>第一次可能需要你做一件小事：</b>GitHub 登录或系统授权弹出时，按 Agent 给的一步提示操作，完成后回复“好了”。</div>
+  </section>
+
+  <section>
+    <h2>你负责什么，Agent 负责什么</h2>
+    <div class="yesno">
+      <div class="box yes"><h3>你只负责</h3><ul><li>说清想完善的 SuperRAN 能力</li><li>判断物理流程与信息边界</li><li>确认成功场景和反向对照</li><li>把最终 PR 链接发给组长</li></ul></div>
+      <div class="box no"><h3>全部交给 Agent</h3><ul><li>GitHub 账号、Fork、下载和分支</li><li>SuperRAN、MCP 和 Skill 安装</li><li>读代码、写代码、补测试、跑回归</li><li>commit、push、填写并提交 PR</li></ul></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>把下面整段直接发给 Agent</h2>
+    <div class="copybar"><p>技术细节默认折叠。Prompt 会从 GitHub 安装仓库里的最新版 Skill。</p><button class="copy" onclick="copyPrompt(this)">复制完整 Prompt</button></div>
+    <details><summary>想看内容可以展开；不看也不影响使用</summary><pre id="member-prompt">你是我的 SuperRAN 实现 Agent。请完整执行，不要让我修改本 Prompt，也不要把编程、Git、安装或路径选择推回给我。
+
+我的角色：无线专家，只说明需求并判断物理含义。
+你的角色：组员 Author Agent，负责环境、GitHub、主动提问、实现、测试和 PR。
+边界：项目管理、其他组员安排、最终审核、合并和发布全部由组长负责；你不得代替组长。
+
+固定上游：https://github.com/TianLin0509/SuperRAN.git
+团队开发分支：develop
+完成后的 PR base：TianLin0509/SuperRAN:develop
+
+先自动准备环境：
+1. 选择新的安全项目目录；不得覆盖已有目录或未提交修改。检查并自动准备 Git、GitHub CLI（gh）和 Python >= 3.10。只有登录、管理员授权或系统弹窗无法自动完成时，才给我一个最短动作，等我回复“好了”后继续。
+2. 用 gh auth status 检查登录并自行读取 GitHub 用户名。普通组员账号没有 Fork 时自行创建 Fork、clone 自己的 Fork，并设置 upstream。若登录账号正是上游 Owner TianLin0509，不要尝试 Fork 自己的仓库，自动进入体验模式：使用隔离目录和 rehearsal/... 分支，最终只建标题以 [REHEARSAL] 开头的 Draft PR，永不合并。
+3. fetch upstream/develop；若远端没有 develop，停止并只说“团队 develop 尚未发布，请联系组长”。从当前远端 develop 记录 base 完整 SHA。不要使用旧 main，也不要在 Prompt 中寻找固定 SHA。
+4. 完整读取 develop 中的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md。仓库代码与当前可执行证据优先于历史文档。
+5. 在仓库内创建独立 .venv，用其 Python 执行 pip install -e .，并按 INSTALL_AGENT.md 自动定位或安装团队有权使用的 ChannelHub。必须执行 channelhub.probe_source_contract()，只有 compatible=true 才继续；缺少来源、授权或出现 blocker 时如实阻断并请组长提供批准版本，不伪造、不静默降级。
+6. 运行“<该 .venv Python> scripts/install_agent_skills.py --role member”，确认输出 status=pass；随后在当前会话完整读取 skills/superran-member-task/SKILL.md 和 skills/channel-sim/SKILL.md。新会话从 Codex 用户 Skill 目录自动发现，当前会话直接按已读取版本执行。
+7. 用同一个 .venv Python 的绝对路径注册或校正 superran MCP，服务脚本使用仓库 scripts/mcp_server.py 的绝对路径。验证 MCP 实际有 35 个工具。不得使用裸 python 或相对路径注册。
+8. 运行 python tests/test_lazy_imports.py 与 python tests/test_carrier.py。不要给我粘贴安装日志；成功只说“环境已准备好”，失败只问我唯一必须亲自处理的动作。
+
+环境就绪后，立即使用 superran-member-task Skill。先只问这一句：
+
+“请用一句话告诉我：你想让 SuperRAN 新增、修正或完善什么？只讲无线需求，不用讲代码。”
+
+我回答后，你先检查相关当前代码和测试，再按 Skill 最多问两轮短问题并给推荐答案。确认五行任务卡后，自主完成实现、物理反向对照、当前 SHA 测试、commit、push 和 PR。不得管理其他任务、审核别人的 PR 或合并。
+
+最后只给我五行：做成了什么、PR 链接、PR HEAD 完整 SHA、当前测试结论、需要组长决定什么。</pre></details>
+  </section>
+
+  <section>
+    <h2>Agent 会怎样问你</h2>
+    <div class="questions">
+      <div class="q"><b>第一句</b><br>你想让 SuperRAN 新增、修正或完善什么？</div>
+      <div class="q"><b>物理流程</b><br>从什么输入出发，经过什么处理，输出给谁使用？</div>
+      <div class="q"><b>怎样算正确</b><br>什么场景应变化，什么反向场景必须不变？</div>
+      <div class="q"><b>边界</b><br>这次明确不同时改什么？</div>
+    </div>
+    <p class="tiny">不确定时可回答“按推荐”，Agent 会采用安全建议并停止追问。</p>
+  </section>
+
+  <section>
+    <h2>最后怎么交给组长</h2>
+    <div class="finish">把 <b>PR 链接 + 一句话说明做了什么 + 是否需要组长决定</b> 发给组长。不要自己点 Merge。</div>
+  </section>
+  <footer>所有组员使用同一份页面；具体任务通过与 Agent 的无线问答形成。</footer>
+</main>
+<script>
+function copyPrompt(button){var text=document.getElementById('member-prompt').innerText;function ok(){var old=button.textContent;button.textContent='已复制，可以粘贴给 Agent';setTimeout(function(){button.textContent=old;},6000);}function fallback(){var a=document.createElement('textarea');a.value=text;a.setAttribute('readonly','');a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);ok();}if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(ok).catch(fallback);}else{fallback();}}
+</script>
+</body>
+</html>

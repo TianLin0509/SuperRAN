@@ -1,5 +1,17 @@
 # SuperRAN 开发规范
 
+## 多人 Agent 协作入口
+
+团队成员开始前还要按角色读取对应 Skill：
+
+- 组员实现任务：`skills/superran-member-task/SKILL.md`
+- 组长分工、状态、PR 审核与合并：`skills/superran-lead/SKILL.md`
+- 仿真设计、数据生成或性能结论：`skills/channel-sim/SKILL.md`
+
+`develop` 是组员 PR 的唯一目标分支，`main` 只由组长单独发布。组员 Agent 只做
+Author；组长 Agent 不修改组员分支，并且只有组长明确批准当前完整 HEAD SHA 后才可
+合并。标题含 `[REHEARSAL]` 的体验 PR 永不合并。
+
 ## 项目定位
 
 SuperRAN 是独立维护、独立演进的 Agent 式无线仿真平台。信道轴序、

@@ -68,24 +68,20 @@ superran 依赖 **ChannelHub** 作为物理内核。两者建议放成兄弟目�
 ### 联网模式
 
 ```bash
-git clone https://github.com/wangxz0803-lab/ChannelHub_main
+git clone https://github.com/wangxz0803-lab/ChannelHub_main  # 候选源，仍必须过下面的合同体检
 git clone https://github.com/TianLin0509/superran
 ```
+
+公开候选源可能落后于 SuperRAN 当前物理接口；能 clone、能 import 都不算通过。
+若团队已有批准的 ChannelHub，优先使用组长给出的版本。
 
 ### 离线模式
 
 superran 就是你手上这份。ChannelHub **不在离线包里**——它没有开源许可证，
 不能随包转发。
 
-先找一遍，很多受控内网已经有：
-
-```bash
-# 在常见位置找 ChannelHub 的特征文件
-find / -name "contract.py" -path "*msg_embedding/data*" 2>/dev/null | head
-# Windows PowerShell
-Get-ChildItem -Path C:\,D:\ -Recurse -Filter contract.py -ErrorAction SilentlyContinue |
-  Where-Object { $_.FullName -like "*msg_embedding\data*" } | Select -First 3
-```
+先让 Agent 在当前项目目录、同级项目目录和团队约定的代码目录中查找。
+**不得为了找依赖递归扫描整个 C: / D: 或根目录。**
 
 找不到就停下来 **【问用户】**：ChannelHub 源码在哪？需要一个目录，
 里面有 `src/msg_embedding/data/contract.py`。没有它整个项目跑不起来。
@@ -105,7 +101,14 @@ export SUPERRAN_CHANNELHUB=/abs/path/to/ChannelHub_main          # macOS/Linux
 <PYTHON> -c "import sys; sys.path.insert(0,'src'); from superran import channelhub; print(channelhub.channelhub_root())"
 ```
 
-打印出的路径下必须存在 `src/msg_embedding/data/contract.py`。不存在就是没找到。
+打印出的路径下必须存在 `src/msg_embedding/data/contract.py`。随后还必须通过当前物理接口合同：
+
+```bash
+<PYTHON> -c "import sys; sys.path.insert(0,'src'); from superran import channelhub as ch; r=ch.probe_source_contract(); print(r.as_dict()); raise SystemExit(0 if r.compatible else 1)"
+```
+
+只有 `compatible: true` 才能继续。任何 blocker（尤其 `array_port_order`）都必须停止并向
+组长索取批准的 ChannelHub；不允许把不兼容源当成可选告警。
 
 ---
 
@@ -224,26 +227,26 @@ claude mcp list        # 应看到 superran ... ✔ Connected
 
 ---
 
-## 第 6 步：装 skill（可选，但推荐）
+## 第 6 步：装 Skill
 
-只有一个 skill，就是 `channel-sim`，一个 `SKILL.md` 文件，无脚本无依赖。
+仓库是 Skill 的版本真源。不要从聊天记录复制旧版本；按角色运行统一安装器：
 
 ```bash
-mkdir -p ~/.claude/skills && cp -r skills/channel-sim ~/.claude/skills/
-mkdir -p ~/.codex/skills  && cp -r skills/channel-sim ~/.codex/skills/
+# 组员：仿真门 + 实现任务问答/开发/PR
+<PYTHON> scripts/install_agent_skills.py --role member
+
+# 组长：再增加分任务、状态、PR 审核与合并
+<PYTHON> scripts/install_agent_skills.py --role lead
 ```
 
-```powershell
-# Windows PowerShell
-New-Item -ItemType Directory -Force $HOME\.claude\skills, $HOME\.codex\skills
-Copy-Item -Recurse -Force skills\channel-sim $HOME\.claude\skills\
-Copy-Item -Recurse -Force skills\channel-sim $HOME\.codex\skills\
-```
+安装器会复制并逐树 SHA-256 对账：
 
-**不装也能用 MCP**，30 个工具全在，只是没有工作流编排——agent 得自己想
-什么时候过门、结论怎么写。装了体验完整很多。
+- `channel-sim`：仿真设计与门 1/2/3；
+- `superran-member-task`：组员的需求问答、实现、测试与 PR；
+- `superran-lead`：仅组长使用的分工、状态、审核与 SHA 绑定合并。
 
-**验证：** 文件存在且和仓库里那份一致。
+当前会话仍要直接完整读取仓库里的对应 `SKILL.md`；新会话会从用户 Skill 目录自动发现。
+MCP 即使不装 Skill 也能调用，但团队开发流程不得省略角色 Skill。
 
 ---
 
@@ -251,21 +254,13 @@ Copy-Item -Recurse -Force skills\channel-sim $HOME\.codex\skills\
 
 ```bash
 cd <仓库>
-<PYTHON> tests/test_e2e.py         # 端到端 39 项
-<PYTHON> tests/test_mcp_server.py  # MCP 全链路 33 项
-<PYTHON> tests/test_raytracing.py  # 射线追踪与决策层 39 项
-<PYTHON> tests/test_linklevel.py   # 谱效、可信度、物理层 35 项
-<PYTHON> tests/test_gates.py       # 校准、标准表、三道门、统计判决 86 项
-<PYTHON> tests/test_results.py     # 结果索引与取货 80 项
-<PYTHON> tests/test_linkadapt.py   # 链路自适应、吞吐、并行生成 135 项
-<PYTHON> tests/test_interference.py # IoT、测量域、场景预设、探测模式、文档计数 145 项
+<PYTHON> scripts/run_test_matrix.py --tier quick
+<PYTHON> scripts/run_test_matrix.py --tier physics
+<PYTHON> scripts/run_test_matrix.py --tier full
 ```
 
-共 **592 项**。测试会真跑仿真；当前开发环境全跑一遍约 2 分钟，安装环境不同会有波动。
-每个文件最后一行会写"全部通过"或列出失败项，退出码非 0 表示失败。
-
-**时间紧就只跑前两个**（`test_e2e` + `test_mcp_server`，约 1 分钟），
-它们已经覆盖生成、取货、MCP 全链路。
+测试文件和运行时检查数会随实现扩展，不手写总项数。以矩阵 JSON 终态、逐文件退出码和
+日志为准；失败、超时、缺文件或 UTF-8 解码失败都会给非零退出。
 
 没装 sionna-rt 时 `test_raytracing.py` 的射线追踪实跑段会自动跳过并说明原因，
 **这不算失败**。
@@ -289,7 +284,7 @@ MCP 冒烟（无 ChannelHub 也应当能起）：
 import asyncio; from superran import server
 print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.MCP_MAJOR)
 "
-# 期望：tools: 16
+# 期望：tools: 35
 ```
 
 ---
@@ -326,7 +321,7 @@ print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.
 ```bash
 claude mcp remove superran
 codex  mcp remove superran
-rm -rf ~/.claude/skills/channel-sim ~/.codex/skills/channel-sim
+rm -rf ~/.codex/skills/channel-sim ~/.codex/skills/superran-member-task ~/.codex/skills/superran-lead
 <PYTHON> -m pip uninstall superran
 # 生成的数据在仓库的 artifacts/ 下，删仓库即可全清
 ```
@@ -340,7 +335,7 @@ rm -rf ~/.claude/skills/channel-sim ~/.codex/skills/channel-sim
 用户提一个无线算法优化思路，它给出可信的信道场景实例、配套物理观察量，
 以及 SINR / 谱效的完整评价链路，并用三道门拦住站不住的结论。
 
-- 30 个 MCP 工具，从探能力、问需求、生成、取货，到 BLER/TDD AMC、3GPP 校准、三道评审门
+- 35 个 MCP 工具，从探能力、问需求、生成、取货，到 BLER/TDD AMC、3GPP 校准、三道评审门
 - **数据永远不进对话** —— MCP 只回句柄、统计摘要和可运行的取货代码
 - 详见 `SETUP.html`（组成与用法）、`CAPABILITIES.html`（能力边界）、
   `SHOWCASE.html`（实测演示）

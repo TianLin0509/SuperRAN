@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0.0",
+  "upstream": "https://github.com/TianLin0509/SuperRAN.git",
+  "owner_login": "TianLin0509",
+  "development_branch": "develop",
+  "release_branch": "main",
+  "merge_method": "squash",
+  "member_skill": "skills/superran-member-task/SKILL.md",
+  "lead_skill": "skills/superran-lead/SKILL.md",
+  "simulation_skill": "skills/channel-sim/SKILL.md",
+  "mcp_tool_count": 35,
+  "rehearsal_title_prefix": "[REHEARSAL]",
+  "rehearsal_merge_allowed": false
+}
