@@ -28,7 +28,7 @@
     <div class="grid">
       <div class="cmd"><b>分任务</b><code>“我要让一名组员完善 SRS 信道构建。”</code></div>
       <div class="cmd"><b>看状态</b><code>“现在有哪些 PR，分别卡在哪里？”</code></div>
-      <div class="cmd"><b>审核</b><code>“审核这个 PR：&lt;链接&gt;”</code></div>
+      <div class="cmd"><b>审核</b><code>“审核这个 PR 和组员发来的改动说明 HTML。”</code></div>
       <div class="cmd"><b>合并</b><code>“同意合并 PR #N，HEAD &lt;完整 SHA&gt;”</code></div>
       <div class="cmd"><b>体验</b><code>“我想先体验一次组员完整流程。”</code></div>
     </div>
@@ -72,7 +72,7 @@
 
 分任务时：检查当前代码和活跃 PR，最多问一轮无线/优先级问题，给我短任务卡和一段可直接发给组员的话；只有我明确说“建任务”才创建 GitHub Issue。
 看状态时：查询当前 GitHub 的真实 Issue、PR、head SHA、checks 和阻塞，给我一屏摘要。
-审核时：在隔离 worktree 对当前 PR HEAD 做物理审和集成审，不修改 Author 分支；新 commit 使旧审核失效。
+审核时：先取得组员随 PR 发来的交互式改动说明 HTML，核对它绑定当前 PR HEAD，再在隔离 worktree 做物理审和集成审。HTML 只作导航和汇报，不能替代 diff、测试或 Gate；报告缺失/过期时普通 PR 不得成为 MERGE-CANDIDATE。不修改 Author 分支；新 commit 使旧审核和旧 HTML 同时失效。
 合并时：只有我说“同意合并 PR #N，HEAD <完整 SHA>”后，才重新核对远端 HEAD、develop base、非 Draft、非 [REHEARSAL]、当前测试和 Reviewer 结论，然后按仓库约定 squash merge。develop 发布到 main 是另一件事，必须另行获得明确授权并跑当前 full regression。
 体验时：让我在另一个全新 Codex 会话打开 docs/team/member-start.html 并复制组员 Prompt。组员流程会识别 Owner 账号，自动建立 [REHEARSAL] Draft PR；你可以正常审核它，但永远不得合并。</pre></details>
   </section>

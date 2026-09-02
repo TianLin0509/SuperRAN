@@ -87,8 +87,15 @@ end-to-end physical mechanism.
 Before opening the PR, fetch `develop` again. Rebase only when it is clean and does not
 change physical intent; otherwise stop with one concise conflict message for the lead.
 
-Push only the topic branch and open a PR against `develop`. Never push `develop` or
-`main`, manage another member, review another PR, weaken gates, merge, or release.
+Push only the topic branch and open a PR against `develop`. After GitHub returns the PR
+number and current remote head SHA, read
+[the user-facing change-report contract](references/change-report.md), generate and
+browser-verify the bound interactive HTML, and give it to the member with the PR link.
+Any later commit invalidates both the review evidence and that report; regenerate it
+against the new remote head before handoff.
+
+Never push `develop` or `main`, manage another member, review another PR, weaken gates,
+merge, or release.
 
 ## Owner rehearsal
 
@@ -105,14 +112,16 @@ mode instead of trying to fork the owner's own repository:
 
 The PR body must include the task card, physical assumptions, changed scope, current
 verification commands and terminal results, negative-control evidence, limitations,
-base SHA, and full head SHA.
+base SHA, full head SHA, and the change-report filename/SHA-256. The HTML itself remains
+local unless the lead separately authorizes a sanitized public copy.
 
 End for the member with only:
 
 - 做成了什么
-- PR 链接
-- PR HEAD 完整 SHA
-- 当前测试结论
+- PR 链接与 PR HEAD 完整 SHA
+- 交互式改动说明 HTML 的绝对路径、SHA-256、大小
+- 当前测试结论，以及证明了什么 / 没有证明什么
 - 需要组长决定什么（没有就写“无”）
+- 下一步：请把 PR 链接和 HTML 文件一起发给组长
 
 Never say the task is merged or released.

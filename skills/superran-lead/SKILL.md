@@ -37,7 +37,8 @@ shared implementation meaning, not simplified terminology or a longer answer.
 
 - **分任务** — read [task dispatch](references/task-dispatch.md).
 - **看状态** — query current GitHub Issues/PRs/checks and return a compact board.
-- **审核 PR / 退回修改 / 合并** — read [PR review and merge](references/pr-review-and-merge.md).
+- **审核 PR / 退回修改 / 合并** — require the Author's interactive change-report HTML,
+  then read [PR review and merge](references/pr-review-and-merge.md).
 - **体验组员流程** — direct the lead to `docs/team/member-start.html` in a new Codex
   session; the member workflow will detect the owner and enter rehearsal mode.
 

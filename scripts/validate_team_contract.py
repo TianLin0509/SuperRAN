@@ -38,7 +38,7 @@ def validate() -> list[str]:
 
     workflow = json.loads(_read("docs/team/workflow.json"))
     expected = {
-        "schema_version": "1.1.0",
+        "schema_version": "1.2.0",
         "development_branch": "develop",
         "release_branch": "main",
         "merge_method": "squash",
@@ -79,7 +79,9 @@ def validate() -> list[str]:
         "superran-member-task/SKILL.md", "channel-sim/SKILL.md", "35 个工具",
         "[REHEARSAL]", "不得代替组长", "技术术语", "白话解释", "具体例子",
         "我理解你要的是", "不等于", "证明了什么、没有证明什么",
-        "不能当作实现或性能证据"):
+        "不能当作实现或性能证据", "交互式改动说明 HTML",
+        "references/change-report.md", "任何新 commit 都要重生成",
+        "不是审核通过", "默认不提交公开仓库"):
         if item not in member_prompt:
             errors.append(f"member prompt missing: {item}")
     if "--role lead" in member_prompt or "同意合并 PR" in member_prompt:
@@ -92,7 +94,8 @@ def validate() -> list[str]:
         "channel-sim/SKILL.md", "同意合并 PR #N，HEAD <完整 SHA>",
         "[REHEARSAL]", "永远不得合并", "full regression", "35 个工具",
         "技术术语", "白话解释", "具体例子", "我理解为", "不等于",
-        "证明了什么、没有证明什么", "不能冒充当前证据"):
+        "证明了什么、没有证明什么", "不能冒充当前证据",
+        "交互式改动说明 HTML", "报告缺失/过期", "不能替代 diff"):
         if item not in lead_prompt:
             errors.append(f"lead prompt missing: {item}")
     if 'href="member-start.html"' not in lead_page:
@@ -108,9 +111,27 @@ def validate() -> list[str]:
 
     ast.parse(_read("scripts/install_agent_skills.py"))
     pr_template = _read(".github/pull_request_template.md")
-    for item in ("核心物理流程", "反向对照", "PR HEAD 完整 SHA", "[REHEARSAL]"):
+    for item in ("核心物理流程", "反向对照", "PR HEAD 完整 SHA",
+                 "Author 交互式改动说明 HTML", "[REHEARSAL]"):
         if item not in pr_template:
             errors.append(f"PR template missing: {item}")
+
+    report = workflow.get("change_report", {})
+    if report.get("required_for_member_pr") is not True:
+        errors.append("member change report is not required")
+    if report.get("committed_by_default") is not False:
+        errors.append("change report must stay out of the public repo by default")
+    if report.get("must_match_remote_pr_head") is not True:
+        errors.append("change report is not bound to current remote PR head")
+    report_contract = ROOT / "skills" / "superran-member-task" / "references" / "change-report.md"
+    if not report_contract.is_file():
+        errors.append("missing change-report contract")
+    else:
+        report_text = report_contract.read_text(encoding="utf-8", errors="strict")
+        for item in ("AUTHOR CHANGE REPORT", "output/change-reports", "what it proves",
+                     "zero console errors", "no network requests", "SHA-256"):
+            if item not in report_text:
+                errors.append(f"change-report contract missing: {item}")
     action = _read(".github/workflows/team-contract.yml")
     if "python scripts/validate_team_contract.py" not in action:
         errors.append("team-contract workflow does not run validator")

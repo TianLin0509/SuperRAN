@@ -2,9 +2,26 @@
 
 ## Review in isolation
 
-Read the PR metadata, task card, base branch, full head SHA, diff, checks, and comments.
+Read the PR metadata, task card, base branch, full head SHA, diff, checks, comments, and
+the Author's interactive change-report HTML. For an ordinary member PR, a missing or
+stale report is a `REVISE` item; the lead can still inspect urgent code, but it is not a
+merge candidate until the current-head report exists.
 Fetch the PR into a clean isolated worktree; never reuse the Author worktree or modify
 the Author branch.
+
+Open the report in a real browser and verify:
+
+- its PR number, base, and full head SHA match current GitHub metadata;
+- it identifies itself as an Author report awaiting review, not an approval;
+- every material diff/task-card item is represented;
+- test and numerical claims point to current-head evidence and state what remains
+  unproved;
+- deferred work, failures, disagreements, privacy/publication risk, and lead decisions
+  are visible;
+- browser console/network/layout checks pass.
+
+Treat the report only as navigation and explanation. A polished page cannot upgrade
+missing code evidence, a failed gate, or a stale review.
 
 Hard-stop when the PR does not target `develop`, the advertised SHA differs from the
 remote head, the worktree is dirty, required evidence is historical, or the PR title
@@ -28,6 +45,7 @@ Return only:
 | LEAD REVIEW | 内容 |
 |---|---|
 | PR / reviewed full SHA | |
+| Author 交互报告 | current / missing / stale + path/hash |
 | 实际改变 | |
 | 物理审 | PASS / BLOCK / N/A + strongest evidence |
 | 集成审 | PASS / BLOCK + strongest evidence |

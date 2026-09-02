@@ -30,7 +30,7 @@
     <div class="steps">
       <div class="step"><div class="num">1</div><h3>打开新 Agent 会话</h3><p>打开 Codex，不用先下载任何东西。</p></div>
       <div class="step"><div class="num">2</div><h3>复制完整 Prompt</h3><p>点击下面蓝色按钮，整段粘贴，一个字都不用改。</p></div>
-      <div class="step"><div class="num">3</div><h3>回答无线问题</h3><p>正常聊天。完成后把 Agent 给你的 PR 链接发给组长。</p></div>
+      <div class="step"><div class="num">3</div><h3>回答无线问题</h3><p>正常聊天。完成后把 Agent 给你的 PR 链接和改动说明 HTML 一起发给组长。</p></div>
     </div>
     <div class="callout"><b>第一次可能需要你做一件小事：</b>GitHub 登录或系统授权弹出时，按 Agent 给的一步提示操作，完成后回复“好了”。</div>
   </section>
@@ -38,7 +38,7 @@
   <section>
     <h2>你负责什么，Agent 负责什么</h2>
     <div class="yesno">
-      <div class="box yes"><h3>你只负责</h3><ul><li>说清想完善的 SuperRAN 能力</li><li>判断物理流程与信息边界</li><li>确认成功场景和反向对照</li><li>把最终 PR 链接发给组长</li></ul></div>
+      <div class="box yes"><h3>你只负责</h3><ul><li>说清想完善的 SuperRAN 能力</li><li>判断物理流程与信息边界</li><li>确认成功场景和反向对照</li><li>把最终 PR 链接和 HTML 文件发给组长</li></ul></div>
       <div class="box no"><h3>全部交给 Agent</h3><ul><li>GitHub 账号、Fork、下载和分支</li><li>SuperRAN、MCP 和 Skill 安装</li><li>读代码、写代码、补测试、跑回归</li><li>commit、push、填写并提交 PR</li></ul></div>
     </div>
   </section>
@@ -72,9 +72,9 @@
 
 交流时保留准确技术术语，但首次出现必须紧跟一句白话解释；关键物理问题再给一个贴近本任务的具体例子，必要时用最小维度、单位或时间线。实现前先复述“我理解你要的是……，不等于……”。把代码事实、我的决定、你的建议和尚未确认分开标明。测试不能只报名称和 PASS/FAIL，还要说“证明了什么、没有证明什么”。例子只用于理解，不能当作实现或性能证据；我已明确理解时不要反复讲基础知识。
 
-我回答后，你先检查相关当前代码和测试，再按 Skill 最多问两轮短问题并给推荐答案。确认五行任务卡后，自主完成实现、物理反向对照、当前 SHA 测试、commit、push 和 PR。不得管理其他任务、审核别人的 PR 或合并。
+我回答后，你先检查相关当前代码和测试，再按 Skill 最多问两轮短问题并给推荐答案。确认五行任务卡后，自主完成实现、物理反向对照、当前 SHA 测试、commit、push 和 PR。PR 提交或更新后，按 skills/superran-member-task/references/change-report.md 自动生成绑定当前远端 PR HEAD 的离线交互式改动说明 HTML，真实浏览器检查后给我绝对路径和 SHA-256；任何新 commit 都要重生成。该报告是 Author 汇报，不是审核通过，默认不提交公开仓库。不得管理其他任务、审核别人的 PR 或合并。
 
-最后只给我五行：做成了什么、PR 链接、PR HEAD 完整 SHA、当前测试结论、需要组长决定什么。</pre></details>
+最后给我：做成了什么；PR 链接与完整 HEAD；交互式 HTML 的绝对路径、SHA-256、大小；测试证明了什么/没有证明什么；需要组长决定什么；并提醒我把 PR 链接和 HTML 文件一起发给组长。</pre></details>
   </section>
 
   <section>
@@ -91,7 +91,7 @@
 
   <section>
     <h2>最后怎么交给组长</h2>
-    <div class="finish">把 <b>PR 链接 + 一句话说明做了什么 + 是否需要组长决定</b> 发给组长。不要自己点 Merge。</div>
+    <div class="finish">把 <b>PR 链接 + Agent 生成的交互式改动说明 HTML + 是否需要组长决定</b> 一起发给组长。不要自己点 Merge。</div>
   </section>
   <footer>所有组员使用同一份页面；具体任务通过与 Agent 的无线问答形成。</footer>
 </main>

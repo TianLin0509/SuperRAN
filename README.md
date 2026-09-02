@@ -297,6 +297,10 @@ PMI 给码本索引而非嵌入向量。
 两份页面会自动引导 Agent 安装仓库版本的 `channel-sim`、`superran-member-task` 与
 `superran-lead`，无需人手改 Prompt 或复制 Skill 文件。
 
+组员 PR 提交或更新后，Author Agent 还会生成绑定当前远端 PR HEAD 的离线交互式改动
+说明 HTML；组员把该文件与 PR 链接一起交给组长。它用于理解改动，不代表审核通过，
+默认不提交到公开仓库。
+
 ## 安装
 
 ### 最省事：让 agent 自己装

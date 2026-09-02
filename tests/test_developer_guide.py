@@ -418,7 +418,9 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
         "superran-member-task/SKILL.md",
         "channel-sim/SKILL.md", "35 个工具", "[REHEARSAL]", "不得代替组长",
         "技术术语", "白话解释", "具体例子", "我理解你要的是", "不等于",
-        "证明了什么、没有证明什么", "不能当作实现或性能证据"):
+        "证明了什么、没有证明什么", "不能当作实现或性能证据",
+        "交互式改动说明 HTML", "references/change-report.md",
+        "任何新 commit 都要重生成", "不是审核通过", "默认不提交公开仓库"):
         assert required in member_prompt
     assert "--role lead" not in member_prompt
     assert "同意合并 PR" not in member_prompt
@@ -429,18 +431,27 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
         "--role lead", "probe_source_contract", "superran-lead/SKILL.md", "channel-sim/SKILL.md",
         "同意合并 PR #N，HEAD <完整 SHA>", "[REHEARSAL]", "永远不得合并",
         "full regression", "35 个工具", "技术术语", "白话解释", "具体例子",
-        "我理解为", "不等于", "证明了什么、没有证明什么", "不能冒充当前证据"):
+        "我理解为", "不等于", "证明了什么、没有证明什么", "不能冒充当前证据",
+        "交互式改动说明 HTML", "报告缺失/过期", "不能替代 diff"):
         assert required in lead_prompt
     assert 'href="member-start.html"' in lead_html
 
     workflow = json.loads(
         (ROOT / "docs" / "team" / "workflow.json").read_text(encoding="utf-8"))
-    assert workflow["schema_version"] == "1.1.0"
+    assert workflow["schema_version"] == "1.2.0"
     assert workflow["development_branch"] == "develop"
     assert workflow["release_branch"] == "main"
     assert workflow["merge_method"] == "squash"
     assert workflow["mcp_tool_count"] == 35
     assert workflow["rehearsal_merge_allowed"] is False
+    assert workflow["change_report"] == {
+        "required_for_member_pr": True,
+        "role": "author_summary_not_review_approval",
+        "directory": "output/change-reports",
+        "committed_by_default": False,
+        "max_bytes_without_explanation": 1048576,
+        "must_match_remote_pr_head": True,
+    }
     for key in ("member_skill", "lead_skill", "simulation_skill"):
         assert (ROOT / workflow[key]).is_file(), key
 

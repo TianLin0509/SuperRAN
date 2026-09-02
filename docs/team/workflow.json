@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.0",
+  "schema_version": "1.2.0",
   "upstream": "https://github.com/TianLin0509/SuperRAN.git",
   "owner_login": "TianLin0509",
   "development_branch": "develop",
@@ -10,5 +10,13 @@
   "simulation_skill": "skills/channel-sim/SKILL.md",
   "mcp_tool_count": 35,
   "rehearsal_title_prefix": "[REHEARSAL]",
-  "rehearsal_merge_allowed": false
+  "rehearsal_merge_allowed": false,
+  "change_report": {
+    "required_for_member_pr": true,
+    "role": "author_summary_not_review_approval",
+    "directory": "output/change-reports",
+    "committed_by_default": false,
+    "max_bytes_without_explanation": 1048576,
+    "must_match_remote_pr_head": true
+  }
 }
