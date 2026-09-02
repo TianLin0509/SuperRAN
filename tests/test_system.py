@@ -1685,6 +1685,309 @@ with tempfile.TemporaryDirectory() as _compare_tmp:
         kpi_view.artifacts_root = _old_kpi_root
         kcmp.artifacts_root = _old_compare_root
 
+
+# ---------------------------------------------------------------------------
+sect("17  下行 AMC 链：rank 策略、HARQ 反馈时序、决策坐标与解码 SINR")
+
+from superran import amc_policy as ap  # noqa: E402
+
+# --- 17.1 HARQ 反馈偏移完全由 TDD 图案决定 --------------------------------
+check(ap.feedback_effective_offsets("DDDSU") == (5, 4, 3, 2, 6),
+      "DDDSU：D/D/D/S 发送的反馈分别在 5/4/3/2 个 TTI 后生效")
+check(ap.feedback_effective_offsets("DDDSUDDDSU")
+      == (5, 4, 3, 2, 6, 5, 4, 3, 2, 6),
+      "图案重复两遍（8 下行 : 2 上行）得到同一组偏移")
+check(ap.feedback_effective_offsets("D") == (1,)
+      and ap.feedback_effective_offsets("DS") == (1, 1),
+      "纯下行图案没有上行承载反馈，退化成零时延并由 notes 说明")
+for _bad in ("", "X", "UU"):
+    try:
+        ap.feedback_effective_offsets(_bad)
+        check(False, f"非法图案 {_bad!r} 应当被拒")
+    except ValueError:
+        check(True, f"非法图案 {_bad!r} 被拒，不静默给一组偏移")
+
+_fb_cfg = sysm.SystemConfig(evaluation_mode="experience", duration_s=0.05,
+                            tdd_pattern="DDDSU", seed=17)
+check(_fb_cfg.as_dict()["harq_feedback_offsets_tti"] == [5, 4, 3, 2, 6]
+      and _fb_cfg.as_dict()["harq_feedback_delay"] is True,
+      "反馈偏移与开关随 SystemConfig 一起进结果合同")
+
+# --- 17.2 OLLA 关闭只去掉叠加，不换决策坐标 --------------------------------
+# 真值坐标与 AMC 预测坐标故意拉开 12 dB：如果关掉 OLLA 会掉回真值坐标，
+# 选出来的 MCS 会明显不同，这条就会红。
+_amc_table = sysm.UeLinkTable(
+    ue=0,
+    sinr_db=np.full((1, 2), 22.0),
+    mcs=np.array([[la.select_mcs(22.0, table=3, target_bler=0.1).index] * 2],
+                 dtype=int),
+    se=np.full((1, 2), 1.0),
+    best_rank=np.array([1], dtype=int),
+    best_se=np.array([1.0]),
+    geo_sinr_db=22.0,
+    outage=np.array([False]),
+    sinr_tx_db=np.full((1, 2), 10.0),
+    sinr_rbg_db=np.full((1, 2, 17), 22.0),
+    sinr_tx_rbg_db=np.full((1, 2, 17), 10.0),
+    mcs_table=3, target_bler=0.1,
+)
+_amc_runs = {}
+for _olla in (True, False):
+    _amc_runs[_olla] = sysm.simulate(
+        [_amc_table],
+        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.02,
+                                  tdd_pattern="D", seed=5),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(
+            mu_enabled=False, olla_enabled=_olla,
+            rank=ap.RankConfig(fixed_rank=1)),
+        kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
+    )
+_amc_rows = {
+    k: v.diagnostics["allocation_sample"][0] for k, v in _amc_runs.items()}
+_amc_expect = la.select_mcs(10.0, table=3, target_bler=0.1).index
+check(_amc_rows[False]["mcs"] == _amc_expect
+      and _amc_rows[False]["mcs_without_olla"] == _amc_expect,
+      f"关掉 OLLA 后发送档仍由 CQI+BF 坐标决定（MCS{_amc_expect}）")
+check(_amc_rows[False]["base_tx_sinr_db"] == 10.0
+      and _amc_rows[True]["base_tx_sinr_db"] == 10.0,
+      "两种配置的决策坐标都是 sinr_tx_db，不是真实接收 SINR")
+check(_amc_rows[False]["mcs"]
+      != la.select_mcs(22.0, table=3, target_bler=0.1).index,
+      "关掉 OLLA 不会退回用真实接收 SINR 反折 MCS 的上帝视角")
+check(_amc_rows[True]["olla_before_db"] == 0.0
+      and _amc_rows[True]["mcs"] == _amc_expect,
+      "开启 OLLA 时首个 TTI 偏置为 0，与关闭 OLLA 给出同一档")
+
+# --- 17.3 解码 SINR 只在实际授予的 RBG 上取 --------------------------------
+# 前 8 个 RBG 极好、后 9 个极差；小包只会拿到少数几个 RBG。
+_grant_rbg = np.concatenate([np.full(8, 26.0), np.full(9, -4.0)])
+_grant_table = sysm.UeLinkTable(
+    ue=0,
+    sinr_db=np.full((1, 1), float(np.mean(_grant_rbg))),
+    mcs=np.array([[la.select_mcs(float(np.mean(_grant_rbg)), table=3,
+                                 target_bler=0.1).index]], dtype=int),
+    se=np.full((1, 1), 1.0),
+    best_rank=np.array([1], dtype=int),
+    best_se=np.array([1.0]),
+    geo_sinr_db=float(np.mean(_grant_rbg)),
+    outage=np.array([False]),
+    sinr_tx_db=np.full((1, 1), 20.0),
+    sinr_rbg_db=_grant_rbg[None, None, :].copy(),
+    sinr_tx_rbg_db=np.full((1, 1, 17), 20.0),
+    mcs_table=3, target_bler=0.1,
+)
+_grant_run = sysm.simulate(
+    [_grant_table],
+    sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.05,
+                              tdd_pattern="D", seed=77),
+    traffic=sysm.TrafficConfig(model="cbr", cbr_mbps=1.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=False, olla_enabled=False, frequency_selective="off",
+        rank=ap.RankConfig(fixed_rank=1)),
+    kpi=sysm.KpiConfig(warmup_tti=0),
+)
+_grant_rows = [r for r in _grant_run.diagnostics["allocation_sample"]
+               if r["n_rbg"] < 17]
+check(bool(_grant_rows), "小包确实只拿到部分 RBG，可用于检查解码 SINR 口径")
+_wideband_db = float(np.mean(_grant_rbg))
+check(all(abs(r["sinr_db"] - _wideband_db) > 1.0 for r in _grant_rows),
+      f"部分授权的解码 SINR 不再等于全带均值 {_wideband_db:.2f} dB")
+check(all(
+    abs(r["sinr_db"]
+        - float(np.mean(_grant_rbg[np.asarray(r["rbg_indices"], dtype=int)])))
+    < 1e-4
+    for r in _grant_rows),
+    "解码 SINR 精确等于被授 RBG 上真值的 dB 域均值")
+
+# --- 17.4 Rank 策略：默认固定、可切历史模式、越界钳位 -----------------------
+check(sysm.SchedulerConfig().rank.mode == "fixed"
+      and sysm.SchedulerConfig().rank.fixed_rank == 2,
+      "默认 rank 策略是固定 rank2，不跟随逐快照 best_rank")
+for _bad_rank in ({"mode": "auto"}, {"fixed_rank": 0}, {"period_tti": 0},
+                  {"switch_se_ratio": 0.5}, {"se_filter_lambda": 0.0}):
+    try:
+        ap.RankConfig(**_bad_rank)
+        check(False, f"非法 rank 配置 {_bad_rank} 应当被拒")
+    except ValueError:
+        check(True, f"非法 rank 配置 {_bad_rank} 被拒")
+
+_rank_ctl = ap.RankController(
+    ap.RankConfig(fixed_rank=4), 2, tti_ms=0.5, max_rank_available=2)
+check(_rank_ctl.rank_of(0) == 2 and _rank_ctl.rank_for(0, 1) == 2,
+      "fixed_rank 超过链路表可用 rank 时钳位，且不被链路表反向拉走")
+_legacy_ctl = ap.RankController(
+    ap.RankConfig(mode="link_table"), 2, tti_ms=0.5, max_rank_available=4)
+check(_legacy_ctl.rank_for(0, 3) == 3 and _legacy_ctl.rank_for(0, 9) == 4,
+      "link_table 历史模式跟随链路表并钳到可用上限")
+
+_rank_runs = {}
+for _mode, _cfg in (("fixed2", ap.RankConfig(fixed_rank=2)),
+                    ("legacy", ap.RankConfig(mode="link_table"))):
+    _rank_runs[_mode] = sysm.simulate(
+        _T[:4],
+        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.05,
+                                  tdd_pattern="DDDSU", seed=909),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(mu_enabled=False, rank=_cfg),
+        kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
+    )
+check(all(abs(r["rank"] - 2) < 1e-9
+          for r in _rank_runs["fixed2"].diagnostics["allocation_sample"]),
+      "固定模式下每一次 grant 的 rank 都是 2")
+check(_rank_runs["fixed2"].cell["avg_rank"] == 2.0,
+      "固定模式的小区平均 rank 精确为 2，没有任何切换")
+check(_rank_runs["legacy"].cell["avg_rank"] != 2.0,
+      "历史模式确实会用到别的 rank，两个模式不是同一条轨迹")
+check(_rank_runs["fixed2"].config["scheduler"]["rank"]["mode"] == "fixed"
+      and "best_rank" in _rank_runs["fixed2"].config["scheduler"]["rank"][
+          "adaptation_note"],
+      "rank 策略随结果一起交付，并写明 best_rank 不再参与发送决策")
+
+# --- 17.5 自适应模式：周期决策 + 迟滞 --------------------------------------
+_adapt = ap.RankController(
+    ap.RankConfig(mode="adaptive", fixed_rank=1, period_tti=10,
+                  switch_se_ratio=1.5, se_filter_lambda=1.0),
+    1, tti_ms=0.5, max_rank_available=4)
+for _s in range(10):
+    _adapt.observe_link(0, _s, [1.0, 1.2, 0.5, 0.4])
+    _adapt.step(_s)
+_adapt.step(10)
+check(_adapt.rank_of(0) == 1,
+      "最优/当前 谱效比 1.2 没跨过 1.5 的门限，rank 不动（迟滞生效）")
+_adapt2 = ap.RankController(
+    ap.RankConfig(mode="adaptive", fixed_rank=1, period_tti=10,
+                  switch_se_ratio=1.5, se_filter_lambda=1.0),
+    1, tti_ms=0.5, max_rank_available=4)
+for _s in range(10):
+    _adapt2.observe_link(0, _s, [1.0, 2.0, 0.5, 0.4])
+    _adapt2.step(_s)
+_adapt2.step(10)
+check(_adapt2.rank_of(0) == 2 and _adapt2.diagnostics()["count_switch_up"] == 1,
+      "谱效比 2.0 跨过门限后切到 rank2，并记录一次抬升")
+_adapt3 = ap.RankController(
+    ap.RankConfig(mode="adaptive", fixed_rank=1, period_tti=10,
+                  switch_se_ratio=1.5, se_filter_lambda=1.0),
+    1, tti_ms=0.5, max_rank_available=4)
+for _s in range(5):
+    _adapt3.observe_link(0, _s, [1.0, 2.0, 0.5, 0.4])
+    _adapt3.step(_s)
+check(_adapt3.rank_of(0) == 1,
+      "周期没到就不决策——rank 不会每个快照跟着谱效跳")
+
+# 抬升后进入回退观察窗：窗内首传误码高就退回原 rank。
+_fb_ctl = ap.RankController(
+    ap.RankConfig(mode="adaptive", fixed_rank=1, period_tti=10,
+                  switch_se_ratio=1.5, se_filter_lambda=1.0,
+                  fallback_window_ms=5.0, fallback_bler_threshold=0.2,
+                  fallback_min_first_tx=4),
+    1, tti_ms=0.5, max_rank_available=4)
+for _s in range(10):
+    _fb_ctl.observe_link(0, _s, [1.0, 2.0, 0.5, 0.4])
+    _fb_ctl.step(_s)
+_fb_ctl.step(10)
+check(_fb_ctl.rank_of(0) == 2, "先抬升到 rank2 并启动回退观察窗")
+for _ in range(8):
+    _fb_ctl.record_first_tx(0, ack=False, mcs=10, realized_se=0.0)
+_fb_ctl.step(20)
+_fb_diag = _fb_ctl.diagnostics()
+check(_fb_ctl.rank_of(0) == 1 and _fb_diag["count_fallback"] == 1
+      and _fb_diag["events"][-1]["reason"] == "first_tx_bler_above_threshold",
+      "观察窗内首传误码过高，rank 退回抬升前的档位")
+check(_fb_diag["barred_rank_by_ue"] == [2],
+      "刚被实测否掉的档位进入封锁，估计谱效不能马上把它顶回去")
+_fb_ctl.step(30)
+check(_fb_ctl.rank_of(0) == 1
+      and _fb_ctl.diagnostics()["count_blocked_by_fallback_bar"] > 0,
+      "封锁期内即使估计谱效仍然更高，也不重复抬升（防乒乓）")
+_fb_ctl.step(40)
+check(_fb_ctl.rank_of(0) == 2,
+      "封锁期满后重新允许按估计谱效抬升，不是永久禁用")
+
+# --- 17.6 avg_mcs 含重传，avg_mcs_first_tx 只看首传 -------------------------
+_amc_cell = _rank_runs["fixed2"].cell
+check("avg_mcs_first_tx" in _amc_cell
+      and "avg_mcs_first_tx" in _rank_runs["fixed2"].users[0],
+      "小区级与用户级都给出只统计首传的平均 MCS")
+check("retransmissions included" in _amc_cell["avg_mcs_definition"],
+      "结果里写明 avg_mcs 的分母含重传，avg_mcs_first_tx 才是链路自适应视角")
+
+# --- 17.7 目标 BLER 可配，并且贯穿量化门限、选档与闭环 ---------------------
+check(la.select_mcs(12.0, table=3, target_bler=0.3).index
+      > la.select_mcs(12.0, table=3, target_bler=0.1).index,
+      "同一 SINR 下放宽目标 BLER 允许更高的 MCS（查表原语单调）")
+_thr10 = la._internal_cqi_thresholds(0.1, 3)
+_thr30 = la._internal_cqi_thresholds(0.3, 3)
+check(all(b < a for a, b in zip(_thr10, _thr30, strict=True)),
+      "CQI 量化门限逐档随目标 BLER 下移，量化侧也吃到了这个参数")
+
+_bler_h = [((np.random.default_rng(_s).standard_normal((8, 24, 16, 4))
+             + 1j * np.random.default_rng(_s + 50).standard_normal(
+                 (8, 24, 16, 4))) / np.sqrt(2))
+           for _s in range(3)]
+_bler_tables = {
+    _target: sysm.build_link_tables(_bler_h, [6.0, 2.0, -2.0],
+                                    target_bler=_target)
+    for _target in (0.1, 0.3)
+}
+check(_bler_tables[0.3][0].target_bler == 0.3,
+      "目标 BLER 跟着链路表走，主循环不再自己写死 10%")
+# **开环大部分抵消**：目标同时出现在 CQI→门限 和 门限→MCS 两侧，两次平移
+# 方向相同、幅度接近，选出的 MCS 索引因此多数不变。抵消不精确——内部 CQI 表
+# 只取 MCS 0,2,…,26,28 这个子集，量化边界上两侧的位移会差一点。
+# 实测 6 个信道 × 4 个几何点 × 4 个 rank 共 384 个样本：354 个完全相同，
+# 其余 30 个偏高 1~4 档，**方向恒为「放宽目标选更高档」，没有一个偏低**。
+# 所以这里断言的是方向性质而不是逐值相等；真正吃到目标的是 OLLA 闭环。
+_open_loop_delta = np.concatenate([
+    (sysm.build_link_tables([_h], [_geo], target_bler=0.3)[0].mcs_tx
+     - sysm.build_link_tables([_h], [_geo], target_bler=0.1)[0].mcs_tx).ravel()
+    for _seed in range(3)
+    for _h in [((np.random.default_rng(_seed).standard_normal((4, 24, 16, 4))
+                 + 1j * np.random.default_rng(_seed + 90).standard_normal(
+                     (4, 24, 16, 4))) / np.sqrt(2))]
+    for _geo in (-8.0, -2.0, 4.0, 10.0)
+])
+check(bool(np.all(_open_loop_delta >= 0)),
+      "放宽目标 BLER 在开环上从不选到更低的 MCS 档")
+check(float(np.mean(_open_loop_delta == 0)) > 0.8,
+      f"开环 MCS 多数对目标不敏感（{np.mean(_open_loop_delta == 0):.0%} 逐值相同）："
+      "同一个目标在量化与选档两侧大部分抵消")
+_bler_runs = {}
+for _target, _tabs in _bler_tables.items():
+    _bler_runs[_target] = sysm.simulate(
+        _tabs,
+        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=1.0,
+                                  tdd_pattern="DDDSU", seed=11),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(mu_enabled=False),
+        kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"))
+_c10, _c30 = _bler_runs[0.1].cell, _bler_runs[0.3].cell
+check(_c30["olla_mcs_mean"] > _c10["olla_mcs_mean"],
+      f"目标放宽后 OLLA 稳态偏置更激进（{_c10['olla_mcs_mean']:.2f} → "
+      f"{_c30['olla_mcs_mean']:.2f} MCS 档）")
+check(_c30["avg_mcs_first_tx"] > _c10["avg_mcs_first_tx"],
+      f"闭环下首传平均 MCS 随目标放宽而升高（{_c10['avg_mcs_first_tx']:.2f} → "
+      f"{_c30['avg_mcs_first_tx']:.2f}）")
+# 实测值不会精确落在目标上：OLLA 的稳态推导是连续偏置，而空口 MCS 是整数档，
+# 偏置要累积到跨过一整档才改变发送，因此实测值围绕目标抖且系统性偏低。
+check(_c30["bler_first_tx"] > 1.5 * _c10["bler_first_tx"],
+      f"实测首传 BLER 跟着目标显著上移（{_c10['bler_first_tx']:.3f} → "
+      f"{_c30['bler_first_tx']:.3f}），但整数 MCS 档使它不精确等于目标")
+for _bad_target in (0.0, 1.0, 0.0005, 0.999):
+    try:
+        sysm.build_link_tables([np.ones((1, 4, 2, 2), dtype=complex)], [10.0],
+                               target_bler=_bad_target)
+        check(False, f"target_bler={_bad_target} 应当被拒")
+    except ValueError:
+        check(True, f"target_bler={_bad_target} 越出预置曲线覆盖区间，被拒")
+try:
+    sysm.build_link_tables([np.ones((1, 4, 2, 2), dtype=complex)], [10.0],
+                           table=1)
+    check(False, "table=1 应当被拒")
+except ValueError:
+    check(True, "系统链路表硬拒绝非表 3，不让量化门限与选档用两张表")
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 
+from . import amc_policy as ap
 from . import linkadapt as la
 from . import rng as rg
 from . import scheduler_finalize as sfinal
@@ -475,6 +476,10 @@ class Allocation:
     mu_olla_before_db: float = 0.0
     su_olla_after_db: float = 0.0
     mu_olla_after_db: float = 0.0
+    #: 本次 ACK/NACK 将要施加的 OLLA 增量（MCS 档）与它**生效**的 TTI。
+    #: 反馈要等上行时隙，所以 ``*_after_db`` 在同一个 TTI 里通常还没变。
+    olla_delta_mcs: float = 0.0
+    olla_effective_tti: int | None = None
     pair_correlation: float | None = None
     plan_su_useful_bytes: int = 0
     plan_mu_useful_bytes: int = 0
@@ -510,6 +515,7 @@ class Allocation:
         d["mu_olla_before_mcs"] = round(self.mu_olla_before_db, 4)
         d["su_olla_after_mcs"] = round(self.su_olla_after_db, 4)
         d["mu_olla_after_mcs"] = round(self.mu_olla_after_db, 4)
+        d["olla_delta_mcs"] = round(self.olla_delta_mcs, 6)
         d["olla_domain"] = "continuous_mcs_index"
         d["pf_average_before_bytes"] = round(self.pf_average_before_bytes, 6)
         d["scheduler_metric"] = round(self.scheduler_metric, 6)
@@ -647,6 +653,9 @@ class _HarqTb:
     slot: str
     first_tti: int
     first_mode: str
+    #: NACK 经上行时隙回到基站、并且下一个下行时隙到来之前，这个 TB
+    #: 不可能被重传。零时延（图案里没有 U）时它就是 ``first_tti + 1``。
+    ready_tti: int = 0
 
 
 @dataclass(frozen=True)
@@ -932,6 +941,39 @@ def _select_mcs(sinr_db: float, lookup: TbsLookup) -> int:
     ).index)
 
 
+def _rank_se_estimates(
+    table: Any, snap: int, olla_offset: float, *, olla_enabled: bool,
+    lookup: TbsLookup, max_rank: int,
+) -> list[float]:
+    """逐 rank 的估计谱效，喂给 :class:`amc_policy.RankController`。
+
+    对每个 rank 假设 ``r``：拿该 rank 的 AMC 预测坐标（CQI 门限 + BF Gain，
+    两者都已经按 ``P/r`` 的每流功率算过，所以功率分摊已经在里面了），叠加
+    当前用户级 OLLA 偏置，反折出**真的会发下去**的 MCS，谱效记为
+    ``r × MCS 谱效``。
+
+    这与现场"用一份上报 RI 的 CQI 再按 ``10log10(RI/r)`` 外推"不是同一个近似：
+    本实现对每个 rank 假设各有一份该 rank 下测得的 CQI 与 BF Gain，比外推更
+    贴近物理，代价是它要求链路表逐 rank 都算过。两者的差异必须写进文档，
+    不能当成同一个算法。
+    """
+    rows = table.sinr_tx_db
+    if rows is None:
+        return []
+    limit = min(int(max_rank), int(rows.shape[1]))
+    profile = la.MCS_TABLES[int(lookup.mcs_table)]
+    out: list[float] = []
+    for rank in range(1, limit + 1):
+        base = float(rows[snap, rank - 1])
+        mcs = _select_mcs(base, lookup)
+        if olla_enabled:
+            mcs = int(la.apply_olla_mcs(
+                mcs, float(olla_offset),
+                mcs_table=int(lookup.mcs_table))["final_mcs"])
+        out.append(float(rank) * float(profile[mcs].se))
+    return out
+
+
 def _bler_lookup(mcs: int, sinr_db: float) -> float:
     value = float(sinr_db)
     # NaN / -Inf 表示链路不可用；+Inf 则应落到预置曲线的高 SINR 尾部。
@@ -996,6 +1038,41 @@ def _subset_db(values: np.ndarray, indices: Sequence[int]) -> float:
     if arr.ndim != 1 or not indices:
         raise ValueError("逐 RBG SINR 必须是一维且 grant 不能为空")
     return float(np.mean(arr[np.asarray(indices, dtype=int)]))
+
+
+def _granted_true_sinr_db(table: Any, snap: int, rank: int,
+                          indices: Sequence[int], fallback_db: float) -> float:
+    """真实解码 SINR 只取**实际授予的那几个 RBG**。
+
+    这些逐 RBG 值是同一份 gNB 发射权打到 ``h_true`` 后按经典 MMSE 算出来的
+    后处理 SINR（见 :func:`csi_aging.rank_adaptation_aged`），不是从全带值折
+    算的。宽带路径早先直接用全带均值：一个只占 1 个 RBG 的小包，误块概率却
+    按 17 个 RBG 的平均信道判——频选衰落越深，这个错越大，而且**两个方向都
+    可能错**（授到好 RBG 时高估误块，授到坏 RBG 时低估）。
+
+    ``fallback_db`` 只服务没有逐 RBG 真值的手工链路表；正常建表一定有。
+    """
+    rbg = getattr(table, "sinr_rbg_db", None)
+    if (rbg is not None and len(indices)
+            and max(int(x) for x in indices) < int(np.shape(rbg)[-1])):
+        return _subset_db(rbg[snap, rank - 1], indices)
+    return float(fallback_db)
+
+
+def _granted_pair_true_sinr_db(link: Any, snap: int, side: int,
+                               indices: Sequence[int],
+                               fallback_db: float) -> float:
+    """MU 配对用户的真实解码 SINR，同样只取实际授予的 RBG。
+
+    ``true_sinr_rbg_db`` 来自 ``mu_link_performance_lmmse``：同一套 ZF/RZF 权
+    打到两个用户的 ``h_true`` 上，对方的流进入干扰协方差，再逐用户 LMMSE
+    检测。它是真算出来的，不是在 SU SINR 上折一个配对余量。
+    """
+    rbg = getattr(link, "true_sinr_rbg_db", None)
+    if (rbg is not None and len(indices)
+            and max(int(x) for x in indices) < int(np.shape(rbg)[-1])):
+        return _subset_db(rbg[snap, side], indices)
+    return float(fallback_db)
 
 
 def _resource_totals_close(left: float, right: float) -> bool:
@@ -1187,7 +1264,9 @@ def _build_su_plan(
                              if tables[u].sinr_tx_db is not None
                              else tables[u].sinr_db)
                 base_tx = float(base_rows[snap, rank - 1])
-                true_sinr = float(tables[u].sinr_db[snap, rank - 1])
+                true_sinr = _granted_true_sinr_db(
+                    tables[u], snap, rank, indices,
+                    float(tables[u].sinr_db[snap, rank - 1]))
             no_olla_mcs = _select_mcs(base_tx, lookup)
             current_tbs = int(
                 lookup.tbs_bytes_for_indices(slot, mcs, rank, indices))
@@ -1270,7 +1349,8 @@ def _build_su_plan(
             tbs = lookup.tbs_bytes_for_indices(slot, mcs, rank, indices)
             base_tx = float(base_tx_sinr_of[u])
             no_olla_mcs = int(mcs_without_olla_of[u])
-            true_sinr = float(true_sinr_of[u])
+            true_sinr = _granted_true_sinr_db(
+                tables[u], snap, rank, indices, float(true_sinr_of[u]))
         useful = (int(pending.payload_bytes) if pending is not None
                   else min(q, tbs))
         if useful <= 0:
@@ -1398,7 +1478,8 @@ def _build_mu_plan(
             tbs = int(lookup.tbs_bytes_for_indices(slot, mcs, rank, indices))
             base_tx = float(base_tx_sinr_of[user])
             no_olla = int(mcs_without_olla_of[user])
-            true_sinr = float(true_sinr_of[user])
+            true_sinr = _granted_true_sinr_db(
+                tables[user], snap, rank, indices, float(true_sinr_of[user]))
         useful = min(q, int(tbs))
         if useful <= 0:
             return None
@@ -1592,9 +1673,13 @@ def _build_mu_plan(
             # remaining RBGs—an especially damaging small+large packet bug.
             n = min(max(remaining_needs), len(available))
             indices = tuple(remaining_order[:n])
-            for value in actual:
+            # 位图定下来之后才知道解码 SINR 该在哪几个 RBG 上取。
+            for value, user in zip(actual, users, strict=True):
                 value["tbs"] = int(lookup.tbs_bytes_for_indices(
                     slot, int(value["mcs"]), mu_rank, indices))
+                value["true"] = _granted_pair_true_sinr_db(
+                    link, snap, int(link.side(user)), indices,
+                    float(value["true"]))
 
         mcs_list = tuple(int(value["mcs"]) for value in actual)
         predicted_blers = tuple(
@@ -1998,6 +2083,31 @@ def simulate_experience(
     r_avg = np.full(n_ue, 1e-6, dtype=float)
     olla_db = np.zeros(n_ue, dtype=float)
     mu_olla_db = np.zeros(n_ue, dtype=float)
+    # --- HARQ 反馈时序 -------------------------------------------------
+    # ACK/NACK 只能搭上行时隙回来，所以 OLLA 更新与重传资格都不在发送
+    # 那个 TTI 生效。偏移逐 slot 相位算一次，主循环只做查表。
+    feedback_delay_on = bool(getattr(sys_cfg, "harq_feedback_delay", True))
+    pattern_len = len(pattern)
+    feedback_offsets = (
+        ap.feedback_effective_offsets(pattern) if feedback_delay_on
+        else tuple(1 for _ in range(pattern_len)))
+    feedback_modelled = feedback_delay_on and "U" in pattern
+    # 到期才生效的 OLLA 增量：{生效 TTI: [(ue, 模式, delta_mcs), ...]}。
+    # 仿真最后几个 TTI 发出的 TB，其反馈生效时刻会落在 num_tti 之外，那些
+    # 条目永远不会被弹出——**这是边界不是泄漏**：条目数上限就是最大偏移
+    # （DDDSU 下 6），而且"仿真结束之后才回来的 ACK 不应该影响任何决策"
+    # 正是想要的语义。
+    deferred_olla: dict[int, list[tuple[int, str, float]]] = {}
+    feedback_wait_skips = 0
+    # --- Rank 策略 -----------------------------------------------------
+    rank_cfg = getattr(sched, "rank", None)
+    if not isinstance(rank_cfg, ap.RankConfig):
+        rank_cfg = ap.RankConfig()
+    rank_ctl = ap.RankController(
+        rank_cfg, n_ue, tti_ms=float(sys_cfg.tti_ms),
+        max_rank_available=min(
+            int(tables[0].sinr_db.shape[1]),
+            int(getattr(sched, "max_layers_per_rbg", 4))))
     served = np.zeros(n_ue, dtype=float)
     scheduled_tbs = np.zeros(n_ue, dtype=float)
     attempted_payload = np.zeros(n_ue, dtype=float)
@@ -2015,6 +2125,7 @@ def simulate_experience(
     padding_measured = np.zeros(n_ue, dtype=float)
     sched_cnt_measured = np.zeros(n_ue, dtype=int)
     mcs_sum_measured = np.zeros(n_ue, dtype=float)
+    mcs_first_sum_measured = np.zeros(n_ue, dtype=float)
     rank_sum_measured = np.zeros(n_ue, dtype=float)
     tx_count_measured = np.zeros(n_ue, dtype=int)
     nack_count_measured = np.zeros(n_ue, dtype=int)
@@ -2122,7 +2233,19 @@ def simulate_experience(
             }
         # 业务在 UL/保护时隙照样到达；旧实现把 step 放在 continue 后面，会漏掉这些到达。
         tr.step(tti)
-        slot = pattern[tti % len(pattern)]
+        # 上一批已经到期的 ACK/NACK 先落到 OLLA 状态上，再做本 TTI 的决策——
+        # 顺序反了就等于让反馈提前一个 TTI 生效。
+        for _u_fb, _mode_fb, _delta_fb in deferred_olla.pop(tti, ()):
+            if _mode_fb == "MU":
+                mu_olla_db[_u_fb] = float(min(max(
+                    mu_olla_db[_u_fb] + _delta_fb,
+                    sched.olla_min_db), sched.olla_max_db))
+            else:
+                olla_db[_u_fb] = float(min(max(
+                    olla_db[_u_fb] + _delta_fb,
+                    sched.olla_min_db), sched.olla_max_db))
+        rank_ctl.step(tti)
+        slot = pattern[tti % pattern_len]
         if slot not in ("D", "S"):
             continue
         dl_tti_full += 1
@@ -2132,9 +2255,18 @@ def simulate_experience(
             available_rbg_equiv += int(sys_cfg.num_rbg) * slot_fraction
             available_prb_equiv += total_prb * slot_fraction
         snap = (tti // snap_every) % n_snap
+        # 待重传的 TB 要等两件事：同类型时隙，以及 ACK/NACK 真的回来了。
+        # 单 HARQ 进程模型下，这期间该 UE 也发不了新 TB。
         cand = [u for u in range(n_ue) if tr.has_data(u)
-                and (u not in harq_pending or harq_pending[u].slot == slot)
+                and (u not in harq_pending
+                     or (harq_pending[u].slot == slot
+                         and tti >= harq_pending[u].ready_tti))
                 and not (tables[u].outage is not None and tables[u].outage[snap])]
+        if in_measurement:
+            feedback_wait_skips += sum(
+                1 for u in range(n_ue)
+                if tr.has_data(u) and u in harq_pending
+                and tti < harq_pending[u].ready_tti)
         blocked_this_tti = sum(
             1
             for u in range(n_ue)
@@ -2184,10 +2316,15 @@ def simulate_experience(
         priority_factor = np.ones(len(cand), dtype=float)
         for i, u in enumerate(cand):
             pending = harq_pending.get(u)
+            if rank_ctl.adaptive and tables[u].sinr_tx_db is not None:
+                rank_ctl.observe_link(u, snap, _rank_se_estimates(
+                    tables[u], snap, float(olla_db[u]),
+                    olla_enabled=bool(sched.olla_enabled), lookup=lookup,
+                    max_rank=rank_ctl.max_rank))
+            # **rank 不再逐快照跟着 best_rank 跳。** 默认固定 rank2；自适应
+            # 模式由 RankController 按周期决策。重传沿用冻结的 rank。
             rank = (int(pending.rank) if pending is not None
-                    else min(
-                        int(tables[u].best_rank[snap]),
-                        int(getattr(sched, "max_layers_per_rbg", 4))))
+                    else rank_ctl.rank_for(u, int(tables[u].best_rank[snap])))
             if pending is not None:
                 base_rows = (tables[u].sinr_tx_db
                              if tables[u].sinr_tx_db is not None
@@ -2195,16 +2332,26 @@ def simulate_experience(
                 base_tx_sinr = float(base_rows[snap, rank - 1])
                 mcs = int(pending.mcs)
                 mcs_without_olla = _select_mcs(base_tx_sinr, lookup)
-            elif tables[u].sinr_tx_db is not None and sched.olla_enabled:
+            elif tables[u].sinr_tx_db is not None:
                 # 硬合同：先用 CQI 门限 + BF Gain 的 SINR 反折无 OLLA MCS，
                 # 再叠加连续 MCS 域 OLLA，floor 后钳到当前 profile。
+                # **关掉 OLLA 只去掉最后这一步叠加，决策坐标不变。**
+                # 早先 ``olla_enabled=False`` 会掉进下面的 else 分支，改用
+                # 真实接收 SINR 反折出的 MCS——那是上帝视角：首传 BLER 被
+                # 构造在目标值上，CSI 老化与 BF 失配的代价整个消失，
+                # 于是"开/关 OLLA"的消融同时换掉了链路自适应的信息面。
                 base_tx_sinr = float(tables[u].sinr_tx_db[snap, rank - 1])
                 mcs_without_olla = _select_mcs(base_tx_sinr, lookup)
-                mcs = int(la.apply_olla_mcs(
-                    mcs_without_olla, float(olla_db[u]),
-                    mcs_table=int(lookup.mcs_table),
-                )["final_mcs"])
+                mcs = (
+                    int(la.apply_olla_mcs(
+                        mcs_without_olla, float(olla_db[u]),
+                        mcs_table=int(lookup.mcs_table),
+                    )["final_mcs"])
+                    if sched.olla_enabled else mcs_without_olla
+                )
             else:
+                # 链路表根本没有 AMC 预测坐标（手工构造的表）。这不是
+                # "关掉 OLLA"，是"没有 CQI/BF 可用"，只能退回表自带的 MCS。
                 base_tx_sinr = float(tables[u].sinr_db[snap, rank - 1])
                 mcs = int(tables[u].mcs[snap, rank - 1])
                 mcs_without_olla = mcs
@@ -2262,7 +2409,9 @@ def simulate_experience(
             and bool(tables[u].outage[snap]) for u in range(n_ue))
         blocked_data = blocked_data or any(
             tr.has_data(u) and u in harq_pending
-            and harq_pending[u].slot != slot for u in range(n_ue))
+            and (harq_pending[u].slot != slot
+                 or tti < harq_pending[u].ready_tti)
+            for u in range(n_ue))
         cursor = tti % int(sys_cfg.num_rbg)
         su_plan = _build_su_plan(
             ordered_users, queue_bytes=queue_bytes, lookup=lookup, slot=slot,
@@ -2459,7 +2608,9 @@ def simulate_experience(
                             mcs=mcs, rank=rank, n_rbg=n_alloc,
                             tb_bytes=tb_bytes, payload_bytes=payload,
                             slot=slot, first_tti=tti,
-                            first_mode=str(grant.mode))
+                            first_mode=str(grant.mode),
+                            ready_tti=tti + int(
+                                feedback_offsets[tti % pattern_len]))
                 pad = max(0, tb_bytes - payload)
                 if accounting == "scheduled_tbs":
                     credit = tb_bytes
@@ -2484,6 +2635,9 @@ def simulate_experience(
                     if not is_retx:
                         tx_count_measured[u] += 1
                         nack_count_measured[u] += int(not ack)
+                        # avg_mcs 的分母含重传（重传重放的是冻结的旧 MCS），
+                        # 想看"链路自适应现在选到哪一档"要用这个首传口径。
+                        mcs_first_sum_measured[u] += mcs
                     sched_cnt_measured[u] += 1
                     mcs_sum_measured[u] += mcs
                     rank_sum_measured[u] += rank
@@ -2498,29 +2652,34 @@ def simulate_experience(
                         user_mu_grant_rbg_equiv[u] += grant_equiv
                         user_mu_grant_prb_equiv[u] += grant_prb_equiv
                         user_mu_tx_measured[u] += 1
+                if not is_retx:
+                    # Rank 判据只看首传：重传重放的是冻结的旧发送身份，
+                    # 把它算进去等于让"上一次的决定"投两次票。
+                    rank_ctl.record_first_tx(
+                        u, ack=ack, mcs=mcs,
+                        realized_se=(
+                            float(rank) * float(
+                                la.MCS_TABLES[int(lookup.mcs_table)][mcs].se)
+                            if ack else 0.0))
+                olla_delta = 0.0
+                olla_effective_tti = tti
                 if sched.olla_enabled and not is_retx:
                     speed = (float(getattr(sched, "olla_warmup_speedup", 1.0))
                              if not in_measurement
                              else float(getattr(sched, "olla_speedup", 1.0)))
                     if grant.mode == "MU":
-                        if ack:
-                            mu_olla_db[u] = min(
-                                mu_olla_db[u]
-                                + float(sched.mu_olla_step_up_db) * speed,
-                                sched.olla_max_db)
-                        else:
-                            mu_olla_db[u] = max(
-                                mu_olla_db[u]
-                                - float(sched.mu_olla_step_down_db) * speed,
-                                sched.olla_min_db)
-                    elif ack:
-                        olla_db[u] = min(
-                            olla_db[u] + float(sched.olla_step_up_db) * speed,
-                            sched.olla_max_db)
+                        step = (float(sched.mu_olla_step_up_db) if ack
+                                else -float(sched.mu_olla_step_down_db))
                     else:
-                        olla_db[u] = max(
-                            olla_db[u] - float(sched.olla_step_down_db) * speed,
-                            sched.olla_min_db)
+                        step = (float(sched.olla_step_up_db) if ack
+                                else -float(sched.olla_step_down_db))
+                    # **步长在发送时刻定，生效在反馈回来之后。** 放大系数按
+                    # 发送时刻所处的窗口取：那次传输确实发生在预热期。
+                    olla_delta = step * speed
+                    olla_effective_tti = (
+                        tti + int(feedback_offsets[tti % pattern_len]))
+                    deferred_olla.setdefault(olla_effective_tti, []).append(
+                        (int(u), str(grant.mode), float(olla_delta)))
                 cls = str(tr.queues[u].traffic_class.name)
                 if in_measurement:
                     class_alloc_rbg[cls] = class_alloc_rbg.get(cls, 0) + n_alloc
@@ -2561,6 +2720,9 @@ def simulate_experience(
                     mu_olla_before_db=mu_olla_before,
                     su_olla_after_db=float(olla_db[u]),
                     mu_olla_after_db=float(mu_olla_db[u]),
+                    olla_delta_mcs=float(olla_delta),
+                    olla_effective_tti=(
+                        int(olla_effective_tti) if olla_delta else None),
                     pair_correlation=grant.pair_correlation,
                     plan_su_useful_bytes=su_plan.useful_bytes,
                     plan_mu_useful_bytes=mu_plan.useful_bytes,
@@ -2840,6 +3002,8 @@ def simulate_experience(
             "completion_delay_p95_ms": _pct(completes, 95),
             "pdb_miss_ratio": float(np.mean(pflags)) if pflags else None,
             "avg_mcs": float(mcs_sum_measured[u] / max(sched_cnt_measured[u], 1)),
+            "avg_mcs_first_tx": float(
+                mcs_first_sum_measured[u] / max(tx_count_measured[u], 1)),
             "avg_rank": float(rank_sum_measured[u] / max(sched_cnt_measured[u], 1)),
             "bler_first_tx": float(
                 nack_count_measured[u] / max(tx_count_measured[u], 1)),
@@ -3118,6 +3282,13 @@ def simulate_experience(
             acked_total_measured * 8 / max(measurement_duration_s, _EPS) / 1e6),
         "avg_mcs": float(
             np.sum(mcs_sum_measured) / max(np.sum(sched_cnt_measured), 1)),
+        "avg_mcs_first_tx": float(
+            np.sum(mcs_first_sum_measured) / max(np.sum(tx_count_measured), 1)),
+        "avg_mcs_definition": (
+            "avg_mcs averages the air-interface MCS over every measured grant, "
+            "retransmissions included (a retransmission replays the frozen "
+            "first-transmission MCS); avg_mcs_first_tx keeps only new "
+            "transmissions and is the link-adaptation view"),
         "avg_rank": float(
             np.sum(rank_sum_measured) / max(np.sum(sched_cnt_measured), 1)),
         "bler_first_tx": float(nack_total / max(tx_total, 1)),
@@ -3199,6 +3370,7 @@ def simulate_experience(
         "outage_ue": int(sum(1 for t in tables
                               if t.outage is not None and bool(t.outage.all()))),
         "outage_skips": int(outage_skips),
+        "harq_feedback_wait_skips": int(feedback_wait_skips),
         "olla_db_mean": float(np.mean(olla_db)),
         "olla_db_p5": float(np.percentile(olla_db, 5)),
         "olla_db_p95": float(np.percentile(olla_db, 95)),
@@ -3337,6 +3509,21 @@ def simulate_experience(
          "在不变 SINR 上查该 NewTx 曲线。等效 MCS 只用于 BLER 查表，不改写空口 MCS。"
          "重传失败后结束本次 HARQ，payload 留在 DRB 队列并在后续作为新 TB。"),
         f"PF 平均量口径是 **{accounting}**；ACKed bytes 另作为 KPI 统计。",
+        (f"Rank 策略={rank_cfg.mode}"
+         + (f"（固定 rank{min(int(rank_cfg.fixed_rank), rank_ctl.max_rank)}）"
+            if rank_cfg.mode == "fixed"
+            else f"（每 {int(rank_cfg.period_tti)} TTI 决策一次，谱效比门限 "
+                 f"{float(rank_cfg.switch_se_ratio):g}）")
+         + "。链路表里的逐快照 best_rank 是瞬时谱效最优值，**不再**直接作为"
+           "发送 rank——那会让 rank 每个信道快照就换一次。"),
+        ("ACK/NACK 搭发送之后第一个 U 时隙回传，OLLA 更新与重传资格从该 U 之后"
+         f"第一个 D/S 时隙起生效；{pattern} 下逐相位偏移 "
+         f"{list(feedback_offsets)} 个 TTI。**重传还要额外等到同类型时隙**"
+         "（S 上发的 TB 要等下一个 S），两个约束取交集。等待期间该 UE 因单 "
+         "HARQ 进程模型不参与调度。k1/k2、PUCCH 资源与并行 HARQ 进程都未建模。"
+         if feedback_modelled else
+         "**HARQ 反馈按零时延处理**：TDD 图案里没有 U 时隙，或反向对照显式"
+         "关掉了时延模型。ACK/NACK 在发送同一个 TTI 就生效，这是上界不是现网。"),
         "分配器每个 DL TTI 只排序一次：按 PF/QoS-PF 优先级依次给最小够用 RBG；"
         "剩余 RBG 没有候选需求时留空，不回填给第一名。",
         "每个 SU/MU 候选计划先经过 ResourceLedger：物理 RBG 只扣一次、逐 RBG "
@@ -3414,6 +3601,27 @@ def simulate_experience(
     if cell["serving_cell_prb_utilization"] > 0.98:
         notes.append("**本小区 PRB 利用率超过 98%**，当前结果更接近容量上限而非稳态体验。")
     diagnostics = {
+        "rank_policy": rank_ctl.diagnostics(),
+        "harq_feedback": {
+            "delay_modelled": bool(feedback_modelled),
+            "requested": bool(feedback_delay_on),
+            "tdd_pattern": pattern,
+            "effective_offsets_tti": [int(x) for x in feedback_offsets],
+            "offset_ms": [
+                round(float(x) * float(sys_cfg.tti_ms), 4)
+                for x in feedback_offsets],
+            "contract": (
+                "ACK/NACK rides the first U slot after the transmission; the "
+                "OLLA update and the retransmission both start at the first "
+                "D/S slot after that U slot"
+                if feedback_modelled
+                else "zero-delay feedback (pattern has no U slot, or the "
+                     "delay model is switched off for a reverse control)"),
+            "not_modelled": (
+                "k1/k2 values, PUCCH resources and parallel HARQ processes are "
+                "not modelled; one HARQ process per UE"),
+            "wait_skips": int(feedback_wait_skips),
+        },
         "tbs_lookup": lookup.as_dict(),
         "srs_resource_assignments": [
             table.srs_resource_assignment.as_dict()

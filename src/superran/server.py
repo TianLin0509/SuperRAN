@@ -1919,6 +1919,11 @@ def sr_system_sim(
     max_logical_prb_per_tti: int | None = None,
     target_bler: float = 0.1,
     harq_combining: str = "ir",
+    harq_feedback_delay: bool | str = True,
+    rank_mode: str = "fixed",
+    fixed_rank: int = 2,
+    rank_adaptation_period_tti: int = 1000,
+    rank_switch_se_ratio: float = 1.05,
     olla_step_up_db: float = 0.01,
     olla_step_down_db: float | None = None,
     qos_avg_rate_exponent: float = 1.0,
@@ -1944,6 +1949,8 @@ def sr_system_sim(
     srs_pci_mod3: int = 0,
     csi_processing_delay_ms: float = 2.0,
     csi_report_period_ms: float = 20.0,
+    cqi_filter_lambda: float = 0.25,
+    cqi_filter_domain: str = "cqi_index",
     warmup_s: float = 1.0,
     olla_speedup: float = 1.0,
     olla_warmup_speedup: float = 1.0,
@@ -1981,8 +1988,33 @@ def sr_system_sim(
     ``N_BS·sigma_e²``；它应来自估计器协方差或离线标定，不能在运行时逐快照
     偷看 ``h_true``。默认 ``zf`` / ``0.0`` 保持旧结果。
 
+    **Rank 是显式策略，默认固定 rank2。** ``rank_mode='fixed'``（默认，配
+    ``fixed_rank``）是现网基线；链路表里的逐快照 ``best_rank`` 是瞬时谱效最优
+    值，每 5 ms 就可能变，直接拿它发送会让链路自适应收敛不了。
+    ``rank_mode='adaptive'`` 每 ``rank_adaptation_period_tti``（默认 1000）决策
+    一次，最优/当前的滤波谱效比要超过 ``rank_switch_se_ratio`` 才切换，抬升后
+    还要过回退观察窗；这些常数是**工程默认、尚未按现场标定**。
+    ``rank_mode='link_table'`` 是逐快照跟随的历史行为，**只作反向对照**。
+
+    **ACK/NACK 要等上行时隙。** ``harq_feedback_delay=True``（默认）下，TB 在
+    D/S 发出、反馈搭其后第一个 U 回传，OLLA 更新与重传资格从该 U 之后第一个
+    D/S 起生效；``DDDSU`` 在 30 kHz 下逐相位偏移 5/4/3/2 个 TTI。**重传还要
+    额外等到同类型时隙**（S 上发的 TB 要等下一个 S），两个约束取交集。等待期间
+    该 UE 因单 HARQ 进程模型不参与调度（计入 ``harq_feedback_wait_skips``）。设成
+    False 是零时延反向对照；图案里没有 U 时自动退化并写进 ``notes``。
+    k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。
+
+    **CQI 的长期滤波是一阶 IIR**：``s <- s + λ(x - s)``，``cqi_filter_lambda``
+    默认 0.25、``cqi_filter_domain`` 默认在量化后的 CQI 档上。两者都是**工程
+    默认、尚未按现场标定**，随结果上报；``λ=1`` 关闭滤波可作反向对照。
+
+    ``target_bler`` 可配，但它在**开环上大部分抵消**（同一个目标同时出现在
+    CQI→门限 与 门限→MCS 两侧）：实测 384 个样本里 92% 选出完全相同的 MCS。
+    真正吃到它的是 OLLA 闭环——10%→30% 实测稳态偏置 1.65→1.85 档、首传 BLER
+    0.067→0.178。取值必须落在预置曲线的共同实测区间 [0.001, 0.998]。
+
     返回里 **cell 是小区级、users 是用户级**，两级都有：平均调度 MCS、
-    平均 rank、首传 BLER、残留 BLER、体验速率、含头速率与首包时延。cell 还给
+    平均 rank、首传 BLER、残留 BLER、体验速率、含头速率与首包时延。``avg_mcs`` 的分母含重传（重传重放冻结的旧档），要看链路自适应视角用 ``avg_mcs_first_tx``。cell 还给
     本小区 PRB 利用率、0..17 RBG 的逐 TTI 占用分布和 MU 配对 PRB 比例。
 
     **每个 KPI 都是 ``{mean, std, ci95, n_rep, cv, rel_half_width}`` 而不是一个裸数**
@@ -2312,6 +2344,8 @@ def sr_system_sim(
             srs_period_adaptive=_flag(srs_period_adaptive),
             processing_delay_ms=float(csi_processing_delay_ms),
             csi_report_period_ms=float(csi_report_period_ms),
+            cqi_filter_lambda=float(cqi_filter_lambda),
+            cqi_filter_domain=str(cqi_filter_domain),
             periodic_trace_history=(mode == "experience" and float(warmup_s) > 0))
     except ValueError as exc:
         return {"error": str(exc)}
@@ -2370,9 +2404,14 @@ def sr_system_sim(
             interarrival_scale=float(interarrival_scale),
             interarrival_cdf_unit=str(interarrival_cdf_unit),
             classes=profile_cfg)
+        rank_cfg = sysm.ap.RankConfig(
+            mode=str(rank_mode), fixed_rank=int(fixed_rank),
+            period_tti=int(rank_adaptation_period_tti),
+            switch_se_ratio=float(rank_switch_se_ratio))
         system_cfg = sysm.SystemConfig(
             evaluation_mode=mode, duration_s=float(duration_s),
             tdd_pattern=tdd_pattern, harq_combining=str(harq_combining),
+            harq_feedback_delay=_flag(harq_feedback_delay),
             seed=seed, snapshot_update_ms=snap_ms,
             power_constraint=str(power_constraint), rb_power_control=power_cfg,
             scs_khz=carrier["scs_khz"],
@@ -2380,6 +2419,7 @@ def sr_system_sim(
             rbg_prb_sizes=tuple(int(x) for x in carrier["rbg_prb_sizes"]))
         scheduler_cfg = sysm.SchedulerConfig(
             algorithm=scheduler, pf_window_tti=pf_window_tti,
+            rank=rank_cfg,
             pf_accounting=pf_accounting,
             frequency_selective=str(frequency_selective),
             max_layers_per_rbg=max_layers_per_rbg,

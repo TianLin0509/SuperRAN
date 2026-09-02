@@ -219,7 +219,12 @@ SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且�
 他能豁免的是自己要不要看，不是你要不要说；他懂概念不等于他知道**这批数据**踩了。
 
 **最容易出错的默认值**：`evaluation_mode="capacity"`（要研究按需 RBG 必须显式改成
-`experience`）、`num_replications=8`（**别调到 6 以下**，见上）、
+`experience`）、`rank_mode="fixed"` / `fixed_rank=2`（**rank 默认固定**，链路表的
+逐快照 `best_rank` 不再是发送 rank；`link_table` 模式是历史行为、只作反向对照）、
+`harq_feedback_delay=True`（ACK/NACK 搭下一个 U 时隙，OLLA 与重传从其后第一个
+D/S 生效；图案没有 U 时自动退化成零时延并写进 notes）、`cqi_filter_lambda=0.25`
+（CQI 一阶 IIR 的工程默认，**尚未现场标定，必须随结果报出**）、
+`num_replications=8`（**别调到 6 以下**，见上）、
 `replication_workers="auto"`（短任务串行，长任务用进程；实际值看结果 `parallel`）、
 `neighbor_prb_util=0.3`、`csi_aging=True`、`olla_speedup=1.0`、`mu_enabled=False`。
 `experience_v2` 当前支持两用户、每用户 rank2 的数据受限 SU/MU 自适应；开 MU 时必须有

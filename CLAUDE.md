@@ -84,6 +84,7 @@ test_csi_aging + test_rng；改动 `scheduler_*.py` / `experience.py` 要额外�
 改动 `srs_waveform.py` 或 SRS 的 `h_ul_true` 数据合同要跑 test_srs_waveform +
 test_physics_contract_extensions + test_channel_generation_contract + test_results；
 改动 `scenes.py` / `scene_assets.py` 要跑 test_physics_contract_extensions + test_raytracing；
+改动 `amc_policy.py` 要跑 test_system + test_scheduler_p0 + test_csi_aging；
 改动 `rng.py` 要跑 test_rng + test_system；
 改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）；
 改动开发者文档生成器要跑 `tests/test_developer_guide.py`。
@@ -398,6 +399,13 @@ IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在�
 有MCS0..27，最高行请求MCS28但必须显式钳到27，不得伪造MCS28曲线。
 所有高层链路/吞吐/SNR扫频接口默认都用表3的256QAM profile；
 表1的64QAM和表2的标准256QAM只在调用方显式指定时使用。
+**`build_link_tables` 硬拒绝非表 3**：只有 preset_20b_256qam 同时具备 28 档 NewTx
+曲线与内部 CQI 映射，混用会让量化门限与选档口径各用一张表且不报错。
+`target_bler` 可配，但必须落在 28 档曲线的**共同实测区间 [0.001, 0.998]** 内，
+越界提前硬失败而不是在深层抛一个看不出哪档的 ValueError。注意这条链里目标 BLER
+**开环几乎抵消**（它同时出现在 CQI→Γ 与 Γ→MCS 两侧，两次平移方向相同），真正
+吃到它的是 OLLA 闭环：实测 10%→30% 时稳态偏置 1.65→1.85 档、首传 BLER
+0.067→0.178。
 
 TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sr_tdd_mcs` 实现：
 `CQI表行/上报codepoint → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标 BLER SINR 门限
@@ -773,6 +781,18 @@ Python 侧：反斜杠 + 数字 是合法的八进制转义，
 真要写转义就用 raw 字符串，并给每个转义补足 6 位或补一个空格作结束符。
 这个只有在浏览器里看 `getComputedStyle(el,'::before').content` 才发现得了。
 
+### 解码 SINR 要取实际授予的那几个 RBG
+
+误块抽签用的是**最终发送 MCS + 真实接收 SINR**，而这个 SINR 由同一个 gNB 发射权
+作用到 `h_true`、经经典 MMSE 逐 RB 逐流算出——**是算出来的，不是从全带值折的**。
+聚合只能在**本次 grant 实际占用的 RBG** 上做（`experience._granted_true_sinr_db`
+与 MU 的 `_granted_pair_true_sinr_db`）。
+
+宽带路径早先直接用全带均值，于是一个只占 1~2 个 RBG 的小包按 17 个 RBG 的平均
+信道判误码，**两个方向都会错**：授到好子带时高估误块、授到坏子带时低估。量级
+不小——最终 MCS15 在 15.1 dB 上的 NewTx BLER 是 0.0006，在 13.2 dB 上是 0.997，
+不到 2 dB 跨越整条瀑布。手工构造、逐 RBG 宽度对不上载波栅格的链路表退回全带值。
+
 ### 仿真粒度降到 RBG 是安全的
 
 一个 RBG 内的 16 个 RB 共用同一个 MCS、同一次调度决策、同一个预编码，
@@ -864,7 +884,16 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
    不成立就说明老化是叠加上去的第二套物理，那样任何"老化损失"都只是两套物理的差。
 2. **rank 由基站按陈旧 CSI 选**。拿真实 SINR 去挑 rank 等于让基站预知信道，
    它会自动避开老化最狠的那个 rank，**损失被凭空抹掉一大半**。
-   同理 PF 调度的 `inst_se` 只能用 `best_se_gnb`，不能用 `best_se`。
+   同理 PF 调度的 `inst_se` 只能用基站估计的谱效，不能用真实谱效。
+
+**但 `best_rank` 已经不是发送 rank 了**（2026-09-02，用户确认）。它是**逐快照的
+瞬时谱效最优值**，默认 5 ms 就可能换一次；rank 一变，每流功率 `P/r`、TBS 和 OLLA
+的收敛点全跟着变，链路自适应根本收敛不了。现在 rank 是 `amc_policy.RankConfig`
+给的显式策略：默认 `fixed` + `fixed_rank=2`（现网基线），`adaptive` 按
+`period_tti`（默认 1000 TTI）决策并带谱效比迟滞与回退封锁，`link_table` 保留
+逐快照跟随的历史行为**只作反向对照**。`best_rank` 现在只是诊断量与 `link_table`
+模式的输入。PF 度量也要取**实际会用的那个 rank** 的估计谱效，不能继续用
+`best_se_gnb`（那是"瞬时最优 rank 的谱效"，与实际发送的 rank 不是同一档）。
 
 表里因此有两套量：`sinr/mcs/se`（真实，用于 BLER 与吞吐对账）与
 `se_gnb/best_se_gnb`（基站以为的，用于 rank 与调度）。零时延时两套逐位相同。
@@ -909,6 +938,14 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 每次更新只能使用该时刻可见的CSI，不能跨完整仿真时间先平均后偷看未来。历史
 API的表行0映射MCS0、对应上报CQI1；真实上报**CQI=0是out-of-range**。
 
+**CQI 的长期滤波是一阶 IIR，不是累计平均**（2026-09-02 换的口径）：
+`s <- s + λ(x - s)`，第一次上报直接初始化状态。旧的 expanding mean 记忆无限长，
+跑得越久新测量权重越小，移动性或负载变化时 CQI 根本不跟踪。λ 由
+`CsiConfig.cqi_filter_lambda` 给，**默认 0.25 是工程默认、尚未按现场标定**，
+必须随结果报出来；λ=1 关闭滤波可作反向对照。`cqi_filter_domain` 默认
+`cqi_index`（现场口径：在量化后的 CQI 档上滤波），`sinr_db` 只用于量化前后的
+口径消融，两个域的结果不能混着比。
+
 `Dataset.tdd_mcs` / `sr_tdd_mcs` 也必须遵守同一因果边界：进入 MCS 的
 `bf_gain_user_db` 只能在 gNB 可见的 `h_prec` 上计算。同一权打到
 `h_true` 得到的 `bf_gain_true_user_db` 与 prediction error 只作事后审计，
@@ -933,8 +970,24 @@ CQI/BF/OLLA 标量时 BLER 必须是 unknown，不能拿 AMC 预测坐标查出�
 必须重新跑收敛标定；2026-08-23 之前 dB-domain OLLA 的 BLER/速率数字仅供历史
 追溯，不能写成当前实测结论。
 
+**`olla_enabled=False` 只去掉"叠加偏置"这一步，决策坐标不变。** 早先它会掉进
+另一条分支、改用**真实接收 SINR** 反折 MCS——那是上帝视角：首传 BLER 被构造在
+目标值上，CSI 老化与 BF 失配的代价整个消失，于是"开/关 OLLA"的消融同时换掉了
+链路自适应的信息面。只有链路表**根本没有** `sinr_tx_db`（手工构造的表）时才
+退回表自带的 MCS，那不是"关 OLLA"，是"没有 CQI/BF 可用"。
+
+**ACK/NACK 要等上行时隙**（2026-09-02 确认）。TB 在 D/S 发出，反馈搭其后第一个
+`U` 时隙回来，OLLA 更新与该 TB 的重传资格都从**该 U 之后第一个 D/S** 起生效。
+偏移由 TDD 图案算出（`amc_policy.feedback_effective_offsets`），`DDDSU` 在
+30 kHz 下逐相位是 5/4/3/2 个 TTI；两个周期即 8 下行配 2 上行，与现场 8:2 一致。
+等待期间该 UE 因单 HARQ 进程模型不参与调度，单独计数为
+`harq_feedback_wait_skips`。图案里没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
+零时延并在 notes 里说明。**k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。**
+
 顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 先用
 `sinr_tx_db` 反折 `mcs_without_olla`，再调 `apply_olla_mcs`），即实际调度下去的档位。
+**但它的分母含重传**，而重传重放的是冻结的旧 MCS，所以它不是"链路自适应现在选到
+哪一档"。要那个视角用 `avg_mcs_first_tx`（只统计首传），两条路径都提供。
 
 `simulate_experience` 作为公开入口**自己**也会兑现"留空=按目标反解"：
 它拿链路表的 `target_bler` 调 `resolved_for_target`，不再依赖调用方先解析
@@ -1268,6 +1321,8 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 - 新的表驱动 BLER → 原始常量放独立数据模块，必须有 SHA-256、全 MCS 覆盖、
   横轴/BLER 单调、目标门限覆盖检查；来源不是标准就不能塞进 `verify_tables`
 - 新的门禁判据 → `gates.py`（门 2/门 3）或 `validate.py`（门 1，会自动进门 1）
+- 新的 rank 策略 / HARQ 反馈时序 → `amc_policy.py`；两条评估路径共用同一份实现，
+  别在 `system.py` 和 `experience.py` 里各写一套
 - 新的随机流 → `rng.register_stream(名字, 用途)`，**别直接改 `STREAMS` 的顺序**
   （流键来自名字的 crc32，加流不会扰动已有流；改顺序也不会，但改用途会）。
   统计判决一律走 `rng.compare_replications`，它复用 `gates.py`，不要另写

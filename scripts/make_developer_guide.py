@@ -365,6 +365,32 @@ F_MU_SINR = M(
     r"+L_{\mathrm{corr}}+L_{\mathrm{power}}",
 )
 F_POWER_LOSS = M(r"L_{\mathrm{power}}=-10\log_{10}K_{\mathrm{MU}}\ \mathrm{dB}")
+F_CQI_IIR = M(
+    r"s_k=\begin{cases}x_k,&k=0\\ s_{k-1}+\lambda\,(x_k-s_{k-1}),&k>0\end{cases}"
+    r"\qquad \mathrm{CQI}_{\mathrm{rep}}=\lfloor s_k\rfloor",
+)
+F_GRANT_SINR = M(
+    r"\gamma^{\mathrm{grant}}_{\mathrm{RX}}"
+    r"=\frac{1}{|\mathcal G|}\sum_{g\in\mathcal G}\gamma_{\mathrm{RX},g}"
+    r"\quad[\mathrm{dB}],\qquad "
+    r"\gamma_{\mathrm{RX},g}=10\log_{10}\!\Big(\tfrac{1}{|g|}"
+    r"\sum_{b\in g}\gamma^{\mathrm{lin}}_{\mathrm{RX},b}\Big)",
+)
+F_RANK_SE = M(
+    r"\widehat{SE}_r=r\cdot SE\!\left(\mathcal S(\gamma_{\mathrm{AMC,pred}}^{(r)},"
+    r"p_{\mathrm{target}})\oplus\Delta\right),\qquad "
+    r"\bar{SE}_r\leftarrow\bar{SE}_r+\lambda_{SE}\,(\widehat{SE}_r-\bar{SE}_r)",
+)
+F_RANK_SWITCH = M(
+    r"r^{\star}=\arg\max_{r\notin\mathcal B}\bar{SE}_r,\qquad "
+    r"r\leftarrow r^{\star}\ \text{iff}\ "
+    r"\frac{\bar{SE}_{r^{\star}}}{\bar{SE}_{r_{\mathrm{cur}}}}>\eta"
+    r"\ \text{and}\ t\equiv 0 \pmod{T_{\mathrm{rank}}}",
+)
+F_HARQ_DELAY = M(
+    r"t_{\mathrm{eff}}(t)=\min\{d>u:\ \mathrm{slot}(d)\in\{D,S\}\},\qquad "
+    r"u=\min\{u>t:\ \mathrm{slot}(u)=U\}",
+)
 F_TBS = M(r"N_{\mathrm{info}}=N_{\mathrm{RE}}Q_mR\nu,\qquad TBS=Q_{38.214}(N_{\mathrm{info}})")
 F_RBG_SEARCH = M(
     r"n_u^\star=\min\{n\in[1,17]:TBS(s,m_u,r_u,n)\ge B_u\}"
@@ -1886,6 +1912,60 @@ def bler_detail_atlas() -> str:
     )
 
 
+def dl_amc_flow_svg() -> str:
+    """下行 AMC 全链的算法流程图。
+
+    四条信息面各占一行，行间蛇形走向；右侧是两个只在特定条件下加入的输入
+    （rank 策略、MU 的两项损失），它们都进入 **SINR 域**，也就是在反折基准
+    MCS **之前**——画成指向 OLLA 那一步就会把口径讲错。
+    """
+    body = ""
+    # 第一行 · 测量面：终端在真实信道上测
+    body += svg_box(20, 20, 190, 62, "UE 测 PMI-SINR", "h_true + Type-I 权", "accent")
+    body += svg_box(250, 20, 175, 62, "量化成 4-bit CQI", "按目标 BLER 门限", "accent")
+    body += svg_box(465, 20, 175, 62, "一阶 IIR 滤波", "CQI += λ(新−旧)", "accent")
+    body += arrow(210, 51, 250, 51)
+    body += arrow(425, 51, 465, 51)
+    # 第二行 · 基站预测面（SINR 域）
+    body += svg_box(20, 128, 190, 62, "CQI → 初始 MCS", "离散表 0,2,…,26,28", "b")
+    body += svg_box(250, 128, 175, 62, "取门限 Γ", "该 MCS 的目标 BLER SINR", "b")
+    body += svg_box(465, 128, 175, 62, "+ BF Gain", "SVD−PMI，都在 h_prec 上", "b")
+    body += svg_box(680, 128, 185, 62, "反折基准 MCS", "mcs_without_olla", "b")
+    body += arrow(552, 82, 115, 128, "CQI")
+    body += arrow(210, 159, 250, 159)
+    body += arrow(425, 159, 465, 159)
+    body += arrow(640, 159, 680, 159)
+    # 右侧 · 只在特定条件下加入的两个输入，都进 SINR 域
+    body += svg_box(895, 116, 180, 42, "Rank 策略", "默认固定 rank2", "b")
+    body += arrow(895, 137, 865, 148)
+    body += svg_box(895, 170, 180, 42, "MU 配对损失", "+CorrLoss +PowerLoss", "b")
+    body += arrow(895, 191, 865, 176)
+    # 第三行 · 闭环面（MCS 域），自右向左
+    body += svg_box(680, 236, 185, 62, "+ OLLA 偏置", "连续 MCS 档", "warn")
+    body += svg_box(465, 236, 175, 62, "floor + 钳位", "0..27", "warn")
+    body += svg_box(250, 236, 175, 62, "发送 MCS", "写进 grant", "warn")
+    body += arrow(772, 190, 772, 236)
+    body += arrow(680, 267, 640, 267)
+    body += arrow(465, 267, 425, 267)
+    # 第四行 · 真实面：只有它能查 BLER
+    body += svg_box(20, 344, 190, 62, "同一个权打 h_true", "post-MMSE 逐 RBG", "danger")
+    body += svg_box(250, 344, 175, 62, "取被授 RBG", "只在实际授的那几个", "danger")
+    body += svg_box(465, 344, 175, 62, "查 NewTx 曲线", "final MCS + 真值 SINR", "danger")
+    body += svg_box(680, 344, 185, 62, "ACK / NACK", "误块抽签", "danger")
+    body += arrow(337, 298, 210, 344, "grant")
+    body += arrow(210, 375, 250, 375)
+    body += arrow(425, 375, 465, 375)
+    body += arrow(640, 375, 680, 375)
+    # 反馈环：等下一个 U 时隙上报，再等其后第一个 D/S 才生效
+    body += svg_box(895, 344, 180, 62, "下一个 U 时隙", "ACK/NACK 上报", "warn")
+    body += arrow(865, 375, 895, 375)
+    body += arrow(952, 344, 868, 300, "下一个 D/S 生效")
+    return svg_wrap(
+        body, 1100, 430,
+        "下行 AMC 全链：测量面（h_true）、预测面（h_prec）、闭环面（OLLA）"
+        "与真实面（解码）四条信息面，以及跨上行时隙的反馈环")
+
+
 def bf_gain_svg() -> str:
     body = svg_box(22, 92, 180, 76, "gNB 可见 CSI", "h_prec / 可能陈旧", "accent")
     body += svg_box(258, 24, 190, 72, "PMI 参照方向", "Type-I-style 宽带", "b")
@@ -2067,7 +2147,7 @@ def product_surfaces_showcase() -> str:
         <span class="surface-stage">RUN · AFTER</span>
         <h3>多算法 KPI 对比与单 TTI 复盘</h3>
         <p>2~5 个算法同屏固定颜色，基线不可隐藏；总览、KPI 矩阵、用户 CDF、TTI 趋势、同 TTI grant 详情与
-        统计门禁形成一条钻取链。单臂工作台仍保留 26 项小区 KPI、24 项用户 KPI 和 Agent 自适应首屏。</p>
+        统计门禁形成一条钻取链。单臂工作台仍保留 27 项小区 KPI、25 项用户 KPI 和 Agent 自适应首屏。</p>
         <a href="#/kpi">查看 KPI 口径与工作台合同 →</a>
       </div>
       """ + kpi_shot + """
@@ -3522,8 +3602,13 @@ def csi_page() -> Page:
 """ + F_CSI_REPORT_HOLD
     body += """
 <p>系统链路表只在 report instant 更新宽带 PMI/CQI，中间 TTI 复用最后一份已到达报告。
-CQI 当前使用报告时刻 PMI-SINR 的因果 expanding mean；代码没有虚构现场 IIR 系数。配置中的额外
-feedback latency 尚未单独建模，报告在其 report snapshot 到达；这项边界会写进 <code>CsiConfig.as_dict()</code>。</p>
+CQI 的长期滤波是**一阶 IIR**：<code>s ← s + λ(x − s)</code>，第一次上报直接初始化状态。
+系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>、作用域 <code>cqi_filter_domain</code>
+默认在量化后的 CQI 档上——两者都是<strong>工程默认、尚未按现场标定</strong>，随
+<code>CsiConfig.as_dict()</code> 一起上报，<code>λ=1</code> 可作不滤波的反向对照。
+CSI 报告本身的额外 feedback latency 仍未单独建模（报告在其 report snapshot 到达）；
+<strong>HARQ 的 ACK/NACK 反馈时延是另一件事，已经建模</strong>，见
+<a href="#/dlamc">下行 AMC 全链</a>。</p>
 <h2>PMI 当前究竟是什么</h2>
 <p><code>pmi_type_i()</code> 在单面板 Type-I-style DFT 列集合上，用宽带发射协方差
 <code>Rtx=E[HHᴴ]</code> 逐层贪心选择列，并在每次选择后投影掉已选方向。它会按 metadata 的
@@ -4112,7 +4197,7 @@ SRS CSI 上，实际发送方向相对 PMI 方向的 post-MMSE SINR 差；默认
     body += callout(
         "danger", "禁止 oracle",
         "<p>把真实接收 SINR 的全仿真均值回填给发送侧，会同时泄露未来信道和实际波束命中效果。"
-        "这会掩盖 CSI 老化与 OLLA 的作用。CQI expanding mean 只能使用 0..s 的历史报告，"
+        "这会掩盖 CSI 老化与 OLLA 的作用。CQI 的 IIR 滤波只能使用 0..s 的历史报告，"
         "BF Gain 必须来自 gNB 自己的 CSI。</p>",
     )
     body += """
@@ -4180,6 +4265,224 @@ MCS 曲线。系统初传与重传都只消费 NewTx 曲线：每个 TB 最多�
         "linkadapt", "CQI、BF、OLLA、MCS 与 TBS", "链路算法", "LINK ADAPTATION",
         "发送/接收 SINR 分离、因果 CQI、OLLA 与非线性 TBS 反查。", body,
         ("CQI", "BF Gain", "OLLA", "MCS", "TBS", "searchsorted"),
+    )
+
+
+def dlamc_page() -> Page:
+    body = dl_amc_flow_svg()
+    body += """
+<h2>一句话：每个 TTI 发出去的那一档 MCS 是怎么定的</h2>
+<p>终端在<strong>真实信道</strong>上用 Type-I 参照权测一个 SINR，量化成 4-bit CQI 并
+按上报周期做一阶 IIR 滤波；基站把 CQI 映射成一个初始 MCS，取<strong>该档在目标
+BLER 下的 SINR 门限</strong> Γ，加上自己在<strong>陈旧 SRS 信道</strong>上算出的
+BF Gain，得到一个只属于基站的预测坐标；在这个坐标上反折出不含 OLLA 的基准 MCS，
+再叠加连续 MCS 域的 OLLA 偏置、向下取整、钳到 profile 范围，就是真正写进 grant
+的发送 MCS。终端能不能解出来，则完全由<strong>同一个发射权打到真实信道</strong>、
+并且只在<strong>实际授予的那几个 RBG</strong> 上得到的接收 SINR 决定。</p>
+<h2>四条信息面，混一条就出错</h2>
+"""
+    body += table(
+        ["信息面", "用哪份信道", "谁能看见", "在链里干什么", "能不能查 BLER"],
+        [
+            ("测量面 · PMI-SINR", "h_true（当前快照）", "终端测、基站只收到量化结果",
+             "决定 CQI，进而决定 Γ", "不能"),
+            ("预测面 · SINR_AMC_PRED", "h_prec（可能陈旧）", "基站自算",
+             "Γ + BF Gain，反折基准 MCS", "不能"),
+            ("闭环面 · OLLA 偏置", "只看 ACK/NACK 历史", "基站自算",
+             "在 MCS 域纠正预测面的系统偏差", "不能"),
+            ("真实面 · SINR_*_RX", "h_true + 实际发射权", "只有仿真看得见",
+             "决定这次 TB 会不会误块", "**只有它能**"),
+        ],
+    )
+    body += callout(
+        "danger", "把预测面当真实面用，等于让基站预知波束打没打准",
+        "<p>预测坐标里 BF Gain 来自基站<strong>自己那份可能陈旧</strong>的 CSI，"
+        "所以老化时它会系统性高估——这正是 OLLA 要纠正的东西。如果拿真实接收 SINR "
+        "去反折 MCS，首传 BLER 会被<strong>构造</strong>在目标值上，CSI 老化、BF 失配、"
+        "OLLA 全部失去意义，而结果看起来完全正常。</p>",
+    )
+    body += """
+<h2>第一步：CQI 怎么测、怎么滤</h2>
+<p>CQI 的物理含义是"终端按参照权看到的长期宽带质量"。参照权是基站在
+<strong>上报时刻</strong>的 h_prec 上搜出来的 Type-I 宽带权，一个 CSI 报告周期内
+保持不变（默认 20&nbsp;ms）；测量本身发生在<strong>真实信道</strong>上——终端没有别的
+信道可测。量化用的门限就是各档映射 MCS 在目标 BLER 下的 NewTx SINR 门限，所以
+改目标 BLER 会同时移动量化侧和选档侧。</p>
+"""
+    body += F_CQI_IIR
+    body += callout(
+        "warn", "从累计平均换成一阶 IIR 是一次口径变更",
+        "<p>早先的滤波是对全部历史上报取平均（expanding mean）：跑得越久，新测量的"
+        "权重越小，移动性或负载变化时 CQI 根本不跟踪。现在是现场口径的一阶 IIR，"
+        "系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>——这是<strong>工程默认，"
+        "尚未按现场标定</strong>，必须随结果一起报出来。<code>λ=1</code> 关闭滤波，"
+        "可用作反向对照。</p>",
+    )
+    body += """
+<div class="toy"><div><b>实算：CQI 阶跃响应（λ=0.25）</b>
+<p>上报 codepoint 序列 7,7,12,12,… 时，滤波状态依次是
+7 → 7.000 → 8.250 → 9.188 → 9.891 → 10.418 → 10.814 → 11.110，取 floor 后
+上报值是 7,7,8,9,9,10,10,11。<strong>第一次上报直接初始化状态</strong>，不从 0 慢慢爬。</p></div>
+<div><b>为什么在 CQI 档上滤而不是在 dB 上滤</b>
+<p>现场口径写作 <code>CQI ← CQI + λ(最新测量 − CQI)</code>，作用对象是 CQI 本身。
+量化前后两个域给出的轨迹不同，所以 <code>cqi_filter_domain</code> 是个显式开关，
+默认 <code>cqi_index</code>；<code>sinr_db</code> 只用于口径消融，不能和默认结果混着比。</p></div></div>
+<h2>第二步：CQI → 初始 MCS → 门限 Γ → 加 BF Gain</h2>
+<p>内部 CQI 表行 0..14 对应上报 codepoint 1..15，映射到 MCS
+<code>[0,2,4,…,26,28]</code>；最高一行请求 MCS28，而当前预置 profile 只到 MCS27，
+因此显式钳位。取该 MCS 的目标 BLER NewTx 门限得到 Γ，加上 BF Gain 就是预测坐标。
+BF Gain 的定义、两套权怎么构造、为什么必须同 rank 同功率约束，见
+<a href="#/bfgain">BF Gain</a> 一章。</p>
+"""
+    body += F_AMC_PRED
+    body += """
+<h2>第三步：反折基准 MCS，再叠 OLLA</h2>
+<p>顺序是合同：<strong>先在 SINR 域选出不含 OLLA 的基准档并留痕</strong>
+（<code>mcs_without_olla</code>），<strong>再</strong>在 MCS 域加偏置、向下取整、钳位。
+反过来做（把 OLLA 折成 dB 加进坐标）会让"偏置"这个量随信道工作点漂移，也无法解释
+一个很小的负偏置为什么能把整数档压下去一档。</p>
+"""
+    body += F_FINAL_MCS
+    body += callout(
+        "good", "关掉 OLLA 只去掉最后这一步叠加",
+        "<p><code>olla_enabled=False</code> 时决策坐标<strong>仍然</strong>是 Γ + BF Gain，"
+        "只是偏置恒为 0。早先它会掉进另一条分支、改用真实接收 SINR 反折 MCS，"
+        "于是“开 OLLA / 关 OLLA”这个消融同时换掉了链路自适应的信息面，测出来的"
+        "OLLA 收益里混着“要不要上帝视角”。</p>",
+    )
+    body += """
+<h2>第四步：Rank 从哪来</h2>
+<p>rank 决定每流功率 <code>P/r</code>、TBS 和 OLLA 的收敛点，所以它<strong>不能每个信道
+快照就换一次</strong>。链路表里的 <code>best_rank</code> 是逐快照的瞬时谱效最优值，
+它现在只作为诊断量与 <code>link_table</code> 反向对照模式的输入，<strong>不再直接
+作为发送 rank</strong>。</p>
+"""
+    body += table(
+        ["模式", "行为", "什么时候用"],
+        [
+            ("fixed（默认）", "全程固定 rank，默认 rank2；超过链路表可用 rank 时钳位",
+             "正常仿真基线：rank 不是被研究对象时就不该让它自由变动"),
+            ("adaptive", "每 period_tti 决策一次，跨过谱效比门限才切换；抬升后进入回退观察窗",
+             "研究 rank 自适应本身"),
+            ("link_table", "逐快照跟随 best_rank（历史行为）",
+             "只作“rank 稳定买到了什么”的反向对照，不出正式结论"),
+        ],
+    )
+    body += F_RANK_SE + F_RANK_SWITCH
+    body += """
+<div class="toy"><div><b>实算：迟滞为什么必要</b>
+<p>某个用户四个 rank 的滤波估计谱效是 5.118 / 8.424 / 8.190 / 8.640
+（分别对应 MCS19 / 16 / 11 / 8）。最优是 rank4，但
+<code>8.640 / 8.424 = 1.026</code> 没跨过默认门限 1.05，<strong>rank 不动</strong>。
+没有这道门限，两个几乎并列的候选会每个周期互相顶替一次。</p></div>
+<div><b>三重防乒乓</b><p>周期节拍（默认 1000 TTI，30&nbsp;kHz 下 500&nbsp;ms）、
+谱效比迟滞、以及抬升失败后的<strong>回退封锁</strong>：被实测否掉的那一档在接下来
+<code>fallback_bar_periods</code> 个决策周期内不允许再被选中，否则"估计说该升、
+实测说该降"会每个周期互相推翻一次。</p></div></div>
+"""
+    body += callout(
+        "warn", "自适应模式的常数还没有现场标定",
+        "<p><code>switch_se_ratio</code>、探测门限、回退门限与回退封锁周期数都是"
+        "<strong>工程默认</strong>。探测环节的 ρ 现场定义尚未确认，当前实现用"
+        "<strong>短时首传 ACK 率</strong>作显式代理，因此 <code>probe_enabled</code> "
+        "默认关闭——没标定的机制不进默认路径。这些都写在结果的 "
+        "<code>rank_policy</code> 段里。</p>",
+    )
+    body += """
+<h2>第五步：ACK/NACK 要等上行时隙</h2>
+<p>TB 在下行时隙发出，终端只能在上行时隙把 ACK/NACK 报回来。所以 OLLA 更新与
+该 TB 的重传资格<strong>都不可能在发送那个 TTI 生效</strong>。偏移完全由 TDD 图案
+决定，不引入 k1/k2 参数。</p>
+"""
+    body += F_HARQ_DELAY
+    body += """
+<p>默认图案 <code>DDDSU</code>（两个周期即 8 个下行时隙配 2 个上行时隙）在 30&nbsp;kHz 下
+逐相位的偏移是 <strong>5 / 4 / 3 / 2</strong> 个 TTI，也就是 2.5 / 2.0 / 1.5 / 1.0&nbsp;ms。
+等待期间该用户因为单 HARQ 进程模型不参与调度，这一段被单独计数为
+<code>harq_feedback_wait_skips</code>。</p>
+<p><strong>重传还有第二个、独立的约束：时隙类型要一致。</strong> D 与 S 的可用 RE
+不同，同一份 MCS/RBG/rank 在两种时隙上算出的 TBS 也不同，冻结的 TB 只能回到同
+类型时隙重发。两个约束取交集，所以上面那张偏移表只精确描述 <strong>OLLA</strong>
+何时生效：在 S 上发出的 TB，实际重传要等到<strong>下一个 S</strong>，在
+<code>DDDSU</code> 下是一整个周期之后。别把它读成「重传一定在这么多个 TTI 之后」。图案里没有上行时隙时（<code>"D"</code>、
+<code>"DS"</code> 这类合成图案）退化成零时延，并在 <code>notes</code> 里说明——
+那是上界，不是现网。</p>
+<h2>第六步：解码 SINR 只在实际授予的 RBG 上取</h2>
+<p>误块抽签用的是<strong>最终发送 MCS + 真实接收 SINR</strong>。这个 SINR 由同一个
+基站设计出的物理发射权作用到 <code>h_true</code>、经经典 MMSE 接收机逐 RB 逐流算出，
+再按"RBG 内线性功率平均、跨 RBG 与流 dB 域算术平均"聚合——<strong>是算出来的，
+不是从全带值折算的</strong>。聚合只在<strong>本次 grant 实际占用的那些 RBG</strong>
+上做。</p>
+"""
+    body += F_GRANT_SINR + F_RX_BLER
+    body += callout(
+        "danger", "小包用全带均值判误块，两个方向都会错",
+        "<p>一个只占 1~2 个 RBG 的小包，如果按 17 个 RBG 的平均信道判误块："
+        "授到好子带时高估误块、授到差子带时低估误块。频率选择性越强错得越多。"
+        "举个实测过的量级：最终 MCS15 在 15.1&nbsp;dB 上的 NewTx BLER 是 "
+        "<strong>0.0006</strong>，在 13.2&nbsp;dB 上是 <strong>0.997</strong>——"
+        "不到 2&nbsp;dB 的差别跨越了整条瀑布。</p>",
+    )
+    body += """
+<h2>端到端手算一遍</h2>
+<div class="toy"><div><b>输入</b>
+<p>终端测得 PMI-SINR = 12.00&nbsp;dB，目标 BLER = 10%，基站算得 BF Gain = 4.00&nbsp;dB，
+该用户当前 OLLA 偏置 = −0.30 档，rank 固定为 1。</p></div>
+<div><b>逐步</b>
+<p>12.00&nbsp;dB 落在上报 codepoint <strong>7</strong>（内部行 6）→ 初始 MCS
+<strong>12</strong> → Γ = <strong>11.1016&nbsp;dB</strong> → 预测坐标 =
+11.1016 + 4.00 = <strong>15.1016&nbsp;dB</strong> → 它落在 MCS16 门限 14.8955 与
+MCS17 门限 15.8460 之间，基准 MCS = <strong>16</strong> → 加 OLLA 得 15.70 →
+floor 得 <strong>15</strong> → 钳位后最终发送 MCS = <strong>15</strong>。</p></div>
+<div><b>然后才是解码</b>
+<p>假设这次 grant 拿到的那几个 RBG 上真实接收 SINR 聚合为 15.1&nbsp;dB，
+查 MCS15 的 NewTx 曲线得 BLER = 0.0006，几乎必然 ACK；ACK 让 OLLA 在
+<strong>下一个 D/S 时隙</strong>加 0.01 档。若真实 SINR 只有 13.2&nbsp;dB，
+BLER = 0.997，几乎必然 NACK，OLLA 减 0.09 档，该 TB 冻结 MCS/RBG 数/rank/TBS
+等一次重传。</p></div></div>
+<h2>改目标 BLER 时，真正变的是闭环那一段</h2>
+<p>目标 BLER 是可配的，而且贯穿了 CQI 量化门限、CQI→MCS 的 Γ、BF 后的重选档、
+OLLA 步长比与覆盖判定。但它在<strong>开环上大部分抵消</strong>：同一个目标同时
+出现在「CQI→门限」和「门限→MCS」两侧，两次平移方向相同、幅度接近。抵消不精确
+——内部 CQI 表只取 MCS 0,2,…,26,28 这个子集，量化边界上会差一点。</p>
+<div class="toy"><div><b>开环实测</b>
+<p>6 个信道 × 4 个几何点 × 4 个 rank 共 384 个样本，把目标从 10% 放宽到 30%：
+<strong>354 个（92%）选出完全相同的 MCS</strong>，其余 30 个偏高 1~4 档，
+方向恒为「放宽目标选更高档」，没有一个偏低。</p></div>
+<div><b>闭环实测</b>
+<p>同一批信道跑 1 秒 experience：OLLA 稳态偏置 1.65 → 1.85 档，首传平均 MCS
+12.17 → 12.59，实测首传 BLER 0.067 → 0.178。<strong>目标真正兑现在这里。</strong>
+注意实测值不会精确落在目标上：OLLA 的稳态推导是连续偏置，而空口 MCS 是整数档，
+偏置要累积到跨过一整档才改变发送，因此实测值围绕目标抖且系统性偏低。</p></div></div>
+<h2>当前不建模的东西</h2>
+<ul>
+<li>k1/k2 的具体取值、PUCCH 资源与并行 HARQ 进程：每个 UE 一个 HARQ 进程，
+反馈时刻只由 TDD 图案决定。</li>
+<li>跨 RBG 与跨流压成单码字 SINR 用的是 dB 域算术平均，<strong>不是</strong>带每档
+系数的 EESM/MIESM 等效 SINR 映射。</li>
+<li>Rank 自适应的探测环节：ρ 的现场定义未确认，默认关闭。</li>
+<li>MU 的相关性损失与功率分摊当前按两用户等流数写死；用户已确认三/四用户与
+不等流数下不是这个形式，正在等现场流程。</li>
+</ul>
+<p>这一章每条机制都有可复跑的反向对照：
+<code>python scripts/run_dl_amc_chain_audit.py</code> 会成对跑
+rank 固定/跟随、OLLA 开/关、反馈时延开/关、CQI 滤波 λ=0.25/1、
+以及部分授权与全带均值的误块差，并把结果写进
+<code>artifacts/results/dl_amc_chain_audit.json</code>。
+它是<strong>机制审计不是性能结论</strong>：只跑一次重复、不做配对检验，
+任何百分比都要重新走门 3。</p>
+"""
+    body += "<p class=source-row>" + source_ref(
+        "src/superran/amc_policy.py", "def feedback_effective_offsets") + " · " + source_ref(
+        "src/superran/amc_policy.py", "class RankController") + " · " + source_ref(
+        "src/superran/system.py", "cqi_by_snapshot = np.zeros") + " · " + source_ref(
+        "src/superran/experience.py", "def _granted_true_sinr_db") + "</p>"
+    return Page(
+        "dlamc", "下行 AMC 全链：从 CQI 到发出去的那一档", "链路算法",
+        "DOWNLINK AMC CHAIN",
+        "把 CQI 滤波、Γ 门限、BF Gain、OLLA、Rank 策略、HARQ 反馈时序与解码 SINR "
+        "串成一条可复算的因果链，并标出四条信息面的边界。", body,
+        ("CQI", "IIR", "OLLA", "Rank", "HARQ 反馈", "解码 SINR"),
     )
 
 
@@ -5989,7 +6292,8 @@ def build() -> str:
         pdp_page(), reference_signals_page(), srs_page(),
         srs_resource_allocation_page(), csi_page(), pmi_page(),
         measurements_page(modules), beamforming_page(), powercontrol_page(), robust_page(),
-        sinr_page(), bfgain_page(), linkadapt_page(), bler_page(), mu_page(),
+        sinr_page(), bfgain_page(), linkadapt_page(), dlamc_page(),
+        bler_page(), mu_page(),
         modes_page(), experience_page(), scheduler_p0_page(), traffic_page(), kpi_page(),
         calibration_page(), interference_page(), rng_page(), gates_page(),
         external_results_page(), tests_page(tests, modules),

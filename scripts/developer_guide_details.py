@@ -511,6 +511,78 @@ DETAIL_SPECS.update({
         ),
         source_paths=("src/superran/linkadapt.py", "src/superran/bler_curves.py", "src/superran/experience.py"),
     ),
+    "dlamc": DetailSpec(
+        promise="把下行 AMC 的四条信息面拆开：终端在真实信道上测什么、基站用自己"
+                "那份可能陈旧的 CSI 预测什么、闭环用 ACK/NACK 纠正什么、以及最后"
+                "由谁来决定这次 TB 到底解不解得出来。每一步都给出可复算的数字。",
+        principles=(
+            "这条链最容易出的错不是公式写错，而是<strong>把两条信息面接在一起</strong>。"
+            "终端只能在真实信道上测量，基站只能用自己收到的 SRS 估计做预测，"
+            "两者之间的差就是 CSI 老化与 BF 失配的全部代价，也正是 OLLA 存在的理由。"
+            "一旦让发送决策看到真实接收 SINR，首传 BLER 会被构造在目标值上，"
+            "所有老化相关的结论同时失效，而结果表面上完全正常。",
+            "OLLA 是 MCS 域的连续状态，不是 dB 域的余量。它加在<strong>已经选好的基准"
+            "档</strong>上再取整，所以一个很小的负偏置也能把整数档压下去一档；"
+            "稳态 BLER 只由上下步长之比决定，与绝对值无关。关掉 OLLA 只应该去掉"
+            "这一步叠加，不应该顺带换掉决策坐标。",
+            "rank 是个慢变量。它一变，每流功率、TBS、OLLA 的收敛点全跟着变，"
+            "高频切换会让链路自适应根本收敛不了。所以默认固定，自适应模式也要"
+            "周期节拍 + 谱效比迟滞 + 回退封锁三重保护。链路表里的逐快照 best_rank "
+            "只是个诊断量，不是发送 rank。",
+            "反馈有时延，解码有位置。ACK/NACK 要搭上行时隙回来，所以 OLLA 与重传"
+            "都比发送晚若干个 TTI；误块抽签只能在<strong>实际授予的那几个 RBG</strong> "
+            "上算 SINR，用全带均值判小包会在两个方向上都错。",
+        ),
+        implementation=(
+            ("测量与滤波", "上报时刻在真实信道上用当期 Type-I 参照权测 PMI-SINR，"
+                          "量化成 4-bit codepoint，再按 cqi_filter_domain 选定的域做"
+                          "一阶 IIR；两次上报之间保持不变。"),
+            ("预测坐标", "CQI 经离散表得初始 MCS，取该档目标 BLER 的 NewTx 门限 Γ，"
+                        "加上在 h_prec 上算出的 BF Gain，逐 rank 各存一份宽带值与"
+                        "逐 RBG 值。"),
+            ("选档与闭环", "在预测坐标上反折 mcs_without_olla，叠加用户级 OLLA 偏置，"
+                          "floor 并钳到 profile 范围；MU 先在 SINR 域加 CorrLoss 与"
+                          "PowerLoss 再反折。"),
+            ("Rank 与资源", "RankController 给出本 TTI 的 rank；TBS 按 slot/MCS/rank/RBG "
+                           "前缀表反查最小够用 RBG 数，频选模式再挑质量最好的子集。"),
+            ("解码与反馈", "同一发射权作用到 h_true，取被授 RBG 聚合成单码字 SINR，"
+                          "用最终 MCS 查 NewTx 曲线抽 ACK/NACK；增量在发送时刻定下，"
+                          "在反馈生效的 TTI 才落到 OLLA 状态上。"),
+        ),
+        example_title="12.00 dB 的 PMI-SINR 最后发成了 MCS15",
+        example=(
+            "<p>目标 BLER 10%、BF Gain 4.00 dB、OLLA 偏置 −0.30 档、rank 1。"
+            "12.00 dB 落在上报 codepoint 7（内部行 6），映射初始 MCS12，"
+            "其 NewTx 10% 门限 Γ = 11.1016 dB。预测坐标 = 11.1016 + 4.00 = 15.1016 dB，"
+            "落在 MCS16 门限 14.8955 与 MCS17 门限 15.8460 之间，基准档 = MCS16。"
+            "加 OLLA 得 15.70，floor 得 15，钳位后<strong>最终发送 MCS15</strong>。</p>"
+            "<p>注意最终档的 10% 门限（13.9 dB 量级）低于预测坐标，这只说明 OLLA 把"
+            "工作点往回压了一档，<strong>不说明这次一定误块</strong>。真正判错要看被授 "
+            "RBG 上的接收 SINR：15.1 dB 时 BLER = 0.0006，13.2 dB 时 BLER = 0.997。"
+            "不到 2 dB 的差别跨越了整条瀑布——这就是为什么解码 SINR 必须取实际授予的"
+            "那几个 RBG，而不是全带均值。</p>"
+        ),
+        checks=(
+            ("决策坐标不含真值", "开/关 OLLA 两条轨迹的 base_tx_sinr_db 相同，"
+                               "且都等于链路表的 sinr_tx_db；关掉 OLLA 不会选出用真实"
+                               "SINR 反折的那一档。"),
+            ("解码位置正确", "部分授权的 sinr_db 逐条等于被授 RBG 上真值的 dB 域均值，"
+                           "且明显不等于全带均值。"),
+            ("rank 稳定", "固定模式下每一次 grant 的 rank 都等于配置值，小区平均 rank "
+                        "精确为整数；自适应模式在周期未到或比值未跨门限时不动。"),
+            ("反馈时序", "DDDSU 逐相位偏移为 5/4/3/2 个 TTI；纯下行图案退化成零时延"
+                       "并在 notes 里显式说明。"),
+        ),
+        pitfalls=(
+            "拿真实接收 SINR 反折 MCS，首传 BLER 被构造在目标值上，老化代价消失。",
+            "把 OLLA 折成 dB 加进 SINR 坐标，偏置的物理含义随工作点漂移。",
+            "让 rank 逐快照跟随 best_rank，OLLA 与 PF 都在追一个每 5 ms 就变的目标。",
+            "小包用全带均值判误块；授到好子带时高估误块，授到差子带时低估。",
+            "把 avg_mcs 当成链路自适应视角——它的分母含重传，重传重放的是冻结的旧档。",
+        ),
+        source_paths=("src/superran/amc_policy.py", "src/superran/system.py",
+                      "src/superran/experience.py", "src/superran/csi_aging.py"),
+    ),
     "mu": DetailSpec(
         promise="按当前已确认的 Phase B 规则解释一次 SU/MU 自适应：只做一次 PF 排序，分别构造数据受限的全 SU 与 MU 方案，用真实 useful bytes 比较，并在 SU 能清空全队列时强制选择 SU。",
         principles=(
@@ -1099,7 +1171,7 @@ DETAIL_SPECS.update({
             ("建立跳频日历", "<code>hop_order()</code> 从 SuperRAN 单一真源读取 C_SRS=63/B_SRS=1/b_hop=0/n_RRC=0 的 17-hop 顺序并返回版本化 provenance；只接受 17×16，没有外部 helper 与 identity fallback。"),
             ("计算逐 RBG staleness", "<code>rbg_csi_staleness_ms()</code> 找最近一次覆盖并加入 processing delay；<code>rbg_lag_snapshots()</code> 向上取整到物理 trace 网格，确保处理尚未完成的快照不会被使用。"),
             ("生成估计与预编码视角", "<code>stale_channel()</code> 从有限历史选择 h_prec；仿真开头可选择 clamp 或显式 periodic prehistory，不能用负索引绕到未来 trace。"),
-            ("提交 PMI/CQI 报告", "系统只在 report instant 更新状态，保存每个 snapshot 的 <code>csi_report_source_snapshot</code>；CQI expanding mean 只读取到当前时刻的报告，不用全轨迹均值回填。"),
+            ("提交 PMI/CQI 报告", "系统只在 report instant 更新状态，保存每个 snapshot 的 <code>csi_report_source_snapshot</code>；CQI 的一阶 IIR 只读取到当前时刻的报告，不用全轨迹均值回填。滤波系数 <code>cqi_filter_lambda</code> 与作用域 <code>cqi_filter_domain</code> 随结果上报。"),
             ("在真值上复评", "SVD/PMI 权作用到当前 h_true，post-MMSE 给逐流和逐 RBG SINR。零 lag 必须与历史 rank adaptation 逐位相同，有 lag 才自然产生泄漏。"),
         ),
         example_title="5 ms snapshot、10 ms SRS、20 ms report 到底何时更新",
@@ -1880,6 +1952,62 @@ FORMULA_SPECS: dict[str, FormulaSpec] = {
         (("L<sub>power</sub>", "MU 相对 SU 的每用户功率损失，单位 dB，取非正值。"),
          ("K<sub>MU</sub>", "同一资源上并发、分享总功率的 MU 用户数。"),
          ("log<sub>10</sub>", "功率比例到 dB 的十进对数。")),
+    ),
+    "F_CQI_IIR": FormulaSpec(
+        "宽带 CQI 的一阶 IIR 滤波",
+        "每个 CSI 上报时刻把新观测按系数 λ 混进状态；第一次上报直接初始化状态，"
+        "不从 0 缓慢爬升。取 floor 得到真正上报的 4-bit codepoint。λ=1 等价于不滤波。"
+        "早先用的是对全部历史取平均，记忆无限长，跑得越久越跟不上信道变化。",
+        (("s<sub>k</sub>", "第 k 次上报之后的滤波状态；域由 cqi_filter_domain 决定。"),
+         ("x<sub>k</sub>", "第 k 次上报的原始观测：CQI 档或量化前的 PMI-SINR。"),
+         ("λ", "滤波系数 cqi_filter_lambda，(0,1]；越小记忆越长。默认 0.25 是工程默认。"),
+         ("⌊·⌋", "取整到整数 codepoint；保守方向，不四舍五入。"),
+         ("CQI<sub>rep</sub>", "本快照实际上报并用于查 Γ 的 4-bit codepoint。")),
+    ),
+    "F_GRANT_SINR": FormulaSpec(
+        "解码 SINR 只在实际授予的 RBG 上聚合",
+        "误块抽签用的接收 SINR 必须由同一个发射权作用到真实信道算出，并且只在本次 "
+        "grant 真正占用的那些 RBG 上聚合：RBG 内在线性功率域平均 RB，跨 RBG 与流在 "
+        "dB 域算术平均。用全带均值判一个只占 1~2 个 RBG 的小包，频率选择性越强错得越多。",
+        (("γ<sup>grant</sup><sub>RX</sub>", "本次 grant 的单码字有效接收 SINR（dB）。"),
+         ("G", "本次 grant 实际占用的 RBG 集合；|G| 是它的元素个数。"),
+         ("γ<sub>RX,g</sub>", "第 g 个 RBG 的接收 SINR（dB）。"),
+         ("γ<sup>lin</sup><sub>RX,b</sub>", "第 b 个 RB 的线性域接收 SINR。"),
+         ("|g|", "该 RBG 包含的 RB 数；Type-0 首尾 RBG 可能不足名义值。")),
+    ),
+    "F_RANK_SE": FormulaSpec(
+        "逐 rank 的估计谱效与它的滤波",
+        "对每个 rank 假设，用该 rank 的 AMC 预测坐标反折出真会发下去的 MCS，"
+        "谱效记为 rank×MCS 谱效，再做与 CQI 同形式的一阶 IIR。每流功率 P/r 已经在"
+        "坐标里（CQI 与 BF Gain 都按该 rank 的每流功率算过），不需要再补 10log10 项。",
+        (("SE&#770;<sub>r</sub>", "rank r 在当前快照下的瞬时估计谱效。"),
+         ("γ<sup>(r)</sup><sub>AMC,pred</sub>", "rank r 的 AMC 预测坐标：Γ(MCS(CQI_r)) + BF Gain_r。"),
+         ("S(·,p)", "在预置 NewTx 曲线中选择 BLER≤p 的最高 MCS 的查表算子。"),
+         ("⊕Δ", "叠加连续 MCS 域 OLLA 偏置后 floor 并钳位，与实际发送同一条路径。"),
+         ("SE&#772;<sub>r</sub>", "滤波后的估计谱效，周期决策只看它。"),
+         ("λ<sub>SE</sub>", "谱效滤波系数 se_filter_lambda。")),
+    ),
+    "F_RANK_SWITCH": FormulaSpec(
+        "Rank 的周期决策与迟滞",
+        "只在决策周期到达时判一次，且最优/当前的滤波谱效比必须跨过门限才切换。"
+        "两个几乎并列的候选因此不会每个周期互相顶替。被回退封锁的档位直接排除在"
+        "候选集之外，避免“估计说该升、实测说该降”来回推翻。",
+        (("r<sup>★</sup>", "本次决策选出的候选 rank。"),
+         ("B", "回退封锁集合：刚被实测否掉的那一档及以上，封锁若干个决策周期。"),
+         ("SE&#772;<sub>r</sub>", "rank r 的滤波估计谱效。"),
+         ("r<sub>cur</sub>", "当前正在使用的 rank。"),
+         ("η", "切换门限 switch_se_ratio，默认 1.05；等于 1 表示无迟滞。"),
+         ("T<sub>rank</sub>", "决策周期 period_tti，默认 1000 个 TTI。")),
+    ),
+    "F_HARQ_DELAY": FormulaSpec(
+        "ACK/NACK 生效时刻由 TDD 图案决定",
+        "TB 在下行时隙发出后，先等到第一个上行时隙把 ACK/NACK 带回来，再等到其后"
+        "第一个下行时隙才生效——OLLA 更新与该 TB 的重传资格都从这一刻开始。"
+        "偏移完全由图案推出，不引入 k1/k2 参数，也不建模 PUCCH 资源或并行 HARQ 进程。",
+        (("t", "这次下行传输所在的 TTI 索引。"),
+         ("u", "t 之后第一个上行时隙的 TTI 索引，ACK/NACK 搭它回传。"),
+         ("t<sub>eff</sub>", "反馈真正生效的 TTI：u 之后第一个 D/S 时隙。"),
+         ("slot(·)", "TDD 图案在该 TTI 的时隙类型，取值 D / S / U。")),
     ),
     "F_TBS": FormulaSpec(
         "从可用 RE 到 38.214 TBS",
