@@ -338,7 +338,58 @@ sys_capacity_full_buffer:
       唯一的随机源只剩 HARQ 抽样。**这反过来说明其他场景那些宽区间主要来自话务**。
 
 # ---------------------------------------------------------------------------
-# 六、experience_v2：按需 RBG 的 PF 记账反向控制
+# 六、experience_v2：固定双 CDF 业务基线
+# ---------------------------------------------------------------------------
+sys_experience_cdf_baseline:
+  group: 系统级 · 体验模式话务
+  label: 固定包大小/包间隔 CDF · 双系数可调
+  summary: >-
+    一个业务使用一对独立边缘 CDF。包大小以 byte 为单位，包间隔原始 value 以秒为单位；
+    两个 scale 只乘各自 value 横轴，概率轴不变。实际 RBG 占用由队列、MCS、rank 与 TBS
+    共同形成，不从目标分布倒推包长。
+  answers:
+    - 固定业务 CDF 在当前无线条件下形成怎样的 0..17 RBG 占用分布
+    - 手动调整包大小与包间隔系数后，本小区 PRB 利用率和队列是否仍可信
+  channel_preset: company_64t4r_multicell
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 1
+    ue_speed_kmh: 3.0
+  system:
+    evaluation_mode: experience
+    duration_s: 5.0
+    traffic_model: cdf
+    packet_size_cdf: presets/traffic/experience_baseline_packet_size_cdf.txt
+    interarrival_cdf: presets/traffic/experience_baseline_interarrival_s_cdf.txt
+    interarrival_cdf_unit: s
+    packet_size_scale: 1.0
+    interarrival_scale: 1.0
+    scheduler: pf
+    pf_window_tti: 100
+    pf_accounting: scheduled_tbs
+    mu_enabled: false
+    small_burst_policy: fractional_slot
+    tdd_pattern: DDDSU
+    neighbor_prb_util: 0.3
+    neighbor_load_jitter: 0.05
+    csi_aging: true
+    srs_period_ms: 10.0
+    srs_hopping: true
+    csi_processing_delay_ms: 2.0
+    olla_speedup: 1.0
+    precoder: svd
+    seed: 20260902
+    num_replications: 8
+  expect:
+    measured: false
+    note: >-
+      两份 CDF 的格式、单位、哈希、缩放与独立随机流合同已经过当前代码测试；尚未在
+      Gate 1 通过的当前信道数据集上做正式系统级重复实验，因此这里不填写 PRB 利用率、
+      1/17-RBG 概率或体验 KPI 数值，也不把输入 CDF 图当成性能证据。
+
+# ---------------------------------------------------------------------------
+# 七、experience_v2：按需 RBG 的 PF 记账反向控制
 # ---------------------------------------------------------------------------
 sys_experience_mixed_pf:
   group: 系统级 · 体验模式 PF 记账

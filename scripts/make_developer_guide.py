@@ -59,6 +59,7 @@ from superran import katex as kx  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import mathml as mm  # noqa: E402
 from superran import srs_resource as srsres  # noqa: E402
+from superran import traffic as traffic_model  # noqa: E402
 
 
 def M(tex: str, *, block: bool = True) -> str:
@@ -888,6 +889,7 @@ def svg_wrap(
     label: str,
     *,
     css_class: str = "",
+    data_attrs: dict[str, Any] | None = None,
 ) -> str:
     defs = (
         '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
@@ -895,8 +897,12 @@ def svg_wrap(
         '<path d="M 0 0 L 10 5 L 0 10 z"/></marker></defs>'
     )
     figure_class = "diagram" + (f" {css_class}" if css_class else "")
+    attrs = "".join(
+        f' data-{esc(name)}="{esc(value)}"'
+        for name, value in (data_attrs or {}).items()
+    )
     return (
-        f'<figure class="{esc(figure_class)}"><svg viewBox="0 0 {width} {height}" role="img" '
+        f'<figure class="{esc(figure_class)}"{attrs}><svg viewBox="0 0 {width} {height}" role="img" '
         f'aria-label="{esc(label)}">{defs}{body}</svg><figcaption>{esc(label)}</figcaption></figure>'
     )
 
@@ -1981,7 +1987,162 @@ def traffic_kpi_svg() -> str:
     body += arrow(680, 130, 760, 80)
     body += arrow(680, 180, 760, 174)
     body += arrow(680, 230, 760, 268)
-    return svg_wrap(body, 1120, 340, "mixed 话务常见的两头高 RBG 占用分布及三个关键体验 KPI")
+    return svg_wrap(
+        body, 1120, 340,
+        "RBG 占用与体验 KPI 的关系示意；不是固定 CDF 基线的仿真结果",
+        css_class="traffic-rbg-schematic",
+        data_attrs={"evidence": "schematic-not-simulation-result"},
+    )
+
+
+def traffic_baseline_contract() -> tuple[
+        dict[str, Any], traffic_model.EmpiricalCdf, traffic_model.EmpiricalCdf]:
+    """Load the checked-in baseline and fail the guide build on identity drift."""
+    manifest_rel = "presets/traffic/experience_baseline.json"
+    manifest = json.loads(read(manifest_rel))
+    loaded: dict[str, traffic_model.EmpiricalCdf] = {}
+    for key, kind in (("packet_size", "packet_size"),
+                      ("interarrival", "interarrival")):
+        spec = manifest[key]
+        cdf = traffic_model.load_empirical_cdf(
+            ROOT / spec["path"], kind=kind, value_unit=str(spec["unit"]))
+        actual = cdf.as_dict()
+        if actual["sha256"] != spec["sha256"] or actual["points"] != spec["points"]:
+            raise RuntimeError(
+                f"traffic baseline identity drift for {key}: "
+                f"sha={actual['sha256']} points={actual['points']}")
+        for statistic in ("min", "p50", "p95", "max", "mean"):
+            if not math.isclose(
+                float(actual[statistic]), float(spec[statistic]),
+                rel_tol=1e-12, abs_tol=1e-12,
+            ):
+                raise RuntimeError(
+                    f"traffic baseline statistic drift for {key}.{statistic}: "
+                    f"{actual[statistic]} != {spec[statistic]}")
+        loaded[key] = cdf
+    return manifest, loaded["packet_size"], loaded["interarrival"]
+
+
+def _traffic_cdf_chart(
+    cdf: traffic_model.EmpiricalCdf,
+    *,
+    title: str,
+    source_rel: str,
+    x_label: str,
+    x_ticks: tuple[tuple[float, str], ...],
+    css_class: str,
+) -> str:
+    """Render a deterministic log-x empirical CDF directly from the source file."""
+    width, height = 1100, 370
+    left, right, top, bottom = 88.0, 1065.0, 42.0, 292.0
+    values = tuple(float(value) for value in cdf.values)
+    probs = tuple(float(value) for value in cdf.cdf)
+    log_lo, log_hi = math.log10(values[0]), math.log10(values[-1])
+
+    def sx(value: float) -> float:
+        return left + (math.log10(value) - log_lo) / (log_hi - log_lo) * (right - left)
+
+    def sy(probability: float) -> float:
+        return bottom - probability * (bottom - top)
+
+    body = f'<text class="chart-panel-title" x="{left:.1f}" y="24">{esc(title)}</text>'
+    for probability in (0.0, 0.25, 0.5, 0.75, 1.0):
+        y = sy(probability)
+        body += (
+            f'<line class="chart-grid" x1="{left:.2f}" y1="{y:.2f}" '
+            f'x2="{right:.2f}" y2="{y:.2f}"/>'
+            f'<text class="chart-tick y" x="{left - 10:.2f}" y="{y + 3:.2f}">'
+            f'{probability * 100:.0f}%</text>'
+        )
+    for value, label in x_ticks:
+        if not values[0] <= value <= values[-1]:
+            continue
+        x = sx(value)
+        body += (
+            f'<line class="chart-grid vertical" x1="{x:.2f}" y1="{top:.2f}" '
+            f'x2="{x:.2f}" y2="{bottom:.2f}"/>'
+            f'<text class="chart-tick x" x="{x:.2f}" y="{bottom + 20:.2f}">'
+            f'{esc(label)}</text>'
+        )
+    body += (
+        f'<line class="chart-axis" x1="{left:.2f}" y1="{bottom:.2f}" '
+        f'x2="{right:.2f}" y2="{bottom:.2f}"/>'
+        f'<line class="chart-axis" x1="{left:.2f}" y1="{top:.2f}" '
+        f'x2="{left:.2f}" y2="{bottom:.2f}"/>'
+    )
+
+    max_points = 720
+    if len(values) <= max_points:
+        indices = list(range(len(values)))
+    else:
+        indices = sorted({
+            int(round(i * (len(values) - 1) / (max_points - 1)))
+            for i in range(max_points)
+        })
+    first = indices[0]
+    path = [
+        f'M{sx(values[first]):.2f},{sy(0.0):.2f}',
+        f'V{sy(probs[first]):.2f}',
+    ]
+    for index in indices[1:]:
+        path.append(f'H{sx(values[index]):.2f}V{sy(probs[index]):.2f}')
+    body += f'<path class="traffic-cdf-line {esc(css_class)}" d="{" ".join(path)}"/>'
+
+    for probability, label in ((0.5, "P50"), (0.95, "P95")):
+        value = cdf.quantile(probability)
+        x, y = sx(value), sy(probability)
+        body += (
+            f'<circle class="traffic-cdf-marker {esc(css_class)}" '
+            f'cx="{x:.2f}" cy="{y:.2f}" r="4"/>'
+            f'<text class="traffic-cdf-label" x="{x + 8:.2f}" y="{y - 8:.2f}">'
+            f'{label}</text>'
+        )
+    body += (
+        f'<text class="chart-axis-label" x="{(left + right) / 2:.2f}" '
+        f'y="{height - 18}">{esc(x_label)}（对数横轴）</text>'
+        f'<text class="chart-axis-label" transform="translate(18 {(top + bottom) / 2:.2f}) '
+        f'rotate(-90)">累计概率</text>'
+    )
+    label = f"{title}；由 {source_rel} 在文档构建时直接生成"
+    return svg_wrap(
+        body, width, height, label,
+        css_class=f"traffic-cdf-chart {css_class}",
+        data_attrs={
+            "source": source_rel,
+            "sha256": cdf.sha256,
+            "points": len(cdf.values),
+            "value-unit": cdf.value_unit,
+            "x-scale": "log10",
+        },
+    )
+
+
+def traffic_baseline_cdf_charts() -> str:
+    manifest, packet, interval = traffic_baseline_contract()
+    packet_rel = str(manifest["packet_size"]["path"])
+    interval_rel = str(manifest["interarrival"]["path"])
+    return (
+        _traffic_cdf_chart(
+            packet,
+            title="固定基线 · 包大小 CDF",
+            source_rel=packet_rel,
+            x_label="包大小",
+            x_ticks=((10, "10 B"), (100, "100 B"), (1_000, "1 KB"),
+                     (10_000, "10 KB"), (100_000, "100 KB"),
+                     (500_000, "500 KB")),
+            css_class="packet",
+        )
+        + _traffic_cdf_chart(
+            interval,
+            title="固定基线 · 包间隔 CDF",
+            source_rel=interval_rel,
+            x_label="原始 value 单位为秒",
+            x_ticks=((0.005, "5 ms"), (0.01, "10 ms"), (0.02, "20 ms"),
+                     (0.05, "50 ms"), (0.1, "100 ms"), (0.2, "200 ms"),
+                     (0.5, "500 ms"), (1.0, "1 s")),
+            css_class="interval",
+        )
+    )
 
 
 def rb_power_svg() -> str:
@@ -4727,42 +4888,57 @@ HARQ 走同一入口，但 MCS、RBG 数、rank、TBS 用初传冻结值，并�
 
 
 def traffic_page() -> Page:
-    body = traffic_kpi_svg()
-    body += """
-<h2>话务由包大小与包间隔共同定义</h2>
-<p>经验 CDF 文件使用 <code>value,cdf</code> 两列；分别对 packet size 和 inter-arrival 做逆变换采样。
-所有用户可共享一个 profile，也可按 <code>ue_ids</code> 映射到 video/XR/FTP 等不同 profile。</p>
-""" + code(r'''traffic:
-  model: cdf
-  profiles:
-    - name: video
-      packet_size_cdf: presets/traffic/video_size.csv
-      inter_arrival_cdf: presets/traffic/video_interval.csv
-      packet_size_scale: 0.5
-      inter_arrival_scale: 1.0
-      ue_ids: [0, 1, 2, 3]
-    - name: xr
-      packet_size_cdf: presets/traffic/xr_size.csv
-      inter_arrival_cdf: presets/traffic/xr_interval.csv
-      packet_size_scale: 1.0
-      inter_arrival_scale: 0.5
-      ue_ids: [4, 5]
-''', "yaml")
+    _manifest, packet, interval = traffic_baseline_contract()
+    packet_stats = packet.as_dict()
+    interval_stats = interval.as_dict()
+    body = """
+<h2>固定下行业务基线：一个业务、一对 CDF</h2>
+<p><code>experience_baseline_v1</code> 只保留无线体验仿真真正需要的两个外生随机量：
+包大小与包间隔。两者分别从自己的 <code>value,cdf</code> 文件做逆变换采样，使用独立命名
+随机子流；不叠加 AppDuration、Reading、IP/PDCP 头或 trace 回放。</p>
+"""
+    body += metric_cards([
+        ("包大小点数", f"{packet_stats['points']:,}",
+         f"P50 {packet_stats['p50']:.1f} B · P95 {packet_stats['p95'] / 1000:.1f} KB"),
+        ("包大小均值", f"{packet_stats['mean'] / 1000:.2f} KB",
+         f"范围 {packet_stats['min']:.0f} B～{packet_stats['max'] / 1000:.2f} KB"),
+        ("包间隔点数", f"{interval_stats['points']:,}",
+         f"原始 value 单位 {interval_stats['value_unit']}"),
+        ("包间隔均值", f"{interval_stats['mean'] * 1000:.2f} ms",
+         f"P50 {interval_stats['p50'] * 1000:.0f} ms · P95 {interval_stats['p95'] * 1000:.1f} ms"),
+    ])
+    body += traffic_baseline_cdf_charts()
+    body += callout(
+        "note", "图与运行时读取同一数据",
+        "<p>两张图在构建文档时直接读取仓库 CDF；manifest 同时锁定 SHA-256、点数、单位和关键分位数。"
+        "图展示的是 <code>scale=1.0</code> 的业务输入，不是 PRB 分布或性能结果。</p>",
+    )
+    body += code(r'''sr_system_sim(
+    dataset_id="...",
+    evaluation_mode="experience",
+    traffic_model="cdf",
+    packet_size_cdf="presets/traffic/experience_baseline_packet_size_cdf.txt",
+    interarrival_cdf="presets/traffic/experience_baseline_interarrival_s_cdf.txt",
+    interarrival_cdf_unit="s",
+    packet_size_scale=1.0,
+    interarrival_scale=1.0,
+)''', "python")
     body += table(
         ["旋钮", "业务量效果", "同时改变什么"],
         [
-            ("packet_size_scale ×0.5", "平均 offered bytes 约减半", "包完成所需 RBG、padding、busy period"),
-            ("inter_arrival_scale ×0.5", "来包约加密一倍", "并发队列、MU 触发概率、首包等待"),
+            ("packet_size_scale ×2", "每个抽样 value 先乘 2，再取最近整数 byte", "包完成所需 RBG、padding、busy period"),
+            ("interarrival_scale ×2", "每个抽样间隔精确乘 2，长期到达率约减半", "并发队列、MU 触发概率、首包等待"),
             ("用户数增加", "总 offered load 增加", "多用户分集、PF 竞争与 pair 候选"),
-            ("UE profile mix", "改变小/大包比例", "RBG 占用直方图与用户级公平性"),
+            ("一业务一对 CDF", "同 profile 的 UE 共用分布但独立抽样", "RBG 占用直方图与用户级离散度"),
         ],
     )
     body += """
-<section class="toy-example"><h2>Toy example：两个CDF标量为什么不是一回事</h2>
-<p>假设包长只取1,000/9,000 B且各50%，平均5,000 B；平均来包间隔100 ms，则单UE offered load
-约为<code>5,000×8/0.1=0.4 Mbps</code>。包长乘0.5后约0.2 Mbps；间隔乘0.5后到达加倍，
-反而约0.8 Mbps。两者都能调负载，但前者改变每包所需RBG/完成时延，后者改变并发队列与MU触发概率，
-所以校准器必须把两个标量分别保存，不能合成一个“业务倍率”。</p></section>
+<section class="toy-example"><h2>基线算例：两个系数为什么不能合成一个</h2>
+<p>固定 CDF 的平均包长约 12,439.98 B，平均间隔约 58.5389 ms，因此
+<code>scale=1</code> 时单 UE 一阶 offered load 约为
+<code>12,439.98×8/0.0585389≈1.70 Mbps</code>。包大小乘 2 时约为 3.40 Mbps，
+且更多包会跨过 TBS 的 RBG 门限；包间隔乘 2 时约为 0.85 Mbps，包本身的 RBG 门限不变，
+但并发队列和空闲 TTI 改变。概率轴在两种操作中都保持不变。</p></section>
 """
     body += """
 <h2>按目标 PRB 利用率校准</h2>
@@ -4777,16 +4953,19 @@ def traffic_page() -> Page:
         "话务校准必须与算法 A/B 分离：先校准 baseline scene，再用同一 offered process 比算法。</p>",
     )
     body += """
-<h2>为什么 mixed 才能看出按需分配收益</h2>
-<p>全大包时每人都需要 17 RBG，按需分配退化成全带；全小包时缺少大流量体验对象，收益难落到
-体验速率。mixed 让小包不再偷走整个 TTI，同时保留大包用户作为体验速率测量对象，RBG 占用呈
-0/1 与 17 两端高、中间低。</p>
+<h2>“两头高中间低”必须从 TBS 映射后实测</h2>
+<p>固定包大小 CDF 同时含大量短包与长尾大包；<code>packet_size_scale</code> 会移动整条 value
+轴，让概率质量跨过不同的 TBS/RBG 门限。当前实现用队列字节、MCS、rank 和 TBS 反查最小够用
+RBG，不把 1/17-RBG 概率硬编码进业务源。先用包大小系数调每个非零 grant 的
+<code>actual_rbg_size_hist.p_1rbg/p_full</code>，再用包间隔系数调小区总负载；同时查看
+<code>tti_occupied_rbg_distribution</code> 的 0..17 完整分布与 backlog。</p>
 """
-    body += "<p class=source-row>CDF 合同：" + source_ref("src/superran/traffic.py", "class EmpiricalCdf") + " · 话务配置：" + source_ref("src/superran/system.py", "class TrafficConfig") + "</p>"
+    body += traffic_kpi_svg()
+    body += "<p class=source-row>CDF 合同：" + source_ref("src/superran/traffic.py", "class EmpiricalCdf") + " · 话务配置：" + source_ref("src/superran/system.py", "class TrafficConfig") + " · 基线身份：" + source_ref("presets/traffic/experience_baseline.json", '"profile_id"') + "</p>"
     return Page(
         "traffic", "话务模型与 PRB 负载校准", "系统仿真", "TRAFFIC",
-        "包大小/间隔 CDF、多 profile、双标量校准与 mixed 话务物理意义。", body,
-        ("CDF", "包大小", "包间隔", "30% PRB", "mixed", "校准"),
+        "固定包大小/包间隔 CDF、独立抽样、秒单位与双系数 PRB 校准。", body,
+        ("CDF", "包大小", "包间隔", "秒", "双系数", "PRB", "校准"),
     )
 
 
@@ -5589,7 +5768,7 @@ def limitations_page() -> Page:
             ("RB 功控算法", "给定 profile 的守恒、逐小区耦合与逐 RBG 调度已实现", "跨小区闭环优化目标、约束信令与现场策略；当前不是自动功控算法"),
             ("MU", "SUS + ZF/RZF、pair table、用户级 MU-OLLA", "现场配对细则、最大用户/层数、接收机与 CSI error 标定"),
             ("BLER/HARQ", "预置通用 NewTx 曲线；每 TB 最多一次 IR/CC，空口身份冻结", "若升级为标准 HARQ，再补 RV、LLR、并行 process 与严格 timing"),
-            ("话务 CDF", "可插拔经验 CDF + 标量 size/interval 校准", "实测视频/XR/FTP CDF 文件与用户 mix"),
+            ("话务 CDF", "固定下行双 CDF 基线 + 独立采样 + value 轴双系数校准", "更多业务各自的一对 CDF、UE mix 与现场版本治理"),
             ("CDL 几何", "标准 profile 的 20-ray 相对几何旋到实际链路；仍非场景确定性 ray tracing", "Sionna RT Paths 或实测 CIR/角度"),
             ("RT 快速探测", "InternalSim 有几何 probe；Sionna RT 只能减少 UE/drop 跑小 N 完整路径", "若后端提供路径缓存/增量求解，再单独定义可验证 RT probe"),
             ("外部算法 CSI 角色", "method_metadata 声明 h_est/h_true 用法，MCP 不执行也无法观察用户进程", "受控沙箱、可检查中间产物或可复现容器"),
@@ -5607,7 +5786,8 @@ def limitations_page() -> Page:
 <li>现场 EPF 的确切公式：乘性/加性时延因子、HoL/平均时延、budget 来源。</li>
 <li>AAU 的实测 Jones pattern、6° 下倾来源与频段/波束校准编号。</li>
 <li>MU 配对/层数/接收机的产品细节，以及用户级 MU-OLLA 是否需按场景再分状态。</li>
-<li>现场话务 CDF 与 BLER 标定曲线；它们决定 30%/50% 负载校准是否有现场意义。</li>
+<li>更多业务 profile 的包大小/包间隔 CDF 与 UE mix；当前只冻结一套下行基线，不能外推到所有业务。</li>
+<li>现场 BLER 标定曲线；它决定 30%/50% 负载校准能否进一步形成可发布性能结论。</li>
 <li>有效 SINR 是否引入 EESM/MIESM，以及 β 的链路级标定协议。</li>
 <li>是否把 MU 流间 <code>waterfilling</code> 暴露到体验系统，以及 RB 功控的优化目标是小区吞吐、边缘体验还是跨小区加权效用。</li>
 </ol>
@@ -5778,6 +5958,7 @@ h2{font-size:27px;line-height:1.3;letter-spacing:-.025em;margin:55px 0 16px;scro
 .diagram{margin:26px 0 34px;background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:15px;box-shadow:var(--shadow);overflow:auto}.diagram svg{display:block;width:100%;min-width:650px;height:auto}.diagram figcaption{text-align:center;color:var(--muted);font-size:12px;margin-top:7px}.diagram rect{fill:var(--soft);stroke:var(--line)}.diagram .accent rect{fill:color-mix(in srgb,var(--brand) 12%,var(--paper));stroke:var(--brand)}.diagram .good rect{fill:color-mix(in srgb,var(--ok) 10%,var(--paper));stroke:var(--ok)}.diagram .danger rect{fill:color-mix(in srgb,var(--danger) 9%,var(--paper));stroke:var(--danger)}.diagram .warn rect{fill:color-mix(in srgb,var(--warm) 11%,var(--paper));stroke:var(--warm)}.diagram text{font-family:inherit;fill:var(--ink)}.diagram .dt{font-size:14px;font-weight:750}.diagram .ds{font-size:11px;fill:var(--muted);text-anchor:middle}.diagram .b .ds,.diagram .accent .ds,.diagram .good .ds,.diagram .danger .ds,.diagram .warn .ds{text-anchor:start}.diagram .arr{stroke:var(--muted);stroke-width:1.5;fill:none}.diagram marker path{fill:var(--muted)}.diagram .al,.diagram .tiny{font-size:9px;fill:var(--muted);text-anchor:middle}.diagram .site{fill:color-mix(in srgb,var(--brand) 10%,var(--paper));stroke:var(--brand)}.diagram .site-t{font-size:12px;text-anchor:middle}.diagram .sector{stroke:var(--brand);stroke-width:3}.diagram .ae.polp{fill:#e45c5c;stroke:none}.diagram .ae.polm{fill:#357bd8;stroke:none}.diagram .feed{fill:none;stroke:var(--muted);stroke-dasharray:4 3}.diagram .slot{font-size:12px;fill:#fff;text-anchor:middle;font-weight:700}.diagram .brace,.diagram .axis,.diagram .cap{fill:none;stroke:var(--muted)}.diagram .bar{fill:var(--brand);stroke:none}.diagram .bar.bad{fill:var(--danger)}.diagram .hist{fill:var(--brand);stroke:none}.diagram .yes{font-size:11px;fill:var(--ok);text-anchor:middle}
 .diagram .plot-panel{fill:color-mix(in srgb,var(--soft) 58%,var(--paper));stroke:var(--line)}.diagram .pattern-grid{fill:none;stroke:color-mix(in srgb,var(--muted) 38%,transparent);stroke-width:1}.diagram .pattern-axis{stroke:var(--line);stroke-width:1}.diagram .pattern-lobe{stroke-width:2.2}.diagram .pattern-lobe.horizontal{fill:color-mix(in srgb,var(--brand) 18%,transparent);stroke:var(--brand)}.diagram .pattern-lobe.element{fill:none;stroke:var(--muted);stroke-dasharray:6 4}.diagram .pattern-lobe.port{fill:color-mix(in srgb,var(--ok) 16%,transparent);stroke:var(--ok)}.diagram .pattern-tick{font-size:8px;fill:var(--muted);text-anchor:end}.diagram .pattern-note{font-size:10px;fill:var(--muted)}.diagram .hpbw{stroke:var(--warm);stroke-dasharray:4 3}.diagram .tilt-ray{stroke:var(--danger);stroke-width:1.5;stroke-dasharray:5 4}.diagram .legend{stroke-width:3}.diagram .legend.element{stroke:var(--muted);stroke-dasharray:6 4}.diagram .legend.port{stroke:var(--ok)}.diagram .physical-dot{fill:var(--ok);stroke:none}.diagram .index-cell.canonical{fill:color-mix(in srgb,var(--brand) 13%,var(--paper));stroke:var(--brand)}.diagram .index-cell.legacy{fill:color-mix(in srgb,var(--warm) 13%,var(--paper));stroke:var(--warm)}.diagram .index-text{font-size:12px;font-weight:700;text-anchor:middle}
 .diagram .chart-band{stroke:none}.diagram .chart-band.band-0{fill:color-mix(in srgb,var(--brand) 6%,transparent)}.diagram .chart-band.band-1{fill:color-mix(in srgb,var(--warm) 5%,transparent)}.diagram .chart-band-label{font-size:10px;font-weight:750;fill:var(--muted);text-anchor:middle}.diagram .chart-grid{stroke:color-mix(in srgb,var(--line) 70%,transparent);stroke-width:.75}.diagram .chart-grid.vertical{stroke-dasharray:3 4}.diagram .chart-axis{stroke:var(--ink);stroke-width:1.15}.diagram .chart-tick{font-size:9px;fill:var(--muted)}.diagram .chart-tick.x{text-anchor:middle}.diagram .chart-tick.y{text-anchor:end}.diagram .chart-axis-label{font-size:10px;font-weight:650;fill:var(--muted);text-anchor:middle}.diagram .chart-panel-title{font-size:13px;font-weight:800;fill:var(--ink)}.diagram .chart-newtx,.diagram .chart-retx,.diagram .chart-curve{fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.diagram .chart-newtx{stroke:var(--brand)}.diagram .chart-retx{stroke:var(--warm);stroke-dasharray:6 4}.diagram circle.chart-newtx,.diagram circle.chart-retx{fill:var(--paper);stroke-width:1.7;stroke-dasharray:none}.diagram .chart-curve{stroke-width:1.65}.diagram .legend-line{stroke-width:2.4}.diagram .chart-legend{font-size:10px;font-weight:700;fill:var(--muted)}.diagram .chart-legend.compact{font-size:8px}.bler-curve-atlas svg,.bler-threshold-chart svg{min-width:760px}
+.traffic-cdf-chart svg{min-width:720px}.diagram .traffic-cdf-line{fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}.diagram .traffic-cdf-line.packet{stroke:var(--brand)}.diagram .traffic-cdf-line.interval{stroke:var(--warm)}.diagram .traffic-cdf-marker{fill:var(--paper);stroke-width:2}.diagram .traffic-cdf-marker.packet{stroke:var(--brand)}.diagram .traffic-cdf-marker.interval{stroke:var(--warm)}.diagram .traffic-cdf-label{font-size:10px;font-weight:800;fill:var(--ink)}
 .kx[data-display="1"]{display:block;overflow:auto;text-align:center;padding:13px 4px;margin:18px 0}.kx math{font-size:1.12em}.source-row{color:var(--muted);font-size:12px;border-top:1px dashed var(--line);padding-top:12px}.src{font-family:"Cascadia Code",Consolas,monospace;font-size:11px}.muted{color:var(--muted)}
 .formula-card{margin:24px 0 30px}.formula-expression{min-width:0}.formula-explain{display:none}.formula-card .kx[data-display="1"]{margin:0}.detail-content{display:none}.detail-opening{margin:70px 0 34px;padding:25px 28px;border-radius:16px;background:linear-gradient(135deg,color-mix(in srgb,var(--brand) 14%,var(--paper)),color-mix(in srgb,var(--brand2) 8%,var(--paper)));border:1px solid color-mix(in srgb,var(--brand) 35%,var(--line))}.detail-opening>span,.worked-example>span{font-size:10px;letter-spacing:.18em;font-weight:850;color:var(--brand)}.detail-opening h2{margin:7px 0 9px;font-size:31px}.detail-opening p{margin:0;color:var(--muted);font-size:16px}.detail-trace{margin-bottom:38px}.worked-example{margin:38px 0;padding:24px 27px;border:1px solid color-mix(in srgb,var(--brand2) 32%,var(--line));border-radius:14px;background:color-mix(in srgb,var(--brand2) 6%,var(--paper));box-shadow:var(--shadow)}.worked-example h2{margin:6px 0 13px;font-size:24px}.worked-example p:last-child{margin-bottom:0}.detail-checks{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;list-style:none;padding:0}.detail-checks li{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:14px;border:1px solid var(--line);border-radius:11px;background:var(--paper)}.detail-checks li>span{width:25px;height:25px;border-radius:50%;display:grid;place-items:center;background:color-mix(in srgb,var(--ok) 13%,var(--paper));color:var(--ok);font-weight:850}.detail-checks p{margin:3px 0 0;color:var(--muted);font-size:13px}.detail-pitfalls ul{margin:8px 0 0;padding-left:19px}.detail-pitfalls li{margin:5px 0}.detail-sources{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin:28px 0;padding-top:17px;border-top:1px dashed var(--line);color:var(--muted);font-size:12px}.detail-sources strong{margin-right:6px;color:var(--ink)}
 html[data-reading-mode="detailed"] .detail-content{display:block}html[data-reading-mode="detailed"] .formula-card{display:grid;grid-template-columns:minmax(300px,1.05fr) minmax(280px,.95fr);gap:18px;align-items:start;padding:18px;border:1px solid var(--line);border-radius:14px;background:var(--paper);box-shadow:0 6px 24px rgba(20,45,36,.05)}html[data-reading-mode="detailed"] .formula-expression{position:sticky;top:82px}html[data-reading-mode="detailed"] .formula-explain{display:block;border-left:3px solid var(--brand);padding-left:16px;color:var(--muted);font-size:13px}html[data-reading-mode="detailed"] .formula-explain>strong{display:block;color:var(--ink);font-size:15px;margin-bottom:5px}html[data-reading-mode="detailed"] .formula-explain>p{margin:4px 0 12px}.symbol-list{margin:0}.symbol-list>div{display:grid;grid-template-columns:minmax(92px,.42fr) 1fr;gap:8px;padding:7px 0;border-top:1px solid var(--line)}.symbol-list dt{font-family:"Cascadia Code",Consolas,monospace;color:var(--brand);font-weight:800;word-break:break-word}.symbol-list dd{margin:0;color:var(--muted)}

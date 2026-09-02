@@ -60,6 +60,19 @@ check(r.generate_kwargs["preset"] == "company_64t4r_multicell",
 check("duration_s" in r.sim_kwargs and "csi_aging" in r.sim_kwargs,
       "sim_kwargs 带齐系统级参数")
 
+baseline = ss.resolve("sys_experience_cdf_baseline")
+baseline_sim = baseline.sim_kwargs
+check(baseline_sim["evaluation_mode"] == "experience"
+      and baseline_sim["traffic_model"] == "cdf"
+      and baseline_sim["interarrival_cdf_unit"] == "s",
+      "固定双 CDF 场景显式使用 experience/cdf 与秒单位")
+check(baseline_sim["packet_size_scale"] == 1.0
+      and baseline_sim["interarrival_scale"] == 1.0,
+      "固定双 CDF 场景的两个 value 轴系数默认均为 1.0")
+for key in ("packet_size_cdf", "interarrival_cdf"):
+    check((Path(__file__).resolve().parents[1] / baseline_sim[key]).is_file(),
+          f"固定双 CDF 场景引用的 {key} 文件存在")
+
 # ---------------------------------------------------------------------------
 section("2  引用完整性")
 # ---------------------------------------------------------------------------

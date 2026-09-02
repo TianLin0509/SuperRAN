@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import html as html_lib
 import importlib.util
 import json
@@ -104,6 +105,20 @@ def test_guide_is_offline_utf8_hash_routed_and_accessible() -> None:
     assert 'data-bler-atlas' in text
     assert text.count('class="diagram bler-threshold-chart"') == 1
     assert text.count('class="diagram bler-curve-atlas"') == 1
+    assert text.count('class="diagram traffic-cdf-chart packet"') == 1
+    assert text.count('class="diagram traffic-cdf-chart interval"') == 1
+    assert ('data-source="presets/traffic/experience_baseline_packet_size_cdf.txt"'
+            in text)
+    assert ('data-source="presets/traffic/experience_baseline_interarrival_s_cdf.txt"'
+            in text)
+    assert 'data-points="4274"' in text and 'data-points="3307"' in text
+    assert 'data-value-unit="byte"' in text and 'data-value-unit="s"' in text
+    assert 'data-x-scale="log10"' in text
+    assert "固定基线 · 包大小 CDF" in text and "固定基线 · 包间隔 CDF" in text
+    assert "包间隔均值</span><b>58.54 ms" in text
+    assert 'interarrival_cdf_unit=&quot;s&quot;' in text
+    assert "inter_arrival_cdf" not in text and "inter_arrival_scale" not in text
+    assert 'data-evidence="schematic-not-simulation-result"' in text
     assert 'data-hello-world="overview-entry"' in text
     overview_article = re.search(
         r'<article class="doc-page" data-page="overview".*?</article>', text, re.S
@@ -170,6 +185,21 @@ def test_guide_is_offline_utf8_hash_routed_and_accessible() -> None:
     assert text.count('<figure class="diagram">') >= 10
     assert text.count('class="kx"') >= 20
     assert text.count('<article class="doc-page"') >= 25
+
+
+def test_fixed_traffic_cdf_identity_matches_manifest() -> None:
+    manifest = json.loads(
+        (ROOT / "presets/traffic/experience_baseline.json").read_text(encoding="utf-8"))
+    assert manifest["profile_id"] == "experience_baseline_v1"
+    assert manifest["interarrival"]["unit"] == "s"
+    assert manifest["sampling_contract"]["dependence"].startswith("independent")
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    for key in ("packet_size", "interarrival"):
+        spec = manifest[key]
+        raw = (ROOT / spec["path"]).read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == spec["sha256"]
+        assert len(raw.splitlines()) == spec["points"]
+        assert f"{spec['path']} -text" in attributes
 
 
 def test_every_chapter_has_two_reading_depths_and_every_formula_is_explained() -> None:

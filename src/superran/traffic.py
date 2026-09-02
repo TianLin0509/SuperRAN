@@ -91,6 +91,63 @@ class EmpiricalCdf:
             "tail_normalized": self.tail_normalized,
         }
 
+    def scaled_summary(
+        self,
+        scale: float = 1.0,
+        *,
+        unit_multiplier: float = 1.0,
+        output_unit: str | None = None,
+        integer_values: bool = False,
+    ) -> dict[str, Any]:
+        """Summarize the effective x-axis after the runtime value transform.
+
+        Scaling changes CDF values, never cumulative probabilities.  Packet sizes
+        use the same nearest-byte rule as :class:`experience.ExperienceTraffic`;
+        interval CDFs normally use ``unit_multiplier=1000`` to convert seconds to
+        milliseconds before applying the configured interval scale.
+        """
+        for name, value in (("scale", scale), ("unit_multiplier", unit_multiplier)):
+            if isinstance(value, (bool, np.bool_)):
+                raise ValueError(f"CDF {name} 必须是有限正数")
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"CDF {name} 必须是有限正数") from exc
+            if not np.isfinite(numeric) or numeric <= 0:
+                raise ValueError(f"CDF {name} 必须是有限正数")
+        if output_unit is not None and (not isinstance(output_unit, str)
+                                        or not output_unit.strip()):
+            raise ValueError("CDF output_unit 必须是非空字符串或 None")
+
+        factor = float(scale) * float(unit_multiplier)
+        values = np.asarray(self.values, dtype=float) * factor
+        rounding = "none"
+        if integer_values:
+            values = np.maximum(1.0, np.floor(values + 0.5))
+            rounding = "nearest_integer_with_minimum_1"
+        probs = np.diff(np.r_[0.0, np.asarray(self.cdf, dtype=float)])
+
+        def _quantile(q: float) -> float | int:
+            idx = int(np.searchsorted(self.cdf, q, side="left"))
+            value = float(values[min(idx, len(values) - 1)])
+            return int(value) if integer_values else value
+
+        mean = float(np.sum(values * probs))
+        return {
+            "source_sha256": self.sha256,
+            "source_value_unit": self.value_unit,
+            "output_unit": output_unit or self.value_unit,
+            "scale": float(scale),
+            "unit_multiplier": float(unit_multiplier),
+            "probability_axis_unchanged": True,
+            "rounding": rounding,
+            "min": int(values[0]) if integer_values else float(values[0]),
+            "p50": _quantile(0.5),
+            "p95": _quantile(0.95),
+            "max": int(values[-1]) if integer_values else float(values[-1]),
+            "mean": mean,
+        }
+
 
 def load_empirical_cdf(
     path: str | Path,

@@ -781,12 +781,31 @@ class ExperienceTraffic:
             sampler = self._profile_samplers[str(c.name)]
             packet_cdf = sampler["packet_cdf"]
             interval_cdf = sampler["interval_cdf"]
-            mean_bytes = (float(packet_cdf.mean) if packet_cdf is not None
-                          else float(c.file_bytes)) * float(sampler["size_scale"])
+            packet_effective = (
+                packet_cdf.scaled_summary(
+                    float(sampler["size_scale"]),
+                    output_unit="byte",
+                    integer_values=True,
+                )
+                if packet_cdf is not None else None
+            )
+            interval_effective = (
+                interval_cdf.scaled_summary(
+                    float(sampler["interval_scale"]),
+                    unit_multiplier=float(sampler["interval_unit_ms"]),
+                    output_unit="ms",
+                )
+                if interval_cdf is not None else None
+            )
+            mean_bytes = (
+                float(packet_effective["mean"])
+                if packet_effective is not None
+                else float(max(1, int(np.floor(
+                    float(c.file_bytes) * float(sampler["size_scale"]) + 0.5))))
+            )
             if interval_cdf is not None:
-                mean_interval_ms = (float(interval_cdf.mean)
-                                    * float(sampler["interval_unit_ms"])
-                                    * float(sampler["interval_scale"]))
+                assert interval_effective is not None
+                mean_interval_ms = float(interval_effective["mean"])
             else:
                 rate = float(c.arrival_rate_hz) / float(sampler["interval_scale"])
                 mean_interval_ms = 1000.0 / rate if rate > 0 else float("inf")
@@ -800,8 +819,15 @@ class ExperienceTraffic:
                 "explicit_ue_ids": [int(x) for x in getattr(c, "ue_ids", ())],
                 "packet_size_scale_effective": float(sampler["size_scale"]),
                 "interarrival_scale_effective": float(sampler["interval_scale"]),
+                "load_multiplier_vs_unscaled_cdf": float(
+                    sampler["size_scale"] / sampler["interval_scale"]),
                 "estimated_mean_packet_bytes": mean_bytes,
                 "estimated_mean_interarrival_ms": mean_interval_ms,
+                "effective_packet_size": packet_effective,
+                "effective_interarrival": interval_effective,
+                "cdf_sampling_contract": (
+                    "independent_inverse_cdf_named_substreams"
+                    if packet_cdf is not None and interval_cdf is not None else None),
                 "estimated_offered_mbps_per_ue": offered,
                 "packet_size_cdf": (
                     packet_cdf.as_dict() if packet_cdf is not None else None),
@@ -3370,9 +3396,10 @@ def simulate_experience(
         notes.append(
             "经验 CDF 话务按 value,cdf 逆变换采样：包大小 CDF 决定每个外生"
             "arrival 的字节数，包间隔 CDF 驱动逐 UE renewal process；存在包间隔 "
-            "CDF 时 arrival_rate_hz 不再参与到达时刻。全局与 profile 的两个"
-            "缩放标量相乘，负载一阶近似正比于 packet_size_scale / "
-            "interarrival_scale。")
+            "CDF 时 arrival_rate_hz 不再参与到达时刻。包大小与包间隔使用独立命名"
+            "随机子流；两个缩放系数只乘各自 CDF 的 value 横轴，累计概率保持不变。"
+            "全局与 profile 的局部标量相乘，负载一阶近似正比于 "
+            "packet_size_scale / interarrival_scale。")
     if bool(sched.olla_enabled) and float(
             getattr(sched, "olla_warmup_speedup", 1.0)) != float(
             getattr(sched, "olla_speedup", 1.0)):

@@ -277,6 +277,7 @@ def main() -> None:
                 "srs": 5,
                 "srsallocation": 6,
                 "schedulerp0": 3,
+                "traffic": 0,
             }
             new_chapter_checks = {}
             for chapter_key, minimum_formulas in chapter_expectations.items():
@@ -333,6 +334,32 @@ def main() -> None:
                         and chapter_extra["curve_atlas_count"] == 1
                         and chapter_extra["curve_summary_rows"] == 28
                     )
+                elif chapter_key == "traffic":
+                    packet_chart = page.locator(
+                        '.doc-page[data-page="traffic"] '
+                        '.traffic-cdf-chart.packet:visible'
+                    )
+                    interval_chart = page.locator(
+                        '.doc-page[data-page="traffic"] '
+                        '.traffic-cdf-chart.interval:visible'
+                    )
+                    chapter_extra = {
+                        "packet_cdf_chart_count": packet_chart.count(),
+                        "interarrival_cdf_chart_count": interval_chart.count(),
+                        "packet_cdf_points": packet_chart.get_attribute("data-points"),
+                        "interarrival_cdf_points": interval_chart.get_attribute("data-points"),
+                        "packet_cdf_unit": packet_chart.get_attribute("data-value-unit"),
+                        "interarrival_cdf_unit": interval_chart.get_attribute(
+                            "data-value-unit"),
+                    }
+                    chapter_extra_pass = bool(
+                        chapter_extra["packet_cdf_chart_count"] == 1
+                        and chapter_extra["interarrival_cdf_chart_count"] == 1
+                        and chapter_extra["packet_cdf_points"] == "4274"
+                        and chapter_extra["interarrival_cdf_points"] == "3307"
+                        and chapter_extra["packet_cdf_unit"] == "byte"
+                        and chapter_extra["interarrival_cdf_unit"] == "s"
+                    )
                 chapter_overflow = page.evaluate(
                     "document.documentElement.scrollWidth - "
                     "document.documentElement.clientWidth"
@@ -345,14 +372,17 @@ def main() -> None:
                 chapter_status_shot = None
                 chapter_grid_shot = None
                 chapter_capacity_shot = None
+                chapter_packet_cdf_shot = None
+                chapter_interval_cdf_shot = None
                 if name == "desktop":
                     chapter_shot = OUT / f"{chapter_key}-desktop.png"
                     page.evaluate("window.scrollTo(0, 0)")
                     page.screenshot(path=str(chapter_shot), full_page=False)
-                    chapter_formula_shot = OUT / f"{chapter_key}-formula-card.png"
-                    page.locator(
-                        f'.doc-page[data-page="{chapter_key}"] .formula-card'
-                    ).first.screenshot(path=str(chapter_formula_shot))
+                    if chapter_formula_count:
+                        chapter_formula_shot = OUT / f"{chapter_key}-formula-card.png"
+                        page.locator(
+                            f'.doc-page[data-page="{chapter_key}"] .formula-card'
+                        ).first.screenshot(path=str(chapter_formula_shot))
                     if chapter_key == "bler":
                         chapter_threshold_shot = OUT / "bler-thresholds-desktop.png"
                         page.locator(
@@ -395,6 +425,17 @@ def main() -> None:
                             "el.dataset.qaVisibility || ''; "
                             "delete el.dataset.qaVisibility; }"
                         )
+                    if chapter_key == "traffic":
+                        chapter_packet_cdf_shot = OUT / "traffic-packet-cdf.png"
+                        page.locator(
+                            '.doc-page[data-page="traffic"] '
+                            '.traffic-cdf-chart.packet'
+                        ).screenshot(path=str(chapter_packet_cdf_shot))
+                        chapter_interval_cdf_shot = OUT / "traffic-interarrival-cdf.png"
+                        page.locator(
+                            '.doc-page[data-page="traffic"] '
+                            '.traffic-cdf-chart.interval'
+                        ).screenshot(path=str(chapter_interval_cdf_shot))
                 new_chapter_checks[chapter_key] = {
                     "formula_count": chapter_formula_count,
                     "minimum_formulas": minimum_formulas,
@@ -424,6 +465,14 @@ def main() -> None:
                     ),
                     "capacity_screenshot": (
                         str(chapter_capacity_shot) if chapter_capacity_shot else None
+                    ),
+                    "packet_cdf_screenshot": (
+                        str(chapter_packet_cdf_shot)
+                        if chapter_packet_cdf_shot else None
+                    ),
+                    "interarrival_cdf_screenshot": (
+                        str(chapter_interval_cdf_shot)
+                        if chapter_interval_cdf_shot else None
                     ),
                     **chapter_extra,
                     "pass": bool(

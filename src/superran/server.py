@@ -2015,10 +2015,12 @@ def sr_system_sim(
     arrival_rate_hz : 每用户每秒到达几个文件。控制负载——太高会积压，
         ``notes`` 会拦。
     packet_size_cdf / interarrival_cdf : UTF-8 两列经验 CDF，cdf 支持 0..1 或
-        0..100；相对路径固定从项目根解析。包间隔存在 CDF 时，它取代
-        ``arrival_rate_hz`` 作为该 profile 的到达时钟。
+        0..100；相对路径固定从项目根解析。一种业务使用一对边缘 CDF，包大小与
+        包间隔独立抽样。包间隔存在 CDF 时，它取代 ``arrival_rate_hz`` 作为该
+        profile 的到达时钟；其 value 单位由 ``interarrival_cdf_unit`` 明确指定。
     packet_size_scale / interarrival_scale : 全局双标量，并与 profile 局部标量
-        相乘。业务量一阶近似正比于 size/interval；二者都必须为正数。
+        相乘。它们分别等比乘包大小/包间隔 CDF 的 value 横轴，不改变累计概率。
+        业务量一阶近似正比于 size/interval；二者都必须为正数。
     traffic_profiles : 多业务模型数组。每项使用 TrafficClassConfig 字段，可通过
         ``ue_ids`` 显式绑定视频/XR 用户；未绑定 UE 按 ``ue_share`` 分配。profile
         自己的 CDF 为空时继承全局 CDF。

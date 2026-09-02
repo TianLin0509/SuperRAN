@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import inspect as _inspect
+import json
 import sys
 import tempfile
 from copy import deepcopy
@@ -1498,6 +1499,86 @@ with tempfile.TemporaryDirectory() as _tmp:
                                    packet_size_scale=True),
         "packet_size_scale 必须是有限正数",
         "布尔值不能冒充全局话务缩放标量")
+
+# 固定下行 CDF 基线：身份、秒单位、有效分位数与双随机流反向对照。
+_root14 = Path(__file__).resolve().parents[1]
+_baseline_manifest = json.loads(
+    (_root14 / "presets/traffic/experience_baseline.json").read_text(encoding="utf-8"))
+_baseline_size_path = _root14 / _baseline_manifest["packet_size"]["path"]
+_baseline_interval_path = _root14 / _baseline_manifest["interarrival"]["path"]
+_baseline_size = trafm.load_empirical_cdf(
+    _baseline_size_path, kind="packet_size", value_unit="byte")
+_baseline_interval = trafm.load_empirical_cdf(
+    _baseline_interval_path, kind="interarrival", value_unit="s")
+check(_baseline_size.sha256 == _baseline_manifest["packet_size"]["sha256"]
+      and len(_baseline_size.values) == 4274
+      and _baseline_interval.sha256 == _baseline_manifest["interarrival"]["sha256"]
+      and len(_baseline_interval.values) == 3307,
+      "固定双 CDF 的 SHA 与点数由 manifest 锁定")
+check(_baseline_interval.value_unit == "s"
+      and np.isclose(_baseline_interval.quantile(0.5), 0.010)
+      and np.isclose(_baseline_interval.mean, 0.05853887418),
+      "包间隔基线明确以秒为原始 value 单位（P50=10 ms）")
+
+_effective_packet = _baseline_size.scaled_summary(
+    2.0, output_unit="byte", integer_values=True)
+_effective_interval = _baseline_interval.scaled_summary(
+    2.0, unit_multiplier=1000.0, output_unit="ms")
+check(_effective_packet["probability_axis_unchanged"]
+      and _effective_packet["p50"] == 1595
+      and _effective_packet["rounding"] == "nearest_integer_with_minimum_1",
+      "包大小 scale 只乘 value 轴，再按运行时规则取最近整数 byte")
+check(_effective_interval["probability_axis_unchanged"]
+      and np.isclose(_effective_interval["p50"], 20.0)
+      and np.isclose(_effective_interval["mean"], 117.07774836),
+      "秒单位换算与 interarrival scale 同时进入有效间隔摘要")
+
+
+def _run_baseline_traffic(packet_scale: float, interval_scale: float):
+    cfg = sysm.TrafficConfig(
+        model="cdf",
+        packet_size_cdf=str(_baseline_size_path),
+        interarrival_cdf=str(_baseline_interval_path),
+        interarrival_cdf_unit="s",
+        packet_size_scale=packet_scale,
+        interarrival_scale=interval_scale,
+    )
+    runtime = expm.ExperienceTraffic(cfg, 4, 0.5, np.random.default_rng(260902))
+    for tti in range(4000):
+        runtime.step(tti)
+    return runtime
+
+
+_baseline_runtime = _run_baseline_traffic(1.0, 1.0)
+_size_x2_runtime = _run_baseline_traffic(2.0, 1.0)
+_interval_x2_runtime = _run_baseline_traffic(1.0, 2.0)
+_base_samples = _baseline_runtime.traffic_samples
+_size_x2_samples = _size_x2_runtime.traffic_samples
+_interval_x2_samples = _interval_x2_runtime.traffic_samples
+check(_size_x2_runtime.arrival_events == _baseline_runtime.arrival_events
+      and _size_x2_samples["interarrival_ms"] == _base_samples["interarrival_ms"],
+      "反向对照：包大小 scale 不改变到达事件数或包间隔序列")
+check(all(abs(int(y) - 2 * int(x)) <= 1 for x, y in zip(
+          _base_samples["packet_size_bytes"],
+          _size_x2_samples["packet_size_bytes"], strict=True)),
+      "包大小 scale=2 的逐样本误差只来自先缩放后取整，最多 1 byte")
+_interval_count = len(_interval_x2_samples["packet_size_bytes"])
+check(_interval_x2_samples["packet_size_bytes"]
+      == _base_samples["packet_size_bytes"][:_interval_count],
+      "反向对照：包间隔 scale 不改变共同前缀的包大小抽样")
+check(np.allclose(
+          _interval_x2_samples["interarrival_ms"],
+          np.asarray(_base_samples["interarrival_ms"][:len(
+              _interval_x2_samples["interarrival_ms"])]) * 2.0,
+          rtol=0.0, atol=1e-12),
+      "包间隔 scale=2 逐样本精确乘 2，概率轴与基础随机序列不变")
+_profile_summary = _size_x2_runtime.profile_summaries[0]
+check(_profile_summary["cdf_sampling_contract"]
+      == "independent_inverse_cdf_named_substreams"
+      and _profile_summary["effective_packet_size"]["p50"] == 1595
+      and np.isclose(
+          _profile_summary["effective_interarrival"]["p50"], 10.0),
+      "运行结果披露独立采样合同与缩放后的有效 CDF 分位数")
 
 # ---------------------------------------------------------------------------
 sect("15  载波栅格与 MCS 表口径必须跟着链路表走")

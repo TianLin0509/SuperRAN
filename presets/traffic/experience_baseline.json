@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0.0",
+  "profile_id": "experience_baseline_v1",
+  "label": "Fixed downlink packet-size and inter-arrival CDF baseline",
+  "scope": "experience_v2 traffic input; not a performance result or 3GPP standard curve",
+  "sampling_contract": {
+    "pairing": "one traffic profile uses one packet-size CDF and one inter-arrival CDF",
+    "dependence": "independent inverse-CDF samples from stable named RNG substreams",
+    "packet_size_transform": "max(1, floor(value * packet_size_scale + 0.5)) bytes",
+    "interarrival_transform": "value_seconds * interarrival_scale * 1000 milliseconds",
+    "probability_axis_scaled": false,
+    "higher_layer_modelled": false
+  },
+  "packet_size": {
+    "path": "presets/traffic/experience_baseline_packet_size_cdf.txt",
+    "unit": "byte",
+    "sha256": "5afc9b349cd8aef64dec0b0ae28aa388c71f6e673a911b15613cbe41e6e6b7be",
+    "points": 4274,
+    "min": 9.0,
+    "p50": 797.4,
+    "p95": 63587.6,
+    "max": 592740.0,
+    "mean": 12439.98216
+  },
+  "interarrival": {
+    "path": "presets/traffic/experience_baseline_interarrival_s_cdf.txt",
+    "unit": "s",
+    "sha256": "cc581a68dcd6b1749f102de866ddf357fb7cba471e0775639c3207ab419a92cd",
+    "points": 3307,
+    "min": 0.005,
+    "p50": 0.01,
+    "p95": 0.2825,
+    "max": 1.25,
+    "mean": 0.05853887418
+  },
+  "default_scales": {
+    "packet_size_scale": 1.0,
+    "interarrival_scale": 1.0
+  },
+  "non_goals": [
+    "application session state",
+    "reading state",
+    "IP or PDCP header modelling",
+    "trace replay",
+    "packet-size/inter-arrival joint correlation"
+  ]
+}

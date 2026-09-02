@@ -142,6 +142,11 @@ class TrafficConfig:
     TR 38.802 §A.2.1.3）：每个用户按泊松过程到达固定大小的文件，
     到达率控制负载。**它是评价体验速率的标准话务模型**——
     full buffer 下"体验速率"没有意义，因为缓冲区永远不空、没有 burst 边界。
+
+    ``cdf`` 的冻结轻量合同是“一种业务对应包大小/包间隔两份边缘 CDF”。两者
+    独立逆变换采样，不建模 AppDuration、Reading、IP/PDCP 头或联合相关性。
+    ``packet_size_scale`` 与 ``interarrival_scale`` 分别乘各自 CDF 的 value 横轴，
+    不改变累计概率；包间隔单位必须由 ``interarrival_cdf_unit`` 显式解释。
     """
 
     model: TrafficModel = "ftp3"
@@ -318,9 +323,9 @@ class TrafficConfig:
                 "packet_size_cdf": self.packet_size_cdf,
                 "interarrival_cdf": self.interarrival_cdf,
                 "interarrival_cdf_unit": self.interarrival_cdf_unit,
-                "note": ("按 UE 分配外生业务类；包长、到达率、PDB 与优先级先定义，"
-                         "CDF 与缩放标量决定到达过程，实际 RBG 占用仍由该用户当时的 "
-                         "MCS/rank 与 TBS 反查决定。"),
+                "note": ("一种业务对应包大小/包间隔两份边缘 CDF，二者独立采样；"
+                         "缩放系数只乘 value 横轴，不乘累计概率。实际 RBG 占用仍由"
+                         "队列字节、该用户当时的 MCS/rank 与 TBS 反查决定。"),
             }
         return d
 

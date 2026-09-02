@@ -609,36 +609,40 @@ DETAIL_SPECS.update({
         source_paths=("src/superran/carrier.py", "src/superran/experience.py", "src/superran/system.py", "tests/test_carrier.py", "tests/test_system.py"),
     ),
     "traffic": DetailSpec(
-        promise="从两个经验 CDF 生成包对象，解释包大小缩放与包间隔缩放如何分别改变负载形态，并给出从目标 30%/50% PRB 利用率反校准话务而不污染正式统计的方法。",
+        promise="从固定的包大小/包间隔 CDF 生成逐 UE 到达，锁定秒单位、独立抽样与双系数 value 轴缩放，并解释怎样调 RBG 形态和小区 PRB 负载而不污染正式统计。",
         principles=(
-            "一个话务模型至少由包大小分布和包间隔分布共同决定。每次到达分别从两个经验 CDF 逆变换采样：均匀随机数 u 经 <code>searchsorted</code> 找到第一个累计概率≥u 的 value。包大小决定单个 burst 需要多少资源，间隔决定同时活跃用户和排队重叠；只有平均比特率相同并不意味着 MU 概率、首包时延或 RBG 直方图相同。",
-            "两个标量提供可解释校准轴。<code>size_scale=0.5</code> 把每次抽到的 payload 等比缩小，平均业务量约减半且 burst 更容易成为小包；<code>interval_scale=0.5</code> 把间隔缩短一半，平均业务量约翻倍，同时更易形成队列重叠和 MU 候选。两者乘积都影响 offered load，但对时域形态的影响不同，因此校准结果必须记录用了哪一轴。",
+            "冻结合同是“一种业务一对边缘 CDF”。每次到达分别从包大小与包间隔 CDF 逆变换采样：均匀随机数 u 经 <code>searchsorted</code> 找到第一个累计概率≥u 的 value。两个 CDF 使用独立命名随机子流，不建模大小/间隔联合相关；包大小决定单个 burst 需要多少资源，间隔决定同时活跃用户和排队重叠。",
+            "固定基线含 4,274 个包大小点与 3,307 个包间隔点。包大小单位 byte；包间隔原始 value 单位是秒，0.010 表示 10 ms。构建文档时直接从同一文件画图并校验 SHA、点数、单位与 P50/P95，图只描述业务输入，不是 PRB 或性能证据。",
+            "两个标量提供正交校准轴。<code>packet_size_scale</code> 把每个包大小 value 等比缩放、再取最近整数 byte；<code>interarrival_scale</code> 把每个间隔 value 等比缩放。累计概率均不改变。长期 offered load 一阶正比于 size/interval，但前者主要移动 TBS/RBG 门限，后者主要改变并发队列和空闲 TTI。",
             "目标 PRB 利用率不是直接塞进调度器的占用概率。校准器在固定用户撒点、算法和业务模型下，选一组标量做短 probe，读取正式定义的 serving-cell PRB utilization，再搜索接近 10%/30%/50% 的参数。最终用独立或明示复用的正式 replication 重跑；校准 probe 不混入性能置信区间。",
-            "所有用户可以共享一个 profile，也可按用户/业务类分配 video、XR 等多套 size/interval CDF。混合用户时不仅保存 profile 数量，还应保存每个 UE 的 profile_id 与 scale；否则用户级 KPI 的差异无法区分是无线条件还是业务模型造成。",
+            "一个 profile 的 UE 共享同一对分布但独立抽样；不同业务可以各用一对 CDF，并通过 ue_ids/ue_share 绑定。当前不增加 AppDuration、Reading、IP/PDCP 头、trace 回放或更高层会话状态。",
         ),
         implementation=(
-            ("读取并校验 CDF", "UTF-8 两列文件解析 value/cdf，value 严格递增、CDF 单调且终点归一；路径以项目根稳定解析并按 mtime/size 缓存。"),
-            ("独立随机采样", "每个 UE/profile 从 traffic 随机流抽 size 与 interval，应用 scale、单位换算和最小值，创建带 arrival_tti 的包对象。"),
+            ("读取并锁身份", "UTF-8 两列文件解析 value/cdf，value 严格递增、CDF 单调且终点归一；baseline manifest 锁定 SHA、点数、秒单位和关键分位数。"),
+            ("独立随机采样", "每个 UE/profile 从 packet_size/interarrival 两条命名子流抽样；分别应用 scale，秒转 ms，包大小四舍五入且至少 1 byte，再创建 arrival 对象。"),
+            ("报告有效曲线", "运行结果同时保留原始 CDF 摘要与缩放后的 effective min/P50/P95/max/mean，明确概率轴未缩放，避免读者拿原始分位数解释已缩放业务。"),
             ("执行负载校准", "固定其他条件，对 size 或 interval 标量做 bracket/search probe，以实测 serving-cell PRB 利用率和容差选参数。"),
             ("正式仿真留痕", "结果记录 CDF 文件哈希/摘要、scale、用户 profile 分配、target、probe 轨迹和 achieved utilization。"),
         ),
-        example_title="同样约 30% 负载，为何缩包与缩间隔的 MU 比例不同",
+        example_title="固定基线的两个系数怎样分工",
         example=(
-            "<p>方案 A 把包大小乘 0.5、保持间隔；方案 B 保持包大小、适当拉长间隔，二者都可能校准到 30% PRB。A 会产生更多短 grant，0/1/2 RBG TTI 比例上升；B 的活跃时段更稀疏但一旦到达更像大包，17 RBG 峰更明显。</p>"
-            "<p>若目标是研究 MU，通常选约 50% 并优先通过 interval 轴提高同时活跃概率；但仍需用相同算法正式测量，而不能把“50%场景”直接解释为 MU 比例 50%。负载是话务、用户位置、链路和调度共同结果。</p>"
+            "<p>原始均值约为 12,439.98 B/包、58.5389 ms/包，scale=1 时单 UE 一阶 offered load 约 1.70 Mbps。包大小乘 2 后约 3.40 Mbps，并把更多包推过较大的 TBS/RBG 门限；包间隔乘 2 后约 0.85 Mbps，基础包大小序列不变，但队列并发下降。</p>"
+            "<p>若目标是“两头高中间低”，先用 packet_size_scale 看每个非零 grant 的 p_1rbg/p_full，再用 interarrival_scale 调服务小区平均 PRB 利用率；最后同时检查 0..17 每 TTI 分布、backlog 和样本覆盖。输入曲线本身不能替代 Gate-1-passed 数据集上的系统实测。</p>"
         ),
         checks=(
-            ("CDF 合法", "value/cdf 单调、单位、终点、均值和关键分位数可展示；同 seed 采样可复现。"),
-            ("负载单调", "在统计波动容差内，size_scale 增大或 interval_scale 减小应提高 offered load/PRB 利用率。"),
+            ("CDF 身份", "两份文件的 SHA、点数、value/cdf 单调性、秒单位、均值和关键分位数与 manifest 一致；两张 SVG 从同一数据生成。"),
+            ("双轴反向对照", "增大 packet_size_scale 时到达时刻不变；增大 interarrival_scale 时基础包大小抽样不变，两个随机子流不得串扰。"),
+            ("负载单调", "在统计波动容差内，packet_size_scale 增大或 interarrival_scale 减小应提高 offered load/PRB 利用率。"),
             ("校准隔离", "probe 与 formal run 的种子/用途可区分，正式 CI 不把搜索过程当独立样本。"),
             ("用户可追溯", "每个 UE 能反查 traffic profile、两个 scale、到达字节和包间隔样本。"),
         ),
         pitfalls=(
+            "把 0.005～1.25 的包间隔 value 当成毫秒；本基线单位是秒，误配会把 offered load 放大 1000 倍。",
             "直接把 target_prb_utilization 当作每 TTI 随机占用概率，跳过真实话务与调度。",
             "只看平均 Mbps，不看包大小/间隔形态，随后误解 MU 和首包时延差异。",
             "用正式结果反复调 scale 后仍把同一结果当预注册验证集。",
         ),
-        source_paths=("src/superran/traffic.py", "src/superran/system.py", "src/superran/experience.py"),
+        source_paths=("src/superran/traffic.py", "src/superran/system.py", "src/superran/experience.py", "presets/traffic/experience_baseline.json", "presets/traffic/README.md"),
     ),
     "kpi": DetailSpec(
         promise="把体验 KPI 的对象、起止事件、分子分母和覆盖率逐一说清，并解释单臂小区/用户分析、2~5 算法比较、逐 TTI 钻取与 Agent 自适应优先展示如何共存而不改变底层真值。",

@@ -1,0 +1,4 @@
+# Preserve the imported traffic baselines byte-for-byte: their SHA-256 values are
+# part of the runtime and documentation provenance contract.
+presets/traffic/experience_baseline_packet_size_cdf.txt -text whitespace=-trailing-space
+presets/traffic/experience_baseline_interarrival_s_cdf.txt -text whitespace=-trailing-space
