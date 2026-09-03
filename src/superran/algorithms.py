@@ -85,7 +85,7 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             caveat="端口顺序只改变数组坐标，不应改变同一物理信道的结果；迁移必须同时重排 H、W、F。"
                    "历史 64T 样本缺少新布局字段时只能按 h_v_pol + bottom_to_top 读取，"
                    "不能静默套用新默认。1 驱 N 是具体硬件事实，未知面板不得猜测。",
-            source="MSG-Platform phy_sim/effective_array.py；本项目 hardware.py",
+            source="SuperRAN native.EffectiveArray + hardware.py",
             alternatives=["legacy_64", "physical_reference（真跑物理阵子，慢但可作参考）"],
         ),
         Algorithm(

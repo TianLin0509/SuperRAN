@@ -1,7 +1,7 @@
 """Deterministic evidence bundle for the SRS/PDP/robust-weight audit.
 
 This script deliberately exercises the public SuperRAN path and the
-physical ChannelHub kernels used underneath it.  It writes one UTF-8 JSON file
+first-party physical kernels used underneath it.  It writes one UTF-8 JSON file
 that the two HTML reports consume; a failed invariant aborts the run instead of
 silently publishing a partial comparison.
 """
@@ -19,16 +19,13 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CHANNELHUB = ROOT.parent / "MSG-Platform"
-DEFAULT_DEPS = Path(r"C:\VibeData\Caches\channelhub-test-deps-20260810")
 DEFAULT_OUTPUT = ROOT / "artifacts" / "srs_pdp_robust_audit_20260810.json"
 
 
-def _bootstrap(channelhub_root: Path, deps_root: Path) -> None:
-    for path in (ROOT / "src", channelhub_root / "src", deps_root):
-        value = str(path)
-        if value not in sys.path:
-            sys.path.insert(0, value)
+def _bootstrap() -> None:
+    value = str(ROOT / "src")
+    if value not in sys.path:
+        sys.path.insert(0, value)
 
 
 def _sha256(path: Path) -> str:
@@ -66,21 +63,20 @@ def _wrap_error(value: float, expected: float, period: float) -> float:
     return abs((value - expected + period / 2.0) % period - period / 2.0)
 
 
-def run(channelhub_root: Path, deps_root: Path, output: Path) -> dict[str, Any]:
-    _bootstrap(channelhub_root, deps_root)
-
-    from msg_embedding.channel_est import exponential_pdp_covariance
-    from msg_embedding.data.sources._interference_estimation import (
-        _srs_port_sequences,
-        estimate_channel_with_interference,
-    )
-    from msg_embedding.phy_sim.effective_array import make_effective_array
+def run(output: Path) -> dict[str, Any]:
+    _bootstrap()
 
     from superran import generate as gen
     from superran import hardware as hw
     from superran import linklevel as ll
     from superran import measure as meas
     from superran import mumimo as mu
+    from superran.native import (
+        _srs_port_sequences,
+        estimate_channel_with_interference,
+        exponential_pdp_covariance,
+        make_effective_array,
+    )
 
     checks: list[dict[str, Any]] = []
 
@@ -533,22 +529,20 @@ def run(channelhub_root: Path, deps_root: Path, output: Path) -> dict[str, Any]:
 
     critical_files = [
         ROOT / "src" / "superran" / "hardware.py",
+        ROOT / "src" / "superran" / "native.py",
+        ROOT / "src" / "superran" / "physical.py",
+        ROOT / "src" / "superran" / "spec38901.py",
         ROOT / "src" / "superran" / "generate.py",
         ROOT / "src" / "superran" / "measure.py",
         ROOT / "src" / "superran" / "mumimo.py",
         ROOT / "src" / "superran" / "system.py",
-        channelhub_root / "src" / "msg_embedding" / "data" / "sources"
-        / "_interference_estimation.py",
-        channelhub_root / "src" / "msg_embedding" / "data" / "sources"
-        / "internal_sim.py",
-        channelhub_root / "src" / "msg_embedding" / "phy_sim" / "effective_array.py",
     ]
     payload = {
         "audit": {
             "title": "SRS, PDP and robust-weight deterministic audit",
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "superran_root": ROOT,
-            "channelhub_root": channelhub_root,
+            "physical_core": "superran-first-party",
             "python": sys.version,
             "numpy": np.__version__,
             "all_checks_passed": all(row["passed"] for row in checks),
@@ -575,13 +569,9 @@ def run(channelhub_root: Path, deps_root: Path, output: Path) -> dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--channelhub-root", type=Path, default=DEFAULT_CHANNELHUB)
-    parser.add_argument("--deps-root", type=Path, default=DEFAULT_DEPS)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
-    result = run(
-        args.channelhub_root.resolve(), args.deps_root.resolve(), args.output.resolve()
-    )
+    result = run(args.output.resolve())
     print(json.dumps({
         "output": str(args.output.resolve()),
         "all_checks_passed": result["audit"]["all_checks_passed"],

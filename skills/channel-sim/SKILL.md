@@ -181,9 +181,10 @@ OLLA 通常只配置 `target_bler`。SU/MU 各自的 ACK 步长默认 +0.01 MCS�
 `model_version`、`pf_accounting` 和物理近似一起保存。
 
 **前置条件：每个 UE 要有多个时间相关的快照。** 生成时 `num_slots_per_sample >= 8`
-（或让 `num_samples` 是 `num_ues` 的 8 倍以上）。当前更稳妥的生成法是
-`num_slots_per_sample=1` 且 `num_samples/num_ues>=8`，绕开外部 ChannelHub 多时隙
-SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且都不报错：
+（或让 `num_samples` 是 `num_ues` 的 8 倍以上）。first-party source 会原样保留
+`num_slots_per_sample` 的完整 slot 轴，不做复信道平均；也支持
+`num_slots_per_sample=1` 且 `num_samples/num_ues>=8` 的跨 sample 序列。两种口径必须由
+`sample_interval_s` 显式给出同一时间间隔。不满足时有两个后果，且都不报错：
 信道没有时间起伏，**PF 退化成轮询**，多用户分集整个拿不到；只有 1 个快照时「陈旧
 信道」与「当前信道」是同一个矩阵，**CSI 老化恒为 0**，`csi_aging=True` 开着也测不出
 老化代价。跑之前先 `sr_describe_dataset(dataset_id)` 对着 `num_ues` 算每 UE 几个快照。
@@ -299,7 +300,7 @@ publishable winner；否则即使统计显著也必须保持 `exploratory_unregi
 
 **生成时的拦截要当真。** `sr_generate` 返回 `status: "blocked"` 时说明这个参数组合跑得出结果但结果没有物理意义（最典型的是波束/定位任务配 TDL——TDL 没有每条径的角度，算法会输出一堆看似正常的垃圾且不报错）。转述 `message` 与 `suggestion` 等用户决定。
 
-**这里的测量量是物理量，不是训练特征。** PDP 不归一化、带真实时延轴；RSRP 不截断；SRS 给完整协方差与全部特征值；PMI 给 Type-I-style 单面板列码本子集近似的索引与预编码矩阵（多层是贪心近似，不冒充完整 38.214 矩阵码本）。用户提到 ChannelHub 的 16-token 特征时，那是另一套，别混用。
+**这里的测量量是物理量，不是训练特征。** PDP 不归一化、带真实时延轴；RSRP 不截断；SRS 给完整协方差与全部特征值；PMI 给 Type-I-style 单面板列码本子集近似的索引与预编码矩阵（多层是贪心近似，不冒充完整 38.214 矩阵码本）。用户提到历史参考平台的 16-token 特征时，那是另一套，别混用。
 
 **先小后大。** 正式实验前先跑 20 个样本确认流程通再放大；`sr_plan` 的 `estimated.size_mb` 超过 1 GB 时提醒用户。**信噪比不能直接设定**——它由路损、发射功率、撒点位置共同决定；要求特定区间时走拒绝采样，可能很慢甚至取不到样本。
 

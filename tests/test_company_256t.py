@@ -28,10 +28,7 @@ from superran import (
 
 
 def _array(profile: str = "256t"):
-    from superran import channelhub
-
-    channelhub._ensure_path()
-    from msg_embedding.phy_sim.effective_array import make_effective_array
+    from superran.native import make_effective_array
 
     panel = [16, 8, 2] if profile == "256t" else [8, 4, 2]
     cfg = {
@@ -90,10 +87,7 @@ def test_64t_uses_the_same_canonical_order_as_256t() -> None:
 
 
 def test_layout_migration_is_an_exact_physical_permutation() -> None:
-    from superran import channelhub
-
-    channelhub._ensure_path()
-    from msg_embedding.phy_sim.effective_array import PortIndex
+    from superran.native import PortIndex
 
     canonical = PortIndex(8, 4, 2, port_order="pol_h_v", vertical_index_order="top_to_bottom")
     legacy = PortIndex(8, 4, 2, port_order="h_v_pol", vertical_index_order="bottom_to_top")
@@ -111,10 +105,7 @@ def test_layout_migration_is_an_exact_physical_permutation() -> None:
 
 def test_superran_owns_the_type_i_port_boundary_without_msg_runtime_import() -> None:
     """Offline Dataset.pmi() must not need the sibling MSG source tree."""
-    from superran import channelhub
-
-    channelhub._ensure_path()
-    from msg_embedding.phy_sim.effective_array import PortIndex
+    from superran.native import PortIndex
 
     for n_h, n_v in ((8, 4), (16, 8)):
         for port_order, vertical_order in (
@@ -141,10 +132,7 @@ def test_superran_owns_the_type_i_port_boundary_without_msg_runtime_import() -> 
 
 
 def test_type_i_search_is_invariant_across_the_legacy_boundary() -> None:
-    from superran import channelhub
-
-    channelhub._ensure_path()
-    from msg_embedding.phy_sim.effective_array import PortIndex
+    from superran.native import PortIndex
 
     canonical = PortIndex(8, 4, 2, port_order="pol_h_v", vertical_index_order="top_to_bottom")
     legacy = PortIndex(8, 4, 2, port_order="h_v_pol", vertical_index_order="bottom_to_top")

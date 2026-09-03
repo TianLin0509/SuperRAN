@@ -46,40 +46,32 @@ check(
 )
 RT_OK = bool(rt.available)
 
-# 无 ChannelHub 时，场景清单/决策/陷阱/实跑各节全部依赖内核——如实跳过，不算失败。
-# （INSTALL_AGENT.md 第 7 步承诺"缺依赖自动跳过"，离线包环境正是这种情况。）
-if any("ChannelHub" in c.missing for c in caps.values()):
-    sect("2~5  依赖 ChannelHub —— 跳过")
-    print("  未找到 ChannelHub 源码，后续各节依赖内核，全部跳过（不算失败）。")
-    print("  补齐方式见 INSTALL_AGENT.md 第 2 步。")
-    raise SystemExit(0)
-
 # ---------------------------------------------------------------------------
 sect("2  场景清单")
 all_scenes = sc.list_scenes()
 for s in all_scenes:
     tag = "内置" if s.builtin else "真实OSM"
     print(f"  {s.scene_id:<22} {tag:<8} {s.display_name[:26]:<28} presets={list(s.presets)}")
-check(len(all_scenes) >= 10, f"至少 10 个场景（实际 {len(all_scenes)}）")
+check(len(all_scenes) >= 4, f"至少 4 个 direct Sionna 内置场景（实际 {len(all_scenes)}）")
 check(sum(1 for s in all_scenes if s.builtin) == 4, "4 个 Sionna 内置场景")
-check(sum(1 for s in all_scenes if s.needs_preparation) >= 6, "6 个中国城市场景带本地资产")
+check(
+    all(not s.needs_preparation or not s.builtin for s in all_scenes),
+    "只有显式本地资产场景需要准备；不从外部源码树借资产",
+)
 
 # ---------------------------------------------------------------------------
-sect("3  场景资产准备（修 PLY 头，不改 ChannelHub）")
-t0 = time.perf_counter()
-prep = sc.prepare_scene("shenzhen_futian", force=True)
-print(f"  准备耗时 {time.perf_counter()-t0:.1f}s")
-print(f"  PLY 总数 {prep['ply_total']}，修复 {prep['ply_fixed']} 个")
-print(f"  缓存位置 {prep['osm_path']}")
-check(prep["prepared"], "场景准备完成")
-check(prep["ply_fixed"] >= 1, "确实修复了带 obj_info 的 PLY")
-
-orig = sc.scenes_dir() / "shenzhen_futian" / "mesh" / "ground.ply"
-if orig.is_file():
-    check(b"obj_info" in orig.read_bytes()[:400], "ChannelHub 原文件未被修改")
-
-cached = sc.prepare_scene("shenzhen_futian")
-check(cached.get("cached") is True, "第二次调用命中缓存")
+sect("3  可选本地场景资产")
+asset_scene = next((item for item in all_scenes if item.needs_preparation), None)
+if asset_scene is None:
+    print("  未配置 SUPERRAN_SCENES；仅保留内置场景，未从其他仓库静默借资产。")
+    check(True, "没有本地资产时能力边界显式可见")
+else:
+    t0 = time.perf_counter()
+    prep = sc.prepare_scene(asset_scene.scene_id, force=True)
+    print(f"  准备耗时 {time.perf_counter()-t0:.1f}s")
+    check(prep["prepared"], "本地场景准备完成")
+    cached = sc.prepare_scene(asset_scene.scene_id)
+    check(cached.get("cached") is True, "第二次调用命中缓存")
 
 # ---------------------------------------------------------------------------
 # 第 4~5 节要真跑射线追踪，没装 sionna-rt 就跳过。

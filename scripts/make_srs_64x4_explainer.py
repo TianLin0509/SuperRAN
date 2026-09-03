@@ -284,11 +284,11 @@ ul.tight{margin:7px 0;padding-left:19px}ul.tight li{margin:4px 0}
     <tbody>
       <tr><td>预置硬件默认</td><td><div class="path">C:\Vibe\Wireless\SuperRAN\src\superran\hardware.py</div></td><td>8×4×2 RF、1驱3、192 AE、UE 2T4R、4 CS、±45°、canonical端口合同</td></tr>
       <tr><td>默认 preset</td><td><div class="path">C:\Vibe\Wireless\SuperRAN\presets\presets.yaml</div></td><td><code>company_64t4r</code> 是 BOTH，UE Tx/Rx 均为 4</td></tr>
-      <tr><td>F 与 steering</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\phy_sim\effective_array.py</div></td><td>端口索引、馈电归一、位置、192×64 coupling、Jones 基、Fᴴ/Fᵀ</td></tr>
-      <tr><td>CDL H / 链路维度</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\data\sources\internal_sim.py</div></td><td>20 rays、极化矩阵、Doppler、簇求和、时延 DFT；DL/UL 天线轴选择</td></tr>
-      <tr><td>当前 SRS pilot / 观测器</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\data\sources\_interference_estimation.py</div></td><td>serving SRS 当前固定 <code>N_ap=1</code>；<code>Y=H·X+I+N</code> 仍按 H 系数广播</td></tr>
-      <tr><td>SRS 序列生成器</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\ref_signals\srs.py</div></td><td>底层支持 <code>N_ap∈{1,2,4}</code>、cyclic shift、comb 与 hopping；调用链未完整暴露</td></tr>
-      <tr><td>LS / 频域 LMMSE</td><td><div class="path">C:\Vibe\Wireless\MSG-Platform\src\msg_embedding\channel_est\</div></td><td>标量 LS、真实 pilot 位置与 PDP 先验频域 LMMSE；不是时频空 LMMSE</td></tr>
+      <tr><td>F 与 steering</td><td><div class="path">src/superran/native.py · EffectiveArray</div></td><td>端口索引、馈电归一、位置、192×64 coupling、Fᴴ/Fᵀ</td></tr>
+      <tr><td>CDL H / 链路维度</td><td><div class="path">src/superran/native.py · InternalSimSource</div></td><td>20 rays、Doppler、簇求和、时延 DFT；DL/UL 天线轴选择</td></tr>
+      <tr><td>当前 SRS pilot / 观测器</td><td><div class="path">src/superran/srs_waveform.py</div></td><td><code>Y=H·X+I+N</code> 与 2T4R 两腿解扩</td></tr>
+      <tr><td>SRS 序列生成器</td><td><div class="path">src/superran/physical.py / native.py</div></td><td>支持 cyclic shift、comb 与产品 17-hop profile</td></tr>
+      <tr><td>LS / 频域 LMMSE</td><td><div class="path">src/superran/native.py</div></td><td>真实 pilot 位置到目标 RB 的直接 LMMSE；不是时频空 LMMSE</td></tr>
     </tbody>
   </table></div>
   <div class="callout" style="margin-top:16px"><h3>最终一句话</h3><b>64×4 H 来自“64 个 gNB RF 端口 × 4 个 UE 端口”的双极化宽带 MIMO 通道；物理 SRS 应从同一接收向量恢复它，但当前调用链尚未做到。</b>仍需诚实标注逐系数观测抽象、RB 中心抽象、无 8-port TDM、无时频空 covariance LMMSE 和无实测 Jones 图。</div>

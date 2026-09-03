@@ -32,7 +32,7 @@
 manifest 里的 `requires_preinstalled` 直接列出需要目标机器自备什么。
 拿不到 manifest 就自己看：`ls wheels/ | grep -i -E "numpy|scipy"` 有没有命中。
 
-三条路的差别只在"依赖从哪来"和"ChannelHub 从哪来"，其余相同。
+三条路的差别只在 Python 依赖从哪来；统计信道物理内核随 SuperRAN 一起安装。
 
 ---
 
@@ -55,66 +55,34 @@ Windows 上如果 `python` 打不开（跳到应用商店），试 `py -3`、
 
 ---
 
-## 第 2 步：放好两个仓库
+## 第 2 步：放好 SuperRAN
 
-superran 依赖 **ChannelHub** 作为物理内核。两者建议放成兄弟目录：
-
-```
-<某个目录>/
-├── ChannelHub_main/      ← 物理内核
-└── superran/        ← 本项目
-```
-
-### 联网模式
+只需要一个仓库。不得搜索、clone 或配置 MSG-Platform / ChannelHub 源码树：
 
 ```bash
-git clone https://github.com/wangxz0803-lab/ChannelHub_main  # 候选源，仍必须过下面的合同体检
-git clone https://github.com/TianLin0509/superran
+git clone https://github.com/TianLin0509/SuperRAN.git
+cd SuperRAN
 ```
 
-公开候选源可能落后于 SuperRAN 当前物理接口；能 clone、能 import 都不算通过。
-若团队已有批准的 ChannelHub，优先使用组长给出的版本。
+统计信道、CDL/TDL 表、NR 载波/TDD、参考序列、阵列、LMMSE 与几何干扰都在
+`src/superran/`。历史环境变量 `SUPERRAN_CHANNELHUB` 不再选择实现；即使残留在
+机器上，也必须对生成字节没有影响。
 
-### 离线模式
-
-superran 就是你手上这份。ChannelHub **不在离线包里**——它没有开源许可证，
-不能随包转发。
-
-先让 Agent 在当前项目目录、同级项目目录和团队约定的代码目录中查找。
-**不得为了找依赖递归扫描整个 C: / D: 或根目录。**
-
-找不到就停下来 **【问用户】**：ChannelHub 源码在哪？需要一个目录，
-里面有 `src/msg_embedding/data/contract.py`。没有它整个项目跑不起来。
-
-### 让 superran 找到 ChannelHub
-
-放成兄弟目录时会自动发现。放在别处就设环境变量：
-
-```bash
-export SUPERRAN_CHANNELHUB=/abs/path/to/ChannelHub_main          # macOS/Linux
-[Environment]::SetEnvironmentVariable("SUPERRAN_CHANNELHUB","D:\path\to\ChannelHub_main","User")  # Windows
-```
-
-**验证：**
-
-```bash
-<PYTHON> -c "import sys; sys.path.insert(0,'src'); from superran import channelhub; print(channelhub.channelhub_root())"
-```
-
-打印出的路径下必须存在 `src/msg_embedding/data/contract.py`。随后还必须通过当前物理接口合同：
+**验证 first-party source contract：**
 
 ```bash
 <PYTHON> -c "import sys; sys.path.insert(0,'src'); from superran import channelhub as ch; r=ch.probe_source_contract(); print(r.as_dict()); raise SystemExit(0 if r.compatible else 1)"
 ```
 
-只有 `compatible: true` 才能继续。任何 blocker（尤其 `array_port_order`）都必须停止并向
-组长索取批准的 ChannelHub；不允许把不兼容源当成可选告警。
+只有 `compatible: true` 才能继续。任何 blocker 都说明本仓安装或代码不完整，
+必须停止并向组长报告；不得改接另一个源码树静默降级。
 
 ---
 
 ## 第 3 步：装依赖
 
-六个：`numpy scipy pydantic pyyaml structlog mcp`。
+五个直接依赖：`numpy scipy pyyaml filelock mcp`。不再为外部信道源安装
+`pydantic-settings`、`structlog` 或 `torch`。
 
 ### 联网模式
 
@@ -142,7 +110,7 @@ thin 包里没有它，`--no-index` 下也无处可拉——而且报错只说
 
 ```bash
 cd superran
-<PYTHON> -m pip install --no-index --find-links wheels mcp pydantic pyyaml structlog
+<PYTHON> -m pip install --no-index --find-links wheels mcp pyyaml filelock
 ```
 
 thin 包**不含 numpy/scipy**，靠目标机器自带。装完先验：
@@ -166,7 +134,7 @@ thin 包**不含 numpy/scipy**，靠目标机器自带。装完先验：
 **验证依赖：**
 
 ```bash
-<PYTHON> -c "import numpy,scipy,pydantic,yaml,structlog,mcp; print('deps ok')"
+<PYTHON> -c "import numpy,scipy,yaml,filelock,mcp; print('deps ok')"
 ```
 
 ---
@@ -265,8 +233,7 @@ cd <仓库>
 没装 sionna-rt 时 `test_raytracing.py` 的射线追踪实跑段会自动跳过并说明原因，
 **这不算失败**。
 
-**没有 ChannelHub 时所有测试都会失败**，这是正常的——它是物理内核。
-这时至少要能验证降级行为正确：
+first-party `internal_sim` 必须始终可用；Sionna RT / QuaDRiGa 是独立的可选直接适配器：
 
 ```bash
 <PYTHON> -c "
@@ -274,10 +241,10 @@ from superran import channelhub as ch
 for c in ch.probe_capabilities():
     print(c.name, c.available, c.missing)
 "
-# 期望：三个引擎都列出，都是 False，missing 里含 'ChannelHub'
+# 期望：internal_sim=True；可选引擎未安装时为 False 并明确列出自身缺项
 ```
 
-MCP 冒烟（无 ChannelHub 也应当能起）：
+MCP 冒烟：
 
 ```bash
 <PYTHON> -c "
@@ -294,7 +261,7 @@ print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.
 跟用户说清楚这几件事，**不要只说"装好了"**：
 
 1. **能不能用** —— MCP 是否 Connected、测试过了几项
-2. **装在哪** —— superran 和 ChannelHub 的绝对路径、用的哪个 Python
+2. **装在哪** —— SuperRAN 的绝对路径、用的哪个 Python
 3. **哪些没装** —— 射线追踪装没装、skill 装没装、`pip install -e .` 做没做
 4. **下一步** —— 给一句可以直接说的话：
    > "用 superran 生成一批单小区 64T4R 的信道，我要验证一个 CSI 压缩的想法。"
@@ -307,7 +274,7 @@ print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.
 |---|---|---|
 | MCP 显示 Failed / 连不上 | Python 路径不对，或依赖没装齐 | 手动跑 `<PYTHON> scripts/mcp_server.py` 看 stderr |
 | MCP 连上但一调用就报缺依赖 | agent 子进程用的不是你 pip install 的那个 Python | 用 python.exe 绝对路径重新注册 |
-| 报找不到 ChannelHub | 目录不在自动查找范围内 | 设 `SUPERRAN_CHANNELHUB`，指到含 `src/msg_embedding/data/contract.py` 的目录 |
+| `internal_sim` 不可用 | 本仓安装不完整或 source contract 失败 | 跑 `probe_source_contract()`，把 blocker 原样报告给组长 |
 | `sr_generate` 卡住不返回 | 历史上是 scipy 在工作线程里的 import 死锁 | 已修（启动预热）。仍遇到就设 `SUPERRAN_DEBUG=1`，会开 faulthandler 打栈到 stderr |
 | 测试报 `ModuleNotFoundError: superran` | 没在仓库根目录跑 | `cd` 到仓库根再跑；测试脚本自己会加 `src/` 到 path |
 | 射线追踪报 `invalid PLY header` | 中国城市场景的 PLY 是 VTK 导出的，Mitsuba 3.8 解析不了 | 已自动处理（复制到缓存后清理头部）。加新场景时若再遇到就是这个原因 |

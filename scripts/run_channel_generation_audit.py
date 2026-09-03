@@ -1,6 +1,6 @@
 r"""Generate reproducible evidence for the channel-generation deep audit.
 
-The script intentionally uses the public SuperRAN generation and loading
+The script intentionally uses only the public SuperRAN generation and loading
 APIs.  It produces three small but full-band datasets:
 
 1. one-cell 64T4R CDL-C with a real LS estimate;
@@ -9,7 +9,7 @@ APIs.  It produces three small but full-band datasets:
 
 Run from any directory::
 
-    python -X utf8 C:\Vibe\Wireless\superran\scripts\run_channel_generation_audit.py
+    python -X utf8 scripts/run_channel_generation_audit.py
 
 The evidence is written to ``artifacts/channel-generation-audit/evidence.json``.
 Generated datasets remain in the normal SuperRAN dataset store and their
@@ -29,19 +29,16 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-CHANNELHUB = ROOT.parent / "MSG-Platform"
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(CHANNELHUB / "src"))
 
-from msg_embedding.ref_signals.srs import (  # noqa: E402
+from superran import gates, generate, load, plan  # noqa: E402
+from superran.native import (  # noqa: E402
     SRSResourceConfig,
     srs_hopping_cycle_length,
     srs_rb_indices,
     srs_sequence,
+    zadoff_chu,
 )
-from msg_embedding.ref_signals.zc import zadoff_chu  # noqa: E402
-
-from superran import gates, generate, load, plan  # noqa: E402
 
 OUT_DIR = ROOT / "artifacts" / "channel-generation-audit"
 EVIDENCE_PATH = OUT_DIR / "evidence.json"
@@ -433,19 +430,11 @@ def main() -> None:
         },
         "repositories": {
             "superran": _git_state(ROOT),
-            "channelhub": _git_state(CHANNELHUB),
         },
         "source_hashes": {
-            "internal_sim.py": _sha256(
-                CHANNELHUB / "src/msg_embedding/data/sources/internal_sim.py"
-            ),
-            "srs.py": _sha256(CHANNELHUB / "src/msg_embedding/ref_signals/srs.py"),
-            "cdl.py": _sha256(
-                CHANNELHUB / "src/msg_embedding/channel_models/cdl.py"
-            ),
-            "tdl.py": _sha256(
-                CHANNELHUB / "src/msg_embedding/channel_models/tdl.py"
-            ),
+            "native.py": _sha256(ROOT / "src/superran/native.py"),
+            "spec38901.py": _sha256(ROOT / "src/superran/spec38901.py"),
+            "physical.py": _sha256(ROOT / "src/superran/physical.py"),
             "generate.py": _sha256(ROOT / "src/superran/generate.py"),
             "measure.py": _sha256(ROOT / "src/superran/measure.py"),
             "validate.py": _sha256(ROOT / "src/superran/validate.py"),

@@ -3,9 +3,8 @@
 给 Agent 用的无线仿真信道供应站 —— **面向蒙特卡洛验证**。
 
 你提一个无线算法优化思路，它给你可信的信道场景实例、配套的物理观察量，
-以及 SINR / 谱效的完整评价链路。复用
-[ChannelHub](https://github.com/wangxz0803-lab/ChannelHub_main) 的物理内核，
-通过 MCP 向任意 Agent 开放。
+以及 SINR / 谱效的完整评价链路。统计信道、标准表、阵列、参考信号与估计器
+均由 SuperRAN 本仓维护，并通过 MCP 向任意 Agent 开放。
 
 配套的 `channel-sim` skill 提供 superpowers 式工作流：
 **头脑风暴 → 计划书 → 生成 → 门 1 体检 → 跑实验 → 门 2/门 3 → 结论**。
@@ -262,9 +261,8 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 **一、不传数据，传取货代码。** 单个信道样本几百 KB，序列化成 JSON 会膨胀到
 十几 MB——进不了任何模型的上下文。MCP 只回句柄、统计摘要和可运行的 Python。
 
-**二、给物理量，不给训练特征。** ChannelHub 的 `data/bridge.py` 会把这些量
-归一化、截断、乘门控后打包成 16 个 MAE token——那是为表征学习服务的。
-本项目**绕开它**：PDP 不归一化、RSRP 不截断、SRS 给完整协方差和全部特征值、
+**二、给物理量，不给训练特征。** 本项目没有 MAE token/特征桥：
+PDP 不归一化、RSRP 不截断、SRS 给完整协方差和全部特征值、
 PMI 给码本索引而非嵌入向量。
 
 **三、生成与取货解耦。** 测量量从信道现算，改主意重新取货**实测 1 毫秒**，
@@ -337,26 +335,23 @@ python scripts/make_offline_bundle.py --thin   # 轻量包 17 MB，要求目标�
 
 **wheel 是平台相关的**，必须在与目标机器同平台、同 Python 大版本的机器上打包。
 
-> 包里**不含 ChannelHub** —— 该仓库没有开源许可证，默认保留所有权利，
-> 随包转发有法律风险。接收方需自备一份含 `src/msg_embedding/data/contract.py`
-> 的源码树。确认自己有权分发时用 `--include-channelhub <路径>`。
+> 包内已经包含 first-party 统计信道物理内核，不需要第二个源码仓库。
+> 可选 Sionna RT / QuaDRiGa 仍按各自许可证和运行时单独安装。
 
 ### 手动
 
 需要 Python ≥ 3.10。
 
 ```bash
-git clone https://github.com/wangxz0803-lab/ChannelHub_main   # 候选物理内核，必须通过 source contract
 git clone https://github.com/TianLin0509/superran
 cd superran && pip install -e .
 
 pip install sionna-rt      # 可选，射线追踪（约 300 MB）
 ```
 
-ChannelHub 会自动在同级/上级目录查找；放在别处就设 `SUPERRAN_CHANNELHUB`。
 不装射线追踪也能用，`sr_capabilities` 会如实报告缺什么。
-能 import 不代表当前物理接口兼容；安装后必须让 Agent 运行
-`channelhub.probe_source_contract()`，只有 `compatible=true` 才能生成正式数据。
+安装后必须让 Agent 运行 `channelhub.probe_source_contract()`；它校验本仓 first-party
+窄腰，只有 `compatible=true` 才能生成正式数据，且不会改接外部源码树。
 
 ```bash
 claude mcp add superran -- python /path/to/superran/scripts/mcp_server.py
@@ -434,7 +429,7 @@ python scripts/install_agent_skills.py --role lead
 
 ## 物理层工具箱
 
-`superran.physical` 转发 ChannelHub 里已按 38.211/38.213/38.214 实现的模块，
+`superran.physical` 公开本仓按 38.211/38.213/38.214 实现并版本化的模块，
 主要用来**当基线**和**做导频层课题**：
 
 ```python
@@ -469,18 +464,15 @@ ph.project_interference(...)       # 干扰投影：不投影会高估干扰
   走拒绝采样。想整体调整，改发射功率或站间距更有效。
 - **视距比例由几何决定**，不是选 CDL-D 就能得到视距信道——剖面类别与几何
   判定不符时会被自动替换。想调视距比例改站间距（实测 200m→0.46、800m→0.13）。
-- **射线追踪拿不到逐径几何**。ChannelHub 尚未导出 Sionna 的 `Paths` 对象，
-  所以射线追踪数据集调 `ds.paths()` 会报错而非返回假角度。
+- **射线追踪当前没有 direct adapter**。统计信道主功能不受影响；未来 direct
+  Sionna 适配器必须显式导出逐径几何，否则 `ds.paths()` 仍应硬失败而非返回假角度。
 - **时延扩展的频域估计有固有误差**。可观测最大时延是 `1/(12·SCS)`，
   实测比值 0.8~1.0，仅作数量级检查。
 - **QuaDRiGa 未纳入**，需要 MATLAB/Octave 运行时。
-- **物理代码与射线追踪资产可来自不同 checkout**。默认优先使用相邻
-  `MSG-Platform` 的当前 Python 内核，并在其他 ChannelHub 候选根寻找真正含 JSON 的
-  `configs/scenes`；也可分别用 `SUPERRAN_CHANNELHUB` 与
-  `SUPERRAN_SCENES` 指定。拿旧仓库的场景资产不会把物理代码一起降级。
-- **CDL-A~E 都有标准表硬门**。相邻 MSG-Platform 的五张表已修正为
-  38.901 Table 7.7.1-1~5（23/23/24/14/15 个表分量）；superran 启动时仍用独立
-  `spec38901` 副本交叉核对并兼容覆盖旧 checkout，失败即阻断生成。diffuse component
+- **场景资产与源码解耦**。内置场景只依赖可选 Sionna 包；自有 OSM/PLY 数据通过
+  `SUPERRAN_SCENES` 指向独立数据目录，不从其他源码 checkout 静默借用。
+- **CDL-A~E 都有标准表硬门**。`spec38901` 是本仓唯一运行表真相源，覆盖
+  38.901 Table 7.7.1-1~5（23/23/24/14/15 个表分量），启动时逐字段自检，失败即阻断生成。diffuse component
   按 20 rays 展开；CDL-D/E 的 K 已在表的镜面/散射功率差中，只计一次。
   `SUPERRAN_CDL_SPEC=0` 仅用于复现历史非标准结果。
 - **`bs_panel` 决定空间阵列，不再决定邻区干扰是否进入几何预算**。当前
@@ -511,6 +503,7 @@ python tests/test_power_control.py
 python tests/test_physics_contract_extensions.py
 python tests/test_physics_invariants.py
 python tests/test_channel_generation_contract.py
+python tests/test_native_independence.py
 python tests/test_developer_guide.py
 python tests/test_carrier.py
 python tests/test_company_256t.py
@@ -518,7 +511,7 @@ python tests/test_system_sim_tool.py
 python tests/test_benchmarks.py
 ```
 
-当前共 **26 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
+当前共 **27 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
 容易失真的手写“总项数”；以实际运行输出和开发者文档的自动盘点为准。
 
 经典通信正确性套件先冻结判据再运行：
@@ -541,8 +534,8 @@ python scripts/run_test_matrix.py --tier full
 
 ## 致谢
 
-物理计算内核来自 [ChannelHub](https://github.com/wangxz0803-lab/ChannelHub_main)。
-射线追踪基于 [Sionna RT](https://nvlabs.github.io/sionna/)。
+统计信道物理内核由 SuperRAN 独立维护；其设计参考了既有信道平台的窄腰思想。
+可选射线追踪计划直接对接 [Sionna RT](https://nvlabs.github.io/sionna/)。
 工作流设计参考 [superpowers](https://github.com/obra/superpowers)。
 
 ## License

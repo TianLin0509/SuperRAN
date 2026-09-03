@@ -28,6 +28,7 @@ QUICK = (
     "test_lazy_imports.py",
     "test_mcp_server.py",
     "test_mumimo.py",
+    "test_native_independence.py",
     "test_power_control.py",
     "test_results.py",
     "test_rng.py",

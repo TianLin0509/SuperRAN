@@ -147,8 +147,8 @@ def _resolve_lazy_modules() -> None:
     正常导完）—— 前提是 numpy/scipy 已经在主线程预热过。
     这与 channelhub.warmup() 里那段标了"别删"的注释完全一致：它预热的就是
     numpy 和那一串 scipy 子模块。所以 main() 里它必须无条件跑；
-    而 sionna/torch 这类可以安全地按需加载（也确实是按需的，见 MSG-Platform
-    的 sionna_rt._ensure_sionna）。
+    而 sionna/torch 这类只能由未来 direct adapter 在事件循环启动后按需加载；
+    当前 first-party source 不导入它们。
 
     省内存要靠 _apply_blas_thread_cap()（那才是 1.3 GB 的真正来源），
     不能靠推迟 import。文件头部的占位模块只用来让"不跑服务端"的场景
@@ -348,6 +348,11 @@ def sr_capabilities() -> dict[str, Any]:
     from . import hardware as hw
 
     return {
+        "physical_core": "superran-first-party",
+        "physical_core_root": str(ch.project_root()),
+        "external_source_tree": None,
+        # Deprecated display alias retained for clients that parsed it before
+        # the first-party-core migration.
         "channelhub_root": str(ch.channelhub_root()),
         "source_contract": ch.probe_source_contract().as_dict(),
         "engines": caps,

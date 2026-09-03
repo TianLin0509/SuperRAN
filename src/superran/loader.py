@@ -336,7 +336,21 @@ class Dataset:
                 raise IndexError(
                     f"snapshot index {snapshot} outside 0..{self.h_true.shape[1] - 1}"
                 )
-            return np.conj(np.asarray(self.h_true[sample, snapshot]))
+            from . import channelhub as ch  # noqa: PLC0415
+
+            contract = dict(self.summary.get("channel_contract") or {})
+            version = str(
+                contract.get(
+                    "reciprocity_contract_version",
+                    ch.SUPERRAN_LEGACY_RECIPROCITY_CONTRACT,
+                )
+            )
+            truth = np.asarray(self.h_true[sample, snapshot])
+            if version == ch.SUPERRAN_RECIPROCITY_CONTRACT:
+                return truth.copy()
+            if version == ch.SUPERRAN_LEGACY_RECIPROCITY_CONTRACT:
+                return np.conj(truth)
+            raise ValueError(f"unknown reciprocity contract {version!r}")
         if not 0 <= snapshot < source.shape[1]:
             raise IndexError(
                 f"snapshot index {snapshot} outside 0..{source.shape[1] - 1}"

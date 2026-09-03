@@ -299,7 +299,7 @@ def test_collect_ignores_source_precoder_and_records_superran_contract(
     assert "w_dl" not in payload
     assert stats["source_precoder_fields_ignored"] == 1
     contract = first_meta["channel_contract"]
-    assert contract["reciprocity_contract_version"] == ch.SUPERRAN_RECIPROCITY_CONTRACT
+    assert contract["reciprocity_contract_version"] == ch.SUPERRAN_LEGACY_RECIPROCITY_CONTRACT
     assert contract["canonical_channel_axes"] == [
         "time", "rb", "bs_port", "ue_port",
     ]
@@ -524,7 +524,7 @@ def test_end_to_end_company_channel_is_64_by_4_with_real_estimate() -> None:
     assert summary["ue_panel_derived"] is True
     assert dataset.channel_contract["h_est_missing_policy"].startswith("hard_error")
     assert dataset.channel_contract["ofdm_to_slot_reduction"].startswith(
-        "middle-symbol snapshot"
+        "source already provides slot snapshots"
     )
     assert "rs_opportunity_model" in dataset.channel_contract
     assert summary["rs_opportunity"]["slot_accurate"] is True
@@ -596,9 +596,7 @@ def test_parallel_semantics_gate_rejects_stateful_or_unindexed_sources() -> None
 
 
 def test_reciprocity_end_to_end_receive_gain() -> None:
-    """端到端互易增益：上游 SRS 约定 (h_ul = conj(h_dl)) 经 SuperRAN 版本化
-    映射还原后，本地 SVD 打到真实信道上的谱效必须接近理想 CSI——
-    共轭约定若在链路级整体反了，纯映射断言一个都抓不住，只有这条能抓。"""
+    """v2 的物理互易是转置而非 Hermitian；canonical 存储后 UL==DL。"""
     from superran import linklevel as lv
 
     rng = np.random.default_rng(20260817)
@@ -606,18 +604,18 @@ def test_reciprocity_end_to_end_receive_gain() -> None:
              + 1j * rng.standard_normal((2, 8, 8, 4))) / np.sqrt(2))
     noise = ((rng.standard_normal(h_dl.shape)
               + 1j * rng.standard_normal(h_dl.shape)) / np.sqrt(2)) * 0.02
-    h_ul_est = np.conj(h_dl) + noise  # 上游导出的 SRS 估计（合同轴）
+    h_ul_est = h_dl + noise  # v2 canonical [BS,UE] SRS 估计
     mapped = ch.ul_estimate_to_dl_precoding_csi(h_ul_est)
 
     ideal = lv.link_performance(h_dl, snr_db=20.0, method="svd")
     correct = lv.link_performance(h_dl, snr_db=20.0, method="svd",
                                   h_for_precoding=mapped)
-    # 错误约定：不做共轭还原，直接拿 SRS 估计当下行 CSI（漏 conj）
+    # 错误约定：把旧 Hermitian 合同的额外共轭套在 v2 数据上。
     wrong = lv.link_performance(h_dl, snr_db=20.0, method="svd",
-                                h_for_precoding=h_ul_est)
+                                h_for_precoding=np.conj(h_ul_est))
 
     assert correct.spectral_efficiency > wrong.spectral_efficiency, (
-        f"正确共轭约定 {correct.spectral_efficiency:.3f} 必须优于错误约定 "
+        f"正确 transpose-only 约定 {correct.spectral_efficiency:.3f} 必须优于错误约定 "
         f"{wrong.spectral_efficiency:.3f}")
     assert correct.spectral_efficiency > 0.9 * ideal.spectral_efficiency, (
         f"估计噪声预算内应接近理想：{correct.spectral_efficiency:.3f} vs "

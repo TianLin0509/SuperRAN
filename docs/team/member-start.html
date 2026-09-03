@@ -63,7 +63,7 @@
 2. 用 gh auth status 检查登录并自行读取 GitHub 用户名。任务模式已由本 Prompt 明确为 FORMAL；GitHub 身份只决定推送路径，绝不能因为登录账号是 Owner 就改成 REHEARSAL。普通组员账号没有 Fork 时自行创建 Fork，以自己的 Fork 作为 origin；若登录账号是上游 Owner TianLin0509，不要 Fork 自己的仓库，直接 clone 上游到新的隔离目录。两条路径都必须确认名为 upstream 的 remote 指向固定上游，并从 upstream/develop 建立分支：普通组员使用自己的 topic branch，Owner 使用 author/TianLin0509/<任务短名> 普通 topic branch 并推送到上游。两种情况最终都创建非 Draft、标题不带 [REHEARSAL] 的正式 PR 到 develop。
 3. fetch upstream/develop；若远端没有 develop，停止并只说“团队 develop 尚未发布，请联系组长”。从当前远端 develop 记录 base 完整 SHA。不要使用旧 main，也不要在 Prompt 中寻找固定 SHA。
 4. 完整读取 develop 中的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md。确认 workflow 的 schema_version 不低于 1.3.0、author_modes.identity_selects_mode=false，且 formal.marker=`TEAM_MODE: FORMAL`；若缺少任一项，停止且只说“团队 develop 尚未发布显式 Author 模式合同，请联系组长”，绝不能按旧规则继续。仓库代码与当前可执行证据优先于历史文档。
-5. 在仓库内创建独立 .venv，用其 Python 执行 pip install -e .，并按 INSTALL_AGENT.md 自动定位或安装团队有权使用的 ChannelHub。必须执行 channelhub.probe_source_contract()，只有 compatible=true 才继续；缺少来源、授权或出现 blocker 时如实阻断并请组长提供批准版本，不伪造、不静默降级。
+5. 在仓库内创建独立 .venv，用其 Python 执行 pip install -e .。不要搜索或安装外部 ChannelHub/MSG-Platform 源码；统计信道物理内核必须来自本仓。执行 channelhub.probe_source_contract()，只有 compatible=true 才继续；出现 blocker 时如实阻断并请组长修复当前 SuperRAN 版本，不改接其他源码树、不静默降级。
 6. 运行“<该 .venv Python> scripts/install_agent_skills.py --role member”，确认输出 status=pass；随后在当前会话完整读取 skills/superran-member-task/SKILL.md 和 skills/channel-sim/SKILL.md。新会话从 Codex 用户 Skill 目录自动发现，当前会话直接按已读取版本执行。
 7. 用同一个 .venv Python 的绝对路径注册或校正 superran MCP，服务脚本使用仓库 scripts/mcp_server.py 的绝对路径。验证 MCP 实际有 35 个工具。不得使用裸 python 或相对路径注册。
 8. 运行 python tests/test_lazy_imports.py 与 python tests/test_carrier.py。不要给我粘贴安装日志；成功只说“环境已准备好”，失败只问我唯一必须亲自处理的动作。
