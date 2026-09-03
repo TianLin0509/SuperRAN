@@ -1064,6 +1064,11 @@ OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工
 没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
 零时延并在 notes 里说明。**k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。**
 
+唯一一次重传发出后，其终次 ACK/NACK 也保留为 `await_final_feedback`，直到同样的反馈
+生效时刻才释放单 HARQ 进程。终次反馈只做释放：**不再进入首传 OLLA/Rank 学习，也不
+触发第三次发送**。DDDSU 的最小反例是 t0 首传 NACK、t5 重传，下一份新 TB 最早 t10，
+不能在 t6 提前发送。
+
 顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 先用
 `sinr_tx_db` 反折 `mcs_without_olla`，再调 `apply_olla_mcs`），即实际调度下去的档位。
 **但它的分母含重传**，而重传重放的是冻结的旧 MCS，所以它不是"链路自适应现在选到

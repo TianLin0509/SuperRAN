@@ -142,6 +142,7 @@ def test_guide_is_offline_utf8_hash_routed_and_accessible() -> None:
         "常数来自现场实现规格，采样粒度是本项目的显式选择",
         "ACK/NACK 要等上行时隙",
         "首传 ACK 与 NACK 都建立 in-flight 状态",
+        "t0 首传 NACK → t5 重传 → t10 终次反馈",
         "尚未经现场测量/设备数据标定",
         "解码 SINR 只在实际授予的 RBG 上取",
         "小包用全带均值判误块，两个方向都会错",

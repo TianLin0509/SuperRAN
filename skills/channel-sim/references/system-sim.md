@@ -461,6 +461,10 @@ BF Gain 来自当前矩阵计算，CQI/OLLA 参数仍是版本化工程近似，
 交给 OLLA 与 RankController。这样 ACK 连发不会穿透反馈窗口，rank 快速回退也不会
 提前看到尚未到达的 NACK。
 
+唯一一次重传的终次 ACK/NACK 也占住进程直到反馈生效；终次反馈只释放进程，不再
+更新 OLLA/Rank，也不产生第三次发送。DDDSU 下 t0 首传 NACK、t5 重传后，下一份新 TB
+最早只能在 t10 发送，不能在 t6 抢跑。
+
 `experience_v2` 目前只接受 `preset_20b_256qam / MCS table 3` 预置表，Table 1/2
 传入后硬失败。代码保留显式 `mcs_table/profile` 边界与带数据指纹的 BLER cache key，
 但必须等下一套 MCS、TBLER/TBS 元数据完整接入后才允许扩展。

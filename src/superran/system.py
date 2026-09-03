@@ -991,7 +991,8 @@ class SystemConfig:
                     "ACK/NACK rides the first U slot after the transmission; "
                     "ACK and NACK both hold the single process in flight; OLLA, "
                     "rank feedback and retransmission eligibility start at the "
-                    "first D/S slot after that U slot"
+                    "first D/S slot after that U slot; a retransmission's terminal "
+                    "feedback only releases the process and causes no more learning/TX"
                     if self.harq_feedback_delay and "U" in self.tdd_pattern.upper()
                     else "no uplink slot in the pattern: zero-delay feedback"),
                 "max_retransmissions": 1,
@@ -2783,8 +2784,10 @@ class _LegacyHarqTb:
     was_mu: bool
     feedback: ap.FirstTxFeedback
     #: ``await_feedback`` blocks every new TB.  A received NACK becomes
-    #: ``retx_ready``; a received ACK removes the process immediately.
+    #: ``retx_ready``.  After that retransmission, ``await_final_feedback``
+    #: blocks new TBs until its terminal ACK/NACK reaches the gNB.
     state: str = "await_feedback"
+    final_feedback_tti: int | None = None
 
     @property
     def ready_tti(self) -> int:
@@ -3079,6 +3082,14 @@ def simulate(
         # 到期的 ACK/NACK 先同时交给 OLLA 与 RankController，再做本 TTI
         # 的发送决策。ACK 删除进程；NACK 转为唯一一次重传就绪状态。
         for _u_fb, _pending_fb in list(harq_pending.items()):
+            if _pending_fb.state == "await_final_feedback":
+                if _pending_fb.final_feedback_tti is None:
+                    raise RuntimeError("终次 HARQ 反馈状态缺少生效 TTI")
+                if tti >= int(_pending_fb.final_feedback_tti):
+                    # 终次 ACK/NACK 只释放单进程；它不是首传反馈，不能再次
+                    # 进入 OLLA/rank 学习，也不能触发第三次发送。
+                    harq_pending.pop(_u_fb, None)
+                continue
             if (_pending_fb.state != "await_feedback"
                     or not _pending_fb.feedback.due(tti)):
                 continue
@@ -3110,7 +3121,8 @@ def simulate(
         _fb_wait_skips += sum(
             1 for u in range(n_ue)
             if tr.has_data(u) and u in harq_pending
-            and harq_pending[u].state == "await_feedback")
+            and harq_pending[u].state in (
+                "await_feedback", "await_final_feedback"))
         blocked = sum(1 for u in range(n_ue) if tr.has_data(u)
                       and tables[u].outage is not None and tables[u].outage[snap])
         outage_tti += blocked
@@ -3317,8 +3329,12 @@ def simulate(
                 else:
                     retx_nack[u] += 1
                     nack_final[u] += 1
-                # 无论 ACK/NACK 都结束本次 HARQ；失败字节仍在队列，后续作为新 TB。
-                harq_pending.pop(u, None)
+                # ACK/NACK outcome 已抽样，但 gNB 要等终次反馈回来才释放这个
+                # 单 HARQ 进程。它不会再次更新 OLLA/rank，也不会再重传。
+                harq_pending[u] = replace(
+                    pend, state="await_final_feedback",
+                    final_feedback_tti=(
+                        tti + int(_fb_offsets[tti % _pat_len])))
                 sched_cnt[u] += 1
                 mcs_sum[u] += m
                 rank_sum[u] += r
@@ -3377,6 +3393,18 @@ def simulate(
     users: list[UeKpi] = []
     small_thp: list[float] = []
     large_thp: list[float] = []
+
+    def _terminal_outcome_unresolved(ue: int) -> bool:
+        pending = harq_pending.get(int(ue))
+        if pending is None:
+            return False
+        # A first ACK and either terminal retransmission outcome are already
+        # sampled at the decoder.  Only a first NACK that has not yet completed
+        # its single retransmission is right-censored for residual BLER.
+        return not (
+            pending.state == "await_final_feedback"
+            or (pending.state == "await_feedback" and pending.first_ack)
+        )
     for u in range(n_ue):
         _warmup_tti = kpi.resolve_warmup_tti(sys_cfg.tti_ms)
         _done = [b for b in tr.done[u] if b.start_tti >= _warmup_tti]
@@ -3402,7 +3430,7 @@ def simulate(
             retx_bler=float(retx_nack[u] / max(retx_cnt[u], 1)),
             residual_bler=float(
                 nack_final[u]
-                / max(tx_first[u] - int(u in harq_pending), 1)),
+                / max(tx_first[u] - int(_terminal_outcome_unresolved(u)), 1)),
             sched_tti=int(sched_cnt[u]), retx_tti=int(retx_cnt[u]),
         ))
 
@@ -3435,11 +3463,14 @@ def simulate(
         "retx_attempts": int(np.sum(retx_cnt)),
         "retx_nacks": int(np.sum(retx_nack)),
         "residual_bler": float(
-            np.sum(nack_final) / max(np.sum(tx_first) - len(harq_pending), 1)),
+            np.sum(nack_final) / max(
+                np.sum(tx_first) - sum(
+                    _terminal_outcome_unresolved(u) for u in range(n_ue)), 1)),
         "pending_harq_tb_at_end": int(len(harq_pending)),
         "residual_bler_definition": (
-            "failed unique retransmissions / initial TBs whose HARQ outcome is "
-            "observed; end-of-run pending TBs are right-censored"),
+            "failed unique retransmissions / initial TBs with a sampled terminal "
+            "decoder outcome; only first-NACK TBs still awaiting/completing their "
+            "single retransmission are right-censored"),
         "dl_tti": dl_tti, "scheduled_tti": busy_tti,
         "occupancy": busy_tti / max(dl_tti, 1),
         "mu_share": mu_tti / max(busy_tti, 1),
@@ -3629,6 +3660,8 @@ def simulate(
          f"{list(_fb_offsets)} 个 TTI。**重传还要额外等到同类型时隙**"
          "（S 上发的 TB 要等下一个 S），两个约束取交集。"
          "首传 ACK/NACK 都占住单 HARQ 进程，反馈前同 UE 不发新 TB；"
+         "重传终次 ACK/NACK 同样等反馈才释放进程，但不再更新 OLLA/rank、"
+         "也不触发第三次发送；"
          "k1/k2、PUCCH 与并行 HARQ 进程未建模。")
         if _fb_modelled else
         ("**HARQ 反馈按零时延处理**：TDD 图案里没有 U 时隙，或反向对照显式"

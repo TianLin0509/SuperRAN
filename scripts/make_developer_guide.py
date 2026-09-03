@@ -4451,6 +4451,9 @@ rank1 / rank1 / rank2——门限是<strong>严格大于</strong>。</p></div>
 但反馈到达前 gNB 不可见，不能更新 OLLA、不能让 RankController 回退、也不能给同一 UE
 发新 TB。等待段被单独计数为
 <code>harq_feedback_wait_skips</code>。</p>
+<p>唯一一次重传发出后，终次 ACK/NACK 也保持 in-flight 到反馈生效；它只释放进程，
+<strong>不再进入首传 OLLA/Rank 学习，也不触发第三次发送</strong>。DDDSU 最小时间线为
+t0 首传 NACK → t5 重传 → t10 终次反馈后才可发下一份新 TB，t6 必须空等。</p>
 <p><strong>重传还有第二个、独立的约束：时隙类型要一致。</strong> D 与 S 的可用 RE
 不同，同一份 MCS/RBG/rank 在两种时隙上算出的 TBS 也不同，冻结的 TB 只能回到同
 类型时隙重发。两个约束取交集，所以上面那张偏移表只精确描述 <strong>OLLA</strong>

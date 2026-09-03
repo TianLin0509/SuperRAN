@@ -197,6 +197,56 @@ def experiment_feedback_delay() -> dict:
     assert all(row == {"scheduled_tti": 2, "feedback_wait_skips": 6}
                for row in ack_runs.values())
 
+    # Terminal retransmission ACK/NACK also stays in flight until feedback.
+    # It only releases the process: no second OLLA/rank vote and no third TX.
+    terminal_runs = {}
+    old_system_bler, old_experience_bler = sy._bler_lookup, ex._bler_lookup
+    old_retx_bler = la.harq_retransmission_bler
+    try:
+        sy._bler_lookup = lambda _mcs, _sinr: 1.0
+        ex._bler_lookup = lambda _mcs, _sinr: 1.0
+        for terminal_ack in (True, False):
+            terminal_bler = 0.0 if terminal_ack else 1.0
+
+            def terminal_retx(mcs, sinr, *, combining="ir", table=3,
+                              _bler=terminal_bler):
+                return {
+                    "bler": float(_bler), "lookup_mcs": int(mcs),
+                    "lookup_sinr_db": float(sinr),
+                    "combining": str(combining), "table": int(table),
+                }
+
+            la.harq_retransmission_bler = terminal_retx
+            for mode in ("capacity", "experience"):
+                result = _run(
+                    one, sched=sy.SchedulerConfig(mu_enabled=False),
+                    sys_cfg=sy.SystemConfig(
+                        evaluation_mode=mode, duration_s=0.006,
+                        tdd_pattern="DDDSU", seed=651))
+                key = f"{mode}/retx_{'ack' if terminal_ack else 'nack'}"
+                terminal_runs[key] = {
+                    "scheduled_tti": int(result.cell["scheduled_tti"]),
+                    "feedback_wait_skips": int(
+                        result.cell["harq_feedback_wait_skips"]),
+                    "olla_mcs_mean": round(
+                        float(result.cell["olla_mcs_mean"]), 6),
+                    "experience_timeline": (
+                        [(row["tti"], row["harq_tx_mode"])
+                         for row in result.diagnostics["allocation_sample"]]
+                        if mode == "experience" else None),
+                }
+    finally:
+        sy._bler_lookup, ex._bler_lookup = old_system_bler, old_experience_bler
+        la.harq_retransmission_bler = old_retx_bler
+    assert all(row["scheduled_tti"] == 3
+               and row["feedback_wait_skips"] == 7
+               and abs(row["olla_mcs_mean"] + 0.09) < 1e-12
+               for row in terminal_runs.values())
+    assert all(
+        row["experience_timeline"] in (
+            None, [(0, "newtx"), (5, "retx"), (10, "newtx")])
+        for row in terminal_runs.values())
+
     # Delayed NACK must not trip the rank monitor at send time.
     ctl = ap.RankController(
         ap.RankConfig(
@@ -238,6 +288,7 @@ def experiment_feedback_delay() -> dict:
         "question": "ACK/NACK 等上行时隙这件事有没有真的进入调度与 OLLA",
         "arms": arms,
         "forced_ack_single_process": ack_runs,
+        "terminal_retransmission_feedback": terminal_runs,
         "rank_nack_feedback_counterexample": {
             "rank_before_feedback": ranks_before_feedback,
             "fallback_tti": 10,
@@ -246,7 +297,8 @@ def experiment_feedback_delay() -> dict:
         "interpretation": (
             "开启时 DDDSU 逐相位偏移 5/4/3/2 个 TTI，并确实产生等待反馈而"
             "不参与调度的 TTI；首传 ACK 与 NACK 都占住单进程，只有反馈到达时"
-            "才交给 OLLA/rank。关闭时偏移全为 1、等待计数为 0，回到反向对照。"),
+            "才交给 OLLA/rank。终次重传 ACK/NACK 也等反馈后才释放进程，但不再"
+            "进入 OLLA/rank、也不触发更多重传。关闭时偏移全为 1、等待计数为 0。"),
         "not_modelled": "k1/k2 取值、PUCCH 资源、并行 HARQ 进程。",
     }
 

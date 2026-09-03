@@ -655,6 +655,7 @@ class _HarqTb:
     first_mode: str
     feedback: ap.FirstTxFeedback
     state: str = "await_feedback"
+    final_feedback_tti: int | None = None
 
     @property
     def ready_tti(self) -> int:
@@ -2249,6 +2250,14 @@ def simulate_experience(
         # 到期的 ACK/NACK 先同时交给 OLLA 与 RankController，再做本 TTI
         # 的决策。ACK 删除进程；NACK 转为唯一一次重传就绪状态。
         for _u_fb, _pending_fb in list(harq_pending.items()):
+            if _pending_fb.state == "await_final_feedback":
+                if _pending_fb.final_feedback_tti is None:
+                    raise RuntimeError("终次 HARQ 反馈状态缺少生效 TTI")
+                if tti >= int(_pending_fb.final_feedback_tti):
+                    # 终次反馈只释放进程；不再进入首传 OLLA/rank 学习，
+                    # 也不产生第三次传输。
+                    harq_pending.pop(_u_fb, None)
+                continue
             if (_pending_fb.state != "await_feedback"
                     or not _pending_fb.feedback.due(tti)):
                 continue
@@ -2287,7 +2296,8 @@ def simulate_experience(
             feedback_wait_skips += sum(
                 1 for u in range(n_ue)
                 if tr.has_data(u) and u in harq_pending
-                and harq_pending[u].state == "await_feedback")
+                and harq_pending[u].state in (
+                    "await_feedback", "await_final_feedback"))
         blocked_this_tti = sum(
             1
             for u in range(n_ue)
@@ -2624,8 +2634,12 @@ def simulate_experience(
                     if pending_tb is not None and pending_tb.first_tti >= warmup:
                         retx_count_measured[u] += 1
                         retx_nack_count_measured[u] += int(not ack)
-                    # 只允许一次重传；失败 payload 留在 DRB 队列，之后成为新 TB。
-                    harq_pending.pop(u, None)
+                    # 只允许一次重传。终次 ACK/NACK 在发送时抽样，但 gNB
+                    # 要等反馈回来才释放单进程；失败 payload 之后成为新 TB。
+                    harq_pending[u] = replace(
+                        pending_tb, state="await_final_feedback",
+                        final_feedback_tti=(
+                            tti + int(feedback_offsets[tti % pattern_len])))
                 else:
                     tx_count[u] += 1
                     nack_count[u] += int(not ack)
@@ -2856,6 +2870,18 @@ def simulate_experience(
         int(u in harq_pending and harq_pending[u].first_tti >= warmup)
         for u in range(n_ue)
     ], dtype=int)
+    unresolved_terminal_measured = np.asarray([
+        int(
+            u in harq_pending
+            and harq_pending[u].first_tti >= warmup
+            and not (
+                harq_pending[u].state == "await_final_feedback"
+                or (harq_pending[u].state == "await_feedback"
+                    and harq_pending[u].first_ack)
+            )
+        )
+        for u in range(n_ue)
+    ], dtype=int)
     users: list[dict[str, Any]] = []
     all_wait: list[float] = []                 # arrival object, FIFO
     all_completion: list[float] = []           # arrival object, FIFO
@@ -3042,7 +3068,8 @@ def simulate_experience(
                 / max(retx_count_measured[u], 1)),
             "residual_bler": float(
                 retx_nack_count_measured[u]
-                / max(tx_count_measured[u] - pending_measured[u], 1)),
+                / max(tx_count_measured[u]
+                      - unresolved_terminal_measured[u], 1)),
             "pending_harq_tb_at_end": int(pending_measured[u]),
             "sched_tti": int(sched_cnt_measured[u]),
             "grant_prb_equivalent": float(
@@ -3093,7 +3120,8 @@ def simulate_experience(
     retx_total = int(np.sum(retx_count_measured))
     retx_nack_total = int(np.sum(retx_nack_count_measured))
     pending_harq_total = int(np.sum(pending_measured))
-    observed_harq_total = max(tx_total - pending_harq_total, 0)
+    observed_harq_total = max(
+        tx_total - int(np.sum(unresolved_terminal_measured)), 0)
 
     def _finalize_adaptation_stats() -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -3332,9 +3360,9 @@ def simulate_experience(
             retx_nack_total / max(observed_harq_total, 1)),
         "pending_harq_tb_at_end": pending_harq_total,
         "residual_bler_definition": (
-            "failed unique retransmissions / initial TBs whose HARQ outcome is "
-            "observed in the measurement cohort; end-of-run pending TBs are "
-            "right-censored"),
+            "failed unique retransmissions / initial TBs with a sampled terminal "
+            "decoder outcome in the measurement cohort; only first-NACK TBs "
+            "still awaiting/completing their single retransmission are right-censored"),
         "dl_tti": int(dl_tti),
         "scheduled_tti": int(busy_tti),
         "occupancy": float(busy_tti / max(dl_tti, 1)),
@@ -3644,7 +3672,8 @@ def simulate_experience(
                 "ACK/NACK rides the first U slot after the transmission; the "
                 "ACK and NACK both hold the single process in flight; OLLA, "
                 "rank feedback and retransmission eligibility start at the "
-                "first D/S slot after that U slot"
+                "first D/S slot after that U slot; terminal retransmission "
+                "feedback only releases the process and causes no more learning/TX"
                 if feedback_modelled
                 else "zero-delay feedback (pattern has no U slot, or the "
                      "delay model is switched off for a reverse control)"),

@@ -1834,6 +1834,73 @@ for _feedback_mode, _run_feedback in _feedback_runs.items():
     check(_feedback_calls[_feedback_mode] == [5],
           f"{_feedback_mode}：首个 ACK 只在反馈到达 t5 交给 OLLA/rank，不在 t0 偷看")
 
+# 重传 ACK/NACK 也必须等终次反馈才释放单进程，但终次反馈不再进入首传
+# OLLA/rank 学习。强制 t0 首传 NACK、t5 重传，下一份新 TB 只能在 t10 发。
+_terminal_runs = {}
+_terminal_feedback_calls = {}
+_old_terminal_system_bler = sysm._bler_lookup
+_old_terminal_experience_bler = expm._bler_lookup
+_old_terminal_retx_bler = la.harq_retransmission_bler
+_old_terminal_record = ap.RankController.record_feedback
+_terminal_key = ""
+
+
+def _terminal_spy(self, ue, **kwargs):
+    if kwargs.get("feedback_tti") is not None:
+        _terminal_feedback_calls.setdefault(_terminal_key, []).append(
+            int(kwargs["feedback_tti"]))
+    return _old_terminal_record(self, ue, **kwargs)
+
+
+try:
+    sysm._bler_lookup = lambda _mcs, _sinr: 1.0
+    expm._bler_lookup = lambda _mcs, _sinr: 1.0
+    ap.RankController.record_feedback = _terminal_spy
+    for _terminal_ack in (True, False):
+        _terminal_bler = 0.0 if _terminal_ack else 1.0
+
+        def _terminal_retx(mcs, sinr, *, combining="ir", table=3,
+                           _bler=_terminal_bler):
+            return {
+                "bler": float(_bler), "lookup_mcs": int(mcs),
+                "lookup_sinr_db": float(sinr), "combining": str(combining),
+                "table": int(table),
+            }
+
+        la.harq_retransmission_bler = _terminal_retx
+        for _terminal_mode in ("capacity", "experience"):
+            _terminal_key = f"{_terminal_mode}/retx_{'ack' if _terminal_ack else 'nack'}"
+            _terminal_runs[_terminal_key] = sysm.simulate(
+                [_amc_table],
+                sys_cfg=sysm.SystemConfig(
+                    evaluation_mode=_terminal_mode, duration_s=0.006,
+                    tdd_pattern="DDDSU", harq_feedback_delay=True, seed=651),
+                traffic=sysm.TrafficConfig(model="full_buffer"),
+                sched=sysm.SchedulerConfig(
+                    mu_enabled=False, olla_enabled=True,
+                    rank=ap.RankConfig(fixed_rank=1)),
+                kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="full"),
+            )
+finally:
+    sysm._bler_lookup = _old_terminal_system_bler
+    expm._bler_lookup = _old_terminal_experience_bler
+    la.harq_retransmission_bler = _old_terminal_retx_bler
+    ap.RankController.record_feedback = _old_terminal_record
+
+for _terminal_key, _terminal_run in _terminal_runs.items():
+    check(_terminal_run.cell["scheduled_tti"] == 3
+          and _terminal_run.cell["harq_feedback_wait_skips"] == 7,
+          f"{_terminal_key}：t5 重传后继续占住进程，下一份新 TB 最早 t10")
+    check(_terminal_feedback_calls[_terminal_key] == [5],
+          f"{_terminal_key}：终次反馈只释放进程，不再次进入首传 OLLA/rank 学习")
+    check(abs(float(_terminal_run.cell["olla_mcs_mean"]) + 0.09) < 1e-12,
+          f"{_terminal_key}：重传 ACK/NACK 都不二次更新 OLLA")
+    if _terminal_key.startswith("experience/"):
+        _terminal_alloc = _terminal_run.diagnostics["allocation_sample"]
+        check([(row["tti"], row["harq_tx_mode"]) for row in _terminal_alloc]
+              == [(0, "newtx"), (5, "retx"), (10, "newtx")],
+              f"{_terminal_key}：逐 TTI 轨迹明确没有 t6 新 TB，也没有第三次重传")
+
 # 快速回退的 NACK 门限只能在反馈到达后触发。先升到 rank2，在 t1 发送一个
 # NACK；t2..t4 必须保持 rank2，t5 将该 feedback 应用后才允许回退。
 _delayed_rank = ap.RankController(
