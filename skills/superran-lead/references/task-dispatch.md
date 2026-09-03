@@ -14,20 +14,30 @@ decisions:
 
 Give a recommendation when information is missing. Then show:
 
+Before the card, restate the boundary as “我理解要实现的是……，不等于……”. For any
+non-obvious term, keep the standard term and add one plain-language sentence plus one
+task-specific example. Mark code facts, lead decisions, recommendations, and open
+assumptions separately.
+
 | 组长任务卡 | 内容 |
 |---|---|
 | 任务名称 | |
-| 给哪位组员 | 未指定时写“待组长分配” |
+| 给哪位实现者 | 普通组员 / 组长本人 / 未指定时写“待组长分配” |
 | 一句话目标 | |
 | 必守物理边界 | |
 | 验收与反向对照 | |
 | 不做什么 | |
 | 与当前 PR 的依赖/冲突 | 无 / concise item |
 
-After the lead confirms, return one plain message to send the member:
+After the lead confirms, return one plain message to send the Author. If assigned to the
+lead, explicitly require a new formal Author session rather than continuing inside the
+management/review session:
 
 > 请打开组员快速开始页，把里面唯一的 Prompt 发给你的 Agent。Agent 问“想完善
 > 什么”时回答：<one-sentence task>. 后续按无线专业判断回答即可。
+
+The formal page is valid for both ordinary members and the lead. It must carry
+`TEAM_MODE: FORMAL`; GitHub login affects Fork versus upstream topic branch only.
 
 Create or update a GitHub Issue only when the lead explicitly asks to record the task.
 Do not assign source files or implementation details to the human member; their Agent
