@@ -423,6 +423,8 @@ IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在�
 表1的64QAM和表2的标准256QAM只在调用方显式指定时使用。
 **`build_link_tables` 硬拒绝非表 3**：只有 preset_20b_256qam 同时具备 28 档 NewTx
 曲线与内部 CQI 映射，混用会让量化门限与选档口径各用一张表且不报错。
+这是 **breaking migration**：旧代码若调用 `build_link_tables(table=1/2)`，现在会在建表
+入口立即失败；系统/体验路径请迁移到 `table=3`，Table 1/2 仅保留在显式链路级接口。
 `target_bler` 可配，但必须落在 28 档曲线的**共同实测区间 [0.001, 0.998]** 内，
 越界提前硬失败而不是在深层抛一个看不出哪档的 ValueError。注意这条链里目标 BLER
 **开环几乎抵消**（它同时出现在 CQI→Γ 与 Γ→MCS 两侧，两次平移方向相同），真正
@@ -840,6 +842,10 @@ MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、**误�
 `h_true` 上，对方的流进干扰协方差。逐 TTI 只查表，矩阵运算全在建表阶段
 （实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s）。
 
+开 `pair_table` 前会校验完整、双向、维度一致的 pair graph；三 UE 缺任意一条边（例如
+1↔2）都硬失败。MU 准入的 predicted BLER 使用叠加 **SU+MU OLLA 后的实际发送 MCS**；
+OLLA 前基准 MCS 即使不过 0.5，也不能替实际发送档放行配对。
+
 **MU 的代价有两半，必须同时记账**：一半是「发得更保守」（MCS 往下走），
 一半是「更容易错」（同一档 MCS 的误块概率更高）。历史的 capacity 只把 TBS 乘一个
 `measure_mu_gain()` 测出的标量 `mu_se_ratio`，等于「包变小但一点也不更容易错」，
@@ -1008,7 +1014,8 @@ API的表行0映射MCS0、对应上报CQI1；真实上报**CQI=0是out-of-range*
 **CQI 的长期滤波是一阶 IIR，不是累计平均**（2026-09-02 换的口径）：
 `s <- s + λ(x - s)`，第一次上报直接初始化状态。旧的 expanding mean 记忆无限长，
 跑得越久新测量权重越小，移动性或负载变化时 CQI 根本不跟踪。λ 由
-`CsiConfig.cqi_filter_lambda` 给，**默认 0.25 是工程默认、尚未按现场标定**，
+`CsiConfig.cqi_filter_lambda` 给，**0.25 已由负责人确认为当前工程默认，但尚未经现场
+测量/设备数据标定**，
 必须随结果报出来；λ=1 关闭滤波可作反向对照。`cqi_filter_domain` 默认
 `cqi_index`（现场口径：在量化后的 CQI 档上滤波），`sinr_db` 只用于量化前后的
 口径消融，两个域的结果不能混着比。
@@ -1037,6 +1044,10 @@ CQI/BF/OLLA 标量时 BLER 必须是 unknown，不能拿 AMC 预测坐标查出�
 必须重新跑收敛标定；2026-08-23 之前 dB-domain OLLA 的 BLER/速率数字仅供历史
 追溯，不能写成当前实测结论。
 
+当前**没有**实现“每流固定 15 dB BF 惩罚”、CQI floor/reset 状态机或已标定的现场
+OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工程近似。不得据此声称
+现场等价，也不得在本次迁移中擅自补成另一套未确认算法。
+
 **`olla_enabled=False` 只去掉"叠加偏置"这一步，决策坐标不变。** 早先它会掉进
 另一条分支、改用**真实接收 SINR** 反折 MCS——那是上帝视角：首传 BLER 被构造在
 目标值上，CSI 老化与 BF 失配的代价整个消失，于是"开/关 OLLA"的消融同时换掉了
@@ -1048,7 +1059,9 @@ CQI/BF/OLLA 标量时 BLER 必须是 unknown，不能拿 AMC 预测坐标查出�
 偏移由 TDD 图案算出（`amc_policy.feedback_effective_offsets`），`DDDSU` 在
 30 kHz 下逐相位是 5/4/3/2 个 TTI；两个周期即 8 下行配 2 上行，与现场 8:2 一致。
 等待期间该 UE 因单 HARQ 进程模型不参与调度，单独计数为
-`harq_feedback_wait_skips`。图案里没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
+`harq_feedback_wait_skips`。**ACK 与 NACK 都建立 in-flight 状态**，所以 ACK 也不能在
+反馈回来前连续发新 TB；抽样结果只能在反馈到达时交给 OLLA 与 RankController。图案里
+没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
 零时延并在 notes 里说明。**k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。**
 
 顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 先用

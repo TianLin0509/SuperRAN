@@ -421,7 +421,7 @@ def decision_cards() -> str:
         ("D5 · burst 边界", "必须拍板", "大包按 RLC DRB buffer busy period；small 1500B 是小包代理，不等同 PDCP SDU。CBR 每 TTI 字节块也只是工程对象。", "推荐把 FTP 文件定义为 large busy period；small KPI 用 arrival object wait/completion/PDB，不报 DRB throughput。"),
         ("D6 · SRS 历史长度", "阻塞绝对标定", "体验数据只有 8×5ms=40ms 历史；10ms SRS ×17 RBG 跳频需要约170ms。超龄 RBG 会钳到最早快照，5s 主循环还周期回放8快照。", "相对 PF 记账对比可保留（两臂共用同一 trace）；上线绝对 KPI 前生成 ≥40 快照/UE，或本阶段明确改用全带 non-hopping SRS。"),
         ("D7 · 邻区真实波束", "阻塞空间干扰标定", "数据保存受害 UE 的交叉信道，但没有邻区被服务 UE 的信道/实际 W。当前默认 W 与交叉信道独立，并由几何 SIR 重标总功率。", "推荐下一版数据同时保存 neighbor served-UE channel 与 scheduler W；当前结果标注 spatial-shape approximation。"),
-        ("D8 · PMI/CQI 周期", "建议确认", "PMI 按 CSI report 周期更新（默认 20 ms），CQI 用一阶 IIR（λ 默认 0.25，工程默认未标定）；都因果。", "推荐由现场给 PMI/CQI 周期与滤波系数 λ；HARQ 的 ACK/NACK 反馈时延已按 TDD 图案建模。"),
+        ("D8 · PMI/CQI 周期", "建议确认", "PMI 按 CSI report 周期更新（默认 20 ms）；CQI 用一阶 IIR，λ=0.25 已确认为工程默认但尚未经现场测量/设备数据标定；都因果。", "推荐后续用现场数据标定 PMI/CQI 周期与 λ；HARQ 的 ACK/NACK 反馈时延已按 TDD 图案建模。"),
         ("D9 · TBS RE 开销", "阻塞绝对容量标定", "TBS 量化遵循38.214，但 D slot 用12数据符号/RB，S slot乘0.7；未精确建 DMRS/PTRS/CORESET。MCS 用预置 20B profile。", "推荐把实际 slot format、DMRS type/ports、PTRS、CORESET overhead 做成 profile 并回归 TBS 表。"),
         ("D10 · 逐 RBG SINR 与 MU", "可延期", "本轮全带 SINR 判 BLER，体验模式关闭 MU。逐RBG信道会扩 UeLinkTable 维度；MU 会引入配对、功率与层数耦合。", "推荐先把 SU/全带链条校准完，再分别立 P1-A（逐RBG）与 P1-B（MU）实验，避免同时改数据结构。"),
         ("D11 · Type-I 完整码本", "建议确认", "当前是 Type-I-style 单面板列码本增量贪心，不冒充完整38.214多层/子带/多面板码本。", "若用于标准对标，接入完整 RI/PMI 枚举与反馈开销；当前只适合作为工程基线。"),
@@ -622,7 +622,7 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 
 <section><div class="section-head"><h2><span class="num">2</span>Phase A：SRS、PMI、CQI、rank 与链路表</h2></div>
 <div class="formula">{F_AGE}</div><p>CSI 陈旧时长量化必须向上取整。2ms处理时延在5ms快照上是1个快照，不允许 round 成0。每个快照的 SVD 与 PMI 都只看同一份 stale h_prec，真实当前信道只用于评估。</p>
-<div class="formula">{F_CQI}</div><p>CQI 采用只吃 0..s 的一阶 IIR（λ 默认 0.25，工程默认、待现场标定）。随后按 CQI 门限 + BF gain 得到发送侧 SINR/MCS；rank 由显式策略给出（默认固定 rank2），不再逐快照跟随瞬时最优 rank。</p>
+<div class="formula">{F_CQI}</div><p>CQI 采用只吃 0..s 的一阶 IIR（λ=0.25 已由负责人确认为工程默认，但尚未经现场测量/设备数据标定）。随后按 CQI 门限 + BF gain 得到发送侧 SINR/MCS；rank 由显式策略给出（默认固定 rank2），不再逐快照跟随瞬时最优 rank。</p>
 <div class="scroll"><table><thead><tr><th>UE</th><th>几何 SINR</th><th>IoT</th><th>平均 CSI lag</th><th>选 rank</th><th>gNB SE</th><th>true SINR</th><th>CQI</th><th>Tx SINR</th><th>Tx MCS</th></tr></thead><tbody>{''.join(rank_rows)}</tbody></table></div>
 <div class="callout warn"><b>绝对标定限制：</b>代表快照的平均 lag 是17 snapshots≈85ms，但现有每 UE 只有8×5ms=40ms历史；超出部分钳到最早快照。A/B 的 PF 因果对比共享同一链路表，因此主对比仍可解释；绝对 CSI-aging / 现场体验值不能据此定标。待决策 D6 给出修法。</div>
 {source_excerpt('src/superran/csi_aging.py','ratio = np.maximum(staleness',before=6,after=8,title='实际实现：CSI 陈旧时长因果量化')}

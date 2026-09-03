@@ -3608,9 +3608,9 @@ def csi_page() -> Page:
     body += """
 <p>系统链路表只在 report instant 更新宽带 PMI/CQI，中间 TTI 复用最后一份已到达报告。
 CQI 的长期滤波是**一阶 IIR**：<code>s ← s + λ(x − s)</code>，第一次上报直接初始化状态。
-系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>，该取值已对照现场 CQI
-仿真核对确认（2026-09-02）；作用域 <code>cqi_filter_domain</code> 默认在量化后的 CQI 档上，
-<strong>这一项仍是工程默认、未经现场确认</strong>。两者都随
+系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>：该取值已由负责人确认
+为当前工程默认，但<strong>尚未经现场测量/设备数据标定</strong>；作用域
+<code>cqi_filter_domain</code> 默认在量化后的 CQI 档上。两者都随
 <code>CsiConfig.as_dict()</code> 一起上报，<code>λ=1</code> 可作不滤波的反向对照。
 CSI 报告本身的额外 feedback latency 仍未单独建模（报告在其 report snapshot 到达）；
 <strong>HARQ 的 ACK/NACK 反馈时延是另一件事，已经建模</strong>，见
@@ -4245,6 +4245,11 @@ MCS-domain OLLA。历史 <code>*_before_db</code> 字段名仅为 API 兼容保�
 元数据，会把两个物理口径拼在一起。<code>TbsLookup.build(..., mcs_table=...)</code>
 和链路表仍显式保留 table/profile 接口；未来要扩展时按完整 profile 插件增加，
 不需要改调度主循环。</p>
+<aside class="callout danger"><span class="callout-icon">!</span><div>
+<strong>BREAKING migration：失败已前移到建表入口</strong>
+<p><code>build_link_tables(table=1/2)</code> 现在立即拒绝，不再先生成一张看似可用的
+系统链路表、到体验主循环才失败。旧系统调用请迁移到 <code>table=3</code>；Table 1/2
+只用于显式链路级分析，不能接入当前系统 TBLER profile。</p></div></aside>
 <h2>TBS 为什么不能用除法反推 RBG</h2>
 """ + F_TBS + F_RBG_SEARCH
     body += """
@@ -4320,10 +4325,10 @@ BF Gain，得到一个只属于基站的预测坐标；在这个坐标上反折�
         "warn", "从累计平均换成一阶 IIR 是一次口径变更",
         "<p>早先的滤波是对全部历史上报取平均（expanding mean）：跑得越久，新测量的"
         "权重越小，移动性或负载变化时 CQI 根本不跟踪。现在是现场口径的一阶 IIR，"
-        "系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>——该取值已对照"
-        "现场 CQI 仿真核对确认（2026-09-02）。<strong>作用域</strong>选在量化后的 CQI 档"
-        "（<code>cqi_filter_domain='cqi_index'</code>）仍是工程默认、未经现场确认，"
-        "必须随结果一起报出来。<code>λ=1</code> 关闭滤波，可用作反向对照。</p>",
+        "系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>——已由负责人确认"
+        "为当前工程默认，但<strong>尚未经现场测量/设备数据标定</strong>。作用域选在量化"
+        "后的 CQI 档（<code>cqi_filter_domain='cqi_index'</code>）。两者必须随结果一起"
+        "报出，且不得称为现场等价；<code>λ=1</code> 关闭滤波，可作反向对照。</p>",
     )
     body += """
 <div class="toy"><div><b>实算：CQI 阶跃响应（λ=0.25）</b>
@@ -4369,7 +4374,7 @@ BF Gain 的定义、两套权怎么构造、为什么必须同 rank 同功率约
         [
             ("fixed（默认）", "全程固定 rank，默认 rank2；超过链路表可用 rank 时钳位",
              "正常仿真基线：rank 不是被研究对象时就不该让它自由变动"),
-            ("adaptive", "每 period_tti 判一次；升 rank 要谱效高 10%，降 rank 立即生效；升完进快速回退监测",
+            ("adaptive", "每 period_tti 判一次；升/降 rank 都要最优谱效高 10%；升完进快速回退监测",
              "研究 rank 自适应本身"),
             ("link_table", "逐快照跟随 best_rank（历史行为）",
              "只作“rank 稳定买到了什么”的反向对照，不出正式结论"),
@@ -4389,14 +4394,14 @@ rank1 / rank1 / rank2——门限是<strong>严格大于</strong>。</p></div>
 <strong>例外是当前 rank 被最小 MCS 闸门判死时</strong>——此时
 <code>SE̅(cur) = SE̅(r★) = 0</code>，"超过 10%" 恒为假，会把 UE 卡在一个已知发不出去
 的 rank 上，所以这种情况直接降到最稳的一档（事件原因 <code>current_rank_gated_out</code>）。</p>
-<p>另一种写法 <code>spec_asymmetric</code>（实现规格文档那种）保留作对照，因为现场究竟
-是哪一种<strong>尚未确认</strong>。<strong>同一个 <code>G↓ = 1.1</code> 在两种写法下行为相反</strong>：
+<p>另一种写法 <code>spec_asymmetric</code>（旧实现规格文档那种）只保留作迁移反向对照；
+负责人已裁决它<strong>不是默认</strong>。同一个 <code>G↓ = 1.1</code> 在两种写法下行为相反：
 默认这条是降要 10% 余量，那一条是降立即生效；<code>spec_asymmetric + 0.9</code> 的等效
 降档余量是 11.1%，与默认同一个意图。所以 <code>as_dict()</code> 直接报
 <code>raise_margin_pct</code> / <code>reduce_margin_pct</code>，不要自己换算。</p></div>
 <div><b>防乒乓靠四件事</b>
 <p>①判决周期（默认 1000 TTI，30&nbsp;kHz 下 500&nbsp;ms）；②样本数闸门（攒够 3 个
-谱效滤波样本才判）；③升 rank 的 10% 迟滞；④<strong>快速回退 + 判决周期指数退避</strong>：
+谱效滤波样本才判）；③升降 rank 的 10% 迟滞；④<strong>快速回退 + 判决周期指数退避</strong>：
 每回退一次周期 ×2，最多 ×2⁴ = 16000 TTI。实测周期序列 100→200→400→800→1600 后封顶。</p></div></div>
 <h2>升 rank 之后的快速回退监测</h2>
 <p>升 rank 不是无条件信任。抬升的同时保存<strong>原 rank 与原 OLLA 偏置</strong>作为回退点，
@@ -4420,8 +4425,9 @@ rank1 / rank1 / rank2——门限是<strong>严格大于</strong>。</p></div>
     body += callout(
         "decision", "常数来自现场实现规格，采样粒度是本项目的显式选择",
         "<p>判决周期 1000、样本数 3、G↑/G↓ = 1.1、β = 0.1、最小 MCS 闸门 9、"
-        "资源消耗系数 [1.0, 0.97, 0.95, 0.93]、回退门限 90/0.3/1.0、退避上限 4 —— "
-        "<strong>全部来自用户 2026-09-02 提供的现场实现规格</strong>，不再是工程猜测。</p>"
+        "资源消耗系数 [1.0, 0.97, 0.95, 0.93]、回退门限 90/0.3/1.0、退避上限 4 来自"
+        "用户提供的现场实现规格；<strong>unified_ratio 的升降对称 10% 默认由负责人"
+        "2026-09-03 裁决</strong>。</p>"
         "<p><strong>只有一处是本项目自己的口径选择</strong>：现场每个 TTI 累积一个谱效"
         "滤波样本，而 SuperRAN 的 AMC 坐标在一个信道快照内是分段常数，逐 TTI 采样等于把"
         "同一个数重复上百次，会让 β=0.1 的平滑在快照之间完全失效。因此默认 "
@@ -4441,7 +4447,9 @@ rank1 / rank1 / rank2——门限是<strong>严格大于</strong>。</p></div>
     body += """
 <p>默认图案 <code>DDDSU</code>（两个周期即 8 个下行时隙配 2 个上行时隙）在 30&nbsp;kHz 下
 逐相位的偏移是 <strong>5 / 4 / 3 / 2</strong> 个 TTI，也就是 2.5 / 2.0 / 1.5 / 1.0&nbsp;ms。
-等待期间该用户因为单 HARQ 进程模型不参与调度，这一段被单独计数为
+<strong>首传 ACK 与 NACK 都建立 in-flight 状态</strong>：虽然 decoder outcome 已抽样，
+但反馈到达前 gNB 不可见，不能更新 OLLA、不能让 RankController 回退、也不能给同一 UE
+发新 TB。等待段被单独计数为
 <code>harq_feedback_wait_skips</code>。</p>
 <p><strong>重传还有第二个、独立的约束：时隙类型要一致。</strong> D 与 S 的可用 RE
 不同，同一份 MCS/RBG/rank 在两种时隙上算出的 TBS 也不同，冻结的 TB 只能回到同
@@ -4499,11 +4507,13 @@ OLLA 步长比与覆盖判定。但它在<strong>开环上大部分抵消</stron
 偏置要累积到跨过一整档才改变发送，因此实测值围绕目标抖且系统性偏低。</p></div></div>
 <h2>当前不建模的东西</h2>
 <ul>
-<li>k1/k2 的具体取值、PUCCH 资源与并行 HARQ 进程：每个 UE 一个 HARQ 进程，
-反馈时刻只由 TDD 图案决定。</li>
+<li>k1/k2 的具体取值、PUCCH 资源与并行 HARQ 进程：每个 UE 一个 HARQ 进程；
+首传 ACK/NACK 都占住该进程，到反馈生效前不得发新 TB，反馈时刻只由 TDD 图案决定。</li>
 <li>跨 RBG 与跨流压成单码字 SINR 用的是 dB 域算术平均，<strong>不是</strong>带每档
 系数的 EESM/MIESM 等效 SINR 映射。</li>
 <li>Rank 自适应的探测环节：ρ 的现场定义未确认，默认关闭。</li>
+<li>每流固定 15 dB BF 惩罚、CQI floor/reset 状态机和现场已标定 OLLA 步骤均未实现；
+当前 BF Gain 是矩阵计算值，CQI/OLLA 参数是版本化工程近似，不得称现场等价。</li>
 <li>MU 的相关性损失与功率分摊当前按两用户等流数写死；用户已确认三/四用户与
 不等流数下不是这个形式，正在等现场流程。</li>
 </ul>
@@ -4664,6 +4674,13 @@ def mu_page() -> Page:
         ("双视角", "<p>在 gNB 估计 CSI 上得到预测 CorrLoss/MCS 输入；在真实当前信道上得到逐用户/逐 RBG SINR 与 BLER 输入。</p>"),
         ("持久表", "<p>保存 correlation、CorrLoss、PowerLoss、true/predicted SINR 与可选逐 RBG 数组；Phase B 不做矩阵求逆。</p>"),
     ))
+    body += callout(
+        "danger", "pair_table 不是“有几条边就先跑”",
+        "<p>调度前硬校验完整、双向、维度一致的 pair graph。三 UE 即使已有 "
+        "0↔1 与 0↔2，只要缺 1↔2 仍立即失败；两个方向还必须引用同一 pair，"
+        "snapshot×两用户×RBG 维度必须一致且有限。这样候选缺失不会被静默解释成"
+        "‘本次没有合适伙伴’。</p>",
+    )
     body += """
 <h2>Phase B 为什么比较 useful bytes</h2>
 <p>PF 先排一次优先级，然后分别构造“全 SU”和“允许 MU”的完整 TTI 计划。两者都按队列实际剩余
@@ -4715,7 +4732,7 @@ MCS 在配对状态下的误块概率本来就更高。历史的 capacity 只认
             ("误块抽签", "pair 表的 true_sinr_db（ZF 权打到双方 h_true）",
              "SU 单用户真值，MU 干扰不进分母"),
             ("OLLA", "SU / MU 两条独立状态", "只有一条 SU OLLA"),
-            ("SU/MU 判决", "逐 TTI 比聚合谱效，还要过预测 BLER≤0.5 的准入",
+            ("SU/MU 判决", "逐 TTI 比聚合谱效；以叠加 SU+MU OLLA 后的实发 MCS 过预测 BLER≤0.5 准入",
              "全程一个标量：ratio>1 就一直配对"),
             ("重传", "恒按 SU 重发（冻结身份不许改 SINR/TBS）", "同左"),
         ],
@@ -5512,7 +5529,7 @@ def gates_page() -> Page:
 """
     body += callout(
         "danger", "测试通过 ≠ 物理正确",
-        "<p>Gate/测试能证明合同、自洽、不漂移；预置 BLER 曲线、实测 Jones 方向图、现场 CQI filter"
+        "<p>Gate/测试能证明合同、自洽、不漂移；预置 BLER 曲线、实测 Jones 方向图、CQI filter 工程默认"
         "若没有独立外部数据，测试只能保护 hash/边界，不能证明模型等同真实网络。</p>",
     )
     body += """

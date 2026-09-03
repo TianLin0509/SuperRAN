@@ -643,7 +643,7 @@ class _PlannedGrant:
 
 @dataclass(frozen=True)
 class _HarqTb:
-    """等待唯一一次重传的单码字 TB；空口发送身份在首传 NACK 时冻结。"""
+    """单进程 HARQ 状态；ACK/NACK 在反馈到达前都保持 in-flight。"""
 
     mcs: int
     rank: int
@@ -653,9 +653,16 @@ class _HarqTb:
     slot: str
     first_tti: int
     first_mode: str
-    #: NACK 经上行时隙回到基站、并且下一个下行时隙到来之前，这个 TB
-    #: 不可能被重传。零时延（图案里没有 U）时它就是 ``first_tti + 1``。
-    ready_tti: int = 0
+    feedback: ap.FirstTxFeedback
+    state: str = "await_feedback"
+
+    @property
+    def ready_tti(self) -> int:
+        return int(self.feedback.effective_tti)
+
+    @property
+    def first_ack(self) -> bool:
+        return bool(self.feedback.ack)
 
 
 @dataclass(frozen=True)
@@ -2000,6 +2007,7 @@ def simulate_experience(
             raise ValueError(f"{name} 必须是有限正数")
     if n_snap < 1:
         raise ValueError("链路表至少需要一个 snapshot")
+    mu_pair_graph: dict[str, Any] | None = None
     for i, table in enumerate(tables):
         if int(getattr(table, "mcs_table", 3)) != mcs_table:
             raise ValueError(f"UE {i} 的 MCS table 与 UE0 不一致")
@@ -2019,13 +2027,15 @@ def simulate_experience(
         if table_power != cfg_power:
             raise ValueError(
                 f"UE {i} 链路表功率约束 {table_power} 与系统配置 {cfg_power} 不一致")
-        if bool(sched.mu_enabled):
-            if table.sinr_db.shape[1] < 2:
-                raise ValueError(f"UE {i} 不支持 MU rank2")
-            if len(getattr(table, "mu_links", {})) < n_ue - 1:
-                raise ValueError(
-                    "已启用 MU，但链路表没有完整 pair 数据；"
-                    "请用 build_link_tables(..., mu_enabled=True) 预计算")
+        if bool(sched.mu_enabled) and table.sinr_db.shape[1] < 2:
+            raise ValueError(f"UE {i} 不支持 MU rank2")
+    if bool(sched.mu_enabled):
+        try:
+            mu_pair_graph = smu.validate_pair_graph(tables)
+        except ValueError as exc:
+            raise ValueError(
+                "已启用 MU，但链路表没有完整、双向且维度一致的 pair graph；"
+                f"请用 build_link_tables(..., mu_enabled=True) 重新预计算：{exc}") from exc
     # MCS 选择目标与 OLLA 稳态目标是两个显式口径。MCP 默认会把它们对齐；
     # Python API 仍允许研究者故意给 SU/MU 不同目标，结果中的
     # target_bler_by_mode 会完整披露，不能在这里把这种消融误判为非法输入。
@@ -2098,12 +2108,8 @@ def simulate_experience(
         ap.feedback_effective_offsets(pattern) if feedback_delay_on
         else tuple(1 for _ in range(pattern_len)))
     feedback_modelled = feedback_delay_on and "U" in pattern
-    # 到期才生效的 OLLA 增量：{生效 TTI: [(ue, 模式, delta_mcs), ...]}。
-    # 仿真最后几个 TTI 发出的 TB，其反馈生效时刻会落在 num_tti 之外，那些
-    # 条目永远不会被弹出——**这是边界不是泄漏**：条目数上限就是最大偏移
-    # （DDDSU 下 6），而且"仿真结束之后才回来的 ACK 不应该影响任何决策"
-    # 正是想要的语义。
-    deferred_olla: dict[int, list[tuple[int, str, float]]] = {}
+    # 首传 ACK 与 NACK 都进入 ``harq_pending``。抽样结果在 ready_tti 前只
+    # 存在于 in-flight 事件里，不能被 OLLA/rank 看见，也不能让该 UE 发新 TB。
     feedback_wait_skips = 0
     # --- Rank 策略 -----------------------------------------------------
     rank_cfg = getattr(sched, "rank", None)
@@ -2240,17 +2246,21 @@ def simulate_experience(
             }
         # 业务在 UL/保护时隙照样到达；旧实现把 step 放在 continue 后面，会漏掉这些到达。
         tr.step(tti)
-        # 上一批已经到期的 ACK/NACK 先落到 OLLA 状态上，再做本 TTI 的决策——
-        # 顺序反了就等于让反馈提前一个 TTI 生效。
-        for _u_fb, _mode_fb, _delta_fb in deferred_olla.pop(tti, ()):
-            if _mode_fb == "MU":
-                mu_olla_db[_u_fb] = float(min(max(
-                    mu_olla_db[_u_fb] + _delta_fb,
-                    sched.olla_min_db), sched.olla_max_db))
+        # 到期的 ACK/NACK 先同时交给 OLLA 与 RankController，再做本 TTI
+        # 的决策。ACK 删除进程；NACK 转为唯一一次重传就绪状态。
+        for _u_fb, _pending_fb in list(harq_pending.items()):
+            if (_pending_fb.state != "await_feedback"
+                    or not _pending_fb.feedback.due(tti)):
+                continue
+            _pending_fb.feedback.apply(
+                rank_controller=rank_ctl, su_olla=olla_db, mu_olla=mu_olla_db,
+                olla_min=float(sched.olla_min_db),
+                olla_max=float(sched.olla_max_db))
+            if _pending_fb.first_ack:
+                harq_pending.pop(_u_fb, None)
             else:
-                olla_db[_u_fb] = float(min(max(
-                    olla_db[_u_fb] + _delta_fb,
-                    sched.olla_min_db), sched.olla_max_db))
+                harq_pending[_u_fb] = replace(
+                    _pending_fb, state="retx_ready")
         # 快速回退会把 rank 与 OLLA 一起退回：新 rank 上的 OLLA 是在错误
         # 工作点上收敛出来的，只退 rank 会让旧 rank 带着别人的偏置继续跑。
         for _u_rk, _olla_rk in rank_ctl.step(tti, olla_by_ue=olla_db):
@@ -2270,14 +2280,14 @@ def simulate_experience(
         # 单 HARQ 进程模型下，这期间该 UE 也发不了新 TB。
         cand = [u for u in range(n_ue) if tr.has_data(u)
                 and (u not in harq_pending
-                     or (harq_pending[u].slot == slot
-                         and tti >= harq_pending[u].ready_tti))
+                     or (harq_pending[u].state == "retx_ready"
+                         and harq_pending[u].slot == slot))
                 and not (tables[u].outage is not None and tables[u].outage[snap])]
         if in_measurement:
             feedback_wait_skips += sum(
                 1 for u in range(n_ue)
                 if tr.has_data(u) and u in harq_pending
-                and tti < harq_pending[u].ready_tti)
+                and harq_pending[u].state == "await_feedback")
         blocked_this_tti = sum(
             1
             for u in range(n_ue)
@@ -2407,7 +2417,8 @@ def simulate_experience(
         # HARQ 是同一 TB 的第二次且最后一次机会：同 D/S 类型可发时优先于
         # 新 TB，并按首传时刻排序。这样不会因 PF 重排而无限拖延软缓冲。
         pending_ready = sorted(
-            (u for u in metric_order if u in harq_pending),
+            (u for u in metric_order if u in harq_pending
+             and harq_pending[u].state == "retx_ready"),
             key=lambda u: harq_pending[u].first_tti)
         ordered_users = pending_ready + [
             u for u in metric_order if u not in harq_pending]
@@ -2421,8 +2432,8 @@ def simulate_experience(
             and bool(tables[u].outage[snap]) for u in range(n_ue))
         blocked_data = blocked_data or any(
             tr.has_data(u) and u in harq_pending
-            and (harq_pending[u].slot != slot
-                 or tti < harq_pending[u].ready_tti)
+            and (harq_pending[u].state == "await_feedback"
+                 or harq_pending[u].slot != slot)
             for u in range(n_ue))
         cursor = tti % int(sys_cfg.num_rbg)
         su_plan = _build_su_plan(
@@ -2553,6 +2564,9 @@ def simulate_experience(
                 is_retx = pending_tb is not None
                 if is_retx:
                     assert pending_tb is not None
+                    if pending_tb.state != "retx_ready":
+                        raise RuntimeError(
+                            "尚未收到反馈的 HARQ TB 不得进入发送路径")
                     identity = (mcs, n_alloc, rank, tb_bytes)
                     expected_identity = (
                         int(pending_tb.mcs), int(pending_tb.n_rbg),
@@ -2615,14 +2629,6 @@ def simulate_experience(
                 else:
                     tx_count[u] += 1
                     nack_count[u] += int(not ack)
-                    if not ack:
-                        harq_pending[u] = _HarqTb(
-                            mcs=mcs, rank=rank, n_rbg=n_alloc,
-                            tb_bytes=tb_bytes, payload_bytes=payload,
-                            slot=slot, first_tti=tti,
-                            first_mode=str(grant.mode),
-                            ready_tti=tti + int(
-                                feedback_offsets[tti % pattern_len]))
                 pad = max(0, tb_bytes - payload)
                 if accounting == "scheduled_tbs":
                     credit = tb_bytes
@@ -2664,15 +2670,6 @@ def simulate_experience(
                         user_mu_grant_rbg_equiv[u] += grant_equiv
                         user_mu_grant_prb_equiv[u] += grant_prb_equiv
                         user_mu_tx_measured[u] += 1
-                if not is_retx:
-                    # Rank 判据只看首传：重传重放的是冻结的旧发送身份，
-                    # 把它算进去等于让"上一次的决定"投两次票。
-                    rank_ctl.record_first_tx(
-                        u, ack=ack, mcs=mcs,
-                        realized_se=(
-                            float(rank) * float(
-                                la.MCS_TABLES[int(lookup.mcs_table)][mcs].se)
-                            if ack else 0.0))
                 olla_delta = 0.0
                 olla_effective_tti = tti
                 if sched.olla_enabled and not is_retx:
@@ -2690,8 +2687,27 @@ def simulate_experience(
                     olla_delta = step * speed
                     olla_effective_tti = (
                         tti + int(feedback_offsets[tti % pattern_len]))
-                    deferred_olla.setdefault(olla_effective_tti, []).append(
-                        (int(u), str(grant.mode), float(olla_delta)))
+                if not is_retx:
+                    # 单 HARQ 进程：首传 ACK/NACK 都占住 UE，直到反馈到达。
+                    # outcome 在发送时抽样，但只能由下一轮顶部的 due-event
+                    # 路径交给 OLLA 与 RankController。
+                    harq_pending[u] = _HarqTb(
+                        mcs=mcs, rank=rank, n_rbg=n_alloc,
+                        tb_bytes=tb_bytes, payload_bytes=payload,
+                        slot=slot, first_tti=tti,
+                        first_mode=str(grant.mode),
+                        feedback=ap.FirstTxFeedback(
+                            ue=int(u), ack=bool(ack), mcs=int(mcs),
+                            rank=int(rank),
+                            realized_se=(
+                                float(rank) * float(
+                                    la.MCS_TABLES[int(lookup.mcs_table)][mcs].se)
+                                if ack else 0.0),
+                            tx_tti=int(tti),
+                            effective_tti=int(
+                                tti + int(feedback_offsets[tti % pattern_len])),
+                            use_mu_olla=(str(grant.mode) == "MU"),
+                            olla_delta_mcs=float(olla_delta)))
                 cls = str(tr.queues[u].traffic_class.name)
                 if in_measurement:
                     class_alloc_rbg[cls] = class_alloc_rbg.get(cls, 0) + n_alloc
@@ -3457,6 +3473,8 @@ def simulate_experience(
                 "PF anchor fixed; maximize queue-limited useful bytes per RBG; "
                 "tie by useful bytes, lower correlation, earlier PF partner"),
         },
+        "mu_pair_graph": (mu_pair_graph if mu_pair_graph is not None else {
+            "status": "not_required", "reason": "mu_disabled"}),
         "mu_user_tx_share": float(
             mu_user_tx / max(int(np.sum(sched_cnt_measured)), 1)),
         "su_mu_plan": {
@@ -3624,8 +3642,9 @@ def simulate_experience(
                 for x in feedback_offsets],
             "contract": (
                 "ACK/NACK rides the first U slot after the transmission; the "
-                "OLLA update and the retransmission both start at the first "
-                "D/S slot after that U slot"
+                "ACK and NACK both hold the single process in flight; OLLA, "
+                "rank feedback and retransmission eligibility start at the "
+                "first D/S slot after that U slot"
                 if feedback_modelled
                 else "zero-delay feedback (pattern has no U slot, or the "
                      "delay model is switched off for a reverse control)"),
@@ -3644,6 +3663,7 @@ def simulate_experience(
         "grant_finalizer": cell["grant_finalizer"],
         "frequency_selection": cell["frequency_selection"],
         "mu_candidate_scoring": cell["mu_candidate_scoring"],
+        "mu_pair_graph": cell["mu_pair_graph"],
         "tti_trace": {
             "schema": "superran_tti_trace_v1",
             "additive_contract_version": 2,

@@ -42,6 +42,7 @@ import numpy as np
 
 __all__ = [
     "RANK_MODES",
+    "FirstTxFeedback",
     "RankConfig",
     "RankController",
     "feedback_effective_offsets",
@@ -97,6 +98,68 @@ def feedback_effective_offsets(pattern: str) -> tuple[int, ...]:
             step += 1
         out.append(int(step))
     return tuple(out)
+
+
+@dataclass(frozen=True)
+class FirstTxFeedback:
+    """A causally hidden first-transmission result waiting for HARQ feedback.
+
+    The decoder outcome is sampled when the TB is sent, but the gNB must not use
+    that outcome until ``effective_tti``.  Both system loops keep one of these
+    records for **ACK and NACK** so a single-process UE cannot send a new TB while
+    its previous result is still in flight.
+
+    ``olla_delta_mcs`` is frozen at transmission time because the warm-up speed
+    multiplier and SU/MU mode belong to that transmission.  Applying the event
+    later changes OLLA and the rank monitor together, at the same causal boundary.
+    """
+
+    ue: int
+    ack: bool
+    mcs: int
+    rank: int
+    realized_se: float
+    tx_tti: int
+    effective_tti: int
+    use_mu_olla: bool
+    olla_delta_mcs: float = 0.0
+
+    def __post_init__(self) -> None:
+        if int(self.ue) < 0:
+            raise ValueError("feedback ue 必须是非负整数")
+        if int(self.mcs) < 0 or int(self.rank) < 1:
+            raise ValueError("feedback MCS/rank 非法")
+        if int(self.tx_tti) < 0 or int(self.effective_tti) <= int(self.tx_tti):
+            raise ValueError("feedback effective_tti 必须晚于 tx_tti")
+        if not math.isfinite(float(self.realized_se)):
+            raise ValueError("feedback realized_se 必须有限")
+        if not math.isfinite(float(self.olla_delta_mcs)):
+            raise ValueError("feedback OLLA 增量必须有限")
+
+    def due(self, tti: int) -> bool:
+        """Whether this result is causally visible to the gNB at ``tti``."""
+        return int(tti) >= int(self.effective_tti)
+
+    def apply(
+        self,
+        *,
+        rank_controller: RankController,
+        su_olla: np.ndarray,
+        mu_olla: np.ndarray,
+        olla_min: float,
+        olla_max: float,
+    ) -> None:
+        """Expose the ACK/NACK to rank and OLLA at the feedback boundary."""
+        if int(self.ue) >= int(len(su_olla)) or int(self.ue) >= int(len(mu_olla)):
+            raise IndexError(f"feedback UE {self.ue} 超出 OLLA 状态范围")
+        rank_controller.record_feedback(
+            int(self.ue), ack=bool(self.ack), mcs=int(self.mcs),
+            realized_se=float(self.realized_se), tx_tti=int(self.tx_tti),
+            tx_rank=int(self.rank), feedback_tti=int(self.effective_tti))
+        state = mu_olla if self.use_mu_olla else su_olla
+        state[int(self.ue)] = float(min(max(
+            float(state[int(self.ue)]) + float(self.olla_delta_mcs),
+            float(olla_min)), float(olla_max)))
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +452,10 @@ class RankController:
         self._realized_se = np.full(self.n_ue, np.nan, dtype=float)
         # 快速回退监测状态（现场 raise_flag / rsvd_* / fallback_*）
         self._monitor_until = np.full(self.n_ue, -1, dtype=int)
+        # Only feedback for TBs actually transmitted after this instant belongs
+        # to the raised-rank monitor.  A delayed result from the previous rank
+        # must not make the new rank fall back.
+        self._monitor_started_tti = np.full(self.n_ue, -1, dtype=int)
         self._rsvd_rank = np.zeros(self.n_ue, dtype=int)
         self._rsvd_olla = np.full(self.n_ue, np.nan, dtype=float)
         self._rsvd_se = np.full(self.n_ue, np.nan, dtype=float)
@@ -486,13 +553,22 @@ class RankController:
         if updated:
             self._filter_count[index] += 1
 
-    def record_first_tx(self, ue: int, *, ack: bool, mcs: int,
-                        realized_se: float) -> None:
-        """登记一次**首传**结果。重传不进任何 rank 判据。
+    def record_feedback(self, ue: int, *, ack: bool, mcs: int,
+                        realized_se: float, tx_tti: int | None = None,
+                        tx_rank: int | None = None,
+                        feedback_tti: int | None = None) -> None:
+        """在 ACK/NACK **到达基站时**登记一次首传结果。
 
         ``realized_se`` 是这次首传实际兑现的谱效：ACK 时是 ``rank × MCS 谱效``，
         NACK 时是 0。快速回退的谱效比判据用的就是它的滤波值——只看 BLER 看不
         出"误码没超标但谱效反而降了"这一条。
+
+        ``tx_tti`` / ``tx_rank`` identify the transmission that produced the
+        delayed feedback.  A result sent before the current raise monitor, or
+        under another rank, still updates long-term diagnostics but cannot vote
+        in that new-rank fallback window.  ``feedback_tti`` is retained in the
+        call contract so tests can prove the main loops do not expose outcomes
+        at send time.
         """
         if not self.adaptive:
             return
@@ -505,10 +581,27 @@ class RankController:
             else current + beta * (value - current))
         self._short_tx[index] += 1
         self._short_mcs_sum[index] += float(mcs)
-        if self._monitor_until[index] >= 0:
+        monitor_start = int(self._monitor_started_tti[index])
+        belongs_to_monitor = (
+            self._monitor_until[index] >= 0
+            and (tx_tti is None or int(tx_tti) >= monitor_start)
+            and (tx_rank is None or int(tx_rank) == int(self._rank[index]))
+        )
+        if belongs_to_monitor:
             self._mon_tx[index] += 1
             self._mon_nack[index] += int(not bool(ack))
             self._mon_se_sum[index] += value
+
+    def record_first_tx(self, ue: int, *, ack: bool, mcs: int,
+                        realized_se: float) -> None:
+        """Compatibility wrapper for callers that already waited for feedback.
+
+        New system loops must call :meth:`record_feedback` only when the event
+        becomes causally visible.  This wrapper keeps small policy-only tests and
+        downstream callers source-compatible; it must not be called at send time.
+        """
+        self.record_feedback(
+            ue, ack=ack, mcs=mcs, realized_se=realized_se)
 
     # -- 周期决策 ------------------------------------------------------------
     def step(self, tti: int, *,
@@ -673,6 +766,7 @@ class RankController:
                 window = min(int(self.cfg.quick_fallback_window_tti),
                              max(1, self.judge_period_tti(ue) - 10))
                 self._monitor_until[ue] = tti + window
+                self._monitor_started_tti[ue] = int(tti)
                 self._rsvd_rank[ue] = old
                 self._rsvd_se[ue] = float(self._realized_se[ue])
                 self._rsvd_olla[ue] = (
@@ -687,6 +781,7 @@ class RankController:
 
     def _clear_monitor(self, ue: int) -> None:
         self._monitor_until[ue] = -1
+        self._monitor_started_tti[ue] = -1
         self._mon_tx[ue] = 0
         self._mon_nack[ue] = 0
         self._mon_se_sum[ue] = 0.0

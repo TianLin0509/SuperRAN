@@ -141,14 +141,22 @@ def test_guide_is_offline_utf8_hash_routed_and_accessible() -> None:
         "防乒乓靠四件事",
         "常数来自现场实现规格，采样粒度是本项目的显式选择",
         "ACK/NACK 要等上行时隙",
+        "首传 ACK 与 NACK 都建立 in-flight 状态",
+        "尚未经现场测量/设备数据标定",
         "解码 SINR 只在实际授予的 RBG 上取",
         "小包用全带均值判误块，两个方向都会错",
         "当前不建模的东西",
+        "每流固定 15 dB BF 惩罚",
+        "CQI floor/reset",
         "15.1016",       # 端到端手算例子的中间量
         "amc_policy.py",
     ):
         assert required in dlamc, required
     assert dlamc.index("四条信息面，混一条就出错") < dlamc.index("当前不建模的东西")
+    assert "升/降 rank 都要最优谱效高 10%" in text
+    assert "BREAKING migration：失败已前移到建表入口" in text
+    assert "缺 1↔2 仍立即失败" in text
+    assert "叠加 SU+MU OLLA 后的实发 MCS" in text
     assert "应用到仿真" in text
     assert "多算法 KPI 对比与单 TTI 复盘" in text
     assert "sr_compare_system_results" in text

@@ -326,7 +326,7 @@ try:
         sched=sysm.SchedulerConfig(mu_enabled=True,
                                    mu_accounting="pair_table"))
 except ValueError as _exc:
-    check("没有 pair 数据" in str(_exc),
+    check("pair graph" in str(_exc) and "完整" in str(_exc),
           "capacity 开 MU 走 pair_table 但没建 pair 表时硬失败")
 else:
     check(False, "capacity 缺 pair 表却没有报错")
@@ -856,7 +856,9 @@ for _u in range(2):
         best_se_gnb=_se[:, 0].copy()))
 _pf_sentinel_cfg = sysm.SystemConfig(
     evaluation_mode="experience", duration_s=1.0,
-    tdd_pattern="DDDSU", seed=9)
+    # This counterexample isolates PF accounting.  Use the explicit no-delay
+    # control so the single-HARQ-process wait window is not a second variable.
+    tdd_pattern="D", harq_feedback_delay=False, seed=9)
 _pf_sentinel_traffic = sysm.TrafficConfig(
     model="mixed", small_ue_share=0.5,
     small_file_bytes=1500, small_arrival_rate_hz=1500.0,
@@ -1786,6 +1788,99 @@ check(_amc_rows[True]["olla_before_db"] == 0.0
       and _amc_rows[True]["mcs"] == _amc_expect,
       "开启 OLLA 时首个 TTI 偏置为 0，与关闭 OLLA 给出同一档")
 
+# --- 17.2a 单 HARQ 进程：ACK 也必须等反馈，rank 不能提前看 NACK ---------
+# 强制所有首传 ACK。DDDSU 的 t0 反馈到 t5 才生效，所以 10 TTI 内同一 UE
+# 只能在 t0/t5 发两次；旧实现只为 NACK 建 pending，会在 8 个 D/S 全部连发。
+_old_system_bler = sysm._bler_lookup
+_old_experience_bler = expm._bler_lookup
+_feedback_calls: dict[str, list[int]] = {"capacity": [], "experience": []}
+_old_record_feedback = ap.RankController.record_feedback
+_feedback_mode = "capacity"
+
+
+def _spy_feedback(self, ue, **kwargs):
+    value = kwargs.get("feedback_tti")
+    if value is not None:
+        _feedback_calls[_feedback_mode].append(int(value))
+    return _old_record_feedback(self, ue, **kwargs)
+
+
+try:
+    sysm._bler_lookup = lambda _mcs, _sinr: 0.0
+    expm._bler_lookup = lambda _mcs, _sinr: 0.0
+    ap.RankController.record_feedback = _spy_feedback
+    _feedback_runs = {}
+    for _feedback_mode in ("capacity", "experience"):
+        _feedback_runs[_feedback_mode] = sysm.simulate(
+            [_amc_table],
+            sys_cfg=sysm.SystemConfig(
+                evaluation_mode=_feedback_mode, duration_s=0.005,
+                tdd_pattern="DDDSU", harq_feedback_delay=True, seed=650),
+            traffic=sysm.TrafficConfig(model="full_buffer"),
+            sched=sysm.SchedulerConfig(
+                mu_enabled=False, olla_enabled=True,
+                rank=ap.RankConfig(fixed_rank=1)),
+            kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="full"),
+        )
+finally:
+    sysm._bler_lookup = _old_system_bler
+    expm._bler_lookup = _old_experience_bler
+    ap.RankController.record_feedback = _old_record_feedback
+
+for _feedback_mode, _run_feedback in _feedback_runs.items():
+    check(_run_feedback.cell["scheduled_tti"] == 2
+          and _run_feedback.cell["harq_feedback_wait_skips"] == 6,
+          f"{_feedback_mode}：ACK 也占住单 HARQ 进程，DDDSU 只在 t0/t5 发送")
+    check(_feedback_calls[_feedback_mode] == [5],
+          f"{_feedback_mode}：首个 ACK 只在反馈到达 t5 交给 OLLA/rank，不在 t0 偷看")
+
+# 快速回退的 NACK 门限只能在反馈到达后触发。先升到 rank2，在 t1 发送一个
+# NACK；t2..t4 必须保持 rank2，t5 将该 feedback 应用后才允许回退。
+_delayed_rank = ap.RankController(
+    ap.RankConfig(
+        mode="adaptive", fixed_rank=1, period_tti=30,
+        min_filter_samples=1, se_filter_beta=1.0,
+        min_mcs_threshold=0, resource_cost_ratio=(1.0, 1.0),
+        gain_factor_raise=1.1, fallback_enabled=True,
+        quick_fallback_nack_thld=1, quick_fallback_window_tti=20,
+        quick_fallback_min_sched=1),
+    1, tti_ms=0.5, max_rank_available=2)
+_delayed_rank.observe_link(0, 0, [1.0, 2.0], [20, 20])
+_delayed_rank._last_judge_tti[0] = -29
+_delayed_rank.step(1, olla_by_ue=np.zeros(1))
+check(_delayed_rank.rank_of(0) == 2, "rank 反例先进入 rank2 快速回退监测窗")
+_delayed_event = ap.FirstTxFeedback(
+    ue=0, ack=False, mcs=20, rank=2, realized_se=0.0,
+    tx_tti=1, effective_tti=5, use_mu_olla=False, olla_delta_mcs=-0.09)
+_delayed_su_olla = np.zeros(1)
+_delayed_mu_olla = np.zeros(1)
+for _tti in range(2, 5):
+    _delayed_rank.step(_tti, olla_by_ue=_delayed_su_olla)
+check(_delayed_rank.rank_of(0) == 2 and not _delayed_event.due(4),
+      "反馈到达前 NACK 不可见，rank 不得提前回退")
+_delayed_event.apply(
+    rank_controller=_delayed_rank,
+    su_olla=_delayed_su_olla, mu_olla=_delayed_mu_olla,
+    olla_min=-20.0, olla_max=3.0)
+_delayed_rank.step(5, olla_by_ue=_delayed_su_olla)
+check(_delayed_rank.rank_of(0) == 2,
+      "第一个已到达 NACK 未超过硬门限，rank2 继续监测")
+_delayed_event_2 = ap.FirstTxFeedback(
+    ue=0, ack=False, mcs=20, rank=2, realized_se=0.0,
+    tx_tti=6, effective_tti=10, use_mu_olla=False, olla_delta_mcs=-0.09)
+for _tti in range(6, 10):
+    _delayed_rank.step(_tti, olla_by_ue=_delayed_su_olla)
+check(_delayed_rank.rank_of(0) == 2 and not _delayed_event_2.due(9),
+      "第二个 NACK 反馈到达前仍不能提前越过回退门限")
+_delayed_event_2.apply(
+    rank_controller=_delayed_rank,
+    su_olla=_delayed_su_olla, mu_olla=_delayed_mu_olla,
+    olla_min=-20.0, olla_max=3.0)
+_delayed_rank.step(10, olla_by_ue=_delayed_su_olla)
+check(_delayed_rank.rank_of(0) == 1
+      and _delayed_rank.diagnostics()["events"][-1]["tti"] == 10,
+      "第二个 NACK 到达 t10 后才超过门限并回退，不在发送时刻窥见反馈")
+
 # --- 17.3 解码 SINR 只在实际授予的 RBG 上取 --------------------------------
 # 前 8 个 RBG 极好、后 9 个极差；小包只会拿到少数几个 RBG。
 _grant_rbg = np.concatenate([np.full(8, 26.0), np.full(9, -4.0)])
@@ -2177,12 +2272,14 @@ for _bad_target in (0.0, 1.0, 0.0005, 0.999):
         check(False, f"target_bler={_bad_target} 应当被拒")
     except ValueError:
         check(True, f"target_bler={_bad_target} 越出预置曲线覆盖区间，被拒")
-try:
-    sysm.build_link_tables([np.ones((1, 4, 2, 2), dtype=complex)], [10.0],
-                           table=1)
-    check(False, "table=1 应当被拒")
-except ValueError:
-    check(True, "系统链路表硬拒绝非表 3，不让量化门限与选档用两张表")
+for _unsupported_table in (1, 2):
+    try:
+        sysm.build_link_tables([np.ones((1, 4, 2, 2), dtype=complex)], [10.0],
+                               table=_unsupported_table)
+        check(False, f"table={_unsupported_table} 应当被拒")
+    except ValueError as _exc:
+        check("只支持 MCS table 3" in str(_exc),
+              f"breaking migration：build_link_tables 在入口硬拒绝 table={_unsupported_table}")
 
 
 # ---------------------------------------------------------------------------
@@ -2223,6 +2320,87 @@ def _mu_run(tables, *, mu_on: bool, accounting: str = "pair_table",
 
 
 _T_indep = _mu_pair_tables(0.0)
+
+# 三 UE 反例：每个 UE 至少还有一个邻居，但缺 1<->2 仍必须硬失败。
+_g_rng = np.random.default_rng(20260903)
+_g_h = [((_g_rng.standard_normal((2, 32, 8, 2))
+          + 1j * _g_rng.standard_normal((2, 32, 8, 2))) / np.sqrt(2))
+        for _ in range(3)]
+_T_graph = sysm.build_link_tables(
+    _g_h, [12.0, 11.0, 10.0], max_rank=2, rb_per_rbg=16,
+    mu_enabled=True, csi=sysm.ca.CsiConfig(enabled=False))
+check(_T_graph[0].mu_links.keys() == {1, 2}
+      and _T_graph[1].mu_links.keys() == {0, 2}
+      and _T_graph[2].mu_links.keys() == {0, 1},
+      "三 UE 建表形成完整双向 pair graph")
+
+
+def _pair_graph_error(tables, needle):
+    try:
+        sysm.simulate(
+            tables,
+            sys_cfg=sysm.SystemConfig(duration_s=0.01, tdd_pattern="D", seed=19),
+            traffic=sysm.TrafficConfig(model="full_buffer"),
+            sched=sysm.SchedulerConfig(mu_enabled=True, mu_accounting="pair_table"))
+    except ValueError as exc:
+        return needle in str(exc)
+    return False
+
+
+_T_missing_edge = deepcopy(_T_graph)
+del _T_missing_edge[1].mu_links[2]
+del _T_missing_edge[2].mu_links[1]
+check(_pair_graph_error(_T_missing_edge, "UE 1 缺边 [2]"),
+      "三 UE 即使各自仍有邻居，缺 1↔2 边也在 capacity 入口硬失败")
+_T_asymmetric = deepcopy(_T_graph)
+_T_asymmetric[2].mu_links[1] = deepcopy(_T_asymmetric[2].mu_links[1])
+check(_pair_graph_error(_T_asymmetric, "不对称"),
+      "pair graph 单向残缺被识别为不对称，不在候选枚举时静默跳过")
+_T_bad_dim = deepcopy(_T_graph)
+_T_bad_dim[1].mu_links[2].true_sinr_db = \
+    _T_bad_dim[1].mu_links[2].true_sinr_db[:, :1]
+check(_pair_graph_error(_T_bad_dim, "维度不一致"),
+      "pair graph 的 snapshot×两用户维度在调度前硬校验")
+
+# capacity MU 准入必须查询叠加 SU+MU OLLA 后的实发 MCS。用一个阶跃 BLER
+# 反例：OLLA 前 MCS 全部可用，第一次 MU ACK 令 MU OLLA +3 档；下一次候选
+# 的实发 MCS 越过 0.5 门，必须拒配。旧实现仍用 OLLA 前 MCS，会继续放行。
+_olla_link = _T_indep[0].mu_links[1]
+_olla_base_mcs = []
+for _u in (0, 1):
+    _side = int(_olla_link.side(_u))
+    _pred = (float(_T_indep[_u].sinr_tx_db[0, 1])
+             + float(_olla_link.corr_loss_tx_db[0, _side])
+             + float(_olla_link.power_loss_db))
+    _olla_base_mcs.append(int(la.select_mcs(
+        _pred, table=3, target_bler=0.1).index))
+_olla_bler_step = max(_olla_base_mcs) + 1
+check(_olla_bler_step <= 27,
+      "MU OLLA 准入反例位于有效 MCS 范围内")
+_old_mu_admission_bler = sysm._bler_lookup
+try:
+    sysm._bler_lookup = lambda mcs, _sinr: (
+        0.9 if int(mcs) >= _olla_bler_step else 0.0)
+    _olla_admission_run = sysm.simulate(
+        _T_indep,
+        sys_cfg=sysm.SystemConfig(
+            evaluation_mode="capacity", duration_s=0.01,
+            tdd_pattern="DDDSU", seed=313),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(
+            mu_enabled=True, mu_accounting="pair_table",
+            mu_corr_threshold=1.0, mu_olla_step_up_db=3.0,
+            olla_max_db=6.0),
+        rng=rg.RngBook(313, 0))
+finally:
+    sysm._bler_lookup = _old_mu_admission_bler
+check(_olla_admission_run.cell["mu_share"] > 0
+      and _olla_admission_run.cell["mu_pair_rejects"] > 0,
+      "正 MU OLLA 令实发 MCS 的预测 BLER 越过 0.5 后，capacity 拒绝后续配对")
+check(_olla_admission_run.cell["mu_pair_graph"]["status"] == "pass"
+      and _olla_admission_run.cell["mu_pair_graph"]["pairs"] == 1,
+      "有效 pair graph 的完整性证据随 capacity 结果交付")
+
 _su_arm = _mu_run(_T_indep, mu_on=False)
 _mu_arm = _mu_run(_T_indep, mu_on=True)
 print(f"  独立信道：SU 首传 MCS {_su_arm.cell['avg_mcs_first_tx']:.2f} → "

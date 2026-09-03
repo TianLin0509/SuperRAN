@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -21,8 +22,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from superran import amc_policy as ap  # noqa: E402
 from superran import csi_aging as ca  # noqa: E402
+from superran import experience as ex  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import rng as rg  # noqa: E402
+from superran import scheduler_mu as smu  # noqa: E402
 from superran import system as sy  # noqa: E402
 
 OUT = ROOT / "artifacts" / "results" / "dl_amc_chain_audit.json"
@@ -168,12 +171,82 @@ def experiment_feedback_delay() -> dict:
     assert arms["delay_off_control"]["offsets_tti"] == [1, 1, 1, 1, 1]
     assert arms["delay_on"]["harq_feedback_wait_skips"] > 0
     assert arms["delay_off_control"]["harq_feedback_wait_skips"] == 0
+
+    # Strong ACK counterexample: with one UE and forced ACK, old code scheduled
+    # all eight D/S opportunities because it created pending state only on NACK.
+    # The single-process contract permits only t0 and t5 in ten DDDSU TTIs.
+    one = _tables()[:1]
+    old_system_bler, old_experience_bler = sy._bler_lookup, ex._bler_lookup
+    ack_runs = {}
+    try:
+        sy._bler_lookup = lambda _mcs, _sinr: 0.0
+        ex._bler_lookup = lambda _mcs, _sinr: 0.0
+        for mode in ("capacity", "experience"):
+            result = _run(
+                one, sched=sy.SchedulerConfig(mu_enabled=False),
+                sys_cfg=sy.SystemConfig(
+                    evaluation_mode=mode, duration_s=0.005,
+                    tdd_pattern="DDDSU", seed=650))
+            ack_runs[mode] = {
+                "scheduled_tti": int(result.cell["scheduled_tti"]),
+                "feedback_wait_skips": int(
+                    result.cell["harq_feedback_wait_skips"]),
+            }
+    finally:
+        sy._bler_lookup, ex._bler_lookup = old_system_bler, old_experience_bler
+    assert all(row == {"scheduled_tti": 2, "feedback_wait_skips": 6}
+               for row in ack_runs.values())
+
+    # Delayed NACK must not trip the rank monitor at send time.
+    ctl = ap.RankController(
+        ap.RankConfig(
+            mode="adaptive", fixed_rank=1, period_tti=30,
+            min_filter_samples=1, se_filter_beta=1.0,
+            min_mcs_threshold=0, resource_cost_ratio=(1.0, 1.0),
+            gain_factor_raise=1.1, fallback_enabled=True,
+            quick_fallback_nack_thld=1, quick_fallback_window_tti=20,
+            quick_fallback_min_sched=1),
+        1, tti_ms=0.5, max_rank_available=2)
+    ctl.observe_link(0, 0, [1.0, 2.0], [20, 20])
+    ctl._last_judge_tti[0] = -29
+    olla = np.zeros(1)
+    mu_olla = np.zeros(1)
+    ctl.step(1, olla_by_ue=olla)
+    delayed = [
+        ap.FirstTxFeedback(0, False, 20, 2, 0.0, 1, 5, False, -0.09),
+        ap.FirstTxFeedback(0, False, 20, 2, 0.0, 6, 10, False, -0.09),
+    ]
+    ranks_before_feedback = []
+    for tti in range(2, 5):
+        ctl.step(tti, olla_by_ue=olla)
+        ranks_before_feedback.append(ctl.rank_of(0))
+    delayed[0].apply(
+        rank_controller=ctl, su_olla=olla, mu_olla=mu_olla,
+        olla_min=-20.0, olla_max=3.0)
+    ctl.step(5, olla_by_ue=olla)
+    for tti in range(6, 10):
+        ctl.step(tti, olla_by_ue=olla)
+        ranks_before_feedback.append(ctl.rank_of(0))
+    delayed[1].apply(
+        rank_controller=ctl, su_olla=olla, mu_olla=mu_olla,
+        olla_min=-20.0, olla_max=3.0)
+    ctl.step(10, olla_by_ue=olla)
+    assert ranks_before_feedback and set(ranks_before_feedback) == {2}
+    assert ctl.rank_of(0) == 1
+    assert ctl.diagnostics()["events"][-1]["tti"] == 10
     return {
         "question": "ACK/NACK 等上行时隙这件事有没有真的进入调度与 OLLA",
         "arms": arms,
+        "forced_ack_single_process": ack_runs,
+        "rank_nack_feedback_counterexample": {
+            "rank_before_feedback": ranks_before_feedback,
+            "fallback_tti": 10,
+            "final_rank": ctl.rank_of(0),
+        },
         "interpretation": (
             "开启时 DDDSU 逐相位偏移 5/4/3/2 个 TTI，并确实产生等待反馈而"
-            "不参与调度的 TTI；关闭时偏移全为 1、等待计数为 0，回到旧行为。"),
+            "不参与调度的 TTI；首传 ACK 与 NACK 都占住单进程，只有反馈到达时"
+            "才交给 OLLA/rank。关闭时偏移全为 1、等待计数为 0，回到反向对照。"),
         "not_modelled": "k1/k2 取值、PUCCH 资源、并行 HARQ 进程。",
     }
 
@@ -204,7 +277,9 @@ def experiment_cqi_filter() -> dict:
             "lambda=1 一步到位，是无滤波上界；lambda=0.25 逐步逼近，"
             "时间常数约 4 个上报周期。旧的 expanding mean 记忆无限长，"
             "阶跃后要很多个周期才追上，且越晚发生的阶跃追得越慢。"),
-        "calibration_status": "lambda 默认 0.25 是工程默认，尚未按现场标定。",
+        "calibration_status": (
+            "lambda=0.25 已由负责人确认为当前工程默认，但尚未经现场测量/设备"
+            "数据标定；不得表述成现场等价。"),
     }
 
 
@@ -242,6 +317,28 @@ def experiment_grant_decode_sinr() -> dict:
     }
 
 
+def experiment_table3_migration() -> dict:
+    """Breaking migration: system link tables reject Table 1/2 at the boundary."""
+    h = np.ones((1, 4, 2, 2), dtype=complex)
+    rejected = {}
+    for table in (1, 2):
+        try:
+            sy.build_link_tables([h], [10.0], table=table)
+        except ValueError as exc:
+            rejected[str(table)] = str(exc)
+    accepted = sy.build_link_tables([h], [10.0], table=3)
+    assert set(rejected) == {"1", "2"}
+    assert int(accepted[0].mcs_table) == 3
+    return {
+        "question": "旧 build_link_tables(table=1/2) 调用怎样迁移",
+        "rejected": rejected,
+        "accepted_table": int(accepted[0].mcs_table),
+        "migration": (
+            "系统/体验调用改用 table=3；Table 1/2 只保留给显式链路级分析。"
+            "失败前移到建表入口，避免先产生一张看似可用的错口径系统表。"),
+    }
+
+
 def _mu_tables(corr: float, n_snap: int = 6, seed: int = 20260902):
     """两个 UE，空间相关系数可控；corr→1 时 ZF 没有零陷空间。"""
     rng = np.random.default_rng(seed)
@@ -270,6 +367,7 @@ def experiment_capacity_mu_accounting() -> dict:
             mu_se_ratio=ratio, rng=rg.RngBook(4242, 0))
 
     indep = _mu_tables(0.0)
+    pair_graph = smu.validate_pair_graph(indep)
     su = run(indep, mu_on=False, accounting="pair_table")
     pair = run(indep, mu_on=True, accounting="pair_table")
     corr = run(_mu_tables(0.999), mu_on=True, accounting="pair_table")
@@ -292,6 +390,59 @@ def experiment_capacity_mu_accounting() -> dict:
         link.predicted_sinr_db
         - (link.predicted_sinr_db - link.corr_loss_tx_db - link.power_loss_db),
         atol=1e-9))
+
+    # Three-UE complete-graph negative control.  Each UE still has a neighbour
+    # after removing 1<->2, so the old len(mu_links)>=1 check would pass.
+    graph_rng = np.random.default_rng(20260903)
+    graph_h = [((graph_rng.standard_normal((2, 32, 8, 2))
+                + 1j * graph_rng.standard_normal((2, 32, 8, 2))) / np.sqrt(2))
+               for _ in range(3)]
+    graph_tables = sy.build_link_tables(
+        graph_h, [12.0, 11.0, 10.0], max_rank=2, rb_per_rbg=16,
+        mu_enabled=True, csi=ca.CsiConfig(enabled=False))
+    broken = deepcopy(graph_tables)
+    del broken[1].mu_links[2]
+    del broken[2].mu_links[1]
+    graph_rejection = ""
+    try:
+        smu.validate_pair_graph(broken)
+    except ValueError as exc:
+        graph_rejection = str(exc)
+    assert "UE 1 缺边 [2]" in graph_rejection
+
+    # Positive OLLA counterexample: the pre-OLLA MCS passes a step BLER model,
+    # then one MU ACK adds +3 MCS.  Admission must use that final sending MCS and
+    # reject the next pair when predicted BLER crosses 0.5.
+    pair01 = indep[0].mu_links[1]
+    base_mcs = []
+    for user in (0, 1):
+        side = pair01.side(user)
+        predicted = (float(indep[user].sinr_tx_db[0, 1])
+                     + float(pair01.corr_loss_tx_db[0, side])
+                     + float(pair01.power_loss_db))
+        base_mcs.append(int(la.select_mcs(
+            predicted, table=3, target_bler=0.1).index))
+    bler_step_mcs = max(base_mcs) + 1
+    assert bler_step_mcs <= 27
+    old_lookup = sy._bler_lookup
+    try:
+        sy._bler_lookup = lambda mcs, _sinr: (
+            0.9 if int(mcs) >= bler_step_mcs else 0.0)
+        olla_admission = sy.simulate(
+            indep,
+            sys_cfg=sy.SystemConfig(
+                evaluation_mode="capacity", duration_s=0.01,
+                tdd_pattern="DDDSU", seed=313),
+            traffic=sy.TrafficConfig(model="full_buffer"),
+            sched=sy.SchedulerConfig(
+                mu_enabled=True, mu_accounting="pair_table",
+                mu_corr_threshold=1.0, mu_olla_step_up_db=3.0,
+                olla_max_db=6.0),
+            rng=rg.RngBook(313, 0))
+    finally:
+        sy._bler_lookup = old_lookup
+    assert olla_admission.cell["mu_share"] > 0
+    assert olla_admission.cell["mu_pair_rejects"] > 0
     assert pair.cell["avg_mcs_first_tx"] < su.cell["avg_mcs_first_tx"]
     assert abs(legacy.cell["avg_mcs_first_tx"]
                - legacy_su.cell["avg_mcs_first_tx"]) < 0.5
@@ -308,6 +459,14 @@ def experiment_capacity_mu_accounting() -> dict:
         "pair_true_minus_su_true_db": round(delta_db, 3),
         "power_loss_db": round(float(link.power_loss_db), 4),
         "mcs_shift_identity_holds": identity_ok,
+        "pair_graph": pair_graph,
+        "missing_1_2_edge_rejection": graph_rejection,
+        "positive_olla_admission_counterexample": {
+            "pre_olla_mcs": base_mcs,
+            "step_bler_reject_mcs": bler_step_mcs,
+            "mu_share": round(float(olla_admission.cell["mu_share"]), 4),
+            "mu_pair_rejects": int(olla_admission.cell["mu_pair_rejects"]),
+        },
         "mu_share_independent": round(float(pair.cell["mu_share"]), 4),
         "mu_share_corr0.999": round(float(corr.cell["mu_share"]), 4),
         "mu_su_wins_corr0.999": int(corr.cell["mu_su_wins"]),
@@ -317,7 +476,8 @@ def experiment_capacity_mu_accounting() -> dict:
             "pair 真值系统性低于 SU 真值，其中 -3.01 dB 是等功率分摊、其余是相关性"
             "损失；决策平移量 CorrLoss+PowerLoss 恒等于 pred_MU-pred_SU，"
             "所以那个常数在决策里精确抵消。相关系数拉到 0.999 时配对率坍塌，"
-            "说明 SU/MU 自适应真的在判而不是无条件配对。"),
+            "说明 SU/MU 自适应真的在判而不是无条件配对。完整 pair graph 在调度前"
+            "硬校验；准入使用叠加 SU+MU OLLA 后的实际发送 MCS。"),
         "not_a_conclusion": (
             "两种口径的吞吐差不是 MU 的收益或损失：它们是两个不同的物理模型，"
             "单次重复、未做配对检验，且历史口径本身已知系统性乐观。"),
@@ -406,8 +566,8 @@ def experiment_rank_decision_machine() -> dict:
             "直接从候选里删掉，并且当前 rank 被闸门判死时不讲迟滞、直接降。"
             "判决周期按 2^n 退避到封顶。"),
         "not_a_conclusion": (
-            "对称 10% 是用户 2026-09-03 给的判据，不是从现场源码确认的行为——"
-            "两份来源对降档写法不同，哪一种是现场真实行为**尚未确认**；"
+            "对称 10% 是负责人 2026-09-03 裁决的当前统一默认；这不等于已经用"
+            "现场设备数据验证。旧 spec_asymmetric 只保留作迁移反向对照；"
             "se_sample_scope 的两个记忆长度差 10 倍，也不是等价实现。"),
     }
 
@@ -423,6 +583,7 @@ def main() -> int:
         "harq_feedback_delay": experiment_feedback_delay(),
         "cqi_filter": experiment_cqi_filter(),
         "grant_decode_sinr": experiment_grant_decode_sinr(),
+        "table3_breaking_migration": experiment_table3_migration(),
         "capacity_mu_accounting": experiment_capacity_mu_accounting(),
         "rank_decision_machine": experiment_rank_decision_machine(),
     }

@@ -140,9 +140,9 @@ class CsiConfig:
     periodic_trace_history: bool = False
     #: 宽带 CQI 的一阶 IIR 滤波系数：``s <- s + lambda*(x - s)``。
     #: 1.0 表示不做滤波（每次上报直接生效），越小记忆越长。
-    #: 现场口径是 ``CQI = CQI + lambda*(最新测量 - CQI)``。**0.25 已由用户
-    #: 2026-09-02 对照现场 CQI 仿真核对确认**，不再是待标定的占位默认；
-    #: 它仍不是协议标准值。
+    #: 现场口径是 ``CQI = CQI + lambda*(最新测量 - CQI)``。**0.25 已由负责人
+    #: 确认为当前工程默认，但尚未经现场测量/设备数据标定**；它不是协议标准值，
+    #: 也不得表述成现场等价。
     cqi_filter_lambda: float = 0.25
     #: 滤波作用域。``cqi_index`` 在量化后的连续 CQI 档上滤波（现场口径），
     #: ``sinr_db`` 在量化前的 PMI-SINR 上滤波（便于做口径消融）。
@@ -239,7 +239,8 @@ class CsiConfig:
             "cqi_filter_lambda": float(self.cqi_filter_lambda),
             "cqi_filter_domain": str(self.cqi_filter_domain),
             "cqi_filter_lambda_basis": (
-                "engineering default pending field calibration; "
+                "lead-confirmed engineering default, not yet calibrated against "
+                "field measurements or device data; "
                 "lambda=1 disables filtering"),
             "periodic_trace_history": self.periodic_trace_history,
             "full_sweep_ms": round(self.full_sweep_ms, 2),

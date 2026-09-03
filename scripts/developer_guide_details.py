@@ -623,7 +623,7 @@ DETAIL_SPECS.update({
             "让 rank 逐快照跟随 best_rank，OLLA 与 PF 都在追一个每 5 ms 就变的目标。",
             "回退只退 rank 不退 OLLA，旧 rank 带着新 rank 收敛出来的偏置继续跑。",
             "把最小 MCS 闸门省掉，让一个根本发不出去的高 rank 靠估计谱效赢下 argmax。",
-            "把“降 rank 无迟滞”当成实现漏洞去补一道门槛——那是现场刻意的不对称设计。",
+            "把 spec_asymmetric 的“降 rank 无迟滞”误当当前默认；负责人已裁决默认统一为升降都需 10% 余量。",
             "小包用全带均值判误块；授到好子带时高估误块，授到差子带时低估。",
             "把 avg_mcs 当成链路自适应视角——它的分母含重传，重传重放的是冻结的旧档。",
         ),
@@ -2022,7 +2022,7 @@ FORMULA_SPECS: dict[str, FormulaSpec] = {
         "早先用的是对全部历史取平均，记忆无限长，跑得越久越跟不上信道变化。",
         (("s<sub>k</sub>", "第 k 次上报之后的滤波状态；域由 cqi_filter_domain 决定。"),
          ("x<sub>k</sub>", "第 k 次上报的原始观测：CQI 档或量化前的 PMI-SINR。"),
-         ("λ", "滤波系数 cqi_filter_lambda，(0,1]；越小记忆越长。默认 0.25 是工程默认。"),
+         ("λ", "滤波系数 cqi_filter_lambda，(0,1]；越小记忆越长。0.25 已由负责人确认为工程默认，但尚未经现场测量/设备数据标定。"),
          ("⌊·⌋", "取整到整数 codepoint；保守方向，不四舍五入。"),
          ("CQI<sub>rep</sub>", "本快照实际上报并用于查 Γ 的 4-bit codepoint。")),
     ),
@@ -2058,15 +2058,14 @@ FORMULA_SPECS: dict[str, FormulaSpec] = {
         "Rank 的周期决策与迟滞",
         "只在决策周期到达、且谱效滤波样本攒够时判一次。升 rank 要求最优的滤波谱效"
         "严格超过当前的 G↑ 倍（现场 1.1，即高 10%），两个几乎并列的候选因此不会每个"
-        "周期互相顶替。降 rank 侧在 G↓≥1 时条件恒成立——因为 r★ 由 argmax 选出，"
-        "SE̅(r★) ≥ SE̅(r_cur) 必然满足——也就是**降 rank 立即生效、无迟滞**，"
-        "这与现场“升谨慎、降果断”的设计一致；把 G↓ 设成 <1（例如 0.9）才会出现真正的"
-        "降迟滞。每次快速回退让判决周期翻倍，最多 2⁴。",
+        "周期互相顶替。默认 unified_ratio 让降 rank 使用同一条式子：最优的滤波谱效"
+        "也必须严格超过当前的 G↓ 倍；G↑=G↓=1.1，因此升降都要 10% 余量。"
+        "spec_asymmetric 仅保留作反向对照。每次快速回退让判决周期翻倍，最多 2⁴。",
         (("r<sup>★</sup>", "本次决策的最优 rank，由滤波谱效的 argmax 给出。"),
          ("SE&#772;<sub>r</sub>", "rank r 的滤波估计谱效。"),
          ("r<sub>cur</sub>", "当前正在使用的 rank。"),
          ("G<sub>↑</sub>", "升 rank 迟滞 gain_factor_raise，现场默认 1.1。"),
-         ("G<sub>↓</sub>", "降 rank 迟滞 gain_factor_reduce，现场默认 1.1（此时降无迟滞）。"),
+         ("G<sub>↓</sub>", "降 rank 迟滞 gain_factor_reduce，默认 1.1（最优需高 10%）。"),
          ("T<sub>rank</sub>", "判决周期 period_tti，现场默认 1000 个 TTI。"),
          ("n", "快速回退次数，判决周期按 2ⁿ 指数退避，n ≤ max_backoff_times。")),
     ),

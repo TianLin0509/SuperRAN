@@ -1927,7 +1927,7 @@ def sr_system_sim(
     rank_adaptation_period_tti: int = 1000,
     rank_gain_factor_raise: float = 1.1,
     rank_gain_factor_reduce: float = 1.1,
-    rank_switch_rule: str = "spec_asymmetric",
+    rank_switch_rule: str = "unified_ratio",
     rank_se_filter_beta: float = 0.1,
     rank_se_sample_scope: str = "snapshot",
     rank_min_filter_samples: int = 3,
@@ -2023,10 +2023,10 @@ def sr_system_sim(
     ``rank_min_mcs_threshold``（默认 9）的 rank 谱效直接置 0；各 rank 再乘一个
     DMRS 开销系数。
 
-    **降 rank 在默认值下无迟滞、立即生效**：最优 rank 由 argmax 选出，所以
-    ``rank_gain_factor_reduce >= 1`` 时"当前仍明显更优"这个条件恒为假。这与
-    现场"升谨慎、降果断"的设计一致；要真正的降迟滞就把它设成 < 1（0.9 复现
-    现场硬编码那条路径）。
+    **默认升/降 rank 使用同一条对称判据**（负责人 2026-09-03 裁决）：
+    ``rank_switch_rule='unified_ratio'``，且两个 gain factor 都是 1.1；只有最优
+    rank 的滤波谱效严格超过当前 rank 10% 才切换。``spec_asymmetric`` 只保留作
+    显式反向对照，不再是 MCP 或页面默认。
 
     **升 rank 之后进入快速回退监测**，窗内实时判：新增 NACK 超过
     ``rank_quick_fallback_nack_thld``（默认 90）立即回退；窗口结束时初传 BLER
@@ -2046,14 +2046,15 @@ def sr_system_sim(
     D/S 发出、反馈搭其后第一个 U 回传，OLLA 更新与重传资格从该 U 之后第一个
     D/S 起生效；``DDDSU`` 在 30 kHz 下逐相位偏移 5/4/3/2 个 TTI。**重传还要
     额外等到同类型时隙**（S 上发的 TB 要等下一个 S），两个约束取交集。等待期间
-    该 UE 因单 HARQ 进程模型不参与调度（计入 ``harq_feedback_wait_skips``）。设成
+    首传 ACK 与 NACK 都占住该 UE 的单 HARQ 进程：反馈前不能更新 OLLA/rank，也不能
+    发新 TB（计入 ``harq_feedback_wait_skips``）。设成
     False 是零时延反向对照；图案里没有 U 时自动退化并写进 ``notes``。
     k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。
 
     **CQI 的长期滤波是一阶 IIR**：``s <- s + λ(x - s)``。``cqi_filter_lambda``
-    默认 0.25，**已由用户 2026-09-02 对照现场 CQI 仿真确认**；
-    ``cqi_filter_domain`` 默认在量化后的 CQI 档上，**这一项仍是工程默认、
-    未经现场确认**。两者都随结果上报；``λ=1`` 关闭滤波可作反向对照。
+    默认 0.25，**已由负责人确认为当前工程默认，但尚未经现场测量/设备数据
+    标定**；``cqi_filter_domain`` 默认在量化后的 CQI 档上。两者都随结果上报；
+    ``λ=1`` 关闭滤波可作反向对照。不得把工程默认表述成现场等价。
 
     ``target_bler`` 可配，但它在**开环上大部分抵消**（同一个目标同时出现在
     CQI→门限 与 门限→MCS 两侧）：实测 384 个样本里 92% 选出完全相同的 MCS。

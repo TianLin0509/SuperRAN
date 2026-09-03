@@ -223,7 +223,8 @@ SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且�
 逐快照 `best_rank` 不再是发送 rank；`link_table` 模式是历史行为、只作反向对照）、
 `harq_feedback_delay=True`（ACK/NACK 搭下一个 U 时隙，OLLA 与重传从其后第一个
 D/S 生效；图案没有 U 时自动退化成零时延并写进 notes）、`cqi_filter_lambda=0.25`
-（CQI 一阶 IIR 的工程默认，**尚未现场标定，必须随结果报出**）、
+（CQI 一阶 IIR：**0.25 已由负责人确认为工程默认，但尚未经现场测量/设备数据标定；
+必须随结果报出且不得声称现场等价**）、
 `num_replications=8`（**别调到 6 以下**，见上）、
 `replication_workers="auto"`（短任务串行，长任务用进程；实际值看结果 `parallel`）、
 `neighbor_prb_util=0.3`、`csi_aging=True`、`olla_speedup=1.0`、`mu_enabled=False`。
