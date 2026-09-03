@@ -47,9 +47,10 @@ h2{font-size:19px;font-weight:700;letter-spacing:-.01em;margin:0 0 14px}
 padding:24px;margin:0 0 16px}
 .badge{display:inline-block;padding:3px 12px;border-radius:6px;font-size:13px;
 font-weight:700;color:#fff}
-.badge.ok{background:var(--ok)}
+/* ok/warn 底色亮，白字对比度不足，统一用深色字；bad 是深红，保留白字 */
+.badge.ok{background:var(--ok);color:#1d1d1f}
 .badge.warn{background:var(--warn);color:#1d1d1f}
-.badge.bad{background:var(--bad)}
+.badge.bad{background:var(--bad);color:#fff}
 .meta{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 26px}
 .meta span{background:var(--card);border:1px solid var(--line);border-radius:6px;
 padding:4px 10px;font-size:12px;color:var(--soft)}
