@@ -1,27 +1,31 @@
 # SuperRAN 开发规范
 
-## 多人 Agent 协作入口
+## Agent 协作入口（先读这里）
 
-团队成员开始前还要按角色读取对应 Skill：
+SuperRAN 由**一位维护者**（无线通信工程师）主导，Agent 是执行者不是决策者。
+所有协作规则在 `.agents/` 目录，**开工前必读，不要按聊天里粘贴的 prompt 工作**：
 
-- 正式实现任务（普通组员或组长本人）：`skills/superran-member-task/SKILL.md`
-- 组长分工、状态、PR 审核与合并：`skills/superran-lead/SKILL.md`
+- 实现任务：`.agents/AUTHOR.md`
+- 独立审核：`.agents/REVIEWER.md`
+- 需要几个 Reviewer：`.agents/RISK.md`（按文件路径查表，不许自己估）
+- 推送与建 PR：`.agents/SYNC.md`（只在维护者明确说“同步 GitHub”时执行）
 - 仿真设计、数据生成或性能结论：`skills/channel-sim/SKILL.md`
 
-`develop` 是实现 PR 的唯一目标分支，`main` 只由组长单独发布。具体实现的 Agent 只做
-Author，人可以是普通组员，也可以是组长本人；组长 Agent 不修改 Author 分支，并且只有
-组长明确批准当前完整 HEAD SHA 后才可合并。标题含 `[REHEARSAL]` 的体验 PR 永不合并。
+三条铁律：**一个提交只动一个物理机制**；**审核发现的物理 bug，修复时必须补一条
+“revert 掉就会变红”的测试**并入 `tests/test_physics_invariants.py`；**不许静默降级**，
+用了工程近似要写进报告的“没证明什么”。
 
-GitHub 身份只决定正式 Author 向自己的 Fork 还是上游 topic branch 推送，不能决定任务
-模式。正式实现必须显式使用 `TEAM_MODE: FORMAL`；演练必须显式使用
-`TEAM_MODE: REHEARSAL`，不得因为登录账号是 Owner 自动进入演练。组长本人作为正式
-Author 提交的 PR，必须由另一个全新 Agent Session 在隔离 worktree 中审核；同一 Author
-Session 不得自写自审。
+报告统一用 `python scripts/make_agent_report.py <report.json>` 生成，字段照抄
+`.agents/report.example.json`，**不要手写 HTML**。看当前状态用
+`python scripts/superran_board.py`。
 
-任一 Author PR 提交或更新后，Author Agent 必须按
-`skills/superran-member-task/references/change-report.md` 生成绑定当前远端 PR HEAD 的
-本地交互式改动说明 HTML，并把 PR 链接与 HTML 文件一起交给组长。报告是 Author 汇报，
-不是审核通过证据；默认不提交到公开仓库，任何新 commit 都使旧报告失效。
+`develop` 是唯一主线，主工作区就是 `C:\Vibe\Wireless\SuperRAN`；并行任务用
+`git worktree add` 建到 `C:\Vibe\Worktrees\SuperRAN\<任务>`，**禁止再 clone 一份**。
+Agent 默认不 push、不建 PR、不合并远端。
+
+> `skills/superran-lead/` 与 `skills/superran-member-task/` 是已废弃的多人「组长-组员」
+> 流程（含 FORMAL/REHEARSAL 模式、Fork 推送等），**不要再按它们工作**，一律以
+> `.agents/` 为准。
 
 与人交流采用“双层表达”：保留准确技术术语，同时紧跟一句白话解释；关键物理概念再给
 一个贴近当前任务的小例子。例子只帮助理解，不能冒充代码事实、测试证据或性能结论。

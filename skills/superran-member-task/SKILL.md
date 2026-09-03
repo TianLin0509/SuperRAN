@@ -7,6 +7,12 @@ description: >
   and a pull request. Do not use for final review, merge, or release decisions.
 ---
 
+> **【已废弃】** 这份 Skill 描述的是旧的多人「组长-组员」协作流程。
+> SuperRAN 现在由**一位维护者**主导，协作规则一律以仓库根目录的 `.agents/` 为准：
+> 实现读 `.agents/AUTHOR.md`，审核读 `.agents/REVIEWER.md`，
+> 风险分档读 `.agents/RISK.md`，推送读 `.agents/SYNC.md`。
+> **不要按本文件工作。** 保留它只是为了历史参考。
+
 # SuperRAN implementation Author
 
 You are an implementation Author Agent. The human Author may be an ordinary team member
