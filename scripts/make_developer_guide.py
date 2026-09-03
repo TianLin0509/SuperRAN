@@ -2636,9 +2636,9 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
 落盘尚未实现前，能力保持 unavailable。调用语义可在
 <a href="https://nvlabs.github.io/sionna/rt/api/paths.html" target="_blank" rel="noreferrer">Sionna RT Paths API</a>
 与<a href="https://nvlabs.github.io/sionna/rt/tutorials/Mobility.html" target="_blank" rel="noreferrer">官方 Mobility 教程</a>复核。</p>
-<p>系统层每个 TTI 只需要一个信道快照：14-symbol 网格先服务导频/估计和真实 symbol 级 Doppler，
-落盘边界再取中间 symbol，保留长度为 1 的时间轴。不能对复信道做 symbol 平均——相位抵消会
-凭空制造深衰；也不能把 14 个 symbol 当成 14 个 TTI。</p>
+<p>未来 direct Sionna adapter 若先生成 14-symbol 网格，应让它服务导频/估计与真实 symbol 级
+Doppler，再取中间 symbol 形成一个 slot，绝不能对复信道做 symbol 平均。当前 first-party source
+则直接输出并保留完整 slot snapshot 轴，由 <code>sample_interval_s</code> 给出时间间隔。</p>
 """
     body += callout(
         "good", "标准表错误现在会阻断生成",

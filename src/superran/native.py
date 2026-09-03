@@ -1280,22 +1280,22 @@ class InternalSimSource:
         )
         for cluster, power in enumerate(powers):
             aoa0 = (
-                None
+                (float(link_aoa_rad) if profile.is_los and cluster == 0 else None)
                 if profile.aoa_deg is None
                 else float(link_aoa_rad) + math.radians(float(profile.aoa_deg[cluster]))
             )
             aod0 = (
-                None
+                (float(link_aod_rad) if profile.is_los and cluster == 0 else None)
                 if profile.aod_deg is None
                 else float(link_aod_rad) + math.radians(float(profile.aod_deg[cluster]))
             )
             zoa0 = (
-                None
+                (float(link_zoa_rad) if profile.is_los and cluster == 0 else None)
                 if profile.zoa_deg is None
                 else float(link_zoa_rad) + math.radians(float(profile.zoa_deg[cluster]) - 90.0)
             )
             zod0 = (
-                None
+                (float(link_zod_rad) if profile.is_los and cluster == 0 else None)
                 if profile.zod_deg is None
                 else float(link_zod_rad) + math.radians(float(profile.zod_deg[cluster]) - 90.0)
             )
