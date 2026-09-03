@@ -7,13 +7,14 @@ param([switch]$NoFetch, [switch]$NoOpen)
 $repo = Split-Path -Parent $PSScriptRoot
 $script = Join-Path $PSScriptRoot 'superran_board.py'
 
-$args = @($script)
-if ($NoFetch) { $args += '--no-fetch' }
-if ($NoOpen)  { $args += '--no-open' }
+# 不要用 $args，它是 PowerShell 的自动变量
+$pyArgs = @($script)
+if ($NoFetch) { $pyArgs += '--no-fetch' }
+if ($NoOpen)  { $pyArgs += '--no-open' }
 
 Push-Location $repo
 try {
-    & python @args
+    & python @pyArgs
     exit $LASTEXITCODE
 } finally {
     Pop-Location
