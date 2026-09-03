@@ -287,22 +287,49 @@ check(_g_bad["measured"] is False, "单用户时 MU 增益明确标成未测得"
 check(bool(_g_bad.get("errors")), "MU 配对失败返回可审计错误，而不是静默吞掉")
 check("禁止用于仿真" in _g_bad["note"], "诊断占位 1.0 不冒充可用 MU 增益")
 
+# **标量比值口径是历史臂**（mu_accounting='se_ratio_legacy'），必须显式选。
 # 比值 <= 1 时调度器不该切 MU（SU 无干扰且可到 rank4）
 _T_legacy_ebf = fake_tables(power_constraint="ebf")
-_r_su = sysm.simulate(_T_legacy_ebf, sys_cfg=sysm.SystemConfig(
-                          duration_s=2.0, seed=12, power_constraint="ebf"),
-                      traffic=sysm.TrafficConfig(model="full_buffer"),
-                      sched=sysm.SchedulerConfig(mu_enabled=True), mu_se_ratio=0.8)
+
+
+def _legacy_mu(ratio: float):
+    return sysm.simulate(
+        _T_legacy_ebf,
+        sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=12,
+                                  power_constraint="ebf"),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(mu_enabled=True,
+                                   mu_accounting="se_ratio_legacy"),
+        mu_se_ratio=ratio)
+
+
+_r_su = _legacy_mu(0.8)
 check(_r_su.cell["mu_share"] == 0.0, "MU 不划算时（比值<1）自适应选 SU，不强行配对")
-_r_mu = sysm.simulate(_T_legacy_ebf, sys_cfg=sysm.SystemConfig(
-                          duration_s=2.0, seed=12, power_constraint="ebf"),
-                      traffic=sysm.TrafficConfig(model="full_buffer"),
-                      sched=sysm.SchedulerConfig(mu_enabled=True), mu_se_ratio=1.6)
+_r_mu = _legacy_mu(1.6)
 print(f"  比值 0.8 -> MU 占比 {_r_su.cell['mu_share']:.0%}；"
       f"比值 1.6 -> MU 占比 {_r_mu.cell['mu_share']:.0%}")
 check(_r_mu.cell["mu_share"] > 0.5, "MU 划算时确实切过去")
 check(_r_mu.cell["cell_served_mbps"] > _r_su.cell["cell_served_mbps"],
       "切到 MU 之后小区吞吐确实更高")
+check(_r_mu.cell["mu_accounting"] == "se_ratio_legacy",
+      "历史标量口径必须随结果显式上报")
+check(any("se_ratio_legacy" in n for n in _r_mu.notes),
+      "历史口径必须进 notes：包变小但不更容易错，结果会系统性乐观")
+
+# --- capacity 的 pair_table 口径：缺 pair 表要硬失败，不静默降级 ---------
+try:
+    sysm.simulate(
+        _T_legacy_ebf,
+        sys_cfg=sysm.SystemConfig(duration_s=0.05, seed=12,
+                                  power_constraint="ebf"),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(mu_enabled=True,
+                                   mu_accounting="pair_table"))
+except ValueError as _exc:
+    check("pair graph" in str(_exc) and "完整" in str(_exc),
+          "capacity 开 MU 走 pair_table 但没建 pair 表时硬失败")
+else:
+    check(False, "capacity 缺 pair 表却没有报错")
 
 # ---------------------------------------------------------------------------
 sect("10  健壮性回归：这些都是真踩到过的")
@@ -829,7 +856,9 @@ for _u in range(2):
         best_se_gnb=_se[:, 0].copy()))
 _pf_sentinel_cfg = sysm.SystemConfig(
     evaluation_mode="experience", duration_s=1.0,
-    tdd_pattern="DDDSU", seed=9)
+    # This counterexample isolates PF accounting.  Use the explicit no-delay
+    # control so the single-HARQ-process wait window is not a second variable.
+    tdd_pattern="D", harq_feedback_delay=False, seed=9)
 _pf_sentinel_traffic = sysm.TrafficConfig(
     model="mixed", small_ue_share=0.5,
     small_file_bytes=1500, small_arrival_rate_hz=1500.0,
@@ -1684,6 +1713,832 @@ with tempfile.TemporaryDirectory() as _compare_tmp:
     finally:
         kpi_view.artifacts_root = _old_kpi_root
         kcmp.artifacts_root = _old_compare_root
+
+
+# ---------------------------------------------------------------------------
+sect("17  下行 AMC 链：rank 策略、HARQ 反馈时序、决策坐标与解码 SINR")
+
+from superran import amc_policy as ap  # noqa: E402
+
+# --- 17.1 HARQ 反馈偏移完全由 TDD 图案决定 --------------------------------
+check(ap.feedback_effective_offsets("DDDSU") == (5, 4, 3, 2, 6),
+      "DDDSU：D/D/D/S 发送的反馈分别在 5/4/3/2 个 TTI 后生效")
+check(ap.feedback_effective_offsets("DDDSUDDDSU")
+      == (5, 4, 3, 2, 6, 5, 4, 3, 2, 6),
+      "图案重复两遍（8 下行 : 2 上行）得到同一组偏移")
+check(ap.feedback_effective_offsets("D") == (1,)
+      and ap.feedback_effective_offsets("DS") == (1, 1),
+      "纯下行图案没有上行承载反馈，退化成零时延并由 notes 说明")
+for _bad in ("", "X", "UU"):
+    try:
+        ap.feedback_effective_offsets(_bad)
+        check(False, f"非法图案 {_bad!r} 应当被拒")
+    except ValueError:
+        check(True, f"非法图案 {_bad!r} 被拒，不静默给一组偏移")
+
+_fb_cfg = sysm.SystemConfig(evaluation_mode="experience", duration_s=0.05,
+                            tdd_pattern="DDDSU", seed=17)
+check(_fb_cfg.as_dict()["harq_feedback_offsets_tti"] == [5, 4, 3, 2, 6]
+      and _fb_cfg.as_dict()["harq_feedback_delay"] is True,
+      "反馈偏移与开关随 SystemConfig 一起进结果合同")
+
+# --- 17.2 OLLA 关闭只去掉叠加，不换决策坐标 --------------------------------
+# 真值坐标与 AMC 预测坐标故意拉开 12 dB：如果关掉 OLLA 会掉回真值坐标，
+# 选出来的 MCS 会明显不同，这条就会红。
+_amc_table = sysm.UeLinkTable(
+    ue=0,
+    sinr_db=np.full((1, 2), 22.0),
+    mcs=np.array([[la.select_mcs(22.0, table=3, target_bler=0.1).index] * 2],
+                 dtype=int),
+    se=np.full((1, 2), 1.0),
+    best_rank=np.array([1], dtype=int),
+    best_se=np.array([1.0]),
+    geo_sinr_db=22.0,
+    outage=np.array([False]),
+    sinr_tx_db=np.full((1, 2), 10.0),
+    sinr_rbg_db=np.full((1, 2, 17), 22.0),
+    sinr_tx_rbg_db=np.full((1, 2, 17), 10.0),
+    mcs_table=3, target_bler=0.1,
+)
+_amc_runs = {}
+for _olla in (True, False):
+    _amc_runs[_olla] = sysm.simulate(
+        [_amc_table],
+        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.02,
+                                  tdd_pattern="D", seed=5),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(
+            mu_enabled=False, olla_enabled=_olla,
+            rank=ap.RankConfig(fixed_rank=1)),
+        kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
+    )
+_amc_rows = {
+    k: v.diagnostics["allocation_sample"][0] for k, v in _amc_runs.items()}
+_amc_expect = la.select_mcs(10.0, table=3, target_bler=0.1).index
+check(_amc_rows[False]["mcs"] == _amc_expect
+      and _amc_rows[False]["mcs_without_olla"] == _amc_expect,
+      f"关掉 OLLA 后发送档仍由 CQI+BF 坐标决定（MCS{_amc_expect}）")
+check(_amc_rows[False]["base_tx_sinr_db"] == 10.0
+      and _amc_rows[True]["base_tx_sinr_db"] == 10.0,
+      "两种配置的决策坐标都是 sinr_tx_db，不是真实接收 SINR")
+check(_amc_rows[False]["mcs"]
+      != la.select_mcs(22.0, table=3, target_bler=0.1).index,
+      "关掉 OLLA 不会退回用真实接收 SINR 反折 MCS 的上帝视角")
+check(_amc_rows[True]["olla_before_db"] == 0.0
+      and _amc_rows[True]["mcs"] == _amc_expect,
+      "开启 OLLA 时首个 TTI 偏置为 0，与关闭 OLLA 给出同一档")
+
+# --- 17.2a 单 HARQ 进程：ACK 也必须等反馈，rank 不能提前看 NACK ---------
+# 强制所有首传 ACK。DDDSU 的 t0 反馈到 t5 才生效，所以 10 TTI 内同一 UE
+# 只能在 t0/t5 发两次；旧实现只为 NACK 建 pending，会在 8 个 D/S 全部连发。
+_old_system_bler = sysm._bler_lookup
+_old_experience_bler = expm._bler_lookup
+_feedback_calls: dict[str, list[int]] = {"capacity": [], "experience": []}
+_old_record_feedback = ap.RankController.record_feedback
+_feedback_mode = "capacity"
+
+
+def _spy_feedback(self, ue, **kwargs):
+    value = kwargs.get("feedback_tti")
+    if value is not None:
+        _feedback_calls[_feedback_mode].append(int(value))
+    return _old_record_feedback(self, ue, **kwargs)
+
+
+try:
+    sysm._bler_lookup = lambda _mcs, _sinr: 0.0
+    expm._bler_lookup = lambda _mcs, _sinr: 0.0
+    ap.RankController.record_feedback = _spy_feedback
+    _feedback_runs = {}
+    for _feedback_mode in ("capacity", "experience"):
+        _feedback_runs[_feedback_mode] = sysm.simulate(
+            [_amc_table],
+            sys_cfg=sysm.SystemConfig(
+                evaluation_mode=_feedback_mode, duration_s=0.005,
+                tdd_pattern="DDDSU", harq_feedback_delay=True, seed=650),
+            traffic=sysm.TrafficConfig(model="full_buffer"),
+            sched=sysm.SchedulerConfig(
+                mu_enabled=False, olla_enabled=True,
+                rank=ap.RankConfig(fixed_rank=1)),
+            kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="full"),
+        )
+finally:
+    sysm._bler_lookup = _old_system_bler
+    expm._bler_lookup = _old_experience_bler
+    ap.RankController.record_feedback = _old_record_feedback
+
+for _feedback_mode, _run_feedback in _feedback_runs.items():
+    check(_run_feedback.cell["scheduled_tti"] == 2
+          and _run_feedback.cell["harq_feedback_wait_skips"] == 6,
+          f"{_feedback_mode}：ACK 也占住单 HARQ 进程，DDDSU 只在 t0/t5 发送")
+    check(_feedback_calls[_feedback_mode] == [5],
+          f"{_feedback_mode}：首个 ACK 只在反馈到达 t5 交给 OLLA/rank，不在 t0 偷看")
+
+# 重传 ACK/NACK 也必须等终次反馈才释放单进程，但终次反馈不再进入首传
+# OLLA/rank 学习。强制 t0 首传 NACK、t5 重传，下一份新 TB 只能在 t10 发。
+_terminal_runs = {}
+_terminal_feedback_calls = {}
+_old_terminal_system_bler = sysm._bler_lookup
+_old_terminal_experience_bler = expm._bler_lookup
+_old_terminal_retx_bler = la.harq_retransmission_bler
+_old_terminal_record = ap.RankController.record_feedback
+_terminal_key = ""
+
+
+def _terminal_spy(self, ue, **kwargs):
+    if kwargs.get("feedback_tti") is not None:
+        _terminal_feedback_calls.setdefault(_terminal_key, []).append(
+            int(kwargs["feedback_tti"]))
+    return _old_terminal_record(self, ue, **kwargs)
+
+
+try:
+    sysm._bler_lookup = lambda _mcs, _sinr: 1.0
+    expm._bler_lookup = lambda _mcs, _sinr: 1.0
+    ap.RankController.record_feedback = _terminal_spy
+    for _terminal_ack in (True, False):
+        _terminal_bler = 0.0 if _terminal_ack else 1.0
+
+        def _terminal_retx(mcs, sinr, *, combining="ir", table=3,
+                           _bler=_terminal_bler):
+            return {
+                "bler": float(_bler), "lookup_mcs": int(mcs),
+                "lookup_sinr_db": float(sinr), "combining": str(combining),
+                "table": int(table),
+            }
+
+        la.harq_retransmission_bler = _terminal_retx
+        for _terminal_mode in ("capacity", "experience"):
+            _terminal_key = f"{_terminal_mode}/retx_{'ack' if _terminal_ack else 'nack'}"
+            _terminal_runs[_terminal_key] = sysm.simulate(
+                [_amc_table],
+                sys_cfg=sysm.SystemConfig(
+                    evaluation_mode=_terminal_mode, duration_s=0.006,
+                    tdd_pattern="DDDSU", harq_feedback_delay=True, seed=651),
+                traffic=sysm.TrafficConfig(model="full_buffer"),
+                sched=sysm.SchedulerConfig(
+                    mu_enabled=False, olla_enabled=True,
+                    rank=ap.RankConfig(fixed_rank=1)),
+                kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="full"),
+            )
+finally:
+    sysm._bler_lookup = _old_terminal_system_bler
+    expm._bler_lookup = _old_terminal_experience_bler
+    la.harq_retransmission_bler = _old_terminal_retx_bler
+    ap.RankController.record_feedback = _old_terminal_record
+
+for _terminal_key, _terminal_run in _terminal_runs.items():
+    check(_terminal_run.cell["scheduled_tti"] == 3
+          and _terminal_run.cell["harq_feedback_wait_skips"] == 7,
+          f"{_terminal_key}：t5 重传后继续占住进程，下一份新 TB 最早 t10")
+    check(_terminal_feedback_calls[_terminal_key] == [5],
+          f"{_terminal_key}：终次反馈只释放进程，不再次进入首传 OLLA/rank 学习")
+    check(abs(float(_terminal_run.cell["olla_mcs_mean"]) + 0.09) < 1e-12,
+          f"{_terminal_key}：重传 ACK/NACK 都不二次更新 OLLA")
+    if _terminal_key.startswith("experience/"):
+        _terminal_alloc = _terminal_run.diagnostics["allocation_sample"]
+        check([(row["tti"], row["harq_tx_mode"]) for row in _terminal_alloc]
+              == [(0, "newtx"), (5, "retx"), (10, "newtx")],
+              f"{_terminal_key}：逐 TTI 轨迹明确没有 t6 新 TB，也没有第三次重传")
+
+# 快速回退的 NACK 门限只能在反馈到达后触发。先升到 rank2，在 t1 发送一个
+# NACK；t2..t4 必须保持 rank2，t5 将该 feedback 应用后才允许回退。
+_delayed_rank = ap.RankController(
+    ap.RankConfig(
+        mode="adaptive", fixed_rank=1, period_tti=30,
+        min_filter_samples=1, se_filter_beta=1.0,
+        min_mcs_threshold=0, resource_cost_ratio=(1.0, 1.0),
+        gain_factor_raise=1.1, fallback_enabled=True,
+        quick_fallback_nack_thld=1, quick_fallback_window_tti=20,
+        quick_fallback_min_sched=1),
+    1, tti_ms=0.5, max_rank_available=2)
+_delayed_rank.observe_link(0, 0, [1.0, 2.0], [20, 20])
+_delayed_rank._last_judge_tti[0] = -29
+_delayed_rank.step(1, olla_by_ue=np.zeros(1))
+check(_delayed_rank.rank_of(0) == 2, "rank 反例先进入 rank2 快速回退监测窗")
+_delayed_event = ap.FirstTxFeedback(
+    ue=0, ack=False, mcs=20, rank=2, realized_se=0.0,
+    tx_tti=1, effective_tti=5, use_mu_olla=False, olla_delta_mcs=-0.09)
+_delayed_su_olla = np.zeros(1)
+_delayed_mu_olla = np.zeros(1)
+for _tti in range(2, 5):
+    _delayed_rank.step(_tti, olla_by_ue=_delayed_su_olla)
+check(_delayed_rank.rank_of(0) == 2 and not _delayed_event.due(4),
+      "反馈到达前 NACK 不可见，rank 不得提前回退")
+_delayed_event.apply(
+    rank_controller=_delayed_rank,
+    su_olla=_delayed_su_olla, mu_olla=_delayed_mu_olla,
+    olla_min=-20.0, olla_max=3.0)
+_delayed_rank.step(5, olla_by_ue=_delayed_su_olla)
+check(_delayed_rank.rank_of(0) == 2,
+      "第一个已到达 NACK 未超过硬门限，rank2 继续监测")
+_delayed_event_2 = ap.FirstTxFeedback(
+    ue=0, ack=False, mcs=20, rank=2, realized_se=0.0,
+    tx_tti=6, effective_tti=10, use_mu_olla=False, olla_delta_mcs=-0.09)
+for _tti in range(6, 10):
+    _delayed_rank.step(_tti, olla_by_ue=_delayed_su_olla)
+check(_delayed_rank.rank_of(0) == 2 and not _delayed_event_2.due(9),
+      "第二个 NACK 反馈到达前仍不能提前越过回退门限")
+_delayed_event_2.apply(
+    rank_controller=_delayed_rank,
+    su_olla=_delayed_su_olla, mu_olla=_delayed_mu_olla,
+    olla_min=-20.0, olla_max=3.0)
+_delayed_rank.step(10, olla_by_ue=_delayed_su_olla)
+check(_delayed_rank.rank_of(0) == 1
+      and _delayed_rank.diagnostics()["events"][-1]["tti"] == 10,
+      "第二个 NACK 到达 t10 后才超过门限并回退，不在发送时刻窥见反馈")
+
+# --- 17.3 解码 SINR 只在实际授予的 RBG 上取 --------------------------------
+# 前 8 个 RBG 极好、后 9 个极差；小包只会拿到少数几个 RBG。
+_grant_rbg = np.concatenate([np.full(8, 26.0), np.full(9, -4.0)])
+_grant_table = sysm.UeLinkTable(
+    ue=0,
+    sinr_db=np.full((1, 1), float(np.mean(_grant_rbg))),
+    mcs=np.array([[la.select_mcs(float(np.mean(_grant_rbg)), table=3,
+                                 target_bler=0.1).index]], dtype=int),
+    se=np.full((1, 1), 1.0),
+    best_rank=np.array([1], dtype=int),
+    best_se=np.array([1.0]),
+    geo_sinr_db=float(np.mean(_grant_rbg)),
+    outage=np.array([False]),
+    sinr_tx_db=np.full((1, 1), 20.0),
+    sinr_rbg_db=_grant_rbg[None, None, :].copy(),
+    sinr_tx_rbg_db=np.full((1, 1, 17), 20.0),
+    mcs_table=3, target_bler=0.1,
+)
+_grant_run = sysm.simulate(
+    [_grant_table],
+    sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.05,
+                              tdd_pattern="D", seed=77),
+    traffic=sysm.TrafficConfig(model="cbr", cbr_mbps=1.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=False, olla_enabled=False, frequency_selective="off",
+        rank=ap.RankConfig(fixed_rank=1)),
+    kpi=sysm.KpiConfig(warmup_tti=0),
+)
+_grant_rows = [r for r in _grant_run.diagnostics["allocation_sample"]
+               if r["n_rbg"] < 17]
+check(bool(_grant_rows), "小包确实只拿到部分 RBG，可用于检查解码 SINR 口径")
+_wideband_db = float(np.mean(_grant_rbg))
+check(all(abs(r["sinr_db"] - _wideband_db) > 1.0 for r in _grant_rows),
+      f"部分授权的解码 SINR 不再等于全带均值 {_wideband_db:.2f} dB")
+check(all(
+    abs(r["sinr_db"]
+        - float(np.mean(_grant_rbg[np.asarray(r["rbg_indices"], dtype=int)])))
+    < 1e-4
+    for r in _grant_rows),
+    "解码 SINR 精确等于被授 RBG 上真值的 dB 域均值")
+
+# --- 17.4 Rank 策略：默认固定、可切历史模式、越界钳位 -----------------------
+check(sysm.SchedulerConfig().rank.mode == "fixed"
+      and sysm.SchedulerConfig().rank.fixed_rank == 2,
+      "默认 rank 策略是固定 rank2，不跟随逐快照 best_rank")
+for _bad_rank in ({"mode": "auto"}, {"fixed_rank": 0}, {"period_tti": 0},
+                  {"gain_factor_raise": 0.5}, {"se_filter_beta": 0.0},
+                  {"se_sample_scope": "slot"}, {"min_filter_samples": 0},
+                  {"quick_fallback_ibler_thld": 1.5},
+                  {"resource_cost_ratio": ()},
+                  {"max_backoff_times": -1}):
+    try:
+        ap.RankConfig(**_bad_rank)
+        check(False, f"非法 rank 配置 {_bad_rank} 应当被拒")
+    except ValueError:
+        check(True, f"非法 rank 配置 {_bad_rank} 被拒")
+
+_rank_ctl = ap.RankController(
+    ap.RankConfig(fixed_rank=4), 2, tti_ms=0.5, max_rank_available=2)
+check(_rank_ctl.rank_of(0) == 2 and _rank_ctl.rank_for(0, 1) == 2,
+      "fixed_rank 超过链路表可用 rank 时钳位，且不被链路表反向拉走")
+_legacy_ctl = ap.RankController(
+    ap.RankConfig(mode="link_table"), 2, tti_ms=0.5, max_rank_available=4)
+check(_legacy_ctl.rank_for(0, 3) == 3 and _legacy_ctl.rank_for(0, 9) == 4,
+      "link_table 历史模式跟随链路表并钳到可用上限")
+
+_rank_runs = {}
+for _mode, _cfg in (("fixed2", ap.RankConfig(fixed_rank=2)),
+                    ("legacy", ap.RankConfig(mode="link_table"))):
+    _rank_runs[_mode] = sysm.simulate(
+        _T[:4],
+        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.05,
+                                  tdd_pattern="DDDSU", seed=909),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(mu_enabled=False, rank=_cfg),
+        kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
+    )
+check(all(abs(r["rank"] - 2) < 1e-9
+          for r in _rank_runs["fixed2"].diagnostics["allocation_sample"]),
+      "固定模式下每一次 grant 的 rank 都是 2")
+check(_rank_runs["fixed2"].cell["avg_rank"] == 2.0,
+      "固定模式的小区平均 rank 精确为 2，没有任何切换")
+check(_rank_runs["legacy"].cell["avg_rank"] != 2.0,
+      "历史模式确实会用到别的 rank，两个模式不是同一条轨迹")
+check(_rank_runs["fixed2"].config["scheduler"]["rank"]["mode"] == "fixed"
+      and "best_rank" in _rank_runs["fixed2"].config["scheduler"]["rank"][
+          "adaptation_note"],
+      "rank 策略随结果一起交付，并写明 best_rank 不再参与发送决策")
+
+# --- 17.5 自适应模式：现场规格的判决状态机 --------------------------------
+# 常数全部来自用户 2026-09-02 给的现场实现规格：判决周期 1000 TTI、
+# 升 rank 谱效比 1.1、谱效滤波 beta=0.1、最少 3 个样本、最小 MCS 闸门 9、
+# 资源消耗系数 [1.0,0.97,0.95,0.93]、快速回退（NACK 90 / IBLER 0.3 /
+# 谱效比 1.0）、判决周期指数退避 x2^n（n<=4）。
+_SPEC_RANK = ap.RankConfig(mode="adaptive")
+check(int(_SPEC_RANK.period_tti) == 1000
+      and float(_SPEC_RANK.gain_factor_raise) == 1.1
+      and float(_SPEC_RANK.gain_factor_reduce) == 1.1
+      and float(_SPEC_RANK.se_filter_beta) == 0.1
+      and int(_SPEC_RANK.min_filter_samples) == 3
+      and int(_SPEC_RANK.min_mcs_threshold) == 9
+      and tuple(_SPEC_RANK.resource_cost_ratio) == (1.0, 0.97, 0.95, 0.93)
+      and int(_SPEC_RANK.quick_fallback_nack_thld) == 90
+      and float(_SPEC_RANK.quick_fallback_ibler_thld) == 0.3
+      and float(_SPEC_RANK.quick_fallback_se_ratio_thld) == 1.0
+      and int(_SPEC_RANK.max_backoff_times) == 4,
+      "rank 自适应的默认常数逐项等于现场规格")
+
+
+def _rank_ctl_spec(**kw):
+    base = dict(mode="adaptive", fixed_rank=1, period_tti=100,
+                min_filter_samples=1, se_filter_beta=1.0,
+                min_mcs_threshold=0,
+                resource_cost_ratio=(1.0, 1.0, 1.0, 1.0),
+                fallback_enabled=False)
+    base.update(kw)
+    return ap.RankController(ap.RankConfig(**base), 1, tti_ms=0.5,
+                             max_rank_available=4)
+
+
+def _drive(ctl, se, mcs=(20, 20, 20, 20), n_tti=401, olla=None):
+    for _tti in range(n_tti):
+        ctl.observe_link(0, _tti, list(se), list(mcs))
+        ctl.step(_tti, olla_by_ue=olla)
+    return ctl
+
+
+# 升 rank：必须**严格超过** 1.1 倍才切
+_r105 = _drive(_rank_ctl_spec(), [1.0, 1.05, 0.0, 0.0])
+_r110 = _drive(_rank_ctl_spec(), [1.0, 1.10, 0.0, 0.0])
+_r111 = _drive(_rank_ctl_spec(), [1.0, 1.11, 0.0, 0.0])
+print(f"  升 rank 迟滞：比值 1.05→rank{_r105.rank_of(0)}、"
+      f"1.10→rank{_r110.rank_of(0)}、1.11→rank{_r111.rank_of(0)}")
+check(_r105.rank_of(0) == 1 and _r110.rank_of(0) == 1,
+      "最优 rank 谱效没有严格超过当前的 1.1 倍时不升（现场 GainFactor=1.1）")
+check(_r111.rank_of(0) == 2
+      and _r111.diagnostics()["count_switch_up"] == 1,
+      "超过 1.1 倍后升到 rank2，并记录一次抬升")
+check(_r110.diagnostics()["count_blocked_by_raise_hysteresis"] > 0,
+      "被迟滞挡下的次数显式计数，不是静默不动")
+
+# **默认判据（用户 2026-09-03 裁决）：按滤波谱效最大化选 rank，但任何方向的
+# 切换都要求最优 rank 超过当前 rank 10%。** 迟滞因此是对称的。
+_SYM = ap.RankConfig(mode="adaptive")
+check(_SYM.switch_rule == "unified_ratio"
+      and float(_SYM.gain_factor_raise) == 1.1
+      and float(_SYM.gain_factor_reduce) == 1.1,
+      "默认是对称 10% 迟滞：两个方向共用同一条判据、同一个常数")
+check(_SYM.as_dict()["raise_margin_pct"] == 10.0
+      and _SYM.as_dict()["reduce_margin_pct"] == 10.0,
+      "两个方向的等效余量直接算成百分比报出来，不让人自己换算")
+
+
+def _margin_trial(se_by_rank, start_rank: int, **kw):
+    _c = _rank_ctl_spec(**kw)
+    _c._rank[0] = int(start_rank)
+    _drive(_c, se_by_rank)
+    return _c.rank_of(0)
+
+
+# 同一个 5.00 基准，最优候选分别高 4% / 9% / 11%；升降两个方向对称
+_sym_rows = [
+    ("降：当前 rank3，rank1 高 4%", [5.20, 4.0, 5.00, 3.0], 3, 3),
+    ("降：当前 rank3，rank1 高 9%", [5.45, 4.0, 5.00, 3.0], 3, 3),
+    ("降：当前 rank3，rank1 高 11%", [5.55, 4.0, 5.00, 3.0], 3, 1),
+    ("升：当前 rank1，rank3 高 9%", [5.00, 4.0, 5.45, 3.0], 1, 1),
+    ("升：当前 rank1，rank3 高 11%", [5.00, 4.0, 5.55, 3.0], 1, 3),
+]
+for _label, _se, _start, _want in _sym_rows:
+    _got = _margin_trial(_se, _start)
+    check(_got == _want, f"对称 10% 迟滞 · {_label} → rank{_want}")
+print("  对称 10% 迟滞：4%/9% 不动、11% 才切，升降两个方向一致")
+
+# **当前 rank 被最小 MCS 闸门判死时不讲迟滞。** 否则 se[cur]=se[best]=0，
+# "超过 10%" 恒为假，UE 会卡在一个已知发不出去的 rank 上。
+_gated = _rank_ctl_spec(min_mcs_threshold=9)
+_gated._rank[0] = 3
+_drive(_gated, [1.0, 1.0, 1.0, 1.0], mcs=(8, 8, 8, 8))
+check(_gated.rank_of(0) == 1
+      and _gated.diagnostics()["events"][-1]["reason"]
+      == "current_rank_gated_out",
+      "所有 rank 都被闸门判死时退到最低档，并显式记下原因")
+
+# **两份现场来源对降档判据的写法不一致，而且让 G↓ 的含义正好相反。**
+# 我们的默认（unified_ratio + 1.1）是用户裁决的对称 10% 迟滞；另一种写法保留
+# 作对照，因为现场到底是哪一种尚未确认，而这正是排查"rank 卡在高档下不来"
+# 时首先要钉死的一条。四种组合的行为逐一锁住，防止有人只改一个常数就以为
+# 换了一种行为。
+def _reduce_trial(rule: str, gd: float, se_by_rank, start_rank: int):
+    _c = ap.RankController(
+        ap.RankConfig(mode="adaptive", fixed_rank=1, period_tti=100,
+                      min_filter_samples=1, se_filter_beta=1.0,
+                      min_mcs_threshold=0,
+                      resource_cost_ratio=(1.0, 1.0, 1.0, 1.0),
+                      fallback_enabled=False, switch_rule=rule,
+                      gain_factor_reduce=gd),
+        1, tti_ms=0.5, max_rank_available=4)
+    _c._rank[0] = int(start_rank)
+    for _tti in range(401):
+        _c.observe_link(0, _tti, list(se_by_rank), [20, 20, 20, 20])
+        _c.step(_tti)
+    return _c.rank_of(0), _c.diagnostics()["count_blocked_by_reduce_hysteresis"]
+
+
+# 当前 rank3，最优 rank1 只高 4%（不到 10%）——四种组合两两相反
+_SE_NARROW = [5.20, 4.0, 5.00, 3.0]
+_r_spec_11 = _reduce_trial("spec_asymmetric", 1.1, _SE_NARROW, 3)
+_r_spec_09 = _reduce_trial("spec_asymmetric", 0.9, _SE_NARROW, 3)
+_r_unif_11 = _reduce_trial("unified_ratio", 1.1, _SE_NARROW, 3)
+_r_unif_09 = _reduce_trial("unified_ratio", 0.9, _SE_NARROW, 3)
+print(f"  降档四组合（最优只高 4%）：spec/1.1→rank{_r_spec_11[0]}、"
+      f"spec/0.9→rank{_r_spec_09[0]}、unified/1.1→rank{_r_unif_11[0]}、"
+      f"unified/0.9→rank{_r_unif_09[0]}")
+check(_r_spec_11 == (1, 0),
+      "spec_asymmetric + G↓=1.1：降 rank 立即生效（保持不变的条件恒为假）——"
+      "同一个常数、相反的行为，所以两者不能只看数值")
+check(_r_spec_09[0] == 3 and _r_spec_09[1] > 0,
+      "spec_asymmetric + G↓=0.9：当前 rank 还有最优的 90% 以上就不降")
+check(_r_unif_11[0] == 3 and _r_unif_11[1] > 0,
+      "unified_ratio + G↓=1.1（默认）：降 rank 同样要 10% 余量，迟滞对称")
+check(_r_unif_09 == (1, 0),
+      "unified_ratio + G↓=0.9：降 rank 立即生效")
+check(_r_spec_11[0] != _r_unif_11[0],
+      "同一个 G↓=1.1 在两种写法下给出相反的降档行为，必须连 switch_rule 一起读")
+# 差距够大时四种组合一致，说明差异只在"临界带"里
+_SE_WIDE = [7.0, 4.0, 5.0, 3.0]
+check(all(_reduce_trial(_rule, _gd, _SE_WIDE, 3)[0] == 1
+          for _rule in ("spec_asymmetric", "unified_ratio")
+          for _gd in (1.1, 0.9)),
+      "最优 rank 高 40% 时四种组合都降，写法差异只体现在临界带")
+check(ap.RankConfig(mode="adaptive").switch_rule == "unified_ratio",
+      "默认是用户裁决的对称 10% 写法；实现规格文档那种保留作对照")
+check(round(ap.RankConfig(
+    mode="adaptive", switch_rule="spec_asymmetric",
+    gain_factor_reduce=0.9).as_dict()["reduce_margin_pct"], 1) == 11.1,
+      "spec_asymmetric+0.9 的等效降档余量是 11.1%，与默认那条同一个意图")
+try:
+    ap.RankConfig(mode="adaptive", switch_rule="whatever")
+    check(False, "非法 switch_rule 应当被拒")
+except ValueError:
+    check(True, "非法 switch_rule 被拒")
+
+# 最小 MCS 闸门：谱效再高，预估 MCS 低于门限也不算有效层
+_gate = _drive(_rank_ctl_spec(min_mcs_threshold=9),
+               [1.0, 2.0, 0.0, 0.0], mcs=(20, 8, 8, 8), n_tti=301)
+check(_gate.rank_of(0) == 1,
+      "rank2 估计谱效高一倍，但预估 MCS 8 < 9 被闸门置零，不升")
+
+# 资源消耗加权：现场系数逐 rank 乘进滤波前的观测
+_cost = ap.RankController(
+    ap.RankConfig(mode="adaptive", fixed_rank=1, se_filter_beta=1.0,
+                  min_mcs_threshold=0),
+    1, tti_ms=0.5, max_rank_available=4)
+_cost.observe_link(0, 0, [1.0, 1.0, 1.0, 1.0], [20, 20, 20, 20])
+check(all(abs(float(_cost._se_filt[0, _i]) - _v) < 1e-12
+          for _i, _v in enumerate((1.0, 0.97, 0.95, 0.93))),
+      "各 rank 的谱效按 DMRS 开销系数 [1.0,0.97,0.95,0.93] 加权")
+
+# 最少样本数：样本不够就不判决
+_few = _rank_ctl_spec(min_filter_samples=3)
+for _tti in range(501):
+    _few.observe_link(0, min(_tti, 1), [1.0, 5.0, 0.0, 0.0], [20, 20, 20, 20])
+    _few.step(_tti)
+check(_few.rank_of(0) == 1
+      and _few.diagnostics()["count_blocked_by_filter_samples"] > 0,
+      "谱效滤波样本不足 min_filter_samples 时不判决（现场默认 3）")
+
+# 周期没到不判决
+_early = _rank_ctl_spec()
+_drive(_early, [1.0, 5.0, 0.0, 0.0], n_tti=50)
+check(_early.rank_of(0) == 1,
+      "周期没到就不决策——rank 不会每个快照跟着谱效跳")
+
+# 快速回退：NACK 硬门限立即触发，rank 与 OLLA 一起退回，判决周期翻倍
+_fb_ctl = _rank_ctl_spec(period_tti=1000, fallback_enabled=True,
+                         quick_fallback_nack_thld=90)
+_olla = np.array([-1.5])
+_drive(_fb_ctl, [1.0, 5.0, 0.0, 0.0], n_tti=1001, olla=_olla)
+check(_fb_ctl.rank_of(0) == 2, "先抬升到 rank2 并进入快速回退监测")
+_olla[0] = -4.0          # 新 rank 上 OLLA 已经收敛到别的工作点
+_restores = []
+for _tti in range(1001, 1200):
+    _fb_ctl.record_first_tx(0, ack=False, mcs=20, realized_se=0.0)
+    _restores += _fb_ctl.step(_tti, olla_by_ue=_olla)
+    if _restores:
+        break
+_fb_diag = _fb_ctl.diagnostics()
+print(f"  快速回退：{_fb_diag['events'][-1]['reason']} @ TTI "
+      f"{_fb_diag['events'][-1]['tti']}，OLLA 恢复 {_restores}，"
+      f"判决周期 {_fb_diag['effective_judge_period_by_ue']}")
+check(_fb_ctl.rank_of(0) == 1
+      and _fb_diag["events"][-1]["reason"] == "quick_fallback_hard_nack",
+      "监测期内 NACK 超过硬门限立即回退，不等窗口结束")
+check(_restores == [(0, -1.5)],
+      "回退把 OLLA 一起退回抬升前的偏置，而不是留下新 rank 收敛出来的那个")
+check(_fb_diag["backoff_times_by_ue"] == [1]
+      and _fb_diag["effective_judge_period_by_ue"] == [2000],
+      "回退一次后判决周期指数退避 ×2")
+
+# 指数退避封顶
+_bo = _rank_ctl_spec(period_tti=100, fallback_enabled=True,
+                     quick_fallback_nack_thld=5, max_backoff_times=4)
+_bo_olla = np.zeros(1)
+_bo_periods = set()
+for _tti in range(40000):
+    _bo.observe_link(0, _tti, [1.0, 5.0, 0.0, 0.0], [20, 20, 20, 20])
+    _bo.step(_tti, olla_by_ue=_bo_olla)
+    if _bo.rank_of(0) > 1:
+        _bo.record_first_tx(0, ack=False, mcs=20, realized_se=0.0)
+    _bo_periods.add(_bo.judge_period_tti(0))
+check(sorted(_bo_periods) == [100, 200, 400, 800, 1600],
+      "判决周期按 ×2^n 退避并在 max_backoff_times 处封顶（100→1600）")
+check(_bo.diagnostics()["count_fallback"] > 1,
+      "反复失败的抬升被反复回退，退避让重试越来越稀")
+
+# --- 17.6 avg_mcs 含重传，avg_mcs_first_tx 只看首传 -------------------------
+_amc_cell = _rank_runs["fixed2"].cell
+check("avg_mcs_first_tx" in _amc_cell
+      and "avg_mcs_first_tx" in _rank_runs["fixed2"].users[0],
+      "小区级与用户级都给出只统计首传的平均 MCS")
+check("retransmissions included" in _amc_cell["avg_mcs_definition"],
+      "结果里写明 avg_mcs 的分母含重传，avg_mcs_first_tx 才是链路自适应视角")
+
+# --- 17.7 目标 BLER 可配，并且贯穿量化门限、选档与闭环 ---------------------
+check(la.select_mcs(12.0, table=3, target_bler=0.3).index
+      > la.select_mcs(12.0, table=3, target_bler=0.1).index,
+      "同一 SINR 下放宽目标 BLER 允许更高的 MCS（查表原语单调）")
+_thr10 = la._internal_cqi_thresholds(0.1, 3)
+_thr30 = la._internal_cqi_thresholds(0.3, 3)
+check(all(b < a for a, b in zip(_thr10, _thr30, strict=True)),
+      "CQI 量化门限逐档随目标 BLER 下移，量化侧也吃到了这个参数")
+
+_bler_h = [((np.random.default_rng(_s).standard_normal((8, 24, 16, 4))
+             + 1j * np.random.default_rng(_s + 50).standard_normal(
+                 (8, 24, 16, 4))) / np.sqrt(2))
+           for _s in range(3)]
+_bler_tables = {
+    _target: sysm.build_link_tables(_bler_h, [6.0, 2.0, -2.0],
+                                    target_bler=_target)
+    for _target in (0.1, 0.3)
+}
+check(_bler_tables[0.3][0].target_bler == 0.3,
+      "目标 BLER 跟着链路表走，主循环不再自己写死 10%")
+# **开环大部分抵消**：目标同时出现在 CQI→门限 和 门限→MCS 两侧，两次平移
+# 方向相同、幅度接近，选出的 MCS 索引因此多数不变。抵消不精确——内部 CQI 表
+# 只取 MCS 0,2,…,26,28 这个子集，量化边界上两侧的位移会差一点。
+# 实测 6 个信道 × 4 个几何点 × 4 个 rank 共 384 个样本：354 个完全相同，
+# 其余 30 个偏高 1~4 档，**方向恒为「放宽目标选更高档」，没有一个偏低**。
+# 所以这里断言的是方向性质而不是逐值相等；真正吃到目标的是 OLLA 闭环。
+_open_loop_delta = np.concatenate([
+    (sysm.build_link_tables([_h], [_geo], target_bler=0.3)[0].mcs_tx
+     - sysm.build_link_tables([_h], [_geo], target_bler=0.1)[0].mcs_tx).ravel()
+    for _seed in range(3)
+    for _h in [((np.random.default_rng(_seed).standard_normal((4, 24, 16, 4))
+                 + 1j * np.random.default_rng(_seed + 90).standard_normal(
+                     (4, 24, 16, 4))) / np.sqrt(2))]
+    for _geo in (-8.0, -2.0, 4.0, 10.0)
+])
+check(bool(np.all(_open_loop_delta >= 0)),
+      "放宽目标 BLER 在开环上从不选到更低的 MCS 档")
+check(float(np.mean(_open_loop_delta == 0)) > 0.8,
+      f"开环 MCS 多数对目标不敏感（{np.mean(_open_loop_delta == 0):.0%} 逐值相同）："
+      "同一个目标在量化与选档两侧大部分抵消")
+_bler_runs = {}
+for _target, _tabs in _bler_tables.items():
+    _bler_runs[_target] = sysm.simulate(
+        _tabs,
+        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=1.0,
+                                  tdd_pattern="DDDSU", seed=11),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(mu_enabled=False),
+        kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"))
+_c10, _c30 = _bler_runs[0.1].cell, _bler_runs[0.3].cell
+check(_c30["olla_mcs_mean"] > _c10["olla_mcs_mean"],
+      f"目标放宽后 OLLA 稳态偏置更激进（{_c10['olla_mcs_mean']:.2f} → "
+      f"{_c30['olla_mcs_mean']:.2f} MCS 档）")
+check(_c30["avg_mcs_first_tx"] > _c10["avg_mcs_first_tx"],
+      f"闭环下首传平均 MCS 随目标放宽而升高（{_c10['avg_mcs_first_tx']:.2f} → "
+      f"{_c30['avg_mcs_first_tx']:.2f}）")
+# 实测值不会精确落在目标上：OLLA 的稳态推导是连续偏置，而空口 MCS 是整数档，
+# 偏置要累积到跨过一整档才改变发送，因此实测值围绕目标抖且系统性偏低。
+check(_c30["bler_first_tx"] > 1.5 * _c10["bler_first_tx"],
+      f"实测首传 BLER 跟着目标显著上移（{_c10['bler_first_tx']:.3f} → "
+      f"{_c30['bler_first_tx']:.3f}），但整数 MCS 档使它不精确等于目标")
+for _bad_target in (0.0, 1.0, 0.0005, 0.999):
+    try:
+        sysm.build_link_tables([np.ones((1, 4, 2, 2), dtype=complex)], [10.0],
+                               target_bler=_bad_target)
+        check(False, f"target_bler={_bad_target} 应当被拒")
+    except ValueError:
+        check(True, f"target_bler={_bad_target} 越出预置曲线覆盖区间，被拒")
+for _unsupported_table in (1, 2):
+    try:
+        sysm.build_link_tables([np.ones((1, 4, 2, 2), dtype=complex)], [10.0],
+                               table=_unsupported_table)
+        check(False, f"table={_unsupported_table} 应当被拒")
+    except ValueError as _exc:
+        check("只支持 MCS table 3" in str(_exc),
+              f"breaking migration：build_link_tables 在入口硬拒绝 table={_unsupported_table}")
+
+
+# ---------------------------------------------------------------------------
+sect("18  capacity 的 MU：代价必须同时进 MCS 决策与误块抽签")
+
+# 用户 2026-09-02：capacity 的误码与重传要与 experience 基本一致。
+# 历史口径只把 TBS 乘一个标量比值——「包变小但不更容易错」，物理上说不通。
+# 这一节证明三件事：pair 表口径确实把配对代价压进了 MCS；误块抽签换成了
+# pair 真值；SU/MU 自适应在信道高度相关时会判 SU 赢。
+
+_MU_SNAP = 6
+
+
+def _mu_pair_tables(corr: float, seed: int = 20260902):
+    """两个 UE，空间相关系数可控。corr→1 时 ZF 没有零陷空间可用。"""
+    _r = np.random.default_rng(seed)
+    _a = ((_r.standard_normal((_MU_SNAP, 272, 16, 4))
+           + 1j * _r.standard_normal((_MU_SNAP, 272, 16, 4))) / np.sqrt(2))
+    _e = ((_r.standard_normal((_MU_SNAP, 272, 16, 4))
+           + 1j * _r.standard_normal((_MU_SNAP, 272, 16, 4))) / np.sqrt(2))
+    _b = corr * _a + np.sqrt(max(1.0 - corr ** 2, 0.0)) * _e
+    return sysm.build_link_tables(
+        [_a, _b], [14.0, 12.0], max_rank=2, rb_per_rbg=16, mu_enabled=True,
+        csi=sysm.ca.CsiConfig(enabled=False))
+
+
+def _mu_run(tables, *, mu_on: bool, accounting: str = "pair_table",
+            ratio: float = 1.0):
+    return sysm.simulate(
+        tables,
+        sys_cfg=sysm.SystemConfig(evaluation_mode="capacity", duration_s=0.6,
+                                  tdd_pattern="DDDSU", seed=4242),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(mu_enabled=mu_on,
+                                   mu_accounting=accounting),
+        kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
+        mu_se_ratio=ratio, rng=rg.RngBook(4242, 0))
+
+
+_T_indep = _mu_pair_tables(0.0)
+
+# 三 UE 反例：每个 UE 至少还有一个邻居，但缺 1<->2 仍必须硬失败。
+_g_rng = np.random.default_rng(20260903)
+_g_h = [((_g_rng.standard_normal((2, 32, 8, 2))
+          + 1j * _g_rng.standard_normal((2, 32, 8, 2))) / np.sqrt(2))
+        for _ in range(3)]
+_T_graph = sysm.build_link_tables(
+    _g_h, [12.0, 11.0, 10.0], max_rank=2, rb_per_rbg=16,
+    mu_enabled=True, csi=sysm.ca.CsiConfig(enabled=False))
+check(_T_graph[0].mu_links.keys() == {1, 2}
+      and _T_graph[1].mu_links.keys() == {0, 2}
+      and _T_graph[2].mu_links.keys() == {0, 1},
+      "三 UE 建表形成完整双向 pair graph")
+
+
+def _pair_graph_error(tables, needle):
+    try:
+        sysm.simulate(
+            tables,
+            sys_cfg=sysm.SystemConfig(duration_s=0.01, tdd_pattern="D", seed=19),
+            traffic=sysm.TrafficConfig(model="full_buffer"),
+            sched=sysm.SchedulerConfig(mu_enabled=True, mu_accounting="pair_table"))
+    except ValueError as exc:
+        return needle in str(exc)
+    return False
+
+
+_T_missing_edge = deepcopy(_T_graph)
+del _T_missing_edge[1].mu_links[2]
+del _T_missing_edge[2].mu_links[1]
+check(_pair_graph_error(_T_missing_edge, "UE 1 缺边 [2]"),
+      "三 UE 即使各自仍有邻居，缺 1↔2 边也在 capacity 入口硬失败")
+_T_asymmetric = deepcopy(_T_graph)
+_T_asymmetric[2].mu_links[1] = deepcopy(_T_asymmetric[2].mu_links[1])
+check(_pair_graph_error(_T_asymmetric, "不对称"),
+      "pair graph 单向残缺被识别为不对称，不在候选枚举时静默跳过")
+_T_bad_dim = deepcopy(_T_graph)
+_T_bad_dim[1].mu_links[2].true_sinr_db = \
+    _T_bad_dim[1].mu_links[2].true_sinr_db[:, :1]
+check(_pair_graph_error(_T_bad_dim, "维度不一致"),
+      "pair graph 的 snapshot×两用户维度在调度前硬校验")
+
+# capacity MU 准入必须查询叠加 SU+MU OLLA 后的实发 MCS。用一个阶跃 BLER
+# 反例：OLLA 前 MCS 全部可用，第一次 MU ACK 令 MU OLLA +3 档；下一次候选
+# 的实发 MCS 越过 0.5 门，必须拒配。旧实现仍用 OLLA 前 MCS，会继续放行。
+_olla_link = _T_indep[0].mu_links[1]
+_olla_base_mcs = []
+for _u in (0, 1):
+    _side = int(_olla_link.side(_u))
+    _pred = (float(_T_indep[_u].sinr_tx_db[0, 1])
+             + float(_olla_link.corr_loss_tx_db[0, _side])
+             + float(_olla_link.power_loss_db))
+    _olla_base_mcs.append(int(la.select_mcs(
+        _pred, table=3, target_bler=0.1).index))
+_olla_bler_step = max(_olla_base_mcs) + 1
+check(_olla_bler_step <= 27,
+      "MU OLLA 准入反例位于有效 MCS 范围内")
+_old_mu_admission_bler = sysm._bler_lookup
+try:
+    sysm._bler_lookup = lambda mcs, _sinr: (
+        0.9 if int(mcs) >= _olla_bler_step else 0.0)
+    _olla_admission_run = sysm.simulate(
+        _T_indep,
+        sys_cfg=sysm.SystemConfig(
+            evaluation_mode="capacity", duration_s=0.01,
+            tdd_pattern="DDDSU", seed=313),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(
+            mu_enabled=True, mu_accounting="pair_table",
+            mu_corr_threshold=1.0, mu_olla_step_up_db=3.0,
+            olla_max_db=6.0),
+        rng=rg.RngBook(313, 0))
+finally:
+    sysm._bler_lookup = _old_mu_admission_bler
+check(_olla_admission_run.cell["mu_share"] > 0
+      and _olla_admission_run.cell["mu_pair_rejects"] > 0,
+      "正 MU OLLA 令实发 MCS 的预测 BLER 越过 0.5 后，capacity 拒绝后续配对")
+check(_olla_admission_run.cell["mu_pair_graph"]["status"] == "pass"
+      and _olla_admission_run.cell["mu_pair_graph"]["pairs"] == 1,
+      "有效 pair graph 的完整性证据随 capacity 结果交付")
+
+_su_arm = _mu_run(_T_indep, mu_on=False)
+_mu_arm = _mu_run(_T_indep, mu_on=True)
+print(f"  独立信道：SU 首传 MCS {_su_arm.cell['avg_mcs_first_tx']:.2f} → "
+      f"MU {_mu_arm.cell['avg_mcs_first_tx']:.2f}，"
+      f"MU 占比 {_mu_arm.cell['mu_share']:.0%}")
+check(_mu_arm.cell["mu_share"] > 0.3, "独立信道下确实发生了配对")
+check(_mu_arm.cell["avg_mcs_first_tx"] < _su_arm.cell["avg_mcs_first_tx"],
+      "pair 表口径下配对的代价进了 MCS 决策：MU 的首传 MCS 低于 SU")
+check(_mu_arm.cell["mu_accounting"] == "pair_table",
+      "capacity 默认走 pair_table 口径并随结果上报")
+check(abs(_mu_arm.cell["mu_olla_mcs_mean"]) > 0
+      or _mu_arm.cell["mu_share"] == 0.0,
+      "MU 的 OLLA 是独立状态，配对发生时它会动")
+
+# 误块抽签换没换坐标：同一档 MCS 在 SU 真值与 pair 真值上的 BLER 差多少。
+_link = _T_indep[0].mu_links[1]
+_bler_su, _bler_mu, _delta_db = [], [], []
+for _s in range(_MU_SNAP):
+    for _side, _u in ((0, 0), (1, 1)):
+        _base = float(_T_indep[_u].sinr_tx_db[_s, 1])
+        _shift = (float(_link.corr_loss_tx_db[_s, _side])
+                  + float(_link.power_loss_db))
+        _m = int(la.select_mcs(_base + _shift, table=3, target_bler=0.1).index)
+        _su_true = float(_T_indep[_u].sinr_db[_s, 1])
+        _mu_true = float(_link.true_sinr_db[_s, _side])
+        _bler_su.append(sysm._bler_lookup(_m, _su_true))
+        _bler_mu.append(sysm._bler_lookup(_m, _mu_true))
+        _delta_db.append(_mu_true - _su_true)
+print(f"  同一档 MCS：SU 真值 BLER {np.mean(_bler_su):.4f} vs "
+      f"pair 真值 {np.mean(_bler_mu):.4f}（真值差 {np.mean(_delta_db):.2f} dB）")
+check(float(np.mean(_delta_db)) < -1.0,
+      "pair 真值系统性低于 SU 真值：功率分摊 + 残余干扰确实存在")
+check(float(np.mean(_bler_mu)) > float(np.mean(_bler_su)),
+      "用 SU 真值抽签会低估误块率——这正是历史口径漏掉的那一半代价")
+
+# **MCS 决策平移量的恒等式**：CorrLoss + powerLoss == pred_MU − pred_SU。
+# 也就是 −3.01 这个常数标签在决策里精确抵消，实际用的是矩阵算出来的差。
+_su_pred_back = (_link.predicted_sinr_db - _link.corr_loss_tx_db
+                 - _link.power_loss_db)
+check(bool(np.allclose(
+    _link.corr_loss_tx_db + _link.power_loss_db,
+    _link.predicted_sinr_db - _su_pred_back, atol=1e-9)),
+    "MU 决策平移量恒等于 pred_MU − pred_SU，3.01 dB 只是记账标签")
+
+# 反向对照：高度相关时 SU/MU 自适应必须判 SU 赢，配对率坍塌。
+_T_corr = _mu_pair_tables(0.999)
+_corr_arm = _mu_run(_T_corr, mu_on=True)
+print(f"  相关系数 0.999：MU 占比 {_corr_arm.cell['mu_share']:.0%}，"
+      f"判定单发更划算 {_corr_arm.cell['mu_su_wins']} 个 TTI")
+check(_corr_arm.cell["mu_share"] < 0.05,
+      "信道几乎同向时 ZF 无处零陷，SU/MU 自适应判 SU 赢")
+check(_corr_arm.cell["mu_su_wins"] > 0,
+      "拒配对的原因被显式计数，不是静默不配")
+
+# 历史标量口径的反向对照：MCS 完全不因配对下降。
+_legacy_tabs = sysm.build_link_tables(
+    [_T_indep[0].h_true_rbg, _T_indep[1].h_true_rbg], [14.0, 12.0],
+    max_rank=2, rb_per_rbg=16, mu_enabled=False,
+    csi=sysm.ca.CsiConfig(enabled=False))
+_legacy_arm = _mu_run(_legacy_tabs, mu_on=True,
+                      accounting="se_ratio_legacy", ratio=1.4)
+_legacy_su = _mu_run(_legacy_tabs, mu_on=False)
+print(f"  历史标量口径：SU 首传 MCS {_legacy_su.cell['avg_mcs_first_tx']:.2f} → "
+      f"MU {_legacy_arm.cell['avg_mcs_first_tx']:.2f}"
+      f"（MU 占比 {_legacy_arm.cell['mu_share']:.0%}）")
+check(_legacy_arm.cell["mu_share"] > 0.3, "历史口径下也确实配了对")
+check(abs(_legacy_arm.cell["avg_mcs_first_tx"]
+          - _legacy_su.cell["avg_mcs_first_tx"]) < 0.5,
+      "历史口径下配对完全不压 MCS——代价只体现在 TBS 上，这正是被修掉的问题")
+check(_legacy_arm.cell["mu_olla_mcs_mean"] == 0.0,
+      "历史口径不走 MU OLLA，那条状态全程为 0")
 
 print("\n" + "=" * 70)
 if FAILED:

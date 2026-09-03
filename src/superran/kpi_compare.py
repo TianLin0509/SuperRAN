@@ -59,6 +59,7 @@ _GOAL: dict[str, str] = {
     "allocated_prb_equivalent": "diagnostic",
     "offered_mbps": "diagnostic",
     "avg_mcs": "diagnostic",
+    "avg_mcs_first_tx": "diagnostic",
     "avg_rank": "diagnostic",
     "su_bler_first_tx": "lower",
     "mu_bler_first_tx": "lower",

@@ -181,9 +181,10 @@ OLLA 通常只配置 `target_bler`。SU/MU 各自的 ACK 步长默认 +0.01 MCS�
 `model_version`、`pf_accounting` 和物理近似一起保存。
 
 **前置条件：每个 UE 要有多个时间相关的快照。** 生成时 `num_slots_per_sample >= 8`
-（或让 `num_samples` 是 `num_ues` 的 8 倍以上）。当前更稳妥的生成法是
-`num_slots_per_sample=1` 且 `num_samples/num_ues>=8`，绕开外部 ChannelHub 多时隙
-SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且都不报错：
+（或让 `num_samples` 是 `num_ues` 的 8 倍以上）。first-party source 会原样保留
+`num_slots_per_sample` 的完整 slot 轴，不做复信道平均；也支持
+`num_slots_per_sample=1` 且 `num_samples/num_ues>=8` 的跨 sample 序列。两种口径必须由
+`sample_interval_s` 显式给出同一时间间隔。不满足时有两个后果，且都不报错：
 信道没有时间起伏，**PF 退化成轮询**，多用户分集整个拿不到；只有 1 个快照时「陈旧
 信道」与「当前信道」是同一个矩阵，**CSI 老化恒为 0**，`csi_aging=True` 开着也测不出
 老化代价。跑之前先 `sr_describe_dataset(dataset_id)` 对着 `num_ues` 算每 UE 几个快照。
@@ -219,7 +220,13 @@ SIR/SINR 聚合口径尚未统一的问题。不满足时有两个后果，且�
 他能豁免的是自己要不要看，不是你要不要说；他懂概念不等于他知道**这批数据**踩了。
 
 **最容易出错的默认值**：`evaluation_mode="capacity"`（要研究按需 RBG 必须显式改成
-`experience`）、`num_replications=8`（**别调到 6 以下**，见上）、
+`experience`）、`rank_mode="fixed"` / `fixed_rank=2`（**rank 默认固定**，链路表的
+逐快照 `best_rank` 不再是发送 rank；`link_table` 模式是历史行为、只作反向对照）、
+`harq_feedback_delay=True`（ACK/NACK 搭下一个 U 时隙，OLLA 与重传从其后第一个
+D/S 生效；图案没有 U 时自动退化成零时延并写进 notes）、`cqi_filter_lambda=0.25`
+（CQI 一阶 IIR：**0.25 已由负责人确认为工程默认，但尚未经现场测量/设备数据标定；
+必须随结果报出且不得声称现场等价**）、
+`num_replications=8`（**别调到 6 以下**，见上）、
 `replication_workers="auto"`（短任务串行，长任务用进程；实际值看结果 `parallel`）、
 `neighbor_prb_util=0.3`、`csi_aging=True`、`olla_speedup=1.0`、`mu_enabled=False`。
 `experience_v2` 当前支持两用户、每用户 rank2 的数据受限 SU/MU 自适应；开 MU 时必须有
@@ -293,7 +300,7 @@ publishable winner；否则即使统计显著也必须保持 `exploratory_unregi
 
 **生成时的拦截要当真。** `sr_generate` 返回 `status: "blocked"` 时说明这个参数组合跑得出结果但结果没有物理意义（最典型的是波束/定位任务配 TDL——TDL 没有每条径的角度，算法会输出一堆看似正常的垃圾且不报错）。转述 `message` 与 `suggestion` 等用户决定。
 
-**这里的测量量是物理量，不是训练特征。** PDP 不归一化、带真实时延轴；RSRP 不截断；SRS 给完整协方差与全部特征值；PMI 给 Type-I-style 单面板列码本子集近似的索引与预编码矩阵（多层是贪心近似，不冒充完整 38.214 矩阵码本）。用户提到 ChannelHub 的 16-token 特征时，那是另一套，别混用。
+**这里的测量量是物理量，不是训练特征。** PDP 不归一化、带真实时延轴；RSRP 不截断；SRS 给完整协方差与全部特征值；PMI 给 Type-I-style 单面板列码本子集近似的索引与预编码矩阵（多层是贪心近似，不冒充完整 38.214 矩阵码本）。用户提到历史参考平台的 16-token 特征时，那是另一套，别混用。
 
 **先小后大。** 正式实验前先跑 20 个样本确认流程通再放大；`sr_plan` 的 `estimated.size_mb` 超过 1 GB 时提醒用户。**信噪比不能直接设定**——它由路损、发射功率、撒点位置共同决定；要求特定区间时走拒绝采样，可能很慢甚至取不到样本。
 

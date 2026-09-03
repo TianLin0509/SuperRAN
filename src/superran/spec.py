@@ -134,17 +134,11 @@ def _fmt(key: str, value: Any) -> str:
 def _site_positions(cfg: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
     """真实站点/扇区位置。拿不到时回空列表 + 原因。
 
-    **直接问 ChannelHub 的拓扑模块**，不自己重算——六边形栅格的站数吸附
-    （1/7/19）和线性布局的两侧交错都在那边，重算一定会漂。
+    **直接问 SuperRAN 的本地拓扑模块**，不在文档层重算——六边形栅格的站数
+    吸附（1/7/19）和线性布局的两侧交错只有一份真相源。
     """
     try:
-        from .channelhub import _ensure_path  # noqa: PLC0415
-
-        _ensure_path()
-        from msg_embedding.topology.hex_grid import (  # noqa: PLC0415
-            make_hex_grid,
-            make_linear_grid,
-        )
+        from .native import make_hex_grid, make_linear_grid  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
         return [], f"取不到拓扑模块：{type(exc).__name__}"
 
@@ -394,14 +388,11 @@ def _svg_array(spec: dict[str, Any]) -> str:
 def unit_hex_layouts() -> dict[str, list[list[float]]]:
     """ISD = 1 时的六边形站点坐标，按站数索引（"1" / "7" / "19"）。
 
-    **由 ChannelHub 现算，不硬编码。** 六边形位置随 ISD 线性缩放，所以前端
+    **由 SuperRAN 本地拓扑现算，不硬编码。** 六边形位置随 ISD 线性缩放，所以前端
     只要乘一个 ISD 就能得到精确坐标——不必在 JS 里重写栅格逻辑，也就不会漂。
     """
     try:
-        from .channelhub import _ensure_path  # noqa: PLC0415
-
-        _ensure_path()
-        from msg_embedding.topology.hex_grid import make_hex_grid  # noqa: PLC0415
+        from .native import make_hex_grid  # noqa: PLC0415
     except Exception:  # noqa: BLE001
         return {}
     out: dict[str, list[list[float]]] = {}
@@ -423,7 +414,7 @@ def planned_ue_drop(cfg: dict[str, Any], n: int = 200) -> list[tuple[float, floa
     仿真跑不跑都一样——所以从预设直接出说明书时也能算出来，
     不需要等数据集生成。
 
-    直接调 ChannelHub 的 ``_place_ues``，用它自己的 RNG 约定
+    直接调 SuperRAN first-party source 的 ``_place_ues``，用同一 RNG 约定
     （``default_rng(ue_seed + idx)``，每个样本一次），
     所以和真跑出来的坐标**逐位相同**。
 
@@ -686,6 +677,45 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "MCS 选择与 SU/MU OLLA 共用；默认 0.10"),
     ("harq_combining", "HARQ 合并", "select", ["ir", "cc"],
      "默认 IR=半谱效等效 MCS；CC=原 MCS 的码字 SINR +3.0103 dB；最多一次重传"),
+    ("harq_feedback_delay", "HARQ 反馈时延", "select", ["on", "off"],
+     "on=ACK/NACK 搭下一个 U 时隙，OLLA 与重传从其后第一个 D/S 生效；"
+     "off 只作零时延反向对照"),
+    ("rank_mode", "Rank 策略", "select", ["fixed", "adaptive", "link_table"],
+     "默认 fixed=全程固定，现网基线；link_table 是逐快照跟随的历史行为，"
+     "只作反向对照"),
+    ("fixed_rank", "固定 Rank", "select", [1, 2, 3, 4],
+     "fixed 模式的发送 rank；超过链路表可用 rank 时自动钳位"),
+    ("rank_adaptation_period_tti", "Rank 自适应周期 TTI", "number",
+     (1, 100000, 100),
+     "adaptive 模式每这么多个 TTI 决策一次；1000 TTI 在 30 kHz 下是 500 ms"),
+    ("rank_gain_factor_raise", "Rank 升档谱效比门限", "number", (1.0, 3.0, 0.05),
+     "最优/当前 的滤波谱效比要超过它才升 rank；现场默认 1.1（高 10%）"),
+    ("rank_gain_factor_reduce", "Rank 降档谱效比门限", "number", (0.5, 3.0, 0.05),
+     "默认 unified_ratio：最优/当前超过 1.1 才降；spec_asymmetric 仅作反向对照"),
+    ("rank_switch_rule", "Rank 切换判据写法", "select",
+     ["unified_ratio", "spec_asymmetric"],
+     "默认 unified_ratio：升/降都要求最优谱效超过当前 10%；另一写法仅作对照"),
+    ("rank_se_filter_beta", "Rank 谱效滤波系数 β", "number", (0.01, 1.0, 0.01),
+     "filt ← β·新观测 + (1−β)·filt；现场默认 0.1（强平滑）"),
+    ("rank_se_sample_scope", "Rank 谱效采样粒度", "select", ["snapshot", "tti"],
+     "snapshot=一次新的 AMC 坐标算一个样本（默认）；tti=复现现场逐 TTI 节拍"),
+    ("rank_min_filter_samples", "Rank 判决最少样本数", "number", (1, 100, 1),
+     "攒够这么多个谱效滤波样本才允许判决；现场默认 3"),
+    ("rank_min_mcs_threshold", "Rank 最小 MCS 闸门", "number", (0, 27, 1),
+     "预估 MCS 低于它的 rank 谱效直接置 0（这一层基本传不动）；现场默认 9"),
+    ("rank_quick_fallback_nack_thld", "Rank 回退 NACK 硬门限", "number",
+     (1, 1000, 10),
+     "升 rank 监测期内新增 NACK 超过它立即回退，不等窗口结束；现场默认 90"),
+    ("rank_quick_fallback_ibler_thld", "Rank 回退 IBLER 门限", "number",
+     (0.01, 0.99, 0.01),
+     "监测窗结束时初传 BLER ≥ 它就回退；现场默认 0.3"),
+    ("rank_quick_fallback_se_ratio_thld", "Rank 回退谱效比门限", "number",
+     (0.1, 3.0, 0.05),
+     "新/旧 rank 的实测谱效比低于它就回退；1.0 = 没变好就退回去"),
+    ("rank_max_backoff_times", "Rank 判决周期退避上限", "number", (0, 8, 1),
+     "每回退一次判决周期 ×2，最多 ×2^n；现场默认 4（最长 16000 TTI）"),
+    ("rank_probe_enabled", "Rank 主动上探", "select", ["off", "on"],
+     "当前 rank 平均 MCS 高于逐 rank 门限时主动试 rank+1；现场默认关"),
     ("olla_step_up_db", "SU-OLLA ACK 步长（MCS档）", "number", (0.001, 1.0, 0.001),
      "默认 0.01；进入 KPI 窗口后按该基础步长更新"),
     ("olla_step_down_db", "SU-OLLA NACK 步长（MCS档）", "auto_number",
@@ -704,6 +734,9 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "fractional_slot 对齐 28.552 Rel-19；exclude 保留旧式单时隙盲区"),
     ("mu_enabled", "SU/MU 自适应", "select", ["off", "on"],
      "experience：PF 排序后比较数据受限 SU/MU 方案；SU 能清空全部队列时强制 SU"),
+    ("mu_accounting", "MU 记账口径", "select", ["pair_table", "se_ratio_legacy"],
+     "pair_table：MCS 与误块抽签都读 pair 表真值，与 experience 同构；"
+     "se_ratio_legacy：只按标量比值缩 TBS，不进误块抽签，仅用于复现旧结果"),
     ("mu_precoder", "MU 预编码", "select", ["zf", "rzf"],
      "ZF 为历史基线；RZF 在噪声加载之外可加入 N_BS·sigma_e² 的 CSI 不确定性加载"),
     ("mu_csi_error_variance", "MU CSI 误差方差", "number", (0.0, 1.0, 0.001),
@@ -745,6 +778,11 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
     ("csi_report_period_ms", "CQI/PMI 报告周期 ms", "select",
      [5.0, 10.0, 20.0, 40.0, 80.0],
      "默认 20 ms 工程基线；38.331 按 slot 配置，不存在统一固定 5 ms"),
+    ("cqi_filter_lambda", "CQI 滤波系数 λ", "number", (0.01, 1.0, 0.01),
+     "一阶 IIR：CQI ← CQI + λ(最新测量 − CQI)。λ=1 不滤波；0.25 已由负责人"
+     "确认为工程默认，但尚未经现场测量/设备数据标定"),
+    ("cqi_filter_domain", "CQI 滤波作用域", "select", ["cqi_index", "sinr_db"],
+     "现场口径在量化后的 CQI 档上滤波；sinr_db 只用于量化前后的口径消融"),
     ("warmup_s", "体验预启动 s", "number", (0.0, 10.0, 0.5),
      "PF/OLLA/SRS 正常演进但不计 KPI；是否足够仍由结果中的收敛门判断"),
     ("olla_speedup", "OLLA 步长放大", "number", (1.0, 50.0, 1.0),
@@ -772,6 +810,22 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "max_logical_prb_per_tti": None,
     "target_bler": 0.1,
     "harq_combining": "ir",
+    "harq_feedback_delay": "on",
+    "rank_mode": "fixed",
+    "fixed_rank": 2,
+    "rank_adaptation_period_tti": 1000,
+    "rank_gain_factor_raise": 1.1,
+    "rank_gain_factor_reduce": 1.1,
+    "rank_switch_rule": "unified_ratio",
+    "rank_se_filter_beta": 0.1,
+    "rank_se_sample_scope": "snapshot",
+    "rank_min_filter_samples": 3,
+    "rank_min_mcs_threshold": 9,
+    "rank_quick_fallback_nack_thld": 90,
+    "rank_quick_fallback_ibler_thld": 0.3,
+    "rank_quick_fallback_se_ratio_thld": 1.0,
+    "rank_max_backoff_times": 4,
+    "rank_probe_enabled": "off",
     "olla_step_up_db": 0.01,
     "olla_step_down_db": None,
     "qos_avg_rate_exponent": 1.0,
@@ -780,6 +834,7 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "qos_priority_weighting": "none",
     "small_burst_policy": "fractional_slot",
     "mu_enabled": "off",
+    "mu_accounting": "pair_table",
     "mu_precoder": "zf",
     "mu_csi_error_variance": 0.0,
     "mu_corr_threshold": 0.7,
@@ -799,6 +854,8 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "srs_pci_mod3": 0,
     "csi_processing_delay_ms": 2.0,
     "csi_report_period_ms": 20.0,
+    "cqi_filter_lambda": 0.25,
+    "cqi_filter_domain": "cqi_index",
     "warmup_s": 1.0,
     "olla_speedup": 1.0,
     "olla_warmup_speedup": 1.0,
@@ -883,7 +940,8 @@ def _interactive(spec: dict[str, Any], *, apply_url: str = "",
                      "srs_period_adaptive", "srs_pci_mod3",
                      "csi_processing_delay_ms",
                      "csi_report_period_ms", "rb_power_control_enabled",
-                     "rb_power_overrides", "mu_precoder", "mu_csi_error_variance"],
+                     "rb_power_overrides", "mu_accounting", "mu_precoder",
+                     "mu_csi_error_variance"],
         },
     }
     return f"""

@@ -37,11 +37,11 @@ from typing import Any
 
 import numpy as np
 
-# ChannelHub 把 SNR/SIR/SINR 一律夹到 ±50 dB（契约约束）。贴边的值意味着
-# 真值在夹逼之外，由它推出的 IoT 不可信，必须单独计数而不是混进统计。
+# 历史外部数据把 SNR/SIR/SINR 夹到 ±50 dB。first-party source 不截断；
+# 但读取旧数据时，落在旧边界上的值仍须单独计数。
 _CLAMP_DB = 50.0
-_CLAMP_EPS = 0.15          # 49.85 dB 以上视为贴边
-_NO_INTF_SENTINEL = 49.9   # 没有干扰源时 ChannelHub 填的哨兵值
+_CLAMP_EPS = 0.15
+_NO_INTF_SENTINEL = 49.9   # 没有干扰源时的有限哨兵值
 
 # IoT 分级。**"20 dB 以上算高干扰"是硬约定**，档位按它对齐：>= 20 dB 一律
 # 落在"高干扰"或"极高干扰"，``high_interference`` 标志就是 ``>= 20``。
@@ -224,8 +224,12 @@ def iot_stats(sinr_db: Any, sir_db: Any) -> IotStats:
     n_total = int(sinr.size)
 
     sentinel = np.isclose(sir, _NO_INTF_SENTINEL, atol=1e-3)
+    # Historical sources clipped *onto* ±50 dB.  New first-party values are
+    # unbounded, so a legitimate 55 dB value is not itself evidence of clipping;
+    # only a value sitting on the old boundary is classified as such.
     clamped = (
-        (np.abs(sinr) > _CLAMP_DB - _CLAMP_EPS) | (np.abs(sir) > _CLAMP_DB - _CLAMP_EPS)
+        np.isclose(np.abs(sinr), _CLAMP_DB, atol=_CLAMP_EPS)
+        | np.isclose(np.abs(sir), _CLAMP_DB, atol=_CLAMP_EPS)
     ) & ~sentinel
 
     values = iot_db(sinr, sir)
@@ -348,14 +352,17 @@ def interference_report(dataset_id: str) -> dict[str, Any]:
         out["traffic_domain"]["ul"] = {"sinr_dB": _dist(ul_sinr), "iot": None}
         out["notes"].append(
             "上行只有 SINR 没有几何 SIR，算不出上行 IoT。"
-            "新版 ChannelHub 会把该量显式写进 sample.meta；旧数据集没有这一列。"
+            "first-party source 会把该量显式写进 sample.meta；旧数据集可能没有这一列。"
         )
 
-    if n_slots > 1:
+    first_party_slots = (
+        (summary.get("sample_meta") or {}).get("implementation")
+        == "superran-first-party"
+    )
+    if n_slots > 1 and not first_party_slots:
         out["notes"].append(
-            f"num_slots_per_sample={n_slots} > 1：ChannelHub 的 sinr_dB 是各 slot 的 dB 均值，"
-            "而 sir_dB 取最后一个 slot，两者口径不完全一致，IoT 只作近似。"
-            "要精确 IoT 请用 num_slots_per_sample=1。"
+            f"num_slots_per_sample={n_slots} > 1：历史来源的聚合 SIR/SINR 口径未知，"
+            "IoT 只作近似。"
         )
         out["iot_exact"] = False
     else:
@@ -521,20 +528,19 @@ def last_install_failure() -> str:
 
 
 def install_geometry_capture() -> bool:
-    """启用 UL 几何 SIR 交接。新版走 metadata，旧版才挂暂存钩子。
+    """Confirm the first-party metadata handoff for UL geometry SIR.
 
-    失败不抛异常——拿不到上行 IoT 只是少一个指标，不该让整次生成崩掉。
+    The former implementation monkey-patched an external private module.  The
+    local source writes ``meta['ul_geometry_sir_dB']`` directly, so installing
+    a hook is neither necessary nor permitted.
     """
     global _installed, _install_failure
     if _installed:
         return True
     try:
-        from .channelhub import _ensure_path  # noqa: PLC0415
+        from .native import InternalSimSource  # noqa: PLC0415
 
-        _ensure_path()
-        from msg_embedding.data.sources import internal_sim  # noqa: PLC0415
-
-        if getattr(internal_sim, "UL_GEOMETRY_SIR_META_KEY", None) == (
+        if getattr(InternalSimSource, "UL_GEOMETRY_SIR_META_KEY", None) == (
             "ul_geometry_sir_dB"
         ):
             _installed = True
@@ -542,41 +548,7 @@ def install_geometry_capture() -> bool:
             return True
     except Exception as exc:  # noqa: BLE001
         _install_failure = f"metadata 路径不可用：{type(exc).__name__}: {exc}"
-
-    try:
-        from msg_embedding.data.sources import _system_sinr  # noqa: PLC0415
-
-        orig = _system_sinr.compute_geometry_sinr_single_ue
-        if getattr(orig, "_sr_wrapped", False):
-            _installed = True
-            _install_failure = ""
-            return True
-
-        def wrapper(*args: Any, **kwargs: Any) -> dict:
-            res = orig(*args, **kwargs)
-            try:
-                _capture["dl_sinr_avg"] = float(res["dl_sinr_avg"])
-                _capture["sir_dl_db"] = float(res["sir_dl_db"])
-                _capture["ul_sinr_avg"] = float(res["ul_sinr_avg"])
-                _capture["sir_ul_db"] = float(res["sir_ul_db"])
-            except (KeyError, TypeError, ValueError):
-                _capture.clear()
-            return res
-
-        wrapper._sr_wrapped = True  # type: ignore[attr-defined]
-        # internal_sim 是函数内部 import 的（`from ... import
-        # compute_geometry_sinr_single_ue`），每次调用都重新取模块属性，
-        # 所以替换模块属性就够了，不需要动 internal_sim。
-        _system_sinr.compute_geometry_sinr_single_ue = wrapper  # type: ignore[assignment]
-        _installed = True
-        _install_failure = ""
-        return True
-    except Exception as exc:  # noqa: BLE001
-        _install_failure = (
-            f"{_install_failure}；兼容钩子也挂不上：{type(exc).__name__}: {exc}"
-            if _install_failure else
-            f"兼容钩子挂不上：{type(exc).__name__}: {exc}")
-        return False
+    return False
 
 
 def take_ul_geometry_sir(sample: Any) -> float:
@@ -594,7 +566,7 @@ def take_ul_geometry_sir(sample: Any) -> float:
         except (TypeError, ValueError):
             return float("nan")
         if math.isfinite(direct):
-            return max(-_CLAMP_DB, min(_CLAMP_DB, direct))
+            return direct
         return float("nan")
 
     if not _capture:

@@ -365,6 +365,37 @@ F_MU_SINR = M(
     r"+L_{\mathrm{corr}}+L_{\mathrm{power}}",
 )
 F_POWER_LOSS = M(r"L_{\mathrm{power}}=-10\log_{10}K_{\mathrm{MU}}\ \mathrm{dB}")
+F_CQI_IIR = M(
+    r"s_k=\begin{cases}x_k,&k=0\\ s_{k-1}+\lambda\,(x_k-s_{k-1}),&k>0\end{cases}"
+    r"\qquad \mathrm{CQI}_{\mathrm{rep}}=\lfloor s_k\rfloor",
+)
+F_GRANT_SINR = M(
+    r"\gamma^{\mathrm{grant}}_{\mathrm{RX}}"
+    r"=\frac{1}{|\mathcal G|}\sum_{g\in\mathcal G}\gamma_{\mathrm{RX},g}"
+    r"\quad[\mathrm{dB}],\qquad "
+    r"\gamma_{\mathrm{RX},g}=10\log_{10}\!\Big(\tfrac{1}{|g|}"
+    r"\sum_{b\in g}\gamma^{\mathrm{lin}}_{\mathrm{RX},b}\Big)",
+)
+F_RANK_SE = M(
+    r"\widehat{SE}_r=\rho_r\cdot r\cdot SE\!\left(m_r\right)\cdot"
+    r"\mathbb 1\!\left[m_r\ge m_{\min}\right],\quad "
+    r"m_r=\mathcal S(\gamma_{\mathrm{AMC,pred}}^{(r)},p_{\mathrm{target}})"
+    r"\oplus\Delta,\quad "
+    r"\bar{SE}_r\leftarrow\bar{SE}_r+\beta\,(\widehat{SE}_r-\bar{SE}_r)",
+)
+F_RANK_SWITCH = M(
+    r"r^{\star}=\arg\max_r\bar{SE}_r,\qquad "
+    r"r\leftarrow r^{\star}\ \text{iff}\ "
+    r"\begin{cases}\bar{SE}_{r^{\star}}>G_{\uparrow}\,\bar{SE}_{r_{\mathrm{cur}}}"
+    r"&r^{\star}>r_{\mathrm{cur}}\\[2pt]"
+    r"\bar{SE}_{r_{\mathrm{cur}}}\le G_{\downarrow}\,\bar{SE}_{r^{\star}}"
+    r"&r^{\star}<r_{\mathrm{cur}}\end{cases}"
+    r"\quad\text{每 } T_{\mathrm{rank}}\cdot 2^{n}\text{ 个 TTI 判一次}",
+)
+F_HARQ_DELAY = M(
+    r"t_{\mathrm{eff}}(t)=\min\{d>u:\ \mathrm{slot}(d)\in\{D,S\}\},\qquad "
+    r"u=\min\{u>t:\ \mathrm{slot}(u)=U\}",
+)
 F_TBS = M(r"N_{\mathrm{info}}=N_{\mathrm{RE}}Q_mR\nu,\qquad TBS=Q_{38.214}(N_{\mathrm{info}})")
 F_RBG_SEARCH = M(
     r"n_u^\star=\min\{n\in[1,17]:TBS(s,m_u,r_u,n)\ge B_u\}"
@@ -906,7 +937,7 @@ def architecture_svg() -> str:
         (20, 34, 128, 64, "Agent / CLI", "自然语言目标"),
         (178, 34, 128, 64, "MCP server", "35 个 sr_* 工具"),
         (336, 34, 128, 64, "Plan / Spec", "冻结配置与说明书"),
-        (494, 34, 128, 64, "Generate", "ChannelHub / Sionna"),
+        (494, 34, 128, 64, "Generate", "SuperRAN / optional Sionna"),
         (652, 34, 128, 64, "Dataset", "h_true / h_est"),
         (810, 34, 128, 64, "Algorithms", "链路 / 系统仿真"),
         (968, 34, 128, 64, "Gates / KPI", "证据与结论"),
@@ -914,7 +945,7 @@ def architecture_svg() -> str:
     body = "".join(svg_box(*b) for b in boxes)
     for a, b in zip(boxes, boxes[1:], strict=False):
         body += arrow(a[0] + a[2], 66, b[0], 66)
-    body += svg_box(494, 140, 286, 64, "物理内核边界", "复用算法，不复用 ChannelHub 产品壳", "accent")
+    body += svg_box(494, 140, 286, 64, "物理内核边界", "first-party 统计信道；可选 direct adapter", "accent")
     body += arrow(636, 140, 636, 104, "标准化")
     body += svg_box(810, 140, 286, 64, "两条评估模式", "capacity / experience，不是精度档位", "good")
     body += arrow(952, 140, 952, 104, "显式 profile")
@@ -1886,6 +1917,60 @@ def bler_detail_atlas() -> str:
     )
 
 
+def dl_amc_flow_svg() -> str:
+    """下行 AMC 全链的算法流程图。
+
+    四条信息面各占一行，行间蛇形走向；右侧是两个只在特定条件下加入的输入
+    （rank 策略、MU 的两项损失），它们都进入 **SINR 域**，也就是在反折基准
+    MCS **之前**——画成指向 OLLA 那一步就会把口径讲错。
+    """
+    body = ""
+    # 第一行 · 测量面：终端在真实信道上测
+    body += svg_box(20, 20, 190, 62, "UE 测 PMI-SINR", "h_true + Type-I 权", "accent")
+    body += svg_box(250, 20, 175, 62, "量化成 4-bit CQI", "按目标 BLER 门限", "accent")
+    body += svg_box(465, 20, 175, 62, "一阶 IIR 滤波", "CQI += λ(新−旧)", "accent")
+    body += arrow(210, 51, 250, 51)
+    body += arrow(425, 51, 465, 51)
+    # 第二行 · 基站预测面（SINR 域）
+    body += svg_box(20, 128, 190, 62, "CQI → 初始 MCS", "离散表 0,2,…,26,28", "b")
+    body += svg_box(250, 128, 175, 62, "取门限 Γ", "该 MCS 的目标 BLER SINR", "b")
+    body += svg_box(465, 128, 175, 62, "+ BF Gain", "SVD−PMI，都在 h_prec 上", "b")
+    body += svg_box(680, 128, 185, 62, "反折基准 MCS", "mcs_without_olla", "b")
+    body += arrow(552, 82, 115, 128, "CQI")
+    body += arrow(210, 159, 250, 159)
+    body += arrow(425, 159, 465, 159)
+    body += arrow(640, 159, 680, 159)
+    # 右侧 · 只在特定条件下加入的两个输入，都进 SINR 域
+    body += svg_box(895, 116, 180, 42, "Rank 策略", "默认固定 rank2", "b")
+    body += arrow(895, 137, 865, 148)
+    body += svg_box(895, 170, 180, 42, "MU 配对损失", "+CorrLoss +PowerLoss", "b")
+    body += arrow(895, 191, 865, 176)
+    # 第三行 · 闭环面（MCS 域），自右向左
+    body += svg_box(680, 236, 185, 62, "+ OLLA 偏置", "连续 MCS 档", "warn")
+    body += svg_box(465, 236, 175, 62, "floor + 钳位", "0..27", "warn")
+    body += svg_box(250, 236, 175, 62, "发送 MCS", "写进 grant", "warn")
+    body += arrow(772, 190, 772, 236)
+    body += arrow(680, 267, 640, 267)
+    body += arrow(465, 267, 425, 267)
+    # 第四行 · 真实面：只有它能查 BLER
+    body += svg_box(20, 344, 190, 62, "同一个权打 h_true", "post-MMSE 逐 RBG", "danger")
+    body += svg_box(250, 344, 175, 62, "取被授 RBG", "只在实际授的那几个", "danger")
+    body += svg_box(465, 344, 175, 62, "查 NewTx 曲线", "final MCS + 真值 SINR", "danger")
+    body += svg_box(680, 344, 185, 62, "ACK / NACK", "误块抽签", "danger")
+    body += arrow(337, 298, 210, 344, "grant")
+    body += arrow(210, 375, 250, 375)
+    body += arrow(425, 375, 465, 375)
+    body += arrow(640, 375, 680, 375)
+    # 反馈环：等下一个 U 时隙上报，再等其后第一个 D/S 才生效
+    body += svg_box(895, 344, 180, 62, "下一个 U 时隙", "ACK/NACK 上报", "warn")
+    body += arrow(865, 375, 895, 375)
+    body += arrow(952, 344, 868, 300, "下一个 D/S 生效")
+    return svg_wrap(
+        body, 1100, 430,
+        "下行 AMC 全链：测量面（h_true）、预测面（h_prec）、闭环面（OLLA）"
+        "与真实面（解码）四条信息面，以及跨上行时隙的反馈环")
+
+
 def bf_gain_svg() -> str:
     body = svg_box(22, 92, 180, 76, "gNB 可见 CSI", "h_prec / 可能陈旧", "accent")
     body += svg_box(258, 24, 190, 72, "PMI 参照方向", "Type-I-style 宽带", "b")
@@ -2067,7 +2152,7 @@ def product_surfaces_showcase() -> str:
         <span class="surface-stage">RUN · AFTER</span>
         <h3>多算法 KPI 对比与单 TTI 复盘</h3>
         <p>2~5 个算法同屏固定颜色，基线不可隐藏；总览、KPI 矩阵、用户 CDF、TTI 趋势、同 TTI grant 详情与
-        统计门禁形成一条钻取链。单臂工作台仍保留 26 项小区 KPI、24 项用户 KPI 和 Agent 自适应首屏。</p>
+        统计门禁形成一条钻取链。单臂工作台仍保留 27 项小区 KPI、25 项用户 KPI 和 Agent 自适应首屏。</p>
         <a href="#/kpi">查看 KPI 口径与工作台合同 →</a>
       </div>
       """ + kpi_shot + """
@@ -2110,7 +2195,8 @@ def overview_page(modules: list[ModuleDoc], tools: list[SymbolDoc], tests: list[
     body += """
 <h2>一句话定位</h2>
 <p><strong>SuperRAN 是给 Agent 使用的无线仿真实验编排与证据平台。</strong>
-它把 ChannelHub/Sionna 等物理内核包装成稳定的数据合同、MCP 工具、系统仿真和三道证据门。
+它把本仓 first-party 统计信道物理内核包装成稳定的数据合同、MCP 工具、系统仿真和三道证据门；
+Sionna RT / QuaDRiGa 只允许作为显式可选 direct adapter。
 它的目标不是“能画一条曲线”，而是让配置、真值、估计、随机数、统计和结论都能回溯；
 交互配置 Mock 与 KPI 工作台分别承载运行前确认和运行后解释。</p>
 """
@@ -2148,13 +2234,13 @@ def overview_page(modules: list[ModuleDoc], tools: list[SymbolDoc], tests: list[
     return Page(
         "overview", "项目总览", "开始", "SUPERRAN DEVELOPER GUIDE",
         "从物理信道到系统 KPI，再到可信结论的一张全景地图。", body,
-        ("MCP", "ChannelHub", "系统仿真", "开发者"),
+        ("MCP", "first-party channel", "系统仿真", "开发者"),
     )
 
 
 def quickstart_page() -> Page:
     install = r"""
-cd C:\Vibe\Wireless\SuperRAN
+cd <SuperRAN绝对路径>
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
@@ -2169,10 +2255,7 @@ python -m superran.server
   "mcpServers": {
     "superran": {
       "command": "C:\\Vibe\\Wireless\\SuperRAN\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "superran.server"],
-      "env": {
-        "SUPERRAN_CHANNELHUB": "C:\\Vibe\\Wireless\\MSG-Platform"
-      }
+      "args": ["-m", "superran.server"]
     }
   }
 }'''
@@ -2295,20 +2378,20 @@ PRB 占用和用户差异。<code>sr_system_sim(evaluation_mode="experience")</c
 """ + code(followup, "MCP tool sequence")
     body += """
 <h2>环境与安装</h2>
-<p>最低 Python 版本是 3.10。基础包只要求 NumPy/SciPy/Pydantic/PyYAML/structlog/MCP；
-Sionna RT 是显式可选依赖。ChannelHub 源码默认在项目周边自动发现，也可用
-<code>SUPERRAN_CHANNELHUB</code> 指定。</p>
+<p>最低 Python 版本是 3.10。基础包只直接要求 NumPy/SciPy/PyYAML/filelock/MCP；
+统计信道、标准表、阵列、参考信号和估计器随本仓安装。Sionna RT 是显式可选
+运行栈，当前 direct adapter 尚未宣称可用；不得用另一个源码树补齐。</p>
 """ + code(install, "PowerShell")
     body += callout(
         "note", "Windows 路径注意",
-        "<p>不要照抄 ChannelHub 旧文档中的某台机器虚拟环境路径。MCP 配置应写当前机器的"
+        "<p>不要照抄其他机器的虚拟环境路径。MCP 配置应写当前机器的"
         "绝对 Python 路径；项目产物默认落在 <code>artifacts/</code>，可由环境变量整体迁移。</p>",
     )
     body += """
 <h2>SuperRAN 重命名的最小兼容边界</h2>
 <p>新代码与配置只写 <code>SUPERRAN_*</code>。<code>_compat.py</code> 仅为已有开发机保留一个临时、
-可审计的环境变量迁移层：当新键不存在而旧产品键存在时，才把 ARTIFACTS、CHANNELHUB、SCENES、
-PRESETS 等 8 个后缀逐项复制到当前进程；新键永远优先，不覆盖用户的新配置。重复调用幂等，
+可审计的环境变量迁移层：当新键不存在而旧产品键存在时，只迁移仍有效的 ARTIFACTS、SCENES、
+PRESETS 等后缀；外部 source-root 键不再迁移。新键永远优先，不覆盖用户的新配置。重复调用幂等，
 <code>legacy_environment_audit()</code> 可查看实际迁移项，同时发出 deprecation warning。它不兼容旧包名、
 CLI 或数据 schema，也不会永久维护两套命名。</p>
 """
@@ -2318,7 +2401,7 @@ CLI 或数据 schema，也不会永久维护两套命名。</p>
 外部自研代码；外部算法通过结果契约注册逐样本值，再进入相同的门 2/门 3。</p>
 <h2>开发内环与发布外环</h2>
 <div class="compare"><div><h3>秒级开发内环</h3><p>AST/合同测试、纯 NumPy toy example、文档结构和公式检查。
-适合每次编辑后执行。</p></div><div><h3>真实物理外环</h3><p>ChannelHub/Sionna 生成、多小区干扰、蒙特卡洛与浏览器 QA。
+适合每次编辑后执行。</p></div><div><h3>真实物理外环</h3><p>first-party 信道生成、多小区干扰、蒙特卡洛与浏览器 QA；可选 direct Sionna 另行验收。
 适合算法改动和发布前执行，可能需要数分钟到数小时。</p></div></div>
 """
     return Page(
@@ -2351,19 +2434,18 @@ def architecture_page() -> Page:
         "这允许单独借鉴新模块，却阻止整仓路径在shape正常时静默换掉物理语义。</p>",
     )
     body += """
-<h2>ChannelHub 边界</h2>
-<p>superran 复用 ChannelHub 的物理算法与数据源，但不复用其产品壳。适配层负责发现源码、
-注入核实过的 38.901 表、预热依赖、取出 serving/interference/估计信道，并把不稳定的内部对象
-压成项目自己的数据合同。</p>
-<p>物理代码根与射线追踪资产根允许分离：当前可从相邻 <code>MSG-Platform</code> 加载最新
-<code>src/msg_embedding</code>，同时从完整 ChannelHub checkout 读取 <code>configs/scenes</code>。
-用户可用 <code>SUPERRAN_CHANNELHUB</code> 指定代码根、用 <code>SUPERRAN_SCENES</code>
-独立指定场景目录；资产回退绝不会把 Python 物理实现一起退回旧版本。</p>
+<h2>First-party 物理内核边界</h2>
+<p><code>native.py</code> 提供统计信道、标准载波/TDD、参考序列、阵列、码本、LMMSE 与
+S/N/I；<code>channelhub.py</code> 只保留旧 API 名兼容。它不搜索路径、不注入
+<code>sys.path</code>，历史 <code>SUPERRAN_CHANNELHUB</code> 也不能改变生成字节。</p>
+<p>射线追踪资产是数据，不是源码依赖：内置场景来自可选 Sionna 包，自有 OSM/PLY 仅通过
+<code>SUPERRAN_SCENES</code> 指向独立数据目录。没有资产或 direct adapter 时能力明确不可用，
+不从其他 checkout 借代码或静默回退。</p>
 """
     body += callout(
-        "danger", "为什么不直接透传 ChannelHub bridge",
-        "<p>产品桥可能做归一化、截断或门控，物理量会在不显眼处改变。"
-        "SuperRAN 只从明确的数据源/算法入口取值，并在落盘前校验形状、有限性和角色。</p>",
+        "danger", "为什么不纳入训练特征 bridge",
+        "<p>训练特征桥可能做归一化、截断或门控，物理量会在不显眼处改变。"
+        "SuperRAN 只从本地物理入口取值，并在落盘前校验形状、有限性和角色。</p>",
     )
     body += """
 <h2>h_true 与 h_est 是架构轴</h2>
@@ -2377,7 +2459,7 @@ def architecture_page() -> Page:
     body += table(
         ["尺度", "当前对象", "典型用途", "常见混淆"],
         [
-            ("OFDM symbol", "ChannelHub 内部可生成 14-symbol slot", "TDD 导频/估计、符号选择性", "系统层不需要每 TTI 重放 14 个 symbol"),
+            ("OFDM symbol", "first-party source 可生成 symbol grid", "TDD 导频/估计、符号选择性", "系统层不需要每 TTI 重放 14 个 symbol"),
             ("channel snapshot", "系统链路表的物理快照", "CSI 老化、PMI/CQI 更新、真实 SINR", "快照周期不是 SRS 周期也不是 PMI 周期"),
             ("TTI", "Phase B 队列与调度步", "到达、PF、grant、BLER、OLLA、KPI", "一个 TTI 只需引用一个 snapshot"),
         ],
@@ -2393,8 +2475,8 @@ def architecture_page() -> Page:
     body += "<p class=source-row>实现入口：" + source_ref("src/superran/generate.py", '"h_true_role"') + " · " + source_ref("src/superran/channelhub.py", "def serving_channel") + " · " + source_ref("src/superran/system.py", "def build_link_tables") + "</p>"
     return Page(
         "architecture", "架构与数据合同", "开始", "ARCHITECTURE",
-        "五层职责、ChannelHub 边界、h_true/h_est 与三个时间尺度。", body,
-        ("h_true", "h_est", "ChannelHub", "Phase A", "Phase B"),
+        "五层职责、first-party 物理边界、h_true/h_est 与三个时间尺度。", body,
+        ("h_true", "h_est", "first-party", "Phase A", "Phase B"),
     )
 
 
@@ -2602,8 +2684,8 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
 """ + F_JONES
     body += callout(
         "note", "Jones/XPR 的当前精确边界",
-        "<p>预置 <code>effective_subarray / physical_reference</code> 的 InternalSim CDL 路径已经调用 "
-        "<code>element_jones()</code>，将理想 ±45° 基与逐 ray 的 2×2 <code>Jℓ</code> 收缩；legacy 面板仍按 "
+        "<p>first-party InternalSim CDL 路径调用 <code>polarization_jones_matrix()</code>，"
+        "将 ±45° 基与逐 ray 的 2×2 <code>Jℓ</code> 收缩；legacy 面板仍按 "
         "V/H 基兼容。<code>element_xpd_db=8</code> 不是实测方向相关 XPD：CDL 优先使用 profile "
         "自带 XPR，它只在无 profile 值或统计回退路径中生效。方向相关复 Jones/XPD 仍需实测表。</p>",
     )
@@ -2621,38 +2703,38 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
         "文档里宣称。</p>",
     )
     body += """
-<h2>ChannelHub、Sionna RT 与系统层各做什么</h2>
+<h2>First-party source、Sionna RT 与系统层各做什么</h2>
 """
     body += table(
         ["来源", "擅长", "项目中的角色", "边界"],
         [
-            ("ChannelHub internal_sim", "38.901 风格 CDL/TDL、多小区几何、导频估计", "默认快速物理源", "部分阵列/干扰模型是工程近似"),
-            ("Sionna RT", "场景网格、材料、射线与确定性路径", "可选城市/室内 RT 源", "依赖重；场景/材料质量决定可信度"),
-            ("SuperRAN", "合同、硬件默认、算法、TTI、统计门", "编排与证据层", "不重新发明传播求解器"),
+            ("SuperRAN InternalSim", "38.901 风格 CDL/TDL、多小区几何、导频估计", "默认 first-party 物理源", "阵列/干扰模型仍含明确工程近似"),
+            ("Sionna RT", "场景网格、材料、射线与确定性路径", "规划中的可选 direct RT 源", "当前 adapter 未实现；依赖和资产质量都要单独验收"),
+            ("SuperRAN 系统层", "合同、硬件默认、算法、TTI、统计门", "编排与证据层", "不把统计 source 冒充确定性 RT"),
         ],
     )
     body += """
-<h3>Sionna RT 的 slot 快照为什么这样做</h3>
+<h3>Direct Sionna RT adapter 的验收边界</h3>
 <p>Sionna 的 <code>Paths.cfr()</code> 会按设备速度计算路径 Doppler，但调用方必须同时设置
-<code>Receiver.velocity</code> 和物理采样率。当前实现用完整 UE 速度向量，并令采样率为
-<code>1 / 平均 OFDM-symbol 周期</code>；RB 频率网格围绕载波中心对称。旧实现没设 velocity、
-还沿用 1 Hz 默认采样，14 个 symbol 只是静态重复，本轮已修。调用语义可在
+<code>Receiver.velocity</code> 和物理采样率。未来 direct adapter 必须使用完整 UE 速度向量、
+以平均 OFDM-symbol 周期的倒数作为采样率，并让 RB 网格围绕载波中心对称；在这些合同和逐径
+落盘尚未实现前，能力保持 unavailable。调用语义可在
 <a href="https://nvlabs.github.io/sionna/rt/api/paths.html" target="_blank" rel="noreferrer">Sionna RT Paths API</a>
 与<a href="https://nvlabs.github.io/sionna/rt/tutorials/Mobility.html" target="_blank" rel="noreferrer">官方 Mobility 教程</a>复核。</p>
-<p>系统层每个 TTI 只需要一个信道快照：14-symbol 网格先服务导频/估计和真实 symbol 级 Doppler，
-落盘边界再取中间 symbol，保留长度为 1 的时间轴。不能对复信道做 symbol 平均——相位抵消会
-凭空制造深衰；也不能把 14 个 symbol 当成 14 个 TTI。</p>
+<p>未来 direct Sionna adapter 若先生成 14-symbol 网格，应让它服务导频/估计与真实 symbol 级
+Doppler，再取中间 symbol 形成一个 slot，绝不能对复信道做 symbol 平均。当前 first-party source
+则直接输出并保留完整 slot snapshot 轴，由 <code>sample_interval_s</code> 给出时间间隔。</p>
 """
     body += callout(
         "good", "标准表错误现在会阻断生成",
-        "<p>相邻 MSG-Platform 的 CDL-A~E 已直接修正；superran 仍保留独立标准副本，用来兼容"
-        "旧 checkout。启动时会按安装版本支持的 dataclass 字段安全覆盖并逐表核对；若校准异常，"
-        "<code>channelhub._ensure_path()</code> 硬失败，不再吞掉异常后继续产出伪标准数据。</p>",
+        "<p><code>spec38901.py</code> 是 CDL-A~E 唯一运行表真相源；"
+        "<code>native.get_channel_profile()</code> 直接读取本地不可变表。启动自检逐表核对；"
+        "若字段或 shape 漂移就硬失败，不再修改外部模块后继续运行。</p>",
     )
     body += "<p class=source-row>适配入口：" + source_ref("src/superran/channelhub.py", "def probe_source_contract") + " · " + source_ref("src/superran/scenes.py", "class SceneInfo") + "</p>"
     return Page(
         "channel", "信道、场景与传播状态", "物理内核", "CHANNEL MODEL",
-        "H 的路径公式、极化耦合、同站/异站状态与 ChannelHub/Sionna 分工。", body,
+        "H 的路径公式、极化耦合、同站/异站状态与 first-party/Sionna 分工。", body,
         ("CDL", "TDL", "Sionna", "Jones", "传播状态"),
     )
 
@@ -2661,7 +2743,7 @@ def raytracing_page() -> Page:
     body = raytracing_probe_svg()
     body += """
 <h2>射线追踪不是把 source 名字改成 sionna_rt</h2>
-<p>场景管理层区分 Sionna 内置城市与 ChannelHub 携带的真实城市资产。后者的 VTK PLY 头可能含
+<p>场景管理层区分 Sionna 内置城市与用户显式配置的独立本地资产。后者的 VTK PLY 头可能含
 Mitsuba 3.8 不接受的 <code>obj_info</code>；<code>prepare_scene()</code> 会复制到项目缓存后清理，
 绝不修改上游原文件。<code>resolve_scene_config()</code> 再把 scene/preset 展开成 OSM 路径、站点数、
 站高、ISD 与载频。结果中必须读取 <code>channel_generation_mode</code> 区分真实 RT 与
@@ -2688,8 +2770,8 @@ PDP、协方差、PMI 与几何量仍可从现有合同计算。这是当前数�
     body += """
 <p><code>scenario.probe()</code> 把正式配置压到最多 24 RB、4 symbol，并关闭 SSB，只返回与频域
 小尺度矩阵无关的几何量。SIR、路损、距离、LOS、位置和 Doppler 在同 seed 下保持；SNR 因总功率
-分给更少 RB 必须按上式修正，再与 SIR 在线性域重算 SINR/IoT。原始 SNR 若已撞 ±50 dB 夹逼，
-对应样本会剔除并报数，不能把统一的 39.5 dB 假平台写进分布。</p>
+分给更少 RB 必须按上式修正，再与 SIR 在线性域重算 SINR/IoT。first-party source 不截断
+SNR/SINR；历史导入数据若恰落在旧 ±50 dB 边界才会标记为不可逆 clipped 样本。</p>
 """
     body += table(
         ["路径", "可以回答", "不能回答/必须升级"],
@@ -2792,7 +2874,7 @@ long-term link budget 单独带入。旧字段 <code>sector_gain_all_db</code> �
             ("port permutation", "canonical↔Sionna↔Type-I 往返为 identity", "码本/物理端口错位"),
         ],
     )
-    body += "<p class=source-row>项目配置：" + source_ref("src/superran/hardware.py", "COMPANY_RF_PANEL") + " · ChannelHub 物理实现由 <code>msg_embedding/phy_sim/effective_array.py</code> 承担。</p>"
+    body += "<p class=source-row>项目配置：" + source_ref("src/superran/hardware.py", "COMPANY_RF_PANEL") + " · first-party 物理实现：" + source_ref("src/superran/native.py", "class EffectiveArray") + "</p>"
     return Page(
         "antenna", "阵列、双极化与 F 矩阵", "物理内核", "ARRAY & POLARIZATION",
         "从 +45/-45° 阵元到 64T/1 驱 3 与 256T/1 驱 6，再到可验证的 F 矩阵。", body,
@@ -3322,7 +3404,7 @@ def reference_signals_page() -> Page:
     body = reference_signal_svg()
     body += """
 <h2>physical.py 是一组可复用基线，不是零散 helper</h2>
-<p>它把 ChannelHub 已实现的 38.211/38.213/38.214 物理入口整理成稳定接口：标准 RB 配置、
+<p>它把 SuperRAN 本地实现的 38.211/38.213/38.214 物理入口整理成稳定接口：标准 RB 配置、
 TDD pattern、SRS/SSB/Gold 序列、序列相关、CSI-RS DFT 扫描、干扰投影，以及 ideal/LS/LMMSE
 信道估计。这样自研算法可以与生成信道时使用的同一套序列和资源映射比较，而不是在评估脚本中
 重写一份“看起来差不多”的参考实现。</p>
@@ -3357,7 +3439,7 @@ PMI 页的 Type-I-style 集合是 <code>[port,column]</code>，还包含过采�
     body += callout(
         "warn", "干扰投影能力存在，但当前数据源限制必须一起说",
         "<p><code>project_interference()</code> 可把邻区信道投到邻区自己的 SVD/DFT 服务子空间；但当前 "
-        "ChannelHub 保存的单邻区干扰信道近似秩 1，<code>precoded</code> 与 <code>isotropic</code> 可能逐位相同。"
+        "历史外部数据的单邻区干扰信道近似秩 1；first-party source 默认不保存完整干扰 H。"
         "接口存在不等于当前数据能支撑波束化干扰增益结论。</p>",
     )
     body += "<p class=source-row>物理基线：" + source_ref("src/superran/physical.py", "def nr_rb_count") + " · 端口映射：" + source_ref("src/superran/hardware.py", "def type1_to_port_permutation") + "</p>"
@@ -3522,8 +3604,14 @@ def csi_page() -> Page:
 """ + F_CSI_REPORT_HOLD
     body += """
 <p>系统链路表只在 report instant 更新宽带 PMI/CQI，中间 TTI 复用最后一份已到达报告。
-CQI 当前使用报告时刻 PMI-SINR 的因果 expanding mean；代码没有虚构现场 IIR 系数。配置中的额外
-feedback latency 尚未单独建模，报告在其 report snapshot 到达；这项边界会写进 <code>CsiConfig.as_dict()</code>。</p>
+CQI 的长期滤波是**一阶 IIR**：<code>s ← s + λ(x − s)</code>，第一次上报直接初始化状态。
+系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>：该取值已由负责人确认
+为当前工程默认，但<strong>尚未经现场测量/设备数据标定</strong>；作用域
+<code>cqi_filter_domain</code> 默认在量化后的 CQI 档上。两者都随
+<code>CsiConfig.as_dict()</code> 一起上报，<code>λ=1</code> 可作不滤波的反向对照。
+CSI 报告本身的额外 feedback latency 仍未单独建模（报告在其 report snapshot 到达）；
+<strong>HARQ 的 ACK/NACK 反馈时延是另一件事，已经建模</strong>，见
+<a href="#/dlamc">下行 AMC 全链</a>。</p>
 <h2>PMI 当前究竟是什么</h2>
 <p><code>pmi_type_i()</code> 在单面板 Type-I-style DFT 列集合上，用宽带发射协方差
 <code>Rtx=E[HHᴴ]</code> 逐层贪心选择列，并在每次选择后投影掉已选方向。它会按 metadata 的
@@ -3612,7 +3700,7 @@ def pmi_page() -> Page:
 """
     body += callout(
         "warn", "CSI-RS DFT 波束码本不等于 PMI Type-I-style 列集合",
-        "<p><code>physical.dft_codebook()</code> 复用 ChannelHub 的 CSI-RS beam-sweep 码本，shape 是"
+        "<p><code>physical.dft_codebook()</code> 使用本地 CSI-RS beam-sweep 码本，shape 是"
         " <code>[beam,port]</code>；<code>type_i_codebook()</code> 是带过采样和四种极化共相的 PMI 候选列，"
         "shape 是 <code>[port,column]</code>。两者都含 DFT 方向、都需要端口置换，但大小、方向和使用阶段不同。</p>",
     )
@@ -3718,7 +3806,7 @@ def calibration_page() -> Page:
     body += """
 <p>耦合损耗同时受路损、收发天线方向图、下倾和 serving-cell selection 影响，因此对整体平移错误很
 敏感。geometry 则分别给含噪声 SINR 与不含噪声 SIR；多小区中若 SINR 与纯热噪声 SNR 逐点相同，
-或 SIR 恒为 ChannelHub 兜底哨兵 49.9 dB，指标会标为不适用并说明干扰没有真正进入。</p>
+或 SIR 恒为无干扰哨兵 49.9 dB，指标会标为不适用并说明干扰没有真正进入。</p>
 <h2>角度扩展必须用圆周定义</h2>
 """ + F_CAL_ANGLE
     body += """
@@ -3919,7 +4007,7 @@ def sinr_page() -> Page:
     body += """
 <p><code>tx_power_dbm</code> 是整个活动载波的导通总功率，<code>noise_power_dBm</code> 是一个
 活动 RB 的 kTB+NF；所以 273 RB 必须先减 24.36 dB。大尺度预算已包含阵元方向图、固定子阵和
-电下倾，但不包含 64 端口数字预编码。ChannelHub 的 first-party SNR/SIR/SINR 因而都在
+电下倾，但不包含 64 端口数字预编码。SuperRAN 的 first-party SNR/SIR/SINR 因而都在
 <strong>预数字波束、每 RB</strong>参考面。</p>
 <p>链路级用 <code>E[|H|²]</code> 反标总损伤；rank-1 的 <code>E[σ₁²]</code> 是后波束诊断量。
 上式给出一个直接反例：若 H 的数字 BF 增益为 14 dB，那么 rank-1 post-BF SINR 应比几何
@@ -4112,7 +4200,7 @@ SRS CSI 上，实际发送方向相对 PMI 方向的 post-MMSE SINR 差；默认
     body += callout(
         "danger", "禁止 oracle",
         "<p>把真实接收 SINR 的全仿真均值回填给发送侧，会同时泄露未来信道和实际波束命中效果。"
-        "这会掩盖 CSI 老化与 OLLA 的作用。CQI expanding mean 只能使用 0..s 的历史报告，"
+        "这会掩盖 CSI 老化与 OLLA 的作用。CQI 的 IIR 滤波只能使用 0..s 的历史报告，"
         "BF Gain 必须来自 gNB 自己的 CSI。</p>",
     )
     body += """
@@ -4154,6 +4242,11 @@ MCS-domain OLLA。历史 <code>*_before_db</code> 字段名仅为 API 兼容保�
 元数据，会把两个物理口径拼在一起。<code>TbsLookup.build(..., mcs_table=...)</code>
 和链路表仍显式保留 table/profile 接口；未来要扩展时按完整 profile 插件增加，
 不需要改调度主循环。</p>
+<aside class="callout danger"><span class="callout-icon">!</span><div>
+<strong>BREAKING migration：失败已前移到建表入口</strong>
+<p><code>build_link_tables(table=1/2)</code> 现在立即拒绝，不再先生成一张看似可用的
+系统链路表、到体验主循环才失败。旧系统调用请迁移到 <code>table=3</code>；Table 1/2
+只用于显式链路级分析，不能接入当前系统 TBLER profile。</p></div></aside>
 <h2>TBS 为什么不能用除法反推 RBG</h2>
 """ + F_TBS + F_RBG_SEARCH
     body += """
@@ -4180,6 +4273,269 @@ MCS 曲线。系统初传与重传都只消费 NewTx 曲线：每个 TB 最多�
         "linkadapt", "CQI、BF、OLLA、MCS 与 TBS", "链路算法", "LINK ADAPTATION",
         "发送/接收 SINR 分离、因果 CQI、OLLA 与非线性 TBS 反查。", body,
         ("CQI", "BF Gain", "OLLA", "MCS", "TBS", "searchsorted"),
+    )
+
+
+def dlamc_page() -> Page:
+    body = dl_amc_flow_svg()
+    body += """
+<h2>一句话：每个 TTI 发出去的那一档 MCS 是怎么定的</h2>
+<p>终端在<strong>真实信道</strong>上用 Type-I 参照权测一个 SINR，量化成 4-bit CQI 并
+按上报周期做一阶 IIR 滤波；基站把 CQI 映射成一个初始 MCS，取<strong>该档在目标
+BLER 下的 SINR 门限</strong> Γ，加上自己在<strong>陈旧 SRS 信道</strong>上算出的
+BF Gain，得到一个只属于基站的预测坐标；在这个坐标上反折出不含 OLLA 的基准 MCS，
+再叠加连续 MCS 域的 OLLA 偏置、向下取整、钳到 profile 范围，就是真正写进 grant
+的发送 MCS。终端能不能解出来，则完全由<strong>同一个发射权打到真实信道</strong>、
+并且只在<strong>实际授予的那几个 RBG</strong> 上得到的接收 SINR 决定。</p>
+<h2>四条信息面，混一条就出错</h2>
+"""
+    body += table(
+        ["信息面", "用哪份信道", "谁能看见", "在链里干什么", "能不能查 BLER"],
+        [
+            ("测量面 · PMI-SINR", "h_true（当前快照）", "终端测、基站只收到量化结果",
+             "决定 CQI，进而决定 Γ", "不能"),
+            ("预测面 · SINR_AMC_PRED", "h_prec（可能陈旧）", "基站自算",
+             "Γ + BF Gain，反折基准 MCS", "不能"),
+            ("闭环面 · OLLA 偏置", "只看 ACK/NACK 历史", "基站自算",
+             "在 MCS 域纠正预测面的系统偏差", "不能"),
+            ("真实面 · SINR_*_RX", "h_true + 实际发射权", "只有仿真看得见",
+             "决定这次 TB 会不会误块", "**只有它能**"),
+        ],
+    )
+    body += callout(
+        "danger", "把预测面当真实面用，等于让基站预知波束打没打准",
+        "<p>预测坐标里 BF Gain 来自基站<strong>自己那份可能陈旧</strong>的 CSI，"
+        "所以老化时它会系统性高估——这正是 OLLA 要纠正的东西。如果拿真实接收 SINR "
+        "去反折 MCS，首传 BLER 会被<strong>构造</strong>在目标值上，CSI 老化、BF 失配、"
+        "OLLA 全部失去意义，而结果看起来完全正常。</p>",
+    )
+    body += """
+<h2>第一步：CQI 怎么测、怎么滤</h2>
+<p>CQI 的物理含义是"终端按参照权看到的长期宽带质量"。参照权是基站在
+<strong>上报时刻</strong>的 h_prec 上搜出来的 Type-I 宽带权，一个 CSI 报告周期内
+保持不变（默认 20&nbsp;ms）；测量本身发生在<strong>真实信道</strong>上——终端没有别的
+信道可测。量化用的门限就是各档映射 MCS 在目标 BLER 下的 NewTx SINR 门限，所以
+改目标 BLER 会同时移动量化侧和选档侧。</p>
+"""
+    body += F_CQI_IIR
+    body += callout(
+        "warn", "从累计平均换成一阶 IIR 是一次口径变更",
+        "<p>早先的滤波是对全部历史上报取平均（expanding mean）：跑得越久，新测量的"
+        "权重越小，移动性或负载变化时 CQI 根本不跟踪。现在是现场口径的一阶 IIR，"
+        "系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>——已由负责人确认"
+        "为当前工程默认，但<strong>尚未经现场测量/设备数据标定</strong>。作用域选在量化"
+        "后的 CQI 档（<code>cqi_filter_domain='cqi_index'</code>）。两者必须随结果一起"
+        "报出，且不得称为现场等价；<code>λ=1</code> 关闭滤波，可作反向对照。</p>",
+    )
+    body += """
+<div class="toy"><div><b>实算：CQI 阶跃响应（λ=0.25）</b>
+<p>上报 codepoint 序列 7,7,12,12,… 时，滤波状态依次是
+7 → 7.000 → 8.250 → 9.188 → 9.891 → 10.418 → 10.814 → 11.110，取 floor 后
+上报值是 7,7,8,9,9,10,10,11。<strong>第一次上报直接初始化状态</strong>，不从 0 慢慢爬。</p></div>
+<div><b>为什么在 CQI 档上滤而不是在 dB 上滤</b>
+<p>现场口径写作 <code>CQI ← CQI + λ(最新测量 − CQI)</code>，作用对象是 CQI 本身。
+量化前后两个域给出的轨迹不同，所以 <code>cqi_filter_domain</code> 是个显式开关，
+默认 <code>cqi_index</code>；<code>sinr_db</code> 只用于口径消融，不能和默认结果混着比。</p></div></div>
+<h2>第二步：CQI → 初始 MCS → 门限 Γ → 加 BF Gain</h2>
+<p>内部 CQI 表行 0..14 对应上报 codepoint 1..15，映射到 MCS
+<code>[0,2,4,…,26,28]</code>；最高一行请求 MCS28，而当前预置 profile 只到 MCS27，
+因此显式钳位。取该 MCS 的目标 BLER NewTx 门限得到 Γ，加上 BF Gain 就是预测坐标。
+BF Gain 的定义、两套权怎么构造、为什么必须同 rank 同功率约束，见
+<a href="#/bfgain">BF Gain</a> 一章。</p>
+"""
+    body += F_AMC_PRED
+    body += """
+<h2>第三步：反折基准 MCS，再叠 OLLA</h2>
+<p>顺序是合同：<strong>先在 SINR 域选出不含 OLLA 的基准档并留痕</strong>
+（<code>mcs_without_olla</code>），<strong>再</strong>在 MCS 域加偏置、向下取整、钳位。
+反过来做（把 OLLA 折成 dB 加进坐标）会让"偏置"这个量随信道工作点漂移，也无法解释
+一个很小的负偏置为什么能把整数档压下去一档。</p>
+"""
+    body += F_FINAL_MCS
+    body += callout(
+        "good", "关掉 OLLA 只去掉最后这一步叠加",
+        "<p><code>olla_enabled=False</code> 时决策坐标<strong>仍然</strong>是 Γ + BF Gain，"
+        "只是偏置恒为 0。早先它会掉进另一条分支、改用真实接收 SINR 反折 MCS，"
+        "于是“开 OLLA / 关 OLLA”这个消融同时换掉了链路自适应的信息面，测出来的"
+        "OLLA 收益里混着“要不要上帝视角”。</p>",
+    )
+    body += """
+<h2>第四步：Rank 从哪来</h2>
+<p>rank 决定每流功率 <code>P/r</code>、TBS 和 OLLA 的收敛点，所以它<strong>不能每个信道
+快照就换一次</strong>。链路表里的 <code>best_rank</code> 是逐快照的瞬时谱效最优值，
+它现在只作为诊断量与 <code>link_table</code> 反向对照模式的输入，<strong>不再直接
+作为发送 rank</strong>。</p>
+"""
+    body += table(
+        ["模式", "行为", "什么时候用"],
+        [
+            ("fixed（默认）", "全程固定 rank，默认 rank2；超过链路表可用 rank 时钳位",
+             "正常仿真基线：rank 不是被研究对象时就不该让它自由变动"),
+            ("adaptive", "每 period_tti 判一次；升/降 rank 都要最优谱效高 10%；升完进快速回退监测",
+             "研究 rank 自适应本身"),
+            ("link_table", "逐快照跟随 best_rank（历史行为）",
+             "只作“rank 稳定买到了什么”的反向对照，不出正式结论"),
+        ],
+    )
+    body += F_RANK_SE + F_RANK_SWITCH
+    body += """
+<div class="toy"><div><b>实算：升 rank 的 10% 余量</b>
+<p>某个用户四个 rank 的滤波估计谱效是 5.118 / 8.424 / 8.190 / 8.640。最优是
+rank4，但 <code>8.640 / 8.424 = 1.026</code> 没跨过 <code>G↑ = 1.1</code>，
+<strong>rank 不动</strong>。实测三个比值 1.05 / 1.10 / 1.11 分别给出
+rank1 / rank1 / rank2——门限是<strong>严格大于</strong>。</p></div>
+<div><b>降 rank 用同一条 10% 判据，迟滞是对称的</b>
+<p>默认 <code>switch_rule="unified_ratio"</code>：两个方向共用
+<code>SE̅(r★) &gt; 1.1·SE̅(r_cur)</code>，<strong>按谱效最大化选 rank，但任何方向都要
+超过 10% 才切</strong>。实测 4% / 9% 不动、11% 才切，升降完全对称。
+<strong>例外是当前 rank 被最小 MCS 闸门判死时</strong>——此时
+<code>SE̅(cur) = SE̅(r★) = 0</code>，"超过 10%" 恒为假，会把 UE 卡在一个已知发不出去
+的 rank 上，所以这种情况直接降到最稳的一档（事件原因 <code>current_rank_gated_out</code>）。</p>
+<p>另一种写法 <code>spec_asymmetric</code>（旧实现规格文档那种）只保留作迁移反向对照；
+负责人已裁决它<strong>不是默认</strong>。同一个 <code>G↓ = 1.1</code> 在两种写法下行为相反：
+默认这条是降要 10% 余量，那一条是降立即生效；<code>spec_asymmetric + 0.9</code> 的等效
+降档余量是 11.1%，与默认同一个意图。所以 <code>as_dict()</code> 直接报
+<code>raise_margin_pct</code> / <code>reduce_margin_pct</code>，不要自己换算。</p></div>
+<div><b>防乒乓靠四件事</b>
+<p>①判决周期（默认 1000 TTI，30&nbsp;kHz 下 500&nbsp;ms）；②样本数闸门（攒够 3 个
+谱效滤波样本才判）；③升降 rank 的 10% 迟滞；④<strong>快速回退 + 判决周期指数退避</strong>：
+每回退一次周期 ×2，最多 ×2⁴ = 16000 TTI。实测周期序列 100→200→400→800→1600 后封顶。</p></div></div>
+<h2>升 rank 之后的快速回退监测</h2>
+<p>升 rank 不是无条件信任。抬升的同时保存<strong>原 rank 与原 OLLA 偏置</strong>作为回退点，
+然后进入一个 <code>min(400, 判决周期−10)</code> 个 TTI 的监测窗。窗内实时判：</p>
+"""
+    body += table(
+        ["判据", "门限（现场默认）", "什么时候判"],
+        [
+            ("监测期内新增 NACK 数", "> 90 → 立即回退", "每个 TTI，不等窗口结束"),
+            ("窗内初传 BLER", "≥ 0.3 → 回退", "窗口结束时"),
+            ("新 rank / 原 rank 的实测谱效比", "< 1.0 → 回退", "窗口结束时"),
+            ("窗内调度次数", "< 15 → 退出监测，不判成败", "窗口结束时"),
+        ],
+    )
+    body += """
+<p><strong>回退要把 OLLA 一起退回去。</strong>新 rank 上的 OLLA 是在一个错误的工作点上
+收敛出来的；只退 rank 会让旧 rank 带着别人的偏置继续跑，接下来几百个 TTI 的 MCS 全是错的。
+代码里这是 <code>RankController.step()</code> 的返回值，两条主循环都必须写回自己的 OLLA
+状态——实测抬升前 OLLA 是 −1.5、新 rank 上漂到 −4.0，回退后精确恢复成 −1.5。</p>
+"""
+    body += callout(
+        "decision", "常数来自现场实现规格，采样粒度是本项目的显式选择",
+        "<p>判决周期 1000、样本数 3、G↑/G↓ = 1.1、β = 0.1、最小 MCS 闸门 9、"
+        "资源消耗系数 [1.0, 0.97, 0.95, 0.93]、回退门限 90/0.3/1.0、退避上限 4 来自"
+        "用户提供的现场实现规格；<strong>unified_ratio 的升降对称 10% 默认由负责人"
+        "2026-09-03 裁决</strong>。</p>"
+        "<p><strong>只有一处是本项目自己的口径选择</strong>：现场每个 TTI 累积一个谱效"
+        "滤波样本，而 SuperRAN 的 AMC 坐标在一个信道快照内是分段常数，逐 TTI 采样等于把"
+        "同一个数重复上百次，会让 β=0.1 的平滑在快照之间完全失效。因此默认 "
+        "<code>se_sample_scope='snapshot'</code>（一次真正的新观测算一个样本），"
+        "设成 <code>'tti'</code> 可复现现场节拍。<strong>两者不等价，随结果一起报。</strong></p>"
+        "<p>主动向上探测 <code>probe_enabled</code> 仍默认关闭，与现场 "
+        "<code>RankProbeSwitch</code> 一致；打开时按逐 rank 的 MCS 门限 "
+        "<code>[9, 22, 20, 18]</code> 试 rank+1。</p>",
+    )
+    body += """
+<h2>第五步：ACK/NACK 要等上行时隙</h2>
+<p>TB 在下行时隙发出，终端只能在上行时隙把 ACK/NACK 报回来。所以 OLLA 更新与
+该 TB 的重传资格<strong>都不可能在发送那个 TTI 生效</strong>。偏移完全由 TDD 图案
+决定，不引入 k1/k2 参数。</p>
+"""
+    body += F_HARQ_DELAY
+    body += """
+<p>默认图案 <code>DDDSU</code>（两个周期即 8 个下行时隙配 2 个上行时隙）在 30&nbsp;kHz 下
+逐相位的偏移是 <strong>5 / 4 / 3 / 2</strong> 个 TTI，也就是 2.5 / 2.0 / 1.5 / 1.0&nbsp;ms。
+<strong>首传 ACK 与 NACK 都建立 in-flight 状态</strong>：虽然 decoder outcome 已抽样，
+但反馈到达前 gNB 不可见，不能更新 OLLA、不能让 RankController 回退、也不能给同一 UE
+发新 TB。等待段被单独计数为
+<code>harq_feedback_wait_skips</code>。</p>
+<p>唯一一次重传发出后，终次 ACK/NACK 也保持 in-flight 到反馈生效；它只释放进程，
+<strong>不再进入首传 OLLA/Rank 学习，也不触发第三次发送</strong>。DDDSU 最小时间线为
+t0 首传 NACK → t5 重传 → t10 终次反馈后才可发下一份新 TB，t6 必须空等。</p>
+<p><strong>重传还有第二个、独立的约束：时隙类型要一致。</strong> D 与 S 的可用 RE
+不同，同一份 MCS/RBG/rank 在两种时隙上算出的 TBS 也不同，冻结的 TB 只能回到同
+类型时隙重发。两个约束取交集，所以上面那张偏移表只精确描述 <strong>OLLA</strong>
+何时生效：在 S 上发出的 TB，实际重传要等到<strong>下一个 S</strong>，在
+<code>DDDSU</code> 下是一整个周期之后。别把它读成「重传一定在这么多个 TTI 之后」。图案里没有上行时隙时（<code>"D"</code>、
+<code>"DS"</code> 这类合成图案）退化成零时延，并在 <code>notes</code> 里说明——
+那是上界，不是现网。</p>
+<h2>第六步：解码 SINR 只在实际授予的 RBG 上取</h2>
+<p>误块抽签用的是<strong>最终发送 MCS + 真实接收 SINR</strong>。这个 SINR 由同一个
+基站设计出的物理发射权作用到 <code>h_true</code>、经经典 MMSE 接收机逐 RB 逐流算出，
+再按"RBG 内线性功率平均、跨 RBG 与流 dB 域算术平均"聚合——<strong>是算出来的，
+不是从全带值折算的</strong>。聚合只在<strong>本次 grant 实际占用的那些 RBG</strong>
+上做。</p>
+"""
+    body += F_GRANT_SINR + F_RX_BLER
+    body += callout(
+        "danger", "小包用全带均值判误块，两个方向都会错",
+        "<p>一个只占 1~2 个 RBG 的小包，如果按 17 个 RBG 的平均信道判误块："
+        "授到好子带时高估误块、授到差子带时低估误块。频率选择性越强错得越多。"
+        "举个实测过的量级：最终 MCS15 在 15.1&nbsp;dB 上的 NewTx BLER 是 "
+        "<strong>0.0006</strong>，在 13.2&nbsp;dB 上是 <strong>0.997</strong>——"
+        "不到 2&nbsp;dB 的差别跨越了整条瀑布。</p>",
+    )
+    body += """
+<h2>端到端手算一遍</h2>
+<div class="toy"><div><b>输入</b>
+<p>终端测得 PMI-SINR = 12.00&nbsp;dB，目标 BLER = 10%，基站算得 BF Gain = 4.00&nbsp;dB，
+该用户当前 OLLA 偏置 = −0.30 档，rank 固定为 1。</p></div>
+<div><b>逐步</b>
+<p>12.00&nbsp;dB 落在上报 codepoint <strong>7</strong>（内部行 6）→ 初始 MCS
+<strong>12</strong> → Γ = <strong>11.1016&nbsp;dB</strong> → 预测坐标 =
+11.1016 + 4.00 = <strong>15.1016&nbsp;dB</strong> → 它落在 MCS16 门限 14.8955 与
+MCS17 门限 15.8460 之间，基准 MCS = <strong>16</strong> → 加 OLLA 得 15.70 →
+floor 得 <strong>15</strong> → 钳位后最终发送 MCS = <strong>15</strong>。</p></div>
+<div><b>然后才是解码</b>
+<p>假设这次 grant 拿到的那几个 RBG 上真实接收 SINR 聚合为 15.1&nbsp;dB，
+查 MCS15 的 NewTx 曲线得 BLER = 0.0006，几乎必然 ACK；ACK 让 OLLA 在
+<strong>下一个 D/S 时隙</strong>加 0.01 档。若真实 SINR 只有 13.2&nbsp;dB，
+BLER = 0.997，几乎必然 NACK，OLLA 减 0.09 档，该 TB 冻结 MCS/RBG 数/rank/TBS
+等一次重传。</p></div></div>
+<h2>改目标 BLER 时，真正变的是闭环那一段</h2>
+<p>目标 BLER 是可配的，而且贯穿了 CQI 量化门限、CQI→MCS 的 Γ、BF 后的重选档、
+OLLA 步长比与覆盖判定。但它在<strong>开环上大部分抵消</strong>：同一个目标同时
+出现在「CQI→门限」和「门限→MCS」两侧，两次平移方向相同、幅度接近。抵消不精确
+——内部 CQI 表只取 MCS 0,2,…,26,28 这个子集，量化边界上会差一点。</p>
+<div class="toy"><div><b>开环实测</b>
+<p>6 个信道 × 4 个几何点 × 4 个 rank 共 384 个样本，把目标从 10% 放宽到 30%：
+<strong>354 个（92%）选出完全相同的 MCS</strong>，其余 30 个偏高 1~4 档，
+方向恒为「放宽目标选更高档」，没有一个偏低。</p></div>
+<div><b>闭环实测</b>
+<p>同一批信道跑 1 秒 experience：OLLA 稳态偏置 1.65 → 1.85 档，首传平均 MCS
+12.17 → 12.59，实测首传 BLER 0.067 → 0.178。<strong>目标真正兑现在这里。</strong>
+注意实测值不会精确落在目标上：OLLA 的稳态推导是连续偏置，而空口 MCS 是整数档，
+偏置要累积到跨过一整档才改变发送，因此实测值围绕目标抖且系统性偏低。</p></div></div>
+<h2>当前不建模的东西</h2>
+<ul>
+<li>k1/k2 的具体取值、PUCCH 资源与并行 HARQ 进程：每个 UE 一个 HARQ 进程；
+首传 ACK/NACK 都占住该进程，到反馈生效前不得发新 TB，反馈时刻只由 TDD 图案决定。</li>
+<li>跨 RBG 与跨流压成单码字 SINR 用的是 dB 域算术平均，<strong>不是</strong>带每档
+系数的 EESM/MIESM 等效 SINR 映射。</li>
+<li>Rank 自适应的探测环节：ρ 的现场定义未确认，默认关闭。</li>
+<li>每流固定 15 dB BF 惩罚、CQI floor/reset 状态机和现场已标定 OLLA 步骤均未实现；
+当前 BF Gain 是矩阵计算值，CQI/OLLA 参数是版本化工程近似，不得称现场等价。</li>
+<li>MU 的相关性损失与功率分摊当前按两用户等流数写死；用户已确认三/四用户与
+不等流数下不是这个形式，正在等现场流程。</li>
+</ul>
+<p>这一章每条机制都有可复跑的反向对照：
+<code>python scripts/run_dl_amc_chain_audit.py</code> 会成对跑
+rank 固定/跟随、OLLA 开/关、反馈时延开/关、CQI 滤波 λ=0.25/1、
+以及部分授权与全带均值的误块差，并把结果写进
+<code>artifacts/results/dl_amc_chain_audit.json</code>。
+它是<strong>机制审计不是性能结论</strong>：只跑一次重复、不做配对检验，
+任何百分比都要重新走门 3。</p>
+"""
+    body += "<p class=source-row>" + source_ref(
+        "src/superran/amc_policy.py", "def feedback_effective_offsets") + " · " + source_ref(
+        "src/superran/amc_policy.py", "class RankController") + " · " + source_ref(
+        "src/superran/system.py", "cqi_by_snapshot = np.zeros") + " · " + source_ref(
+        "src/superran/experience.py", "def _granted_true_sinr_db") + "</p>"
+    return Page(
+        "dlamc", "下行 AMC 全链：从 CQI 到发出去的那一档", "链路算法",
+        "DOWNLINK AMC CHAIN",
+        "把 CQI 滤波、Γ 门限、BF Gain、OLLA、Rank 策略、HARQ 反馈时序与解码 SINR "
+        "串成一条可复算的因果链，并标出四条信息面的边界。", body,
+        ("CQI", "IIR", "OLLA", "Rank", "HARQ 反馈", "解码 SINR"),
     )
 
 
@@ -4318,6 +4674,13 @@ def mu_page() -> Page:
         ("双视角", "<p>在 gNB 估计 CSI 上得到预测 CorrLoss/MCS 输入；在真实当前信道上得到逐用户/逐 RBG SINR 与 BLER 输入。</p>"),
         ("持久表", "<p>保存 correlation、CorrLoss、PowerLoss、true/predicted SINR 与可选逐 RBG 数组；Phase B 不做矩阵求逆。</p>"),
     ))
+    body += callout(
+        "danger", "pair_table 不是“有几条边就先跑”",
+        "<p>调度前硬校验完整、双向、维度一致的 pair graph。三 UE 即使已有 "
+        "0↔1 与 0↔2，只要缺 1↔2 仍立即失败；两个方向还必须引用同一 pair，"
+        "snapshot×两用户×RBG 维度必须一致且有限。这样候选缺失不会被静默解释成"
+        "‘本次没有合适伙伴’。</p>",
+    )
     body += """
 <h2>Phase B 为什么比较 useful bytes</h2>
 <p>PF 先排一次优先级，然后分别构造“全 SU”和“允许 MU”的完整 TTI 计划。两者都按队列实际剩余
@@ -4345,19 +4708,73 @@ MU计划交付79,927 B，最终走MU。若SU在本TTI能清空全部队列，则
             ("用户 exposure", "每个配对用户都暴露于该 MU RBG", "误以为每人只拿一半频域"),
             ("用户归因", "共享 RBG 在两 UE 间等分，跨用户可加", "把 exposure 相加做小区资源"),
             ("MU OLLA", "每用户一条、所有 pair 共用", "误称为 pair-specific OLLA"),
-            ("legacy MU", "MU/SU 聚合标量比值", "把它当 experience_v2 的 pair 实现"),
+            ("capacity MU（默认）", "读 pair 表：MCS 与误块抽签都用真值",
+             "以为 capacity 只有标量近似"),
+            ("se_ratio_legacy", "MU/SU 聚合标量比值，仅复现旧结果",
+             "把它当默认口径或当 pair 实现"),
         ],
     )
+    body += """
+<h2>capacity 的 MU 现在也读同一张 pair 表</h2>
+<p><strong>MU 的代价有两半，必须同时记账。</strong>一半是「发得更保守」——配对后
+每流只分到 P/4、还要吃残余干扰，MCS 应当往下走；另一半是「更容易错」——同一档
+MCS 在配对状态下的误块概率本来就更高。历史的 capacity 只认了第三种东西：把 TBS
+乘一个建表阶段测出的标量 <code>mu_se_ratio</code>，于是配对表现为「包变小，但一点
+也不更容易错」。物理上说不通，而且配对越激进结果越乐观。</p>
+"""
+    body += table(
+        ["环节", "pair_table（默认，2026-09-02 起）", "se_ratio_legacy（历史）"],
+        [
+            ("MCS 决策", "AMC 坐标 + CorrLoss + PowerLoss",
+             "SU 单用户坐标，完全不减配对代价"),
+            ("TBS", "按该 MCS 全带算，不再另乘比值",
+             "按 SU 的 MCS 算，再乘 mu_se_ratio/K"),
+            ("误块抽签", "pair 表的 true_sinr_db（ZF 权打到双方 h_true）",
+             "SU 单用户真值，MU 干扰不进分母"),
+            ("OLLA", "SU / MU 两条独立状态", "只有一条 SU OLLA"),
+            ("SU/MU 判决", "逐 TTI 比聚合谱效；以叠加 SU+MU OLLA 后的实发 MCS 过预测 BLER≤0.5 准入",
+             "全程一个标量：ratio>1 就一直配对"),
+            ("重传", "恒按 SU 重发（冻结身份不许改 SINR/TBS）", "同左"),
+        ],
+    )
+    body += """
+<div class="toy"><div><b>实测：代价确实进了 MCS</b>
+<p>两个独立信道 UE、几何 14/12&nbsp;dB、272&nbsp;RB：SU 臂首传平均 MCS
+<strong>23.48</strong>，开 MU 后降到 <strong>19.93</strong>（配对占 68% 的
+TTI）。历史标量口径下同一组配置是 22.68 → 22.69——<strong>一档都没降</strong>。</p></div>
+<div><b>实测：抽签坐标换了</b>
+<p>同一批快照、同一档 MCS：按 SU 真值抽签平均 BLER <strong>0.0008</strong>，
+按 pair 真值是 <strong>0.0040</strong>，两者的真值差 <strong>−3.92&nbsp;dB</strong>
+（其中 −3.01 是等功率分摊，余下是相关性损失）。</p></div>
+<div><b>实测：自适应会判 SU 赢</b>
+<p>把两个 UE 的空间相关系数拉到 0.999，ZF 无处零陷：配对占比
+<strong>0%</strong>，767 个 TTI 被显式记为「单发更划算」（<code>mu_su_wins</code>），
+不是静默不配。</p></div></div>
+<p><strong>−3.01&nbsp;dB 只是记账标签，不是近似。</strong>按 pair 表的定义，
+<code>CorrLoss = pred_MU − pred_SU − PowerLoss</code>，所以决策里真正用到的平移量
+<code>CorrLoss + PowerLoss</code> 恒等于 <code>pred_MU − pred_SU</code>——那个常数
+精确抵消，实际生效的是矩阵算出来的差。把 PowerLoss 单列只是为了让诊断能分开看
+「功率分摊占多少、相关性损失占多少」。<strong>但这条只在当前支持的 2 用户 ×
+rank2 下成立</strong>；扩到 3/4 用户或不等流数时，这个常数标签本身要重新定义。</p>
+"""
     body += callout(
         "decision", "下一阶段 MU 细化",
         "<p>当前落地的是可验证的最小真实 MU：2UE×rank2、ZF/RZF、用户级 MU OLLA。"
         "一般 rank 组合、3/4 用户、pair-specific OLLA、HARQ 进程与更大候选图仍需业务/性能约束后再扩展。</p>",
     )
-    body += "<p class=source-row>pair 表：" + source_ref("src/superran/system.py", "def build_mu_pair_tables") + " · TTI 决策：" + source_ref("src/superran/experience.py", "SU_clears_all_queues") + "</p>"
+    body += ("<p class=source-row>pair 表："
+             + source_ref("src/superran/system.py", "def build_mu_pair_tables")
+             + " · experience 的 TTI 决策："
+             + source_ref("src/superran/experience.py", "SU_clears_all_queues")
+             + " · capacity 的 MU 记账："
+             + source_ref("src/superran/system.py", "mu_accounting")
+             + "</p>")
     return Page(
         "mu", "MU-MIMO 与 SU/MU 自适应", "链路算法", "MU-MIMO",
-        "CorrLoss、PowerLoss、双 OLLA、真实 pair 表和 useful-bytes 计划比较。", body,
-        ("MU", "ZF", "RZF", "CorrLoss", "PowerLoss", "pair table"),
+        "CorrLoss、PowerLoss、双 OLLA、真实 pair 表、useful-bytes 计划比较，"
+        "以及 capacity 的 pair 表记账口径。", body,
+        ("MU", "ZF", "RZF", "CorrLoss", "PowerLoss", "pair table",
+         "mu_accounting"),
     )
 
 
@@ -4971,7 +5388,7 @@ IoT=<code>10log10((I+N)/N)=10 dB</code>。若邻区PRB利用率降到30%，只�
 新IoT约5.68 dB，而S和N不变。若直接把10 dB SINR乘0.3，既改错了信号也无法重建SIR，
 后续功控和负载比较都会失去物理意义。</p></section>
 <h2>邻区 PRB 负载</h2>
-<p>ChannelHub 几何 SINR默认邻区都在发，相当于 100% 资源负载。系统场景通过
+<p>first-party 几何 SINR 默认邻区都在发，相当于 100% 资源负载。系统场景通过
 <code>neighbor_prb_util=η</code> 把干扰项缩为 ηI，同时保持 SIR/SINR 同口径；30% 是默认中载
 场景，不是所有网络的事实。</p>
 <h2>功控从哪里接入干扰预算</h2>
@@ -5112,7 +5529,7 @@ def gates_page() -> Page:
 """
     body += callout(
         "danger", "测试通过 ≠ 物理正确",
-        "<p>Gate/测试能证明合同、自洽、不漂移；预置 BLER 曲线、实测 Jones 方向图、现场 CQI filter"
+        "<p>Gate/测试能证明合同、自洽、不漂移；预置 BLER 曲线、实测 Jones 方向图、CQI filter 工程默认"
         "若没有独立外部数据，测试只能保护 hash/边界，不能证明模型等同真实网络。</p>",
     )
     body += """
@@ -5282,7 +5699,7 @@ def presets_page(presets: dict[str, Any]) -> Page:
     body += """
 <h2>配置不是一张扁平字典</h2>
 <p>一个可复现实验由四层组成：信道预设给物理骨架；用户 overrides 改显式旋钮；
-<code>plan.py</code> 把 64T4R 等人话展开为 ChannelHub 参数；系统仿真再追加话务、调度、
+<code>plan.py</code> 把 64T4R 等人话展开为 first-party source 参数；系统仿真再追加话务、调度、
 OLLA、MU 与 KPI 口径。最终写入数据集的是解析后的配置，不是用户输入的片段。</p>
 """
     body += code(r'''draft = sr_plan(
@@ -5480,13 +5897,13 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
 <h2>本次全项目审计中当场修复的纰漏</h2>
 """
     audit_rows = [
-        ("ChannelHub 跨站传播状态", "一个 UE 级 LOS/DS/SF 被复制到所有小区；扇区反而换 seed", "按 physical site 独立抽样；同站扇区共享状态与 cluster seed，方位角作用于阵列", "MSG-Platform 21/21"),
+        ("历史外部源的跨站传播状态", "一个 UE 级 LOS/DS/SF 被复制到所有小区；扇区反而换 seed", "first-party source 按 physical site 独立抽样；同站扇区共享状态与 cluster seed，方位角作用于阵列", "本地合同与多站反例"),
         ("自定义站点三扇区", "custom positions 永远只建 sector 0", "按 0/120/240° 展开，2站×3扇区 toy case 固定为 6 cells", "契约测试"),
         ("扇区服务选择", "azimuth_deg 不进 path gain，三扇区同功率、按列表先后胜出", "110° 水平阵子图给相对 sector gain；pathloss 保持纯传播量", "boresight 反例"),
         ("SRS 时序", "样本 idx 直接当 slot；可在 DL/guard slot 合成 SRS", "idx 映射到第 n 个满足 TDD+T_SRS+offset 的真实机会；无交集硬失败", "paired 3→13 slot toy"),
-        ("SRS 带宽与跳频", "ChannelHub 只硬编码 C_SRS 0..17，默认 row 3；多级 F_b 有空循环且混淆 n_RRC/n_shift", "补全 64 行 38.211 表，分离 freqDomainPosition/freqDomainShift，奇偶 N_b 逐式实现；预置冻结 63/1/0、20 slot", "64 行×各 B_SRS/b_hop 穷举 + 17 跳覆盖 272 RB"),
+        ("SRS 带宽与跳频", "历史 helper 的行表与 n_RRC 语义曾漂移", "本仓冻结产品 C_SRS=63/B_SRS=1/b_hop=0 与 17-hop 顺序；非产品 hopping 硬拒绝", "17 跳覆盖 272 RB + 非标反例"),
         ("小载波 SRS 默认值", "Sionna/QuaDRiGa 固定 C_SRS=3；4 RB toy carrier 在历史 hopping 回看时映射到 RB[8,12) 并崩溃", "四种 source 均按实际载波自动选最宽合法 C_SRS；显式非法资源仍硬失败", "跨 backend 86 passed / 1 conditional skip"),
-        ("CDL 标准表校准", "旧 A/B/C 角度错、D/E 行数短；新 dataclass 字段又让兼容覆盖 TypeError，异常被吞后继续生成", "MSG A~E 源表直接修正；兼容层只写已支持字段；shape mismatch 全表判错且校准异常阻断生成", "A/B/C/D/E 分别 23/23/24/14/15 行，逐字段 0 mismatch"),
+        ("CDL 标准表校准", "历史 A/B/C 角度错、D/E 行数短；运行时 monkey patch 还会随 dataclass 漂移", "spec38901 成为本仓唯一运行表；native 直接读取，不修改外部注册表", "A/B/C/D/E 分别 23/23/24/14/15 行，逐字段 0 mismatch"),
         ("CDL ray 与 LOS", "每簇只生成一个 rank-1 方向，忽略 20-ray spread/XPR；D/E 又二次混 K；显式 UMa_LOS 仍随机出 NLOS", "20-ray 偏移/角耦合/逐 ray Jones+Doppler；D/E K 只用表功率；显式 LOS 强制 LOS/CDL-D", "CDL 定向 19/19 + LOS 反例"),
         ("配置/实际剖面", "摘要只突出 configured CDL-D，但 NLOS 链路实际由 CDL-C 生成，24-component 结果容易被误读成 D", "新增 configured_channel_model；repr、摘要与 E2E 同时展示 effective_channel_model_counts", "NLOS configured D→effective C 反例"),
         ("TDL/阵列链路预算", "TDL 缺少实际 ZOD/ZOA/Jones；有效阵子峰值和电下倾未进入 conducted link budget", "TDL LOS 接实际几何与 Jones；element×subarray absolute gain 进入预算，数字 BF 单独计算", "方向性功率、下倾与 physical-reference 等价哨兵"),
@@ -5499,13 +5916,13 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         ("逐小区 S/N/I 契约", "旧 _system_sinr 移除后，RB 功控依赖的 dl_signal/noise/interference metadata 一并消失，单元算法虽绿但真实数据无法启用", "InternalSim/Sionna 在同一几何预算落每 RB S/N/I_k；一个 symbol 网格只写一个 slot 行；缺字段仍硬失败", "source→NPZ→loader 重构误差 3.6e−15 dB"),
         ("Doppler 投影", "先把速度投影到最近站径向，CDL 再按每 ray 方向余弦投影，方向作用两次", "metadata 交付 f_max=|v|/λ 与完整速度方向，CDL 每 ray 只投影一次；static 仅冻结跨 snapshot 几何", "350 km/h @ 2.6 GHz = 842.59 Hz"),
         ("static Doppler 测试夹具", "预设没写 ue_speed_kmh 时，测试把缺失键当成 0；但 InternalSim 的公开默认是 3 km/h，实际 9.72 Hz 被误报为实现失败", "反例显式固定 static + 36 km/h，以 f_max=|v|/λ 核对；不再从可漂移的预设缺省推断期望", "完整 interference 回归 1002 s 全绿"),
-        ("paired UL 天线轴测试", "旧单测期待公开 h_ul_true 保持物理 [UE,BS] 转置布局；实际 ChannelSample 窄腰早已统一为 [BS,UE]，把正确输出误判失败", "锁定两层语义：内部物理 H_UL=H_DL^H；返回时恢复 canonical [T,RB,BS,UE]，零校准误差时数值为 conj(H_DL)", "interference/bridge/mobility/export 定向 41 passed / 1 ONNX skip"),
+        ("paired UL 天线轴测试", "旧 Hermitian 约定在 canonical 存储后多出一次共轭", "v2 锁定物理 H_UL=H_DL^T；两侧恢复 canonical [T,RB,BS,UE] 后零校准 UL==DL；v1 数据按显式版本继续共轭", "v1/v2 复数哨兵 + 端到端接收反例"),
         ("track 移动性测试", "MOBILITY_MODES 新增 track 后，两个遍历全模式的旧测试未传必需 waypoints，因 ValueError 失败", "为 track 夹具给显式两点轨道；形状与高度守恒继续覆盖全部模式", "test_mobility 定向回归"),
         ("Sionna RT 时变", "Receiver.velocity 未设置且 Paths.cfr 默认 1 Hz 采样，多个 symbol 实为静态重复；频率网格还从 0 单边展开", "写完整 UE 速度，CFR 采样率=1/平均 OFDM symbol 周期，RB 频率以载波中心对称", "真实 Munich RT symbol 演进反例"),
         ("Probe SRS 资源", "全带显式 C_SRS=63 覆盖 272 RB，直接塞进 24-RB probe 后越界", "probe-only 重新选最宽合法标准资源并报告 63→7；正式生成仍对显式非法配置硬失败", "company_64t4r probe 回归"),
         ("系统时间轴", "14 symbol 被误当 14 个 TTI 落盘", "14 symbol 先完成估计，再取中间 symbol 为 1 slot snapshot；禁复数平均", "64×4 E2E"),
         ("TDD 系统载波", "通用 Type-0 工具被直接暴露给系统入口，使 51/106/273 RB 也会自动变成新的系统口径", "对外冻结 100 MHz@30 kHz、272 RB=17×16；张量宽度与标签任一不符就硬失败；通用工具仅保留为内部数学能力", "fixed-profile 合同 + UI 无 num_rb/rbg_size_config 控件"),
-        ("UL→DL 互易映射", "若跟随外部 helper/w_dl 的轴序与共轭约定，数据源演进可悄悄改变发射权", "SuperRAN 版本化 [time,rb,bs,ue] 合同，h_precoding_est=conj(h_ul_est)；新数据忽略 source w_dl，权值由本地 EBF/PEBF/NEBF 重算", "复数逐位哨兵 + 轴形状反例 + source-w_dl 忽略测试"),
+        ("UL→DL 互易映射", "若跟随外部 helper/w_dl 的轴序与共轭约定，数据源演进可悄悄改变发射权", "v2 的 [time,rb,bs,ue] canonical 映射为 identity；v1 显式走 conj；新数据忽略 source w_dl，权值由本地 EBF/PEBF/NEBF 重算", "复数逐位哨兵 + 轴形状反例 + v1兼容"),
         ("SRS 17-hop 所有权", "老化模型运行时调外部 srs_rb_indices，依赖失败时还可退回恒等扫描", "SuperRAN 固化 C_SRS=63/B_SRS=1/b_hop=0 的 0,8,16,...,1,9 序列；只接受 17×16，无外部 helper、无 fallback", "17 跳不重不漏 + 非标 profile 硬失败"),
         ("SRS 5 ms 三义性", "5 ms可能被同时当作信道snapshot、单腿空口机会和四端口SRS周期；错误到建表深处才暴露", "基础2T4R资源profile只接受10/20/40 ms全局周期；5 ms仅在关闭资源分配的诊断上界中可用", "CsiConfig前门反例 + 129项CSI回归"),
         ("SRS批量UE身份", "同一cell重复ue_id会命中allocator幂等返回，却在批量结果中被计成两个UE", "批量入口先校验(cell_id,ue_id)唯一；跨cell相同本地UE号仍允许", "同cell拒绝/跨cell允许反例"),
@@ -5528,8 +5945,8 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         ("replication删样", "KpiStat只保留有限值却不报告原始总数；配对API还会flatten二维数组并由统计层删除NaN行", "单臂输出n_total/n_nonfinite/coverage；A/B只接受非空一维全有限数组", "2/3覆盖toy + 二维/NaN配对反例"),
         ("文档合同漂移", "33/34 tools、273/272 RB、17/18 Gate、默认弹浏览器等旧说法", "README/Skill/算法卡与源码统一，并加语义哨兵", "test_interference"),
         ("说明书 RB 粒度合同", "独立 algo_defs2 页面仍宣称‘RB 级没有算法使用’，与已上线的逐 RB 功控精确路径矛盾；且未说明几何量的预数字波束参考面", "明确区分功控关闭的中心 RB 快路径与功控开启的 272-RB→post-MMSE→RBG 路径，并写出 prebeam/per-RB/EESM 边界", "说明书关键短语哨兵 + 完整 interference 回归"),
-        ("代码根/场景资产根", "当前 MSG-Platform 代码可用但不带 configs/scenes，能力探测报 Sionna 可用而场景列表为 0", "代码与资产独立发现；SUPERRAN_SCENES 可显式覆盖，候选目录必须真的含 JSON 才接受", "10 场景恢复 + prepare_scene 资产回归"),
-        ("并行样本语义", "static 串行固定 1 个 UE 几何；旧 worker 各用 seed+id，4 进程混入 4 个几何，KS p=0", "ChannelHub 增加 sample_index_offset；同 seed 全局索引分块；有状态/拒绝采样路径显式回退", "workers=1/2/4 的 h_true、h_est、SINR 逐位一致"),
+        ("源码根/场景资产根", "代码与资产混在外部 checkout 时会同步降级且难以审计", "物理代码固定在本仓；SUPERRAN_SCENES 只指独立数据目录；四个内置场景恒可发现", "bogus source-root + local-assets反例"),
+        ("并行样本语义", "static 串行固定 1 个 UE 几何；旧 worker 各用 seed+id，4 进程混入 4 个几何，KS p=0", "first-party source 用 sample_index_offset + 同 seed 全局索引分块；有状态/拒绝采样显式回退", "workers=1/2/4 的 h_true、h_est、SINR 逐位一致"),
         ("带宽→RB 反查", "生成器曾用 0.95×BW/(12·SCS) 近似；随后共享表又把 FR1/FR2 字典覆盖合并，使 50/100 MHz@60 kHz 的 FR1 值被 FR2 静默替换", "按 FR1/FR2 保留独立 38.101 表；后端依据载频显式选 range；非标准组合硬失败，synthetic grid 要显式 num_rb", "20M@30k→51；50M@60k FR1/FR2=65/66；100M=135/132；9 单测"),
         ("系统字节守恒显示", "offered_mbps 先四舍五入到 3 位而 served_mbps 保留全精度；恰好供需平衡的 trace 被显示成多发送 0.000333 Mbps", "保留吞吐全精度并新增 offered_bytes/served_bytes 整数真相源；守恒断言只用整数", "100k TTI×8 UE 全系统 14 章 + 精确字节反例"),
         ("性能标定漂移", "20-ray 内核上线后仍宣称旧单簇 24 ms/样本、probe 11.5x，CI 又把硬编码旧数字打印成‘实测’", "重测热/冷与 21-cell 对照；估时降格为版本化调度启发式；文档、Skill、MCP 统一以 elapsed_s 为准", "0.158/1.074/7.48 s anchors；probe 交错两轮约 1.80x"),
@@ -5540,7 +5957,7 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         "<p>本轮新增的体验随机属性压力覆盖 18 个 case×12 条不变量，共 <strong>216/216</strong>；"
         "话务校准压力覆盖 5 类边界，共 <strong>40/40</strong>。<code>test_system.py</code> 的 14 个章节全部通过，"
         "其中包含 100,000 TTI×8 UE；<code>test_rng.py</code> 为 <strong>125/125</strong>；"
-        "MU、物理不变量与开发手册定向回归均通过；外部信道源只作为可替换输入适配器，不作为本仓测试计数或算法真相源。</p>"
+        "MU、物理不变量与开发手册定向回归均通过；first-party source 是唯一默认生成实现，可选 direct adapter 不作为本仓算法真相源。</p>"
         "<p>这些证据证明合同、守恒、机制反例与边界处理，不等价于所有性能假设已经成立。"
         "SRS/PMI Hello World 的 Gate 3 仍阻断，50% MU pilot 的 Gate 2 仍阻断；实测方向图、"
         "完整 Type-I 多层码本和现场标定的 EESM/MIESM 仍是外部校准边界。主手册的页数、模块数、"
@@ -5709,9 +6126,9 @@ def glossary_page() -> Page:
     body += table(
         ["问题", "第一入口", "再追"],
         [
-            ("64T/256T/阵子图/F", "hardware.py", "MSG-Platform effective_array.py"),
-            ("H 如何生成/同站状态", "channelhub.py + generate.py", "MSG-Platform internal_sim.py / sionna_rt.py"),
-            ("SRS/LMMSE/老化", "physical.py + csi_aging.py", "MSG-Platform ref_signals/channel_est"),
+            ("64T/256T/阵子图/F", "hardware.py", "native.py / EffectiveArray"),
+            ("H 如何生成/同站状态", "native.py + generate.py", "channelhub.py 兼容门面"),
+            ("SRS/LMMSE/老化", "physical.py + native.py", "csi_aging.py / srs_waveform.py"),
             ("PMI/Type-I/RI/CQI 参照", "measure.py + hardware.py", "linklevel.py / system.py"),
             ("EBF/PEBF/NEBF", "beamforming.py", "linklevel.py"),
             ("CQI/MCS/TBS/BLER", "linkadapt.py", "bler_data_20b.py"),
@@ -5989,7 +6406,8 @@ def build() -> str:
         pdp_page(), reference_signals_page(), srs_page(),
         srs_resource_allocation_page(), csi_page(), pmi_page(),
         measurements_page(modules), beamforming_page(), powercontrol_page(), robust_page(),
-        sinr_page(), bfgain_page(), linkadapt_page(), bler_page(), mu_page(),
+        sinr_page(), bfgain_page(), linkadapt_page(), dlamc_page(),
+        bler_page(), mu_page(),
         modes_page(), experience_page(), scheduler_p0_page(), traffic_page(), kpi_page(),
         calibration_page(), interference_page(), rng_page(), gates_page(),
         external_results_page(), tests_page(tests, modules),

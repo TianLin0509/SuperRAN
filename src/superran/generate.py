@@ -42,6 +42,7 @@ _SCALAR_META_FIELDS = (
     "tdd_slot_direction", "srs_active_in_slot",
     "indexed_slot_rs_schedule_valid", "rs_opportunity_abstraction_used",
     "effective_channel_model",
+    "pathloss_model", "pathloss_model_approximate",
 )
 
 # 每个样本、每个小区/扇区一项的大尺度量。不能塞进 scalar，也不能只留第一条。
@@ -142,7 +143,9 @@ def _stable_ue_identity(
     return None, "unavailable"
 
 
-def _slot_snapshot(h: Any, *, time_axis: int = 0) -> np.ndarray:
+def _slot_snapshot(
+    h: Any, *, time_axis: int = 0, preserve_time: bool = False
+) -> np.ndarray:
     """Reduce ChannelHub's intra-slot OFDM-symbol grid to one slot snapshot.
 
     System-level simulation advances once per slot/TTI.  Averaging complex H
@@ -151,6 +154,8 @@ def _slot_snapshot(h: Any, *, time_axis: int = 0) -> np.ndarray:
     used all symbols before this storage-boundary reduction.
     """
     arr = np.asarray(h, dtype=np.complex64)
+    if preserve_time:
+        return arr
     if arr.ndim <= time_axis or arr.shape[time_axis] <= 1:
         return arr
     middle = arr.shape[time_axis] // 2
@@ -532,6 +537,9 @@ def _collect(
                 break
             continue
 
+        meta = dict(sample.meta) if isinstance(sample.meta, dict) else {}
+        preserve_time = meta.get("time_axis_semantics") == "slot_snapshots"
+
         ht, he, hde, csi_source = ch.downlink_and_precoding_channels(sample)
         if ht is None:
             continue
@@ -543,8 +551,8 @@ def _collect(
                 f"sample={attempted - 1}"
             )
 
-        ht_arr = _slot_snapshot(ht)
-        he_arr = _slot_snapshot(he)
+        ht_arr = _slot_snapshot(ht, preserve_time=preserve_time)
+        he_arr = _slot_snapshot(he, preserve_time=preserve_time)
         if ht_arr.shape != he_arr.shape:
             raise RuntimeError(
                 f"下行真值/预编码 CSI 形状不一致：{ht_arr.shape} vs {he_arr.shape}。"
@@ -559,7 +567,7 @@ def _collect(
         precoding_csi_sources.append(csi_source)
         hut = getattr(sample, "h_ul_true", None)
         if hut is not None:
-            hut_arr = _slot_snapshot(hut)
+            hut_arr = _slot_snapshot(hut, preserve_time=preserve_time)
             if hut_arr.shape != ht_arr.shape:
                 raise RuntimeError(
                     "h_ul_true 与 h_dl_true 的 canonical 轴不一致："
@@ -569,7 +577,7 @@ def _collect(
                 raise RuntimeError("h_ul_true 含 NaN 或 Inf，拒绝落盘")
             h_ul_true.append(hut_arr)
         if hde is not None:
-            hde_arr = _slot_snapshot(hde)
+            hde_arr = _slot_snapshot(hde, preserve_time=preserve_time)
             if hde_arr.shape != ht_arr.shape:
                 raise RuntimeError(
                     f"h_dl_est 与 h_dl_true 形状不一致：{hde_arr.shape} vs {ht_arr.shape}"
@@ -581,7 +589,11 @@ def _collect(
         hi_arr = getattr(sample, "h_interferers", None)
         if hi_arr is not None:
             # [cell, symbol, RB, BS, UE] -> keep one symbol, preserving axis.
-            h_intf.append(_slot_snapshot(hi_arr, time_axis=1))
+            h_intf.append(
+                _slot_snapshot(
+                    hi_arr, time_axis=1, preserve_time=preserve_time
+                )
+            )
 
         pos = getattr(sample, "ue_position", None)
         positions.append(
@@ -601,7 +613,6 @@ def _collect(
         # 因此仍紧跟 sample 处理，避免旧路径串样本。
         scalars["ul_sir_geo_dB"].append(intf_mod.take_ul_geometry_sir(sample))
 
-        meta = dict(sample.meta) if isinstance(sample.meta, dict) else {}
         ue_id, ue_id_source = _stable_ue_identity(
             source_name,
             cfg_run,
@@ -671,6 +682,18 @@ def _collect(
         contract = {}
         first_meta["channel_contract"] = contract
     unique_sources = sorted(set(precoding_csi_sources))
+    reciprocity_version = str(
+        contract.get(
+            "reciprocity_contract_version",
+            ch.SUPERRAN_LEGACY_RECIPROCITY_CONTRACT,
+        )
+    )
+    if reciprocity_version == ch.SUPERRAN_RECIPROCITY_CONTRACT:
+        reciprocity_map = "h_precoding_est = h_ul_est (canonical transpose-only v2)"
+    elif reciprocity_version == ch.SUPERRAN_LEGACY_RECIPROCITY_CONTRACT:
+        reciprocity_map = "h_precoding_est = conjugate(h_ul_est) (legacy Hermitian v1)"
+    else:
+        raise RuntimeError(f"unknown reciprocity contract {reciprocity_version!r}")
     contract.update({
         "h_true_role": "downlink physical evaluation channel",
         "h_ul_true_role": (
@@ -688,9 +711,9 @@ def _collect(
             if len(h_dl_est) == accepted else "not available in legacy/single data"
         ),
         "precoding_csi_sources": unique_sources,
-        "reciprocity_contract_version": ch.SUPERRAN_RECIPROCITY_CONTRACT,
+        "reciprocity_contract_version": reciprocity_version,
         "canonical_channel_axes": list(ch.SUPERRAN_CANONICAL_CHANNEL_AXES),
-        "ul_to_dl_precoding_map": "h_precoding_est = conjugate(h_ul_est)",
+        "ul_to_dl_precoding_map": reciprocity_map,
         "precoder_ownership": (
             "SuperRAN recomputes every transmit weight from normalized h_est; "
             "source-provided w_dl is ignored and never written to new datasets"
@@ -700,8 +723,12 @@ def _collect(
             "the documented first-party iterator contract, never from a moving coordinate"
         ),
         "ofdm_to_slot_reduction": (
-            "middle-symbol snapshot; no complex averaging; all OFDM symbols "
-            "were retained through channel estimation before reduction"
+            "source already provides slot snapshots; preserve the complete slot axis"
+            if first_meta.get("time_axis_semantics") == "slot_snapshots"
+            else (
+                "middle-symbol snapshot; no complex averaging; all OFDM symbols "
+                "were retained through channel estimation before reduction"
+            )
         ),
     })
     return payload, first_meta, stats

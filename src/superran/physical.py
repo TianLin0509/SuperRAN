@@ -1,16 +1,14 @@
 """物理层工具箱：3GPP 标准序列、帧结构、波束与估计基线。
 
-这里既有 SuperRAN 自己冻结的产品合同，也有仍经数据源适配器调用的通用
-链路级工具。暴露出来主要有两个用途：
+这里的产品合同与通用链路级工具都由 SuperRAN 本仓实现。暴露出来主要有两个用途：
 
 * **当基线** —— LS/MMSE 估计、SVD 预编码、DFT 码本、SSB 波束扫描，
   都是"你的方法要跟什么比"的现成答案。
 * **做导频层课题** —— SRS 跳频、序列相关性、导频污染这类研究，
   需要真实的序列而不是随机数。
 
-100 MHz / 272 RB / 17-hop SRS 资源映射由 SuperRAN 本地版本化；其他
-参考序列和通用物理工具目前仍经 ChannelHub 数据源适配器调用。两类来源会在
-返回值或文档中显式标注，不能把后者说成整仓零依赖。
+100 MHz / 272 RB / 17-hop SRS 资源映射、参考序列、阵列、码本与估计器都在
+本仓版本化；外部源码树不参与运行时选择。
 """
 from __future__ import annotations
 
@@ -18,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from .channelhub import _ensure_path
+from . import native
 
 # ---------------------------------------------------------------------------
 # NR 帧结构与资源
@@ -36,11 +34,8 @@ def nr_rb_count(
     不是简单地用 ``带宽/(12·SCS)`` —— 标准表格考虑了保护带，
     100 MHz @30 kHz 是 273 个 RB 而非 277。
     """
-    _ensure_path()
-    from msg_embedding.phy_sim.nr_rb_table import nr_rb_lookup  # noqa: PLC0415
-
     return int(
-        nr_rb_lookup(
+        native.nr_rb_lookup(
             float(bandwidth_hz),
             float(scs_hz),
             frequency_range=frequency_range,
@@ -50,20 +45,14 @@ def nr_rb_count(
 
 def nr_valid_configs(*, frequency_range: str = "FR1") -> dict[str, Any]:
     """列出 NR 支持的子载波间隔与各自的合法带宽。"""
-    _ensure_path()
-    from msg_embedding.phy_sim.nr_rb_table import (  # noqa: PLC0415
-        nr_valid_bandwidths,
-        nr_valid_scs,
-    )
-
-    scs_list = [int(x) for x in nr_valid_scs(frequency_range=frequency_range)]
+    scs_list = [int(x) for x in native.nr_valid_scs(frequency_range=frequency_range)]
     return {
         "frequency_range": str(frequency_range).upper(),
         "subcarrier_spacing_khz": scs_list,
         "bandwidths_mhz": {
             int(s): [
                 int(b)
-                for b in nr_valid_bandwidths(int(s), frequency_range=frequency_range)
+                for b in native.nr_valid_bandwidths(int(s), frequency_range=frequency_range)
             ]
             for s in scs_list
         },
@@ -77,10 +66,7 @@ def tdd_pattern_info(name: str = "DDDSU") -> dict[str, Any]:
     普通配比只说"哪些时隙是下行/上行"，但特殊时隙 S 内部还要分
     下行符号、保护间隔、上行符号——做时隙级仿真时这个切分很关键。
     """
-    _ensure_path()
-    from msg_embedding.phy_sim.tdd_config import get_tdd_pattern  # noqa: PLC0415
-
-    p = get_tdd_pattern(name)
+    p = native.get_tdd_pattern(name)
     out: dict[str, Any] = {"name": name}
     for attr in ("pattern", "period_slots", "num_dl", "num_ul", "num_special",
                  "periodicity_ms", "slots"):
@@ -97,10 +83,7 @@ def tdd_pattern_info(name: str = "DDDSU") -> dict[str, Any]:
 
 
 def list_tdd_patterns() -> list[str]:
-    _ensure_path()
-    from msg_embedding.phy_sim.tdd_config import list_tdd_patterns as _l  # noqa: PLC0415
-
-    return [str(x) for x in _l()]
+    return [str(x) for x in native.list_tdd_patterns()]
 
 
 # ---------------------------------------------------------------------------
@@ -235,13 +218,7 @@ def srs_config(
     if int(frequency_resource_id) != 0:
         raise ValueError(
             "不跳频配置只有frequency_resource_id=0；不存在17档频域相位")
-    _ensure_path()
-    from msg_embedding.ref_signals.srs import (  # noqa: PLC0415
-        SRSResourceConfig,
-        auto_select_c_srs,
-        srs_hopping_cycle_length,
-        srs_rb_indices,
-    )
+    from .channelhub import auto_select_c_srs  # noqa: PLC0415
 
     c = (
         int(auto_select_c_srs(
@@ -251,26 +228,17 @@ def srs_config(
         ))
         if c_srs is None else int(c_srs)
     )
-    cfg = SRSResourceConfig(
-        C_SRS=c,
-        B_SRS=int(b_srs),
-        K_TC=int(comb),
-        n_RRC=int(n_rrc),
-        b_hop=int(b_hop),
-        n_SRS_ID=0,
-        T_SRS=int(periodicity),
-        T_offset=int(offset),
-        N_ap=int(n_ports),
-    )
-    cycle = int(srs_hopping_cycle_length(cfg))
-    idx0 = np.asarray(srs_rb_indices(cfg, 0, 0, int(num_rb)))  # (slot, symbol, total_rb)
+    hopping_enabled = False
+    cycle = 1
+    allocation = int(num_rb)
+    idx0 = np.arange(allocation, dtype=np.intp)
     return {
         "c_srs": c,
         "b_srs": int(b_srs),
         "b_hop": int(b_hop),
         "comb": int(comb),
         "periodicity_slots": int(periodicity),
-        "hopping_enabled": bool(cfg.hopping_enabled),
+        "hopping_enabled": hopping_enabled,
         "hopping_cycle_length": cycle,
         "rb_per_hop": int(idx0.size),
         "coverage_ratio": round(float(idx0.size) / max(int(num_rb), 1), 3),
@@ -286,10 +254,7 @@ def srs_sequence(
     *, length: int, u: int = 0, v: int = 0, cyclic_shift: float = 0.0
 ) -> np.ndarray:
     """SRS 基序列（Zadoff-Chu 或短序列），含循环移位。"""
-    _ensure_path()
-    from msg_embedding.ref_signals.srs import srs_base_sequence  # noqa: PLC0415
-
-    seq = np.asarray(srs_base_sequence(int(u), int(v), int(length)))
+    seq = np.asarray(native.srs_base_sequence(int(u), int(v), int(length)))
     if cyclic_shift:
         n = np.arange(seq.size)
         seq = seq * np.exp(1j * float(cyclic_shift) * n)
@@ -298,23 +263,17 @@ def srs_sequence(
 
 def zadoff_chu(root: int, length: int) -> np.ndarray:
     """Zadoff-Chu 序列。恒模、理想周期自相关，是 SRS/PRACH 的基础。"""
-    _ensure_path()
-    from msg_embedding.ref_signals.zc import zadoff_chu as _zc  # noqa: PLC0415
-
-    return np.asarray(_zc(int(root), int(length))).astype(np.complex64)
+    return np.asarray(native.zadoff_chu(int(root), int(length))).astype(np.complex64)
 
 
 def ssb_sequences(pci: int) -> dict[str, np.ndarray]:
     """SSB 的三种序列：PSS、SSS、PBCH-DMRS。小区搜索与同步用。"""
-    _ensure_path()
-    from msg_embedding.ref_signals.ssb import pbch_dmrs, pss, sss  # noqa: PLC0415
-
     n_id2 = int(pci) % 3
     n_id1 = int(pci) // 3
     return {
-        "pss": np.asarray(pss(n_id2)),
-        "sss": np.asarray(sss(int(pci))),
-        "pbch_dmrs": np.asarray(pbch_dmrs(int(pci), 0)),
+        "pss": np.asarray(native.pss(n_id2)),
+        "sss": np.asarray(native.sss(int(pci))),
+        "pbch_dmrs": np.asarray(native.pbch_dmrs(int(pci), 0)),
         "n_id_1": n_id1,
         "n_id_2": n_id2,
     }
@@ -322,10 +281,7 @@ def ssb_sequences(pci: int) -> dict[str, np.ndarray]:
 
 def gold_sequence(c_init: int, length: int) -> np.ndarray:
     """38.211 的 Gold 伪随机序列。CSI-RS、DMRS、PDSCH 加扰都基于它。"""
-    _ensure_path()
-    from msg_embedding.ref_signals.gold import pseudo_random  # noqa: PLC0415
-
-    return np.asarray(pseudo_random(int(c_init), int(length)))
+    return np.asarray(native.pseudo_random(int(c_init), int(length)))
 
 
 def sequence_correlation(a: np.ndarray, b: np.ndarray | None = None) -> dict[str, Any]:
@@ -366,15 +322,7 @@ def dft_codebook(
     与 ChannelHub 生成 CSI-RS 波束时用的是同一份实现，
     所以拿它当基线和仿真是自洽的。
     """
-    _ensure_path()
-    from msg_embedding.phy_sim.csirs_precoding import (  # noqa: PLC0415
-        CSIRSBeamConfig,
-        generate_dft_codebook,
-    )
-
-    codebook = np.asarray(
-        generate_dft_codebook(CSIRSBeamConfig(n_h=n_h, n_v=n_v, n_p=n_p))
-    )
+    codebook = np.asarray(native.generate_dft_codebook(n_h, n_v, n_p))
     if port_order is None:
         return codebook
     from .hardware import type1_to_port_permutation
@@ -399,10 +347,7 @@ def dft_codebook(
 
 def select_beam(codebook: np.ndarray, h: np.ndarray) -> int:
     """在码本里选最优波束，返回索引。"""
-    _ensure_path()
-    from msg_embedding.phy_sim.csirs_precoding import select_csirs_beam  # noqa: PLC0415
-
-    return int(select_csirs_beam(np.asarray(codebook), np.asarray(h)))
+    return int(native.select_csirs_beam(np.asarray(codebook), np.asarray(h)))
 
 
 def project_interference(
@@ -420,10 +365,7 @@ def project_interference(
     给 ``bs_panel`` 时用 DFT 码本（贴近真实网络的 Type I CSI 行为），
     否则用 SVD。
     """
-    _ensure_path()
-    from msg_embedding.phy_sim.precoding import project_interference_channels  # noqa: PLC0415
-
-    proj, ranks = project_interference_channels(
+    proj, ranks = native.project_interference_channels(
         np.asarray(h_interferers),
         [np.asarray(x) for x in h_serving_of_interferers],
         max_rank=max_rank,
@@ -490,13 +432,8 @@ def estimate_channel(
             # realization 或错误 tau_rms 宣称逐样本支配。
             tau_s = float(tau_rms_s) if tau_rms_s else 300e-9
             df = 12.0 * float(scs_hz)  # 相邻 RB 的频率间隔
-            _ensure_path()
-            from msg_embedding.channel_est import (  # noqa: PLC0415
-                lmmse_frequency_interpolate,
-            )
-
             # Library convention is [pilot, ...]; local convention is [T, P, B, U].
-            estimate = lmmse_frequency_interpolate(
+            estimate = native.lmmse_frequency_interpolate(
                 np.moveaxis(h_p, 1, 0),
                 pilots,
                 np.arange(rb),

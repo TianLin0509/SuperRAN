@@ -147,8 +147,8 @@ def _resolve_lazy_modules() -> None:
     正常导完）—— 前提是 numpy/scipy 已经在主线程预热过。
     这与 channelhub.warmup() 里那段标了"别删"的注释完全一致：它预热的就是
     numpy 和那一串 scipy 子模块。所以 main() 里它必须无条件跑；
-    而 sionna/torch 这类可以安全地按需加载（也确实是按需的，见 MSG-Platform
-    的 sionna_rt._ensure_sionna）。
+    而 sionna/torch 这类只能由未来 direct adapter 在事件循环启动后按需加载；
+    当前 first-party source 不导入它们。
 
     省内存要靠 _apply_blas_thread_cap()（那才是 1.3 GB 的真正来源），
     不能靠推迟 import。文件头部的占位模块只用来让"不跑服务端"的场景
@@ -348,6 +348,11 @@ def sr_capabilities() -> dict[str, Any]:
     from . import hardware as hw
 
     return {
+        "physical_core": "superran-first-party",
+        "physical_core_root": str(ch.project_root()),
+        "external_source_tree": None,
+        # Deprecated display alias retained for clients that parsed it before
+        # the first-party-core migration.
         "channelhub_root": str(ch.channelhub_root()),
         "source_contract": ch.probe_source_contract().as_dict(),
         "engines": caps,
@@ -1220,8 +1225,10 @@ async def sr_throughput(
 
     表 1/2 的 BLER 是有限码长分析模型，不是实测。表 3 的 BLER 来自预置的
     解调曲线，也不是 3GPP 标准曲线；源标签 Es/No 表示经典 MMSE 接收机 SINR。
-    表 3 的 HARQ 只允许一次重传：默认 IR 用半谱效等效 MCS，可选 CC 用原 MCS
-    的码字 SINR +3.0103 dB；两者都只查询 NewTx 曲线，空口 MCS 不会被等效档改写。
+    表 3 的 HARQ 只允许一次重传（**用户 2026-09-02 确认的显式决定**，不是待补
+    项；现场规格的 16 进程 / 最多 3 次重传当前不做）：默认 IR 用半谱效等效 MCS，
+    可选 CC 用原 MCS 的码字 SINR +3.0103 dB；两者都只查询 NewTx 曲线，空口 MCS
+    不会被等效档改写。
     表 3 使用版本化256QAM映射。历史内部表行0..14对应上报4-bit CQI1..15；
     上报CQI0是out-of-range，不调度。
     """
@@ -1919,6 +1926,22 @@ def sr_system_sim(
     max_logical_prb_per_tti: int | None = None,
     target_bler: float = 0.1,
     harq_combining: str = "ir",
+    harq_feedback_delay: bool | str = True,
+    rank_mode: str = "fixed",
+    fixed_rank: int = 2,
+    rank_adaptation_period_tti: int = 1000,
+    rank_gain_factor_raise: float = 1.1,
+    rank_gain_factor_reduce: float = 1.1,
+    rank_switch_rule: str = "unified_ratio",
+    rank_se_filter_beta: float = 0.1,
+    rank_se_sample_scope: str = "snapshot",
+    rank_min_filter_samples: int = 3,
+    rank_min_mcs_threshold: int = 9,
+    rank_quick_fallback_nack_thld: int = 90,
+    rank_quick_fallback_ibler_thld: float = 0.3,
+    rank_quick_fallback_se_ratio_thld: float = 1.0,
+    rank_max_backoff_times: int = 4,
+    rank_probe_enabled: bool = False,
     olla_step_up_db: float = 0.01,
     olla_step_down_db: float | None = None,
     qos_avg_rate_exponent: float = 1.0,
@@ -1926,6 +1949,7 @@ def sr_system_sim(
     qos_delay_exponent: float = 0.0,
     qos_priority_weighting: str = "none",
     mu_enabled: bool = False,
+    mu_accounting: str = "pair_table",
     mu_precoder: str = "zf",
     mu_csi_error_variance: float = 0.0,
     mu_corr_threshold: float = 0.7,
@@ -1944,6 +1968,8 @@ def sr_system_sim(
     srs_pci_mod3: int = 0,
     csi_processing_delay_ms: float = 2.0,
     csi_report_period_ms: float = 20.0,
+    cqi_filter_lambda: float = 0.25,
+    cqi_filter_domain: str = "cqi_index",
     warmup_s: float = 1.0,
     olla_speedup: float = 1.0,
     olla_warmup_speedup: float = 1.0,
@@ -1976,13 +2002,72 @@ def sr_system_sim(
     从生成到首次调度）与“含头速率”（相同 payload/去尾规则，只把首包时延加回分母）。
     两套结果不可混为同一指标。
 
+    **``mu_accounting`` 决定 MU 的代价怎么记账**（用户 2026-09-02 定：capacity
+    的误码与重传要与 experience 基本一致）。``pair_table``（默认）与
+    ``experience_v2`` 同构：MCS 从 pair 表的 ``CorrLoss + powerLoss`` 平移出来、
+    TBS 按该 MCS 全带算、**误块抽签用 pair 的真实 SINR**（ZF 权按基站可能已
+    老化的 CSI 打，但打在双方 ``h_true`` 上，对方的流进干扰协方差）。
+    ``se_ratio_legacy`` 是历史行为，只用于复现旧结果：MCS 与误块抽签都走 SU
+    单用户口径，配对代价只表现为 TBS 乘一个标量 ``mu_se_ratio``——「包变小但
+    不更容易错」，结果会系统性乐观，并且会写进 ``notes``。
+
     ``mu_precoder`` 可选 ``zf`` 或 ``rzf``。RZF 的
     ``mu_csi_error_variance`` 是每个复信道系数的估计误差方差，加载项为
     ``N_BS·sigma_e²``；它应来自估计器协方差或离线标定，不能在运行时逐快照
     偷看 ``h_true``。默认 ``zf`` / ``0.0`` 保持旧结果。
 
+    **Rank 是显式策略，默认固定 rank2。** ``rank_mode='fixed'``（默认，配
+    ``fixed_rank``）是现网基线；链路表里的逐快照 ``best_rank`` 是瞬时谱效最优
+    值，每 5 ms 就可能变，直接拿它发送会让链路自适应收敛不了。
+    ``rank_mode='adaptive'`` 按用户 2026-09-02 给的现场规格实现，常数不再是
+    工程猜测：每 ``rank_adaptation_period_tti``（默认 1000）判决一次，且要先
+    攒够 ``rank_min_filter_samples``（默认 3）个谱效滤波样本；**升 rank 要求
+    最优 rank 的滤波谱效超过当前 rank 的 ``rank_gain_factor_raise`` 倍**
+    （默认 1.1，即高 10%）。谱效滤波是 ``beta`` 一阶 IIR
+    （``rank_se_filter_beta`` 默认 0.1）；预估 MCS 低于
+    ``rank_min_mcs_threshold``（默认 9）的 rank 谱效直接置 0；各 rank 再乘一个
+    DMRS 开销系数。
+
+    **默认升/降 rank 使用同一条对称判据**（负责人 2026-09-03 裁决）：
+    ``rank_switch_rule='unified_ratio'``，且两个 gain factor 都是 1.1；只有最优
+    rank 的滤波谱效严格超过当前 rank 10% 才切换。``spec_asymmetric`` 只保留作
+    显式反向对照，不再是 MCP 或页面默认。
+
+    **升 rank 之后进入快速回退监测**，窗内实时判：新增 NACK 超过
+    ``rank_quick_fallback_nack_thld``（默认 90）立即回退；窗口结束时初传 BLER
+    ≥ ``rank_quick_fallback_ibler_thld``（默认 0.3）或新旧 rank 实测谱效比低于
+    ``rank_quick_fallback_se_ratio_thld``（默认 1.0）也回退。回退会把 rank 与
+    OLLA 偏置一起退回，并让判决周期指数退避 ``×2^n``（n 上限
+    ``rank_max_backoff_times``，默认 4 → 最长 16000 TTI）。
+
+    ``rank_se_sample_scope`` 是 SuperRAN 侧显式的口径选择：现场每 TTI 累积一个
+    谱效样本，而这里的 AMC 坐标在一个信道快照内是常数，逐 TTI 采样会让
+    ``beta=0.1`` 的平滑在快照之间完全失效。默认 ``snapshot``（一次新观测算一个
+    样本），设成 ``tti`` 复现现场节拍。**两者不等价，随结果一起报。**
+
+    ``rank_mode='link_table'`` 是逐快照跟随的历史行为，**只作反向对照**。
+
+    **ACK/NACK 要等上行时隙。** ``harq_feedback_delay=True``（默认）下，TB 在
+    D/S 发出、反馈搭其后第一个 U 回传，OLLA 更新与重传资格从该 U 之后第一个
+    D/S 起生效；``DDDSU`` 在 30 kHz 下逐相位偏移 5/4/3/2 个 TTI。**重传还要
+    额外等到同类型时隙**（S 上发的 TB 要等下一个 S），两个约束取交集。等待期间
+    首传 ACK 与 NACK 都占住该 UE 的单 HARQ 进程：反馈前不能更新 OLLA/rank，也不能
+    发新 TB（计入 ``harq_feedback_wait_skips``）。设成
+    False 是零时延反向对照；图案里没有 U 时自动退化并写进 ``notes``。
+    k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。
+
+    **CQI 的长期滤波是一阶 IIR**：``s <- s + λ(x - s)``。``cqi_filter_lambda``
+    默认 0.25，**已由负责人确认为当前工程默认，但尚未经现场测量/设备数据
+    标定**；``cqi_filter_domain`` 默认在量化后的 CQI 档上。两者都随结果上报；
+    ``λ=1`` 关闭滤波可作反向对照。不得把工程默认表述成现场等价。
+
+    ``target_bler`` 可配，但它在**开环上大部分抵消**（同一个目标同时出现在
+    CQI→门限 与 门限→MCS 两侧）：实测 384 个样本里 92% 选出完全相同的 MCS。
+    真正吃到它的是 OLLA 闭环——10%→30% 实测稳态偏置 1.65→1.85 档、首传 BLER
+    0.067→0.178。取值必须落在预置曲线的共同实测区间 [0.001, 0.998]。
+
     返回里 **cell 是小区级、users 是用户级**，两级都有：平均调度 MCS、
-    平均 rank、首传 BLER、残留 BLER、体验速率、含头速率与首包时延。cell 还给
+    平均 rank、首传 BLER、残留 BLER、体验速率、含头速率与首包时延。``avg_mcs`` 的分母含重传（重传重放冻结的旧档），要看链路自适应视角用 ``avg_mcs_first_tx``。cell 还给
     本小区 PRB 利用率、0..17 RBG 的逐 TTI 占用分布和 MU 配对 PRB 比例。
 
     **每个 KPI 都是 ``{mean, std, ci95, n_rep, cv, rel_half_width}`` 而不是一个裸数**
@@ -2300,10 +2385,12 @@ def sr_system_sim(
                 "RB 功控的当前 SystemResult 是单小区调度结果，数据集却包含多个 "
                 f"serving cell {_serving_cells}。不能把独立小区的 RBG 当成一个互斥"
                 "资源池；请生成/筛选同一服务小区的 UE。跨小区联合调度属于下一阶段。")}
-    if (power_cfg.enabled and mode == "capacity" and _flag(mu_enabled)):
+    if (power_cfg.enabled and mode == "capacity" and _flag(mu_enabled)
+            and str(mu_accounting) == "se_ratio_legacy"):
         return {"error": (
-            "RB 功控与 MU 同开时请使用 evaluation_mode='experience'；"
-            "capacity 的 legacy 标量 MU 增益没有逐 RBG pair SINR，不能准确评估。")}
+            "RB 功控与 MU 同开时不能用 mu_accounting='se_ratio_legacy'："
+            "标量 MU 增益没有逐 RBG pair SINR，不能准确评估。改用 "
+            "mu_accounting='pair_table'（默认）或 evaluation_mode='experience'。")}
     try:
         csi_cfg = sysm.ca.CsiConfig(
             enabled=_flag(csi_aging), srs_period_ms=float(srs_period_ms),
@@ -2312,6 +2399,8 @@ def sr_system_sim(
             srs_period_adaptive=_flag(srs_period_adaptive),
             processing_delay_ms=float(csi_processing_delay_ms),
             csi_report_period_ms=float(csi_report_period_ms),
+            cqi_filter_lambda=float(cqi_filter_lambda),
+            cqi_filter_domain=str(cqi_filter_domain),
             periodic_trace_history=(mode == "experience" and float(warmup_s) > 0))
     except ValueError as exc:
         return {"error": str(exc)}
@@ -2370,9 +2459,26 @@ def sr_system_sim(
             interarrival_scale=float(interarrival_scale),
             interarrival_cdf_unit=str(interarrival_cdf_unit),
             classes=profile_cfg)
+        rank_cfg = sysm.ap.RankConfig(
+            mode=str(rank_mode), fixed_rank=int(fixed_rank),
+            period_tti=int(rank_adaptation_period_tti),
+            min_filter_samples=int(rank_min_filter_samples),
+            gain_factor_raise=float(rank_gain_factor_raise),
+            gain_factor_reduce=float(rank_gain_factor_reduce),
+            switch_rule=str(rank_switch_rule),
+            se_filter_beta=float(rank_se_filter_beta),
+            se_sample_scope=str(rank_se_sample_scope),
+            min_mcs_threshold=int(rank_min_mcs_threshold),
+            quick_fallback_nack_thld=int(rank_quick_fallback_nack_thld),
+            quick_fallback_ibler_thld=float(rank_quick_fallback_ibler_thld),
+            quick_fallback_se_ratio_thld=float(
+                rank_quick_fallback_se_ratio_thld),
+            max_backoff_times=int(rank_max_backoff_times),
+            probe_enabled=_flag(rank_probe_enabled))
         system_cfg = sysm.SystemConfig(
             evaluation_mode=mode, duration_s=float(duration_s),
             tdd_pattern=tdd_pattern, harq_combining=str(harq_combining),
+            harq_feedback_delay=_flag(harq_feedback_delay),
             seed=seed, snapshot_update_ms=snap_ms,
             power_constraint=str(power_constraint), rb_power_control=power_cfg,
             scs_khz=carrier["scs_khz"],
@@ -2380,6 +2486,7 @@ def sr_system_sim(
             rbg_prb_sizes=tuple(int(x) for x in carrier["rbg_prb_sizes"]))
         scheduler_cfg = sysm.SchedulerConfig(
             algorithm=scheduler, pf_window_tti=pf_window_tti,
+            rank=rank_cfg,
             pf_accounting=pf_accounting,
             frequency_selective=str(frequency_selective),
             max_layers_per_rbg=max_layers_per_rbg,
@@ -2391,6 +2498,7 @@ def sr_system_sim(
             qos_delay_exponent=float(qos_delay_exponent),
             qos_priority_weighting=str(qos_priority_weighting),
             mu_enabled=_flag(mu_enabled),
+            mu_accounting=str(mu_accounting),
             mu_precoder=str(mu_precoder),
             mu_csi_error_variance=float(mu_csi_error_variance),
             mu_corr_threshold=float(mu_corr_threshold),
@@ -2435,7 +2543,10 @@ def sr_system_sim(
             load_jitter_rng=(load_rng if float(neighbor_load_jitter) > 0 else None),
             neighbor_load_jitter=float(neighbor_load_jitter),
             precoder=str(precoder), power_constraint=str(power_constraint),
-            mu_enabled=(_flag(mu_enabled) and mode == "experience"),
+            # capacity 现在也读 pair 表（mu_accounting='pair_table'）：
+            # MU 的代价必须同时进 MCS 决策与误块抽签，标量比值做不到。
+            mu_enabled=(_flag(mu_enabled)
+                        and str(mu_accounting) == "pair_table"),
             mu_rank_per_user=2, mu_precoder=str(mu_precoder),
             mu_csi_error_variance=float(mu_csi_error_variance),
             rb_power_control=power_cfg, power_geometry=power_geometry,
@@ -2474,11 +2585,15 @@ def sr_system_sim(
         csi=csi_cfg, snapshot_ms=snap_ms,
         power_constraint=str(power_constraint), mu_precoder=str(mu_precoder),
         mu_csi_error_variance=float(mu_csi_error_variance))
-        if _flag(mu_enabled) and mode == "capacity"
+        if (_flag(mu_enabled) and mode == "capacity"
+            and str(mu_accounting) == "se_ratio_legacy")
         else {"ratio": 1.0, "measured": False,
-              "note": ("experience_v2 使用逐 pair 查表与数据受限 SU/MU 判决"
+              "note": ("逐 pair 查表口径（mu_accounting='pair_table'）不使用标量"
+                       "比值；MU 代价直接进 MCS 与误块抽签"
                        if _flag(mu_enabled) else "未开 MU")})
-    if _flag(mu_enabled) and mode == "capacity" and not mu_gain.get("measured"):
+    if (_flag(mu_enabled) and mode == "capacity"
+            and str(mu_accounting) == "se_ratio_legacy"
+            and not mu_gain.get("measured")):
         return {
             "error": "已启用 MU，但没有任何快照完成 MU/SU 配对；已停止，未用 1.0 静默降级。",
             "mu_gain": mu_gain,

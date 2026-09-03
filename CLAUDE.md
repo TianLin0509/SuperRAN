@@ -1,27 +1,31 @@
 # SuperRAN 开发规范
 
-## 多人 Agent 协作入口
+## Agent 协作入口（先读这里）
 
-团队成员开始前还要按角色读取对应 Skill：
+SuperRAN 由**一位维护者**（无线通信工程师）主导，Agent 是执行者不是决策者。
+所有协作规则在 `.agents/` 目录，**开工前必读，不要按聊天里粘贴的 prompt 工作**：
 
-- 正式实现任务（普通组员或组长本人）：`skills/superran-member-task/SKILL.md`
-- 组长分工、状态、PR 审核与合并：`skills/superran-lead/SKILL.md`
+- 实现任务：`.agents/AUTHOR.md`
+- 独立审核：`.agents/REVIEWER.md`
+- 需要几个 Reviewer：`.agents/RISK.md`（按文件路径查表，不许自己估）
+- 推送与建 PR：`.agents/SYNC.md`（只在维护者明确说“同步 GitHub”时执行）
 - 仿真设计、数据生成或性能结论：`skills/channel-sim/SKILL.md`
 
-`develop` 是实现 PR 的唯一目标分支，`main` 只由组长单独发布。具体实现的 Agent 只做
-Author，人可以是普通组员，也可以是组长本人；组长 Agent 不修改 Author 分支，并且只有
-组长明确批准当前完整 HEAD SHA 后才可合并。标题含 `[REHEARSAL]` 的体验 PR 永不合并。
+三条铁律：**一个提交只动一个物理机制**；**审核发现的物理 bug，修复时必须补一条
+“revert 掉就会变红”的测试**并入 `tests/test_physics_invariants.py`；**不许静默降级**，
+用了工程近似要写进报告的“没证明什么”。
 
-GitHub 身份只决定正式 Author 向自己的 Fork 还是上游 topic branch 推送，不能决定任务
-模式。正式实现必须显式使用 `TEAM_MODE: FORMAL`；演练必须显式使用
-`TEAM_MODE: REHEARSAL`，不得因为登录账号是 Owner 自动进入演练。组长本人作为正式
-Author 提交的 PR，必须由另一个全新 Agent Session 在隔离 worktree 中审核；同一 Author
-Session 不得自写自审。
+报告统一用 `python scripts/make_agent_report.py <report.json>` 生成，字段照抄
+`.agents/report.example.json`，**不要手写 HTML**。看当前状态用
+`python scripts/superran_board.py`。
 
-任一 Author PR 提交或更新后，Author Agent 必须按
-`skills/superran-member-task/references/change-report.md` 生成绑定当前远端 PR HEAD 的
-本地交互式改动说明 HTML，并把 PR 链接与 HTML 文件一起交给组长。报告是 Author 汇报，
-不是审核通过证据；默认不提交到公开仓库，任何新 commit 都使旧报告失效。
+`develop` 是唯一主线，主工作区就是 `C:\Vibe\Wireless\SuperRAN`；并行任务用
+`git worktree add` 建到 `C:\Vibe\Worktrees\SuperRAN\<任务>`，**禁止再 clone 一份**。
+Agent 默认不 push、不建 PR、不合并远端。
+
+> `skills/superran-lead/` 与 `skills/superran-member-task/` 是已废弃的多人「组长-组员」
+> 流程（含 FORMAL/REHEARSAL 模式、Fork 推送等），**不要再按它们工作**，一律以
+> `.agents/` 为准。
 
 与人交流采用“双层表达”：保留准确技术术语，同时紧跟一句白话解释；关键物理概念再给
 一个贴近当前任务的小例子。例子只帮助理解，不能冒充代码事实、测试证据或性能结论。
@@ -32,21 +36,20 @@ Session 不得自写自审。
 
 SuperRAN 是独立维护、独立演进的 Agent 式无线仿真平台。信道轴序、
 TDD 互易、预编码、功率约束、RBG/TBS、链路自适应和 KPI 都以
-SuperRAN 本仓的合同为准，不等待、不跟随 MSG-Platform 的 helper 语义。
+SuperRAN 本仓的合同为准。统计信道生成、CDL/TDL 表、NR 载波/TDD、参考序列、
+阵列、LMMSE 与几何 S/N/I 均由 ``src/superran`` first-party 实现；运行时不得
+搜索、导入或修改 MSG-Platform / ChannelHub 源码树。
 
-当前原始信道生成仍保留一个惰性 ChannelHub/``msg_embedding`` 适配器，它只是
-可替换的数据源边界：外部输出必须先归一化和硬校验，源端 ``w_dl``
-不落盘也不参与仿真。算法与已有数据的分析路径不应需要该源代码。
-“新生成也完全不需要 msg_embedding”尚未完成，不得对外谎称整仓已零依赖。
+``channelhub.py`` 只保留为历史 Python API 的兼容门面，实际实现固定指向
+``native.py``。历史环境变量 ``SUPERRAN_CHANNELHUB`` 被有意忽略，不能改变生成字节。
+Sionna RT / QuaDRiGa 只能作为显式 direct optional adapter 接入；不可用时硬报告，
+不得退回另一个仓库。
 
 ## 环境
 
 - Python ≥ 3.10，需要 numpy / scipy / pydantic v2 / pyyaml / structlog / mcp
-- ChannelHub 源码由 `channelhub.channelhub_root()` 自动发现（同级或上级目录），
-  环境变量 `SUPERRAN_CHANNELHUB` 可覆盖
 - 射线追踪需 `pip install sionna-rt`（连带 mitsuba + drjit，约 300 MB）；
-  实测不会降级 numpy/scipy/torch
-- **ChannelHub 自己的 CLAUDE.md 写的 `D:\MSG\.venv312` 是源工程路径，多数机器上不存在，不要照抄**
+  当前 direct adapter 尚未实现，所以装包不等于能力可用
 
 ## 测试
 
@@ -70,7 +73,8 @@ python tests/test_sysscenes.py              # 系统场景预设与成对受控�
 python tests/test_power_control.py          # EBF/PEBF/NEBF 与逐 RB 功率耦合
 python tests/test_physics_contract_extensions.py # 快照时钟、SRS测量口径与场景资产合同
 python tests/test_physics_invariants.py     # 极化、子阵、SRS/LMMSE 物理不变量
-python tests/test_channel_generation_contract.py # ChannelHub 生成合同与最小网格
+python tests/test_channel_generation_contract.py # first-party 信道生成合同与最小网格
+python tests/test_native_independence.py       # 外部根/导入阻断、v1/v2互易、35工具
 python tests/test_developer_guide.py         # 开发者文档覆盖、离线结构与漂移检查
 python tests/test_carrier.py                 # 载波栅格、Type-0 边界、本地 TDD 合同
 python tests/test_company_256t.py            # 256T 阵列与码本
@@ -78,7 +82,7 @@ python tests/test_system_sim_tool.py          # sr_system_sim 行为级（硬失
 python tests/test_benchmarks.py               # 预注册经典通信基准与 provenance
 ```
 
-当前共 **26 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
+当前共 **27 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
 pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` 不再是
 0 检查假绿）；脚本式文件必须在 pytest 收集/薄壳路径中同样以异常或非零退出
 传播失败，不能只在 `if __name__ == '__main__'` 里检查全局 FAILED。
@@ -100,6 +104,9 @@ test_csi_aging + test_rng；改动 `scheduler_*.py` / `experience.py` 要额外�
 改动 `srs_waveform.py` 或 SRS 的 `h_ul_true` 数据合同要跑 test_srs_waveform +
 test_physics_contract_extensions + test_channel_generation_contract + test_results；
 改动 `scenes.py` / `scene_assets.py` 要跑 test_physics_contract_extensions + test_raytracing；
+改动 `amc_policy.py` 要跑 test_system + test_scheduler_p0 + test_csi_aging；
+改动 `native.py` / `channelhub.py` / `physical.py` 要跑 test_native_independence +
+test_channel_generation_contract + test_physics_invariants + test_linklevel + test_gates；
 改动 `rng.py` 要跑 test_rng + test_system；
 改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）；
 改动开发者文档生成器要跑 `tests/test_developer_guide.py`。
@@ -138,20 +145,18 @@ KaTeX 未必收，光看 Python 源码看不出来。
 真相源生成，并有逐格一致性测试。只写“见代码”、只给字段清单，或用 metadata 表替代
 算法解释，都不算文档完成。
 
-## 与外部信道源的边界
+## 物理内核与可选后端的边界
 
 | 外部部分 | 怎么对待 |
 |---|---|
-| `src/msg_embedding/` 原始信道生成 | 过渡期可插拔 source adapter；不是 SuperRAN 语义真源 |
-| `platform/backend`、`platform/frontend` | 不用 |
-| 任务队列 / 数据库 / 数据集管理 | 不用，直接落盘 |
-| `data/bridge.py` 特征桥接 | **绕开** |
-| source `w_dl` / 外部预编码 helper | **忽略**；只从本地归一化 `h_est` 重算 EBF/PEBF/NEBF |
-
-绕开 bridge 的原因：它的输出是为 MAE token 服务的——PDP 除以峰值归一化
-（`bridge.py:184`）、RSRP 截断到 [-160,-60]（`:195`）、SRS 只取前 4 个特征向量
-（`:262`）、PMI 乘了基于 CQI 的门控（`extractor.py:232`）。拿这些做通用仿真会
-得到看似正常但错误的结果。
+| 部分 | 怎么对待 |
+|---|---|
+| `src/superran/native.py` | first-party 统计信道和 PHY 窄腰；本仓真相源 |
+| `channelhub.py` | 只作旧 API 名兼容，不发现外部源码 |
+| Sionna RT / QuaDRiGa | 显式可选 direct adapter；缺失时硬报告 |
+| 平台后端、训练、数据库、任务队列 | 不纳入；数据直接按 SuperRAN 合同落盘 |
+| 特征桥 / MAE token | 不纳入；只输出未归一化、未截断、未门控的物理量 |
+| source `w_dl` | 不接受；只从本地 `h_est` 重算 EBF/PEBF/NEBF |
 
 ## 四条不可动摇的约定
 
@@ -167,7 +172,7 @@ KaTeX 未必收，光看 Python 源码看不出来。
 ### scipy 子模块必须在主线程预热
 
 `channelhub.warmup()` 里那串 `import scipy.interpolate / special / io / spatial / stats`
-**不是冗余**。ChannelHub 是惰性 import 这些子模块的（用到才导），而 MCP 把工具
+**不是冗余**。first-party 估计/校准路径会用这些子模块，而 MCP 把工具
 调用派到工作线程执行——在工作线程里首次加载 scipy 的 C 扩展会撞上 import 死锁。
 
 症状极其隐蔽：请求永久无响应、无异常、无日志，看起来像仿真跑不完。
@@ -183,7 +188,7 @@ MCP 服务端是**每个 CLI 会话各起一个进程**。2026-08-29 在 20 逻�
 单是 superran 就锁掉 34.6 GB 提交内存（系统总额度的三分之一），最后表现成一个
 看起来毫不相干的故障——AI Hub 文件预览打不开（提交内存见底，Chromium 起不了渲染进程）。
 
-拆开之后钱花在两处，第二处才是大头：
+以下是**脱钩前的历史诊断**，用于解释为什么禁止恢复外部 source import：
 
     到 scipy 全部子模块为止              330 MB   ← 其中 numpy/scipy 的 BLAS 线程 arena 占 ~250 MB
     + msg_embedding.data.sources      1645 MB   ← **+1314 MB，全是 PyTorch**
@@ -192,7 +197,8 @@ PyTorch 是被 MSG-Platform 的 `sionna_rt.py` 一段**模块级可选依赖探�
 它 `try: import sionna / sionna.rt / torch` 只为算出一个 `_SIONNA_AVAILABLE` 布尔值，
 而这台机器装了 CUDA 版 torch（单独 import = 提交 1507 MB）。**superran 一行 torch 都不用。**
 
-两条修法（都在 MSG-Platform 侧 + 本仓库 `_probe_module`）：
+当时的两条过渡修法是外部延迟导入与本仓 `_probe_module`；现在已经进一步删除
+外部 runtime import，只保留顶层包名探测给可选 direct adapter：
 
 1. 可用性改用 `importlib.util.find_spec`，**只探顶层包名**。
    `find_spec("sionna.rt")` 会为了拿父包 `__path__` 真的 import sionna，
@@ -214,15 +220,14 @@ SVD、64×64 eigh、2048×64 ifft），多线程只剩调度开销：4 线程在
 （见「多进程必须先压 BLAS 线程数」）。要放开就设 `SUPERRAN_BLAS_THREADS=auto`。
 这是**性能取舍不是精度取舍**，数值逐位不变。
 
-剩下的 172 MB 基本就是地板了：Python 8 + numpy 40 + scipy.special 19 +
-scipy 其余子模块 35 + superran 自己 36 + msg_embedding 2 + BLAS/FFT 池初始化 32。
+当时的 172 MB 近似地板由 Python、numpy/scipy、SuperRAN 与 BLAS/FFT 池构成；
+当前版本已不再包含 `msg_embedding` 那一项，具体提交内存必须按当前 HEAD 重测。
 后两项里的 scipy 子模块与池初始化都是主线程预热的防死锁动作，不能省。
 
 **别想着把 numpy 改成懒加载**——试过，两次死锁：
 
     sr_mcs_info → linkadapt.py → numpy/_core/multiarray.py → create_module   ← 卡死
-    # 只预载 numpy/scipy 后，卡点换个地方：
-    sr_capabilities → probe_source_contract → msg_embedding/.../interpolate.py ← 卡死
+    # 只预载 numpy/scipy 后，历史卡点会在首次估计器 C 扩展 import 处移动
 
 危险的**只是 numpy / scipy 及其子模块**的首次加载，这正是上一节「scipy 子模块必须在
 主线程预热」说的事，所以 `main()` 里的 `ch.warmup()` 是正确性依赖、**不提供跳过开关**。
@@ -408,12 +413,27 @@ ReTx 行保留作来源审计。CC 保持原 MCS 并把查询 SINR 增加 `10log
 IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在不变 SINR 上查表。
 等效 MCS 只用于 BLER lookup；空口 MCS、RBG 数、rank 与 TBS 必须和初传完全一致。
 重传失败后结束本次 HARQ，payload 留队并在后续成为新 TB；不得再挂第二次重传。
+
+**"最多一次重传 + 单 HARQ 进程"是显式决定，不是待补的半成品**（用户
+2026-09-02 确认："HARQ 我们先仅考虑一次重传"）。现场实现规格里是 16 个 HARQ
+进程、`max_retx=3`（共 4 次传输）；扩到那一档会同时改动队列模型、反馈时延语义
+（一个 UE 可以在等反馈时继续发别的进程）和全部 BLER/时延口径，因此**当前显式
+不做**。所有 residual BLER 都要按"一次重传后仍失败"来读。
 表 3 使用版本化256QAM映射：历史内部表行0..14为
 `[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28]`，对应上报4-bit CQI1..15；
 上报CQI0是out-of-range。自动量化用各映射MCS的NewTx目标BLER门限。当前曲线仅
 有MCS0..27，最高行请求MCS28但必须显式钳到27，不得伪造MCS28曲线。
 所有高层链路/吞吐/SNR扫频接口默认都用表3的256QAM profile；
 表1的64QAM和表2的标准256QAM只在调用方显式指定时使用。
+**`build_link_tables` 硬拒绝非表 3**：只有 preset_20b_256qam 同时具备 28 档 NewTx
+曲线与内部 CQI 映射，混用会让量化门限与选档口径各用一张表且不报错。
+这是 **breaking migration**：旧代码若调用 `build_link_tables(table=1/2)`，现在会在建表
+入口立即失败；系统/体验路径请迁移到 `table=3`，Table 1/2 仅保留在显式链路级接口。
+`target_bler` 可配，但必须落在 28 档曲线的**共同实测区间 [0.001, 0.998]** 内，
+越界提前硬失败而不是在深层抛一个看不出哪档的 ValueError。注意这条链里目标 BLER
+**开环几乎抵消**（它同时出现在 CQI→Γ 与 Γ→MCS 两侧，两次平移方向相同），真正
+吃到它的是 OLLA 闭环：实测 10%→30% 时稳态偏置 1.65→1.85 档、首传 BLER
+0.067→0.178。
 
 TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sr_tdd_mcs` 实现：
 `CQI表行/上报codepoint → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标 BLER SINR 门限
@@ -439,7 +459,7 @@ SVD 方向叠加 NEBF 每天线约束，因此也记为 `SINR_NEBF`。RB 先在�
 
 并行分块**不能给每块换 seed**。static `internal_sim` 的一个 seed 固定 UE 几何；旧实现
 给 worker 用 `seed=S..S+W-1`，于是并行混入 W 个几何，串行却只有一个，连条件分布都变了。
-现在 ChannelHub 支持 `sample_index_offset`，所有 worker 保持同一 seed，只切互不重叠的全局
+现在 first-party `InternalSimSource` 支持 `sample_index_offset`，所有 worker 保持同一 seed，只切互不重叠的全局
 sample index；`workers=1/4` 必须逐样本、逐位相同。移动轨迹、拒绝采样或未实现全局索引的
 source 会显式回退串行并把原因写进摘要，不能以“统计等价”为理由偷偷改变实验条件。
 
@@ -513,7 +533,7 @@ venv 里才暴露出来的。改 `server.py` 的导入前先想清楚两个版�
 
 ### num_samples 必须能被 num_ues 整除
 
-ChannelHub 的硬约束（`internal_sim.py:1103`）。`generate._align_to_ues()` 负责
+first-party source 的等用户轮转合同。`generate._align_to_ues()` 负责
 向上取整并在够数后截断，不要让这个约束泄漏给用户。
 
 ### YAML 里的科学计数法
@@ -523,7 +543,7 @@ ChannelHub 的硬约束（`internal_sim.py:1103`）。`generate._align_to_ues()`
 
 ### 干扰小区信道默认不保存
 
-ChannelHub 的 `measurements.interferer_channels` 默认 `False`——多小区场景下
+first-party source 的 `measurements.interferer_channels` 默认 `False`——多小区场景下
 干扰只体现在 SINR 里，`h_interferers` 会是 `None`。干扰协调类任务必须显式打开
 （见 `decisions.py` 里 interference 任务的 `config_hints`）。代价是数据量按
 干扰小区数翻倍。
@@ -559,22 +579,17 @@ ChannelHub 的 `measurements.interferer_channels` 默认 `False`——多小区�
 
 ### 射线追踪的 PLY 资产与 Mitsuba 版本
 
-ChannelHub 里中国城市场景的 PLY 是 VTK 导出的，头部有 `obj_info` 行，
+可选本地城市场景的 PLY 若由 VTK 导出，头部会有 `obj_info` 行，
 Mitsuba 3.8 的解析器直接报错。`scenes.prepare_scene()` 会复制到 artifacts
-缓存再清理，**不动 ChannelHub 原文件**。加新城市场景时如果报
+缓存再清理，**不动源资产**。加新城市场景时如果报
 "invalid PLY header"，就是这个原因。
 
 ### CDL-A~E 表、20-ray 展开与 K 因子都有硬门
 
-2026-08 审计确认旧 ChannelHub 的 CDL-A/B/C 角度列错误、CDL-C 少一行，CDL-D/E
-也不是完整标准表；更隐蔽的是，兼容覆盖曾因新版 dataclass 字段触发 `TypeError`，异常又被
-上层吞掉，导致生成继续使用错误表。现在相邻 MSG-Platform 源码内五张表均与
-38.901 Table 7.7.1-1~5 逐字段一致（23/23/24/14/15 个表分量）。
-
-`spec38901.py` 仍保留独立录入副本，兼容旧 checkout 时只覆盖已安装 dataclass 支持的字段；
-`channelhub._ensure_path()` 会在任何 ChannelHub 入口先校准，shape mismatch 视为全表失败，
-异常会阻断生成，不能再静默降级。`SUPERRAN_CDL_SPEC=0` 只用于复现历史结果，
-关闭后不得把数据称为标准 CDL。
+2026-08 审计确认历史外部实现曾出现 CDL 角度列、行数和可选字段漂移。现在
+`spec38901.py` 是本仓唯一运行表真相源，五张表与 38.901 Table 7.7.1-1~5
+逐字段一致（23/23/24/14/15 个表分量）；`native.get_channel_profile()` 直接读取它，
+不再 monkey-patch 外部注册表。shape/字段自检失败会阻断生成，不能静默降级。
 
 生成器对每个 diffuse component 按 Table 7.5-3 展开 20 rays，并使用每簇角扩展、逐 ray
 XPR/Jones 相位和 Doppler。CDL-D/E 的镜面/Laplacian 功率差已经把 K=13.3/22 dB 写在
@@ -589,10 +604,8 @@ row 0/1 中，**禁止再做第二次 Rician K 混合**；回归测试通过篡�
 （17 RBG x 16 RB；38.104 标准表是 273，口径不同），终端默认 **4R 下行**，
 仿真粒度到 RB 为止。
 
-ChannelHub 的 `phy_sim/effective_array.py` 就是照这套硬件写的（模块文档
-"Target AAU" 一节逐条对得上），但默认没启用——`antenna_model_mode` 默认
-`legacy_64`，把 64 个端口当成 64 个**独立**阵元、间距一律 0.5λ。
-`hardware.apply_array_defaults()` 现在对两个已确认面板自动切到
+`native.EffectiveArray` 按这套硬件生成物理位置与稀疏馈电矩阵；
+`hardware.apply_array_defaults()` 对两个已确认面板自动切到
 `effective_subarray`：64T 的 8x4x2 / 1 驱 3，以及 256T 的
 16x8x2 / 1 驱 6。
 
@@ -691,7 +704,7 @@ TDD 图里有 `.sl{fill:#fff}`（时隙标号）。结果小区编号糊成蓝�
 26.15（新 mmse）vs 28.52（=旧 mmse=新 irc）bit/s/Hz，**旧数字偏乐观 2.37**。
 之前所有"MMSE 基线"的谱效都要按新口径重算才能和 IRC 比。
 
-### ChannelHub 的干扰小区信道是秩 1 的
+### 历史外部源的干扰小区信道是秩 1 的
 
 单个干扰小区的 `[BS, UE]` 切片奇异值是 `[1, 0, 0, 0]`——实测 96 个抽样
 σ₂/σ₁ 中位 4.0e-8、最大 5.9e-8，而服务小区是满秩（归一奇异值
@@ -710,7 +723,7 @@ TDD 图里有 `.sl{fill:#fff}`（时隙标号）。结果小区编号糊成蓝�
 
 ### LMMSE 必须从真实 pilot 位置直接映射到目标频点
 
-`msg_embedding/channel_est/` 对外稳定名字是 `ideal` / `ls_linear` / `ls_mmse`；
+本地估计器对外稳定名字是 `ideal` / `ls_linear` / `ls_mmse`；
 `ls_lmmse` 是完全等价、物理命名更精确的兼容 alias。`internal_sim` 还多两档 `ls_hop_concat` /
 `ls_hop_sequential`（SRS 跳频，仅上行），默认仍为 `ls_linear`。
 
@@ -789,6 +802,18 @@ Python 侧：反斜杠 + 数字 是合法的八进制转义，
 真要写转义就用 raw 字符串，并给每个转义补足 6 位或补一个空格作结束符。
 这个只有在浏览器里看 `getComputedStyle(el,'::before').content` 才发现得了。
 
+### 解码 SINR 要取实际授予的那几个 RBG
+
+误块抽签用的是**最终发送 MCS + 真实接收 SINR**，而这个 SINR 由同一个 gNB 发射权
+作用到 `h_true`、经经典 MMSE 逐 RB 逐流算出——**是算出来的，不是从全带值折的**。
+聚合只能在**本次 grant 实际占用的 RBG** 上做（`experience._granted_true_sinr_db`
+与 MU 的 `_granted_pair_true_sinr_db`）。
+
+宽带路径早先直接用全带均值，于是一个只占 1~2 个 RBG 的小包按 17 个 RBG 的平均
+信道判误码，**两个方向都会错**：授到好子带时高估误块、授到坏子带时低估。量级
+不小——最终 MCS15 在 15.1 dB 上的 NewTx BLER 是 0.0006，在 13.2 dB 上是 0.997，
+不到 2 dB 跨越整条瀑布。手工构造、逐 RBG 宽度对不上载波栅格的链路表退回全带值。
+
 ### 仿真粒度降到 RBG 是安全的
 
 一个 RBG 内的 16 个 RB 共用同一个 MCS、同一次调度决策、同一个预编码，
@@ -807,11 +832,29 @@ rank 与 MCS **逐位相同**、谱效差 0.1%，建表快一倍。
 按 `1/K` 分 RE，MU 的聚合吞吐就和 SU **一模一样**——等于把空间复用做成了
 时频复用，MU 增益整个消失。测试里"切到 MU 之后小区吞吐确实更高"当场抓到。
 
-配对后每人只分到 `1/K` 的功率、还要吃残余干扰，这部分由
-`measure_mu_gain()` 在建表阶段用真实的 `su_mu_adaptation` 测出**聚合比值**，
-主循环按 `ratio/K` 折算。**这是标量近似**：逐 TTI 真配对要在每个 TTI 做
-SVD + 矩阵求逆，十万 TTI 跑不完。返回值带逐快照比值与离散度，
-离散度就是这个近似的可信度——实测 3.7%~13.1%，超过 30% 就不该用标量。
+配对后每人只分到 `1/K` 的功率、还要吃残余干扰。**两条评估路径现在都从同一张
+pair 表读这部分代价**（`SchedulerConfig.mu_accounting="pair_table"`，默认）：
+MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、**误块抽签用
+`MuPairLink.true_sinr_db`**——ZF 权按基站（可能已老化的）CSI 打，但打在双方
+`h_true` 上，对方的流进干扰协方差。逐 TTI 只查表，矩阵运算全在建表阶段
+（实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s）。
+
+开 `pair_table` 前会校验完整、双向、维度一致的 pair graph；三 UE 缺任意一条边（例如
+1↔2）都硬失败。MU 准入的 predicted BLER 使用叠加 **SU+MU OLLA 后的实际发送 MCS**；
+OLLA 前基准 MCS 即使不过 0.5，也不能替实际发送档放行配对。
+
+**MU 的代价有两半，必须同时记账**：一半是「发得更保守」（MCS 往下走），
+一半是「更容易错」（同一档 MCS 的误块概率更高）。历史的 capacity 只把 TBS 乘一个
+`measure_mu_gain()` 测出的标量 `mu_se_ratio`，等于「包变小但一点也不更容易错」，
+物理上说不通、且配对越激进越乐观。它保留为 `mu_accounting="se_ratio_legacy"`，
+**只用于复现旧结果**，会写进 `notes`。实测同一组配置：pair 表口径下开 MU 把首传
+平均 MCS 从 23.48 压到 19.93，历史口径是 22.68 → 22.69（一档都没降）。
+
+**−3.01 dB 只是记账标签，不是近似。** 按定义 `CorrLoss = pred_MU − pred_SU −
+PowerLoss`，所以决策里真正用的平移量 `CorrLoss + PowerLoss` 恒等于
+`pred_MU − pred_SU`，那个常数精确抵消。单列 PowerLoss 只为诊断能分开看
+「功率分摊占多少、相关性损失占多少」。**这条只在当前支持的 2 用户 × rank2 下
+成立**，扩到 3/4 用户或不等流数时标签本身要重新定义。
 
 实测在 10 用户 / 64 端口下 **MU/SU 比值 < 1**（密集城区 0.755、城区宏站 0.917），
 自适应因此全程选 SU。这不是 bug：SU 无干扰且能到 rank4，
@@ -849,16 +892,16 @@ Configuration 必须对应 16 RB。任一项不符立即拒绝运行。结果中
 
 ### 多时隙的快照间隔是 5 ms，不是一个 TTI
 
-ChannelHub 的 `num_slots_per_sample` 输出**不是连续 TTI**，而是连续的
-SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
+first-party source 的 `sample_interval_s` 是独立显式时钟，默认 **5 ms**；
+它既不是 0.5-ms TTI，也不再从 SRS/CSI-RS 周期反推。移动 UE 每个快照推进
 
-    speed × max(srs_periodicity, csirs_periodicity) × slot_duration_s
+    speed × sample_interval_s
 
-默认 10 × 0.5 ms = **5 ms**。把它当成一个 TTI（0.5 ms）会让**所有时间相关的
+默认即 **5 ms**。把它当成一个 TTI（0.5 ms）会让**所有时间相关的
 结论差 10 倍**——CSI 老化、多普勒、移动性全部受影响。
 
 **这个错误很难自己看出来。** 症状是"3 km/h 的信道相关系数 7 ms 内掉到 0.24"，
-而按 2.6 GHz 算相干时间有 59 ms。我第一反应是怀疑 ChannelHub 每 slot
+而按 2.6 GHz 算相干时间有 59 ms。当时第一反应是怀疑外部源每 slot
 重抽了小尺度衰落——查下来**不是**：相关随滞后单调下降（滞后 1 为 0.987、
 滞后≥8 为 0.374），而且 0.315→0.342→0.390→0.432 的回升正是 **J₀ 的负瓣**，
 形状完全是 Jakes，只有时间尺度不对。
@@ -880,7 +923,47 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
    不成立就说明老化是叠加上去的第二套物理，那样任何"老化损失"都只是两套物理的差。
 2. **rank 由基站按陈旧 CSI 选**。拿真实 SINR 去挑 rank 等于让基站预知信道，
    它会自动避开老化最狠的那个 rank，**损失被凭空抹掉一大半**。
-   同理 PF 调度的 `inst_se` 只能用 `best_se_gnb`，不能用 `best_se`。
+   同理 PF 调度的 `inst_se` 只能用基站估计的谱效，不能用真实谱效。
+
+**但 `best_rank` 已经不是发送 rank 了**（2026-09-02，用户确认）。它是**逐快照的
+瞬时谱效最优值**，默认 5 ms 就可能换一次；rank 一变，每流功率 `P/r`、TBS 和 OLLA
+的收敛点全跟着变，链路自适应根本收敛不了。现在 rank 是 `amc_policy.RankConfig`
+给的显式策略：默认 `fixed` + `fixed_rank=2`（现网基线），`link_table` 保留逐快照
+跟随的历史行为**只作反向对照**，`adaptive` 按现场实现规格实现（用户 2026-09-02 给
+的文档）。`best_rank` 现在只是诊断量与 `link_table` 模式的输入。
+
+`adaptive` 的判决是**三层不同时间尺度**的状态机，别压成一层：
+
+- **每 TTI**：累积一个谱效滤波样本（`se_filter_beta=0.1` 的一阶 IIR）+ 跑一次快速回退监测。
+- **每 `period_tti`（1000）且样本数 ≥ `min_filter_samples`（3）**：判一次该不该换 rank。
+- **切换判据（用户 2026-09-03 裁决）：按滤波谱效最大化选 rank，但任何方向的切换
+  都要求最优 rank 超过当前 rank 10%。** 也就是 `switch_rule="unified_ratio"` +
+  `gain_factor_raise = gain_factor_reduce = 1.1`，两个方向共用一条式子
+  `se[best] > 1.1 · se[cur]`，常数含义相同、不会读反。实测 4% / 9% 不动、11% 才切，
+  升降完全对称。
+- **但当前 rank 被最小 MCS 闸门判死（谱效 0）时不讲迟滞**，直接降到候选里最稳的一档。
+  否则 `se[cur] = se[best] = 0`，"超过 10%" 恒为假，UE 会卡在一个已知发不出去的
+  rank 上。事件原因记作 `current_rank_gated_out`。
+- 另一种写法 `spec_asymmetric`（实现规格文档那种：`se[cur] > G↓·se[best]` 时保持）
+  **保留作对照**，因为现场到底是哪一种尚未确认。**同一个 `G↓=1.1` 在两种写法下
+  行为相反**：`unified_ratio` 是降要 10% 余量，`spec_asymmetric` 是降立即生效；
+  `spec_asymmetric + 0.9` 的等效降档余量是 11.1%，和默认那条同一个意图。
+  `as_dict()` 直接报 `raise_margin_pct` / `reduce_margin_pct`，不要自己换算。
+
+谱效估计前有两道修正，都会改判决：预估 MCS < `min_mcs_threshold`（9）的 rank 谱效
+**置 0**（那一层根本发不出去，不能让它赢 argmax）；再乘 `resource_cost_ratio`
+（`[1.0,0.97,0.95,0.93]`，高 rank 的 DMRS 开销）。
+
+升 rank 后进 **快速回退监测窗**（`min(400, 周期−10)` TTI）：窗内新增 NACK > 90 **当场退**；
+窗末初传 BLER ≥ 0.3 或新旧 rank 实测谱效比 < 1.0 也退；窗内调度 < 15 次样本不足，
+不判成败直接退出。**回退要把 OLLA 一起退回**（`RankController.step()` 的返回值，两条主
+循环都必须写回）——新 rank 上的 OLLA 是在错误工作点收敛的，只退 rank 会让旧 rank 带着
+别人的偏置继续跑，KPI 上看不出来。每回退一次判决周期 `×2`，最多 `2^4`（1000→16000 TTI）。
+
+**唯一一处本项目自己的口径选择是 `se_sample_scope`**：现场每 TTI 采一个谱效样本，
+而这里的 AMC 坐标在一个快照内是分段常数，逐 TTI 采样会让 β=0.1 的平滑在快照之间完全
+失效。默认 `snapshot`（一次新观测算一个样本），设 `tti` 复现现场节拍。**两者不等价。**PF 度量也要取**实际会用的那个 rank** 的估计谱效，不能继续用
+`best_se_gnb`（那是"瞬时最优 rank 的谱效"，与实际发送的 rank 不是同一档）。
 
 表里因此有两套量：`sinr/mcs/se`（真实，用于 BLER 与吞吐对账）与
 `se_gnb/best_se_gnb`（基站以为的，用于 rank 与调度）。零时延时两套逐位相同。
@@ -897,10 +980,8 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 相干时间只有约 3 ms。实测 MU/SU 比值 0.816 → 0.449（−45%），SU 谱效 −27%；
 把信道换成慢变（ρ=0.99）后损失掉到 10%——**这条对照证明损失确实来自时变**。
 
-序列直接调 ChannelHub 的 `srs_rb_indices`，不自己写。兜底的恒等扫描与 C_SRS=63
-的标准镜像顺序不同；测试既断言完整标准顺序，也断言 `hop_order()` 返回的 `source`
-以 `channelhub:` 开头，防止依赖缺失时静默换算法。
-`hop_order` 里要先 `_ensure_path()`，否则静默走兜底。
+序列由 SuperRAN 本地 `native.srs_rb_indices` / `hardware.COMPANY_SRS_17_HOP_ORDER_RBG`
+共同冻结。没有依赖缺失时的恒等扫描兜底；非 272-RB 产品 profile 直接拒绝。
 
 ### 测试信道所有用户统计相同时，MU/SU 比值是个死数
 
@@ -924,6 +1005,15 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 两个实现细节：宽带 PMI 按 CSI report 周期更新并在周期内保持，不是每个 TTI 重搜；
 每次更新只能使用该时刻可见的CSI，不能跨完整仿真时间先平均后偷看未来。历史
 API的表行0映射MCS0、对应上报CQI1；真实上报**CQI=0是out-of-range**。
+
+**CQI 的长期滤波是一阶 IIR，不是累计平均**（2026-09-02 换的口径）：
+`s <- s + λ(x - s)`，第一次上报直接初始化状态。旧的 expanding mean 记忆无限长，
+跑得越久新测量权重越小，移动性或负载变化时 CQI 根本不跟踪。λ 由
+`CsiConfig.cqi_filter_lambda` 给，**0.25 已由负责人确认为当前工程默认，但尚未经现场
+测量/设备数据标定**，
+必须随结果报出来；λ=1 关闭滤波可作反向对照。`cqi_filter_domain` 默认
+`cqi_index`（现场口径：在量化后的 CQI 档上滤波），`sinr_db` 只用于量化前后的
+口径消融，两个域的结果不能混着比。
 
 `Dataset.tdd_mcs` / `sr_tdd_mcs` 也必须遵守同一因果边界：进入 MCS 的
 `bf_gain_user_db` 只能在 gNB 可见的 `h_prec` 上计算。同一权打到
@@ -949,8 +1039,35 @@ CQI/BF/OLLA 标量时 BLER 必须是 unknown，不能拿 AMC 预测坐标查出�
 必须重新跑收敛标定；2026-08-23 之前 dB-domain OLLA 的 BLER/速率数字仅供历史
 追溯，不能写成当前实测结论。
 
+当前**没有**实现“每流固定 15 dB BF 惩罚”、CQI floor/reset 状态机或已标定的现场
+OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工程近似。不得据此声称
+现场等价，也不得在本次迁移中擅自补成另一套未确认算法。
+
+**`olla_enabled=False` 只去掉"叠加偏置"这一步，决策坐标不变。** 早先它会掉进
+另一条分支、改用**真实接收 SINR** 反折 MCS——那是上帝视角：首传 BLER 被构造在
+目标值上，CSI 老化与 BF 失配的代价整个消失，于是"开/关 OLLA"的消融同时换掉了
+链路自适应的信息面。只有链路表**根本没有** `sinr_tx_db`（手工构造的表）时才
+退回表自带的 MCS，那不是"关 OLLA"，是"没有 CQI/BF 可用"。
+
+**ACK/NACK 要等上行时隙**（2026-09-02 确认）。TB 在 D/S 发出，反馈搭其后第一个
+`U` 时隙回来，OLLA 更新与该 TB 的重传资格都从**该 U 之后第一个 D/S** 起生效。
+偏移由 TDD 图案算出（`amc_policy.feedback_effective_offsets`），`DDDSU` 在
+30 kHz 下逐相位是 5/4/3/2 个 TTI；两个周期即 8 下行配 2 上行，与现场 8:2 一致。
+等待期间该 UE 因单 HARQ 进程模型不参与调度，单独计数为
+`harq_feedback_wait_skips`。**ACK 与 NACK 都建立 in-flight 状态**，所以 ACK 也不能在
+反馈回来前连续发新 TB；抽样结果只能在反馈到达时交给 OLLA 与 RankController。图案里
+没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
+零时延并在 notes 里说明。**k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。**
+
+唯一一次重传发出后，其终次 ACK/NACK 也保留为 `await_final_feedback`，直到同样的反馈
+生效时刻才释放单 HARQ 进程。终次反馈只做释放：**不再进入首传 OLLA/Rank 学习，也不
+触发第三次发送**。DDDSU 的最小反例是 t0 首传 NACK、t5 重传，下一份新 TB 最早 t10，
+不能在 t6 提前发送。
+
 顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 先用
 `sinr_tx_db` 反折 `mcs_without_olla`，再调 `apply_olla_mcs`），即实际调度下去的档位。
+**但它的分母含重传**，而重传重放的是冻结的旧 MCS，所以它不是"链路自适应现在选到
+哪一档"。要那个视角用 `avg_mcs_first_tx`（只统计首传），两条路径都提供。
 
 `simulate_experience` 作为公开入口**自己**也会兑现"留空=按目标反解"：
 它拿链路表的 `target_bler` 调 `resolved_for_target`，不再依赖调用方先解析
@@ -989,7 +1106,7 @@ block，其余 warn），不再靠文案子串定严重度；移动模式的身�
 `bool("off")` 是 `True`，开关**完全无声地失效**。`sr_system_sim` 里的 `_flag()`
 负责把 `"off"/"false"/"0"/"no"/""` 都判成假。新加 select 型开关时记得走它。
 
-`spec._SIM_DEFAULTS` 给系统级旋钮提供页面默认值（它们不在 ChannelHub 的信道
+`spec._SIM_DEFAULTS` 给系统级旋钮提供页面默认值（它们不在 first-party 信道
 生成配置里），**必须和 `sr_system_sim` 的函数签名保持一致**——漂了的话页面显示
 的就不是实际会跑的值，而这种不一致没有任何提示。有一条测试逐个比对。
 
@@ -1128,8 +1245,9 @@ SRS 机会发送，端口 2/3 在下一个可用机会（如 slot7→17，间隔
 原因是外部或旧数据源未必声明 SNR 信号参考面；而业务域 SIR/SINR 是报告接口已经
 要求的一对。`snr-sinr` 用于 first-party 一致性反查，不作为跨源唯一真相。
 
-`num_slots_per_sample > 1` 时这个式子只是近似：`sinr_dB` 是各 slot 的 dB 均值，
-`sir_dB` 取最后一个 slot。`interference_report` 会把 `iot_exact` 标成 false。
+first-party `num_slots_per_sample > 1` 会保留完整 slot 信道轴；几何 S/N/I 在这些
+slot 上采用同一大尺度预算，因此 IoT 仍为 exact。只有历史来源缺少逐 slot 口径时，
+`interference_report` 才把 `iot_exact` 标成 false。
 
 ### 业务域与测量域是两个量，别混
 
@@ -1191,17 +1309,16 @@ SIR 按比例猜。2026-08-11 审查发现旧 `_system_sinr` 移除后这些字�
 `10log10(RB_full/RB_probe)` 升高；raw SINR 在噪声不可忽略时也会随之变化。
 `scenario.probe` 先精确还原全带 SNR，再与不变 SIR 重算全带 SINR/IoT。
 
-**但修正只对没被夹逼的样本成立。** ChannelHub 把 `snr_dB` 夹到 ±50 dB，
-探测口径下 snr 高了 10.4 dB，高信噪比场景会**先撞天花板再被减回去**，
-得到一个看起来正常的假值。实测 InF 与密集城区两个完全不同的场景，
-探测出的 SNR 都是 39.5 dB（= 49.9 - 10.4）。`scenario.probe` 现在剔除并计数。
-依赖 SNR 的重算 SINR/IoT 同样剔除撞夹逼样本；SIR 与传播几何不受影响。
+历史外部数据曾把 `snr_dB` 夹到 ±50 dB，探测修正会丢失被截断前的信息。
+first-party source 不再截断 SNR/SINR；`scenario.probe` 的历史 clamped 计数字段保留，
+但新数据应为 0。无干扰 SIR 仍使用 49.9 dB 有限哨兵，并由拓扑语义识别。
 
-`num_ofdm_symbols` 同样可压；ChannelHub 已把几何量移出 symbol 网格，14 / 7 / 4 /
-2 / 1 下 SINR、SIR、路损、距离、LOS 与位置逐位相同。`PROBE_NUM_SYM` 仍取 4，
+`num_ofdm_symbols` 同样可压；first-party source 已把几何量移出 symbol 网格，14 / 7 / 4 /
+2 / 1 下 SINR、SIR、路损、距离、LOS 与位置逐位相同。正式输出的时间轴是 slot snapshot，
+不会把 symbol 伪装成 TTI。`PROBE_NUM_SYM` 仍取 4，
 是为了保留一小段时域结构并更容易暴露误用，不是因为 1 有几何悬崖。这个旋钮
 **只对探测模式安全**：正式信道会随时间网格改变。适配器也不再做复信道平均——
-系统层保留中间 symbol 的 length-1 快照；链路估计在压缩前仍使用完整网格。
+历史 symbol-grid adapter 才取中间 symbol；first-party source 直接保留完整 slot 轴。
 
 性能数字必须绑定内核版本。旧单簇内核曾测得 11.5×；20-ray 内核在 2026-08-11
 用 21 小区 16T/20 MHz、6 样本交错两轮重测，full 为 7.80/9.45 s/样本，probe
@@ -1216,7 +1333,7 @@ raw SINR 变化来自每 RB PSD 改变，必须按上一节的 SNR→SINR 重构
 
 ### 多普勒定义与移动轨迹边界
 
-ChannelHub 的 `doppler_hz` 明确定义为最大 Doppler
+first-party source 的 `doppler_hz` 明确定义为最大 Doppler
 `f_max = |v| / lambda`，CDL 内部再按每条 ray 的方向余弦投影一次。旧实现先把
 速度投影到最近站的径向、随后又在 CDL 内投影一次，会把高铁场景严重压低；
 `hst_350kmh` 在 2.6 GHz 下现在稳定为 **842.59 Hz**，与解析值一致。
@@ -1284,6 +1401,8 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 - 新的表驱动 BLER → 原始常量放独立数据模块，必须有 SHA-256、全 MCS 覆盖、
   横轴/BLER 单调、目标门限覆盖检查；来源不是标准就不能塞进 `verify_tables`
 - 新的门禁判据 → `gates.py`（门 2/门 3）或 `validate.py`（门 1，会自动进门 1）
+- 新的 rank 策略 / HARQ 反馈时序 → `amc_policy.py`；两条评估路径共用同一份实现，
+  别在 `system.py` 和 `experience.py` 里各写一套
 - 新的随机流 → `rng.register_stream(名字, 用途)`，**别直接改 `STREAMS` 的顺序**
   （流键来自名字的 crc32，加流不会扰动已有流；改顺序也不会，但改用途会）。
   统计判决一律走 `rng.compare_replications`，它复用 `gates.py`，不要另写
@@ -1297,7 +1416,7 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
   回传白名单都从它派生（`spec.editable_keys()`）
 - 新场景 → `presets/presets.yaml`，不改代码。**加完必须跑一遍 `sr_probe_scenario` 把实测值写进 `expect`**——preset 里的 label 是设计意图，写着「高干扰」实际只有 2 dB 的事发生过
 - 新的干扰量或分级 → `interference.py`，门限改动等于改现场约定，先和用户对齐
-- 新射线追踪城市 → ChannelHub 的 `configs/scenes/`，`scenes.py` 自动发现
+- 新射线追踪城市 → 独立数据目录并用 `SUPERRAN_SCENES` 指向；不得放进别的源码仓库
 - 新任务类型 / 新决策点 / 新对比组 / 新陷阱 → `decisions.py` 的
   `ALL_DECISIONS`、`_DESIGN`、`TASK_PROFILES`
 - 新测量量 → `measure.py` 加函数 + `MEASUREMENT_CATALOG` + `_ALIASES` +

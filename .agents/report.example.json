@@ -1,0 +1,55 @@
+{
+  "role": "author",
+  "title": "EDF 调度时延兜底",
+  "slug": "edf-scheduler",
+  "verdict": "DONE",
+  "branch": "feat/edf-scheduler",
+  "sha": "5e91134...",
+  "risk": "红",
+  "seat": "claude1",
+  "mechanism": "调度",
+  "math": false,
+
+  "conclusion": "一句话讲清这次的结论，让人不看下文也能拍板。",
+
+  "chain": [
+    {"step": "在哪个环节插入", "detail": "用无线语言描述，不要提函数名"},
+    {"step": "输入用的是什么量", "detail": "谁算的、什么时刻可得、是 h_true 还是 h_est"},
+    {"step": "输出影响了什么", "detail": "最终落到哪个 KPI、方向是升还是降"}
+  ],
+
+  "changes": [
+    {"what": "改动一句话", "why": "为什么必须这么改"}
+  ],
+
+  "findings": [
+    {
+      "issue": "Reviewer 专用：问题一句话",
+      "impact": "物理后果与 KPI 影响方向",
+      "evidence": "最强反例 / 实测数据"
+    }
+  ],
+
+  "evidence": [
+    {"claim": "已验证的结论", "how": "怎么验的", "proved": true},
+    {"claim": "只是推断的结论", "how": "未实测", "proved": false}
+  ],
+
+  "not_proved": [
+    "明确写出这次没有覆盖的场景、用到的工程近似、未确认的现场口径"
+  ],
+
+  "ratchet": {
+    "test": "tests/test_physics_invariants.py::test_xxx",
+    "verified_red": true
+  },
+
+  "risks": ["剩余风险，按严重度排序"],
+  "decisions": ["需要维护者拍板的问题，没有就留空数组"],
+
+  "handoff": "读 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\REVIEWER.md 按它工作。\n任务：<一句话>\n分支：<branch>  完整 SHA：<40 位>\nAuthor 报告：<绝对路径>\n风险档：<绿/黄/红>  本次触碰的物理机制：<模块>\n棘轮测试：<测试函数名，或\"本次无\">",
+
+  "details": [
+    {"label": "运行的命令与结果", "content": "折叠区，放命令、日志摘要、文件清单"}
+  ]
+}

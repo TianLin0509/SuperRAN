@@ -132,10 +132,7 @@ def probe_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], int, int]:
     # the returned report; normal generation still hard-fails an inconsistent
     # explicit user resource instead of silently changing it.
     if rb_probe < rb_full and out.get("srs_c_srs") is not None:
-        from .channelhub import _ensure_path  # noqa: PLC0415
-
-        _ensure_path()
-        from msg_embedding.ref_signals.srs import auto_select_c_srs  # noqa: PLC0415
+        from .channelhub import auto_select_c_srs  # noqa: PLC0415
 
         b_srs = int(out.get("srs_b_srs", 1) or 0)
         b_hop = int(out.get("srs_b_hop", 0) or 0)
@@ -174,7 +171,6 @@ def _sinr_from_snr_sir(snr_db: np.ndarray, sir_db: np.ndarray) -> np.ndarray:
         out = -10.0 * np.log10(
             np.power(10.0, -snr / 10.0) + np.power(10.0, -sir / 10.0)
         )
-    out = np.clip(out, -49.9, 49.9)
     return np.where(np.isfinite(snr) & np.isfinite(sir), out, np.nan)
 
 
@@ -272,22 +268,18 @@ def probe(
     # SNR 先还原到全带宽口径，再与不变的几何 SIR 重合成 SINR。直接拿
     # probe 的 raw SINR 会把“总功率挤进更少 RB”的人工 PSD 增益带进报告。
     #
-    # **但修正只对没被夹逼的样本成立。** ChannelHub 把 snr_dB 夹到 ±50 dB
-    # （契约约束），而探测模式的 snr_dB 比全带宽口径高 10log10(RB_full/RB_probe)
-    # ≈ 10.4 dB——高信噪比场景在探测下会**先撞上 +50 的天花板再被我减回去**，
-    # 得到一个看起来正常的假值。实测 InF 与密集城区两个完全不同的场景，
-    # 探测出来的 SNR 都是 39.5 dB，就是这么来的（49.9 - 10.4）。
-    # 撞顶的样本必须剔除并报数，不能混进分布。
+    # first-party source 不截断 SNR/SINR。保留 clamped 计数字段只为让
+    # 历史结果结构继续可读；新生成的 probe 这里恒为 0。
     corr = snr_correction_db(rb_probe, rb_full)
-    snr_clamped = np.abs(arr["snr_dB"]) > 49.85
-    ul_snr_clamped = np.abs(arr["ul_snr_dB"]) > 49.85
+    snr_clamped = np.zeros_like(arr["snr_dB"], dtype=bool)
+    ul_snr_clamped = np.zeros_like(arr["ul_snr_dB"], dtype=bool)
     snr_full = np.where(
-        snr_clamped, np.nan, np.clip(arr["snr_dB"] + corr, -49.9, 49.9)
+        snr_clamped, np.nan, arr["snr_dB"] + corr
     )
     ul_snr_full = np.where(
         ul_snr_clamped,
         np.nan,
-        np.clip(arr["ul_snr_dB"] + corr, -49.9, 49.9),
+        arr["ul_snr_dB"] + corr,
     )
     cells = int(cfg.get("num_sites", 1) or 1) * int(cfg.get("sectors_per_site", 1) or 1)
     # 单小区没有干扰源时 49.9 dB 只是有限哨兵（真实 SIR 是 ∞）。是否为哨兵

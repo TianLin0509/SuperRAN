@@ -1470,6 +1470,10 @@ def link_adaptation(
     表 1/2 的 HARQ 沿用 i.i.d. BLER 简化。表 3 只允许一次重传，且所有
     BLER 都从 NewTx 曲线推导：CC 把码字 SINR 抬升 10log10(2) dB；IR（默认）
     把原 MCS 谱效减半后映射到等效低档 MCS，在不变 SINR 上查曲线。
+
+    **"最多一次重传"是显式决定**（用户 2026-09-02 确认）。现场规格是 16 进程、
+    最多 3 次重传；扩过去会连带改动队列、反馈时延语义与全部 BLER 口径，
+    当前不做。
     """
     if not (math.isfinite(float(target_bler)) and 0.0 < float(target_bler) < 1.0):
         raise ValueError(f"target_bler 必须在 (0,1) 内，收到 {target_bler!r}")

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import inspect
 from dataclasses import replace
 from functools import wraps
 from pathlib import Path
@@ -15,7 +16,9 @@ import numpy as np
 import pytest
 
 from superran import provenance
+from superran import amc_policy as ap
 from superran import server as srv
+from superran import spec as specm
 from superran import system as sysm
 from superran.paths import datasets_dir
 
@@ -93,6 +96,18 @@ def _run(**kw):
                 num_replications=2, mu_enabled=False)
     args.update(kw)
     return srv.sr_system_sim(**args)
+
+
+def test_rank_switch_default_is_identical_across_all_entry_points() -> None:
+    signature_default = inspect.signature(srv.sr_system_sim).parameters[
+        "rank_switch_rule"].default
+    control = next(row for row in specm._EDITABLE if row[0] == "rank_switch_rule")
+    assert ap.RankConfig().switch_rule == "unified_ratio"
+    assert signature_default == "unified_ratio"
+    assert specm._SIM_DEFAULTS["rank_switch_rule"] == "unified_ratio"
+    assert control[3][0] == "unified_ratio"
+    assert ap.RankConfig().gain_factor_raise == 1.1
+    assert ap.RankConfig().gain_factor_reduce == 1.1
 
 
 def test_capacity_ok() -> None:

@@ -594,7 +594,12 @@ def path_structure(model: str, tau_rms_s: float) -> PathStructure:
 
     prof = cdl_profile(model)
     name = getattr(prof, "name", model)
-    has_angles = all(hasattr(prof, a) for a in ("aod_rad", "aoa_rad", "zod_rad", "zoa_rad"))
+    degree_fields = ("aod_deg", "aoa_deg", "zod_deg", "zoa_deg")
+    has_degree_angles = all(getattr(prof, field, None) is not None for field in degree_fields)
+    has_callable_angles = all(
+        callable(getattr(prof, name, None))
+        for name in ("aod_rad", "aoa_rad", "zod_rad", "zoa_rad")
+    )
 
     powers = np.asarray(prof.powers_normalized(), dtype=np.float64)
     return PathStructure(
@@ -602,10 +607,22 @@ def path_structure(model: str, tau_rms_s: float) -> PathStructure:
         delays_s=np.asarray(prof.delays_seconds(tau_rms_s), dtype=np.float64),
         powers_linear=powers,
         powers_db=10.0 * np.log10(np.maximum(powers, _EPS)),
-        aod_rad=np.asarray(prof.aod_rad()) if has_angles else None,
-        aoa_rad=np.asarray(prof.aoa_rad()) if has_angles else None,
-        zod_rad=np.asarray(prof.zod_rad()) if has_angles else None,
-        zoa_rad=np.asarray(prof.zoa_rad()) if has_angles else None,
+        aod_rad=(
+            np.radians(np.asarray(prof.aod_deg, dtype=np.float64))
+            if has_degree_angles else (np.asarray(prof.aod_rad()) if has_callable_angles else None)
+        ),
+        aoa_rad=(
+            np.radians(np.asarray(prof.aoa_deg, dtype=np.float64))
+            if has_degree_angles else (np.asarray(prof.aoa_rad()) if has_callable_angles else None)
+        ),
+        zod_rad=(
+            np.radians(np.asarray(prof.zod_deg, dtype=np.float64))
+            if has_degree_angles else (np.asarray(prof.zod_rad()) if has_callable_angles else None)
+        ),
+        zoa_rad=(
+            np.radians(np.asarray(prof.zoa_deg, dtype=np.float64))
+            if has_degree_angles else (np.asarray(prof.zoa_rad()) if has_callable_angles else None)
+        ),
         k_factor_db=getattr(prof, "k_factor_dB", None),
         is_los=bool(getattr(prof, "is_los", False)),
         num_paths=int(len(powers)),

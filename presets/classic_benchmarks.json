@@ -62,9 +62,9 @@
     },
     {
       "id": "B07_tdd_srs_reciprocity",
-      "title": "UL-SRS reciprocity mapping restores the DL precoding convention",
+      "title": "Transpose-only UL-SRS reciprocity preserves the canonical DL convention",
       "primary_metric": "receive_spectral_efficiency",
-      "expected": "correct conjugate mapping beats the wrong convention and reaches at least 90% of ideal-CSI SE",
+      "expected": "canonical v2 identity mapping beats an erroneous extra conjugation and reaches at least 90% of ideal-CSI SE",
       "sources": [
         "https://www.mathworks.com/help/5g/ug/srs-based-downlink-channel-measurements-for-tdd-system.html"
       ]

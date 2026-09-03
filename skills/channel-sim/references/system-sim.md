@@ -40,7 +40,7 @@ sr_system_sim(
 
 | `evaluation_mode` | 版本 | 调度/资源 | 失败包 | KPI 边界 | 用途 |
 |---|---|---|---|---|---|
-| `capacity` | `legacy_v1` | 历史全带口径，单次选择一个 SU（或标量 MU 近似） | 每 TB 最多一次 IR/CC；同 MCS/RBG 数/rank/TBS | `trim=none/tail/head_tail` | 复现旧结果、满缓冲容量、公平性 |
+| `capacity` | `legacy_v1` | 历史全带口径，单次选择一个 SU 或一对 MU（MU 读 pair 表，默认） | 每 TB 最多一次 IR/CC；同 MCS/RBG 数/rank/TBS；重传恒为 SU | `trim=none/tail/head_tail` | 复现旧结果、满缓冲容量、公平性 |
 | `experience` | `experience_v2` | TBS 反查最小 RBG，同 TTI 可排多个 UE，尾料可留空 | 每 TB 最多一次 IR/CC；失败字节留 FIFO，后续成为新 TB | DRB busy-period + FIFO 到达对象；小 burst 可按 fractional slot | 大小包混跑、等待/PDB、按需分配 |
 
 两者是**两个评估 profile**，不是一个算法的快慢档。当前 `experience_v2` 支持
@@ -317,7 +317,7 @@ RBG，**包含 idle TTI 的 0 桶**。不要拿 `rbg_size_hist` 代替：后者�
 
 ## 邻区负载 `neighbor_prb_util`
 
-ChannelHub 的几何 SINR 是按**所有邻区都在发**算出来的，等于 100% PRB 利用率。
+first-party source 的几何 SINR 是按**所有邻区都在发**算出来的，等于 100% PRB 利用率。
 真实 5G 网络典型是 10% / 30% / 50%。按 full buffer 算会把干扰放大到不真实的程度，
 所以默认取 **0.3**；设 1.0 退化成原行为。
 
@@ -415,8 +415,8 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 `mean_csi_staleness_ms`。只能转述 effective 值，并同时说明 requested→effective 是否升档。
 显式 `ue_speed_kmh=0` 是合法静止条件，不得当成缺省 3 km/h。
 
-**快照间隔不是一个 TTI。** ChannelHub 的多时隙输出是连续的 SRS/CSI-RS 机会，
-默认 `10 × 0.5 ms = 5 ms`，由 `system.snapshot_interval_ms(cfg)` 从配置算出。
+**快照间隔不是一个 TTI。** 新数据用显式 `sample_interval_s`（默认 5 ms），
+由 `system.snapshot_interval_ms(cfg)` 直接读取；不再从 SRS/CSI-RS 周期反推。
 把它当成 0.5 ms 会让**所有时间相关的结论差 10 倍**。
 
 ## 调度与 OLLA
@@ -434,6 +434,10 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 **基站按陈旧 CSI 选 rank 和调度**（`best_se_gnb`），不是按真实 SINR——
 拿真实 SINR 挑 rank 等于让基站预知信道，老化损失会被凭空抹掉一大半。
 
+Rank 自适应默认 `switch_rule="unified_ratio"`，`gain_factor_raise=1.1`、
+`gain_factor_reduce=1.1`：升/降都只有在最优滤波谱效严格超过当前 10% 时切换。
+`spec_asymmetric` 只保留作显式迁移反向对照，不是 MCP、页面或 Python 默认。
+
 OLLA 默认只要求用户给 `target_bler`。ACK 步长默认 **+0.01 MCS**，NACK 步长为
 `None` 时按 `down=up*(1-target)/target` 自动反解；目标 10% 时才得到 **−0.09 MCS**。
 顺序是先由 `SINR_AMC_PRED`（CQI 门限 + gNB 可见 BF Gain，不是物理 TX/RX
@@ -447,11 +451,28 @@ SINR）反折无 OLLA MCS，再加连续 MCS offset、floor 并钳位；BLER 只
 2026-08-23 之前 dB-domain OLLA 的 IBLER/速率数字只作历史追溯。
 **出正式结论设回 1.0**，非 1.0 时结果里会带一条显式告警。
 
+当前未实现每流固定 15 dB BF 惩罚、CQI floor/reset 状态机或现场已标定 OLLA 步骤；
+BF Gain 来自当前矩阵计算，CQI/OLLA 参数仍是版本化工程近似，不能声称现场等价。
+
 `avg_mcs` 报的是 **OLLA 之后**的 MCS，即实际调度下去的档位。
+
+单 HARQ 进程下，首传 ACK 和 NACK 都建立 in-flight 状态；反馈生效前同一 UE
+不得发新 TB。抽样 outcome 只在发送时冻结，直到按 TDD 图案算出的反馈时刻才同时
+交给 OLLA 与 RankController。这样 ACK 连发不会穿透反馈窗口，rank 快速回退也不会
+提前看到尚未到达的 NACK。
+
+唯一一次重传的终次 ACK/NACK 也占住进程直到反馈生效；终次反馈只释放进程，不再
+更新 OLLA/Rank，也不产生第三次发送。DDDSU 下 t0 首传 NACK、t5 重传后，下一份新 TB
+最早只能在 t10 发送，不能在 t6 抢跑。
 
 `experience_v2` 目前只接受 `preset_20b_256qam / MCS table 3` 预置表，Table 1/2
 传入后硬失败。代码保留显式 `mcs_table/profile` 边界与带数据指纹的 BLER cache key，
 但必须等下一套 MCS、TBLER/TBS 元数据完整接入后才允许扩展。
+
+**BREAKING migration：**硬拒绝已前移到 `build_link_tables(table=1/2)`，不再允许先建
+一张系统表、到 `simulate_experience` 才失败。旧调用若要进入系统/体验路径，必须改用
+`table=3`；若确实研究标准 Table 1/2，只能继续使用显式选择表号的链路级接口，不能把
+它们接到当前系统 TBLER profile。
 
 ## 调度 P0：资源账、逐 RBG 频选与统一 FinalGrant
 
@@ -474,11 +495,21 @@ bitmap TBS、payload/padding/useful bytes，并与 planner 估值逐值硬比较
 
 ## MU `mu_enabled`
 
-默认 **False**，先看清 SU 基线。`legacy_v1` 仍保留历史聚合 `mu_gain` 近似；
-`experience_v2` 不再用标量比值回乘，而是在建表阶段预计算所有两用户、每用户 rank2
-的 pair 链路。TTI 主循环先固定 PF anchor，再枚举全部伙伴；缺 pair、相关性超门限、
+默认 **False**，先看清 SU 基线。**两种模式现在都读同一张 pair 表**
+（`mu_accounting="pair_table"`，默认）：在建表阶段预计算所有两用户、每用户 rank2
+的 pair 链路，MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、
+误块抽签用 pair 的 `true_sinr_db`。`legacy_v1` 的历史聚合 `mu_gain` 标量近似降级为
+`mu_accounting="se_ratio_legacy"`，**只用于复现旧结果**——它只缩 TBS、不进误块抽签，
+结果系统性乐观，选用时会写进 `notes`。capacity 的 SU/MU 判决是逐 TTI 比聚合谱效
+（还要过 predicted BLER ≤ 0.5 的准入；这里查询的是叠加 SU+MU OLLA 后的实际发送
+MCS，不是 OLLA 前的基准档），拒配对的两种原因分别计入
+`mu_pair_rejects` 与 `mu_su_wins`；重传恒按 SU 重发（冻结身份不许改 SINR/TBS）。TTI 主循环先固定 PF anchor，再枚举全部伙伴；缺 pair、相关性超门限、
 总层数超限或 predicted BLER > 0.5 都留下明确 rejection reason。可行伙伴按
 `sum(min(queue,TBS))/shared_RBG` 评分，不再取 PF 顺序里的第一个可行者。
+
+`pair_table` 开启时先硬校验完整 pair graph：每个 UE 必须与其余所有 UE 双向相连，
+两个方向必须引用同一个 pair，snapshot/两侧/RBG 维度必须一致且有限。三 UE 即使
+0↔1、0↔2 都存在，只要缺 1↔2 仍会硬失败，不能在运行中静默跳过该候选。
 
 MU MCS 口径是 `CQI + BF + SU-OLLA + CorrLoss + powerLoss + MU-OLLA`：两个 rank2 UE
 相对 SU rank2 的等流功率损失固定为 `−10log10(2)=−3.0103 dB`；CorrLoss 来自 pair

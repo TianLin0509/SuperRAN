@@ -1,4 +1,4 @@
-r"""Randomized and analytic stress checks for ChannelHub channel generation.
+r"""Randomized and analytic stress checks for SuperRAN channel generation.
 
 This is deliberately separate from the three human-readable audit examples:
 the examples explain the model, while this script tries to break its contracts
@@ -15,16 +15,13 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-CHANNELHUB = ROOT.parent / "MSG-Platform"
-sys.path.insert(0, str(CHANNELHUB / "src"))
+sys.path.insert(0, str(ROOT / "src"))
 
-from msg_embedding.data.sources._interference_estimation import (  # noqa: E402
-    estimate_channel_with_interference,
-)
-from msg_embedding.data.sources.internal_sim import InternalSimSource  # noqa: E402
-from msg_embedding.ref_signals.srs import (  # noqa: E402
+from superran.native import (  # noqa: E402
     SRS_BW_TABLE,
+    InternalSimSource,
     SRSResourceConfig,
+    estimate_channel_with_interference,
     srs_hopping_cycle_length,
     srs_rb_indices,
     srs_sequence,
