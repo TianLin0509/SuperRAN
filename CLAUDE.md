@@ -82,7 +82,7 @@ python tests/test_system_sim_tool.py          # sr_system_sim 行为级（硬失
 python tests/test_benchmarks.py               # 预注册经典通信基准与 provenance
 ```
 
-当前共 **27 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
+当前共 **28 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
 pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` 不再是
 0 检查假绿）；脚本式文件必须在 pytest 收集/薄壳路径中同样以异常或非零退出
 传播失败，不能只在 `if __name__ == '__main__'` 里检查全局 FAILED。
@@ -99,7 +99,7 @@ pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` �
 改动 `mumimo.py` / `beamforming.py` / `power_control.py` 要跑 test_mumimo +
 test_power_control + test_physics_invariants；
 改动 `system.py` / `experience.py` / `traffic.py` / `kpi_view.py` / `kpi_compare.py` 要跑 test_system +
-test_csi_aging + test_rng；改动 `scheduler_*.py` / `experience.py` 要额外跑 test_scheduler_p0；
+test_csi_aging + test_rng；改动 `scheduler_*.py` / `experience.py` 要额外跑 test_scheduler_p0 + test_scheduler_edf；
 改动 `csi_aging.py` / `srs_resource.py` 要跑 test_csi_aging + test_srs_resource；
 改动 `srs_waveform.py` 或 SRS 的 `h_ul_true` 数据合同要跑 test_srs_waveform +
 test_physics_contract_extensions + test_channel_generation_contract + test_results；
