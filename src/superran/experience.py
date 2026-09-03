@@ -944,13 +944,17 @@ def _select_mcs(sinr_db: float, lookup: TbsLookup) -> int:
 def _rank_se_estimates(
     table: Any, snap: int, olla_offset: float, *, olla_enabled: bool,
     lookup: TbsLookup, max_rank: int,
-) -> list[float]:
-    """逐 rank 的估计谱效，喂给 :class:`amc_policy.RankController`。
+) -> tuple[list[float], list[int]]:
+    """逐 rank 的估计谱效与 MCS，喂给 :class:`amc_policy.RankController`。
 
     对每个 rank 假设 ``r``：拿该 rank 的 AMC 预测坐标（CQI 门限 + BF Gain，
     两者都已经按 ``P/r`` 的每流功率算过，所以功率分摊已经在里面了），叠加
     当前用户级 OLLA 偏置，反折出**真的会发下去**的 MCS，谱效记为
     ``r × MCS 谱效``。
+
+    **资源消耗加权与最小 MCS 闸门不在这里做**，它们由 ``RankController``
+    统一施加——两条评估路径都喂同一个控制器，修正只应该有一份实现。因此这里
+    把 MCS 一并返回。
 
     这与现场"用一份上报 RI 的 CQI 再按 ``10log10(RI/r)`` 外推"不是同一个近似：
     本实现对每个 rank 假设各有一份该 rank 下测得的 CQI 与 BF Gain，比外推更
@@ -959,10 +963,11 @@ def _rank_se_estimates(
     """
     rows = table.sinr_tx_db
     if rows is None:
-        return []
+        return [], []
     limit = min(int(max_rank), int(rows.shape[1]))
     profile = la.MCS_TABLES[int(lookup.mcs_table)]
-    out: list[float] = []
+    se_out: list[float] = []
+    mcs_out: list[int] = []
     for rank in range(1, limit + 1):
         base = float(rows[snap, rank - 1])
         mcs = _select_mcs(base, lookup)
@@ -970,8 +975,9 @@ def _rank_se_estimates(
             mcs = int(la.apply_olla_mcs(
                 mcs, float(olla_offset),
                 mcs_table=int(lookup.mcs_table))["final_mcs"])
-        out.append(float(rank) * float(profile[mcs].se))
-    return out
+        se_out.append(float(rank) * float(profile[mcs].se))
+        mcs_out.append(int(mcs))
+    return se_out, mcs_out
 
 
 def _bler_lookup(mcs: int, sinr_db: float) -> float:
@@ -2105,6 +2111,7 @@ def simulate_experience(
         rank_cfg = ap.RankConfig()
     rank_ctl = ap.RankController(
         rank_cfg, n_ue, tti_ms=float(sys_cfg.tti_ms),
+        snapshot_ms=float(sys_cfg.snapshot_update_ms),
         max_rank_available=min(
             int(tables[0].sinr_db.shape[1]),
             int(getattr(sched, "max_layers_per_rbg", 4))))
@@ -2244,7 +2251,11 @@ def simulate_experience(
                 olla_db[_u_fb] = float(min(max(
                     olla_db[_u_fb] + _delta_fb,
                     sched.olla_min_db), sched.olla_max_db))
-        rank_ctl.step(tti)
+        # 快速回退会把 rank 与 OLLA 一起退回：新 rank 上的 OLLA 是在错误
+        # 工作点上收敛出来的，只退 rank 会让旧 rank 带着别人的偏置继续跑。
+        for _u_rk, _olla_rk in rank_ctl.step(tti, olla_by_ue=olla_db):
+            olla_db[_u_rk] = float(min(max(
+                _olla_rk, sched.olla_min_db), sched.olla_max_db))
         slot = pattern[tti % pattern_len]
         if slot not in ("D", "S"):
             continue
@@ -2317,10 +2328,11 @@ def simulate_experience(
         for i, u in enumerate(cand):
             pending = harq_pending.get(u)
             if rank_ctl.adaptive and tables[u].sinr_tx_db is not None:
-                rank_ctl.observe_link(u, snap, _rank_se_estimates(
+                _se_est, _mcs_est = _rank_se_estimates(
                     tables[u], snap, float(olla_db[u]),
                     olla_enabled=bool(sched.olla_enabled), lookup=lookup,
-                    max_rank=rank_ctl.max_rank))
+                    max_rank=rank_ctl.max_rank)
+                rank_ctl.observe_link(u, snap, _se_est, _mcs_est)
             # **rank 不再逐快照跟着 best_rank 跳。** 默认固定 rank2；自适应
             # 模式由 RankController 按周期决策。重传沿用冻结的 rank。
             rank = (int(pending.rank) if pending is not None
@@ -3512,8 +3524,8 @@ def simulate_experience(
         (f"Rank 策略={rank_cfg.mode}"
          + (f"（固定 rank{min(int(rank_cfg.fixed_rank), rank_ctl.max_rank)}）"
             if rank_cfg.mode == "fixed"
-            else f"（每 {int(rank_cfg.period_tti)} TTI 决策一次，谱效比门限 "
-                 f"{float(rank_cfg.switch_se_ratio):g}）")
+            else f"（每 {int(rank_cfg.period_tti)} TTI 决策一次，升 rank 谱效比"
+                 f"门限 {float(rank_cfg.gain_factor_raise):g}）")
          + "。链路表里的逐快照 best_rank 是瞬时谱效最优值，**不再**直接作为"
            "发送 rank——那会让 rank 每个信道快照就换一次。"),
         ("ACK/NACK 搭发送之后第一个 U 时隙回传，OLLA 更新与重传资格从该 U 之后"

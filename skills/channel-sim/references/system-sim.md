@@ -40,7 +40,7 @@ sr_system_sim(
 
 | `evaluation_mode` | 版本 | 调度/资源 | 失败包 | KPI 边界 | 用途 |
 |---|---|---|---|---|---|
-| `capacity` | `legacy_v1` | 历史全带口径，单次选择一个 SU（或标量 MU 近似） | 每 TB 最多一次 IR/CC；同 MCS/RBG 数/rank/TBS | `trim=none/tail/head_tail` | 复现旧结果、满缓冲容量、公平性 |
+| `capacity` | `legacy_v1` | 历史全带口径，单次选择一个 SU 或一对 MU（MU 读 pair 表，默认） | 每 TB 最多一次 IR/CC；同 MCS/RBG 数/rank/TBS；重传恒为 SU | `trim=none/tail/head_tail` | 复现旧结果、满缓冲容量、公平性 |
 | `experience` | `experience_v2` | TBS 反查最小 RBG，同 TTI 可排多个 UE，尾料可留空 | 每 TB 最多一次 IR/CC；失败字节留 FIFO，后续成为新 TB | DRB busy-period + FIFO 到达对象；小 burst 可按 fractional slot | 大小包混跑、等待/PDB、按需分配 |
 
 两者是**两个评估 profile**，不是一个算法的快慢档。当前 `experience_v2` 支持
@@ -474,9 +474,14 @@ bitmap TBS、payload/padding/useful bytes，并与 planner 估值逐值硬比较
 
 ## MU `mu_enabled`
 
-默认 **False**，先看清 SU 基线。`legacy_v1` 仍保留历史聚合 `mu_gain` 近似；
-`experience_v2` 不再用标量比值回乘，而是在建表阶段预计算所有两用户、每用户 rank2
-的 pair 链路。TTI 主循环先固定 PF anchor，再枚举全部伙伴；缺 pair、相关性超门限、
+默认 **False**，先看清 SU 基线。**两种模式现在都读同一张 pair 表**
+（`mu_accounting="pair_table"`，默认）：在建表阶段预计算所有两用户、每用户 rank2
+的 pair 链路，MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、
+误块抽签用 pair 的 `true_sinr_db`。`legacy_v1` 的历史聚合 `mu_gain` 标量近似降级为
+`mu_accounting="se_ratio_legacy"`，**只用于复现旧结果**——它只缩 TBS、不进误块抽签，
+结果系统性乐观，选用时会写进 `notes`。capacity 的 SU/MU 判决是逐 TTI 比聚合谱效
+（还要过 predicted BLER ≤ 0.5 的准入），拒配对的两种原因分别计入
+`mu_pair_rejects` 与 `mu_su_wins`；重传恒按 SU 重发（冻结身份不许改 SINR/TBS）。TTI 主循环先固定 PF anchor，再枚举全部伙伴；缺 pair、相关性超门限、
 总层数超限或 predicted BLER > 0.5 都留下明确 rejection reason。可行伙伴按
 `sum(min(queue,TBS))/shared_RBG` 评分，不再取 PF 顺序里的第一个可行者。
 

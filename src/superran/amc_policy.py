@@ -103,6 +103,8 @@ def feedback_effective_offsets(pattern: str) -> tuple[int, ...]:
 # 二、Rank 策略
 # ---------------------------------------------------------------------------
 RANK_MODES: tuple[str, ...] = ("fixed", "adaptive", "link_table")
+SE_SAMPLE_SCOPES: tuple[str, ...] = ("snapshot", "tti")
+RANK_SWITCH_RULES: tuple[str, ...] = ("spec_asymmetric", "unified_ratio")
 
 
 @dataclass
@@ -113,9 +115,8 @@ class RankConfig:
     自适应本身，都应该保持固定——否则 rank 会成为一个没人控制的自由度，
     把别的对比全部污染。
 
-    ``mode='adaptive'`` 的常数目前是**工程默认，尚未按现场标定**：
-    ``switch_se_ratio`` / ``probe_*`` / ``fallback_*`` 都需要用户确认。
-    ``probe_enabled`` 因此默认关闭——未标定的探测机制不应该在默认路径上跑。
+    ``mode='adaptive'`` 的常数**全部来自用户 2026-09-02 给的现场实现规格**
+    （生产级 5G MAC 仿真蓝本），不再是工程猜测。逐项见各字段注释。
 
     ``mode='link_table'`` 是**历史行为**：直接跟随链路表的逐快照
     ``best_rank``，也就是每个信道快照都可能换 rank。它保留下来只有一个用途
@@ -125,35 +126,99 @@ class RankConfig:
     mode: str = "fixed"
     #: ``fixed`` 模式下的固定 rank；也是 ``adaptive`` 的初始 rank。
     fixed_rank: int = 2
-    #: 自适应决策周期。1000 个 TTI 在 30 kHz 下是 500 ms。
+
+    # --- 判决节拍 ---------------------------------------------------------
+    #: 判决周期 ``rank_judge_period``。1000 个 TTI 在 30 kHz 下是 500 ms。
     period_tti: int = 1000
-    #: 最优/当前 的滤波谱效比要超过它才允许切换；迟滞就在这里。
-    switch_se_ratio: float = 1.05
-    #: 逐 rank 估计谱效的一阶 IIR 系数，与 CQI 滤波同一形式。
-    se_filter_lambda: float = 0.25
-    #: Rank 探测。ρ 的现场定义尚未确认，这里用**短时首传 ACK 率**当代理，
-    #: 因此默认关闭：没标定的机制不进默认路径。
-    probe_enabled: bool = False
-    probe_ack_ratio_threshold: float = 0.95
-    probe_mcs_threshold: int = 22
-    #: 抬升后的回退观察窗。窗内首传误码过高、或实际谱效反而下降就退回。
+    #: 触发一次判决所需的最少谱效滤波样本数（现场 ``min_filter_samples``）。
+    min_filter_samples: int = 3
+
+    # --- 迟滞门限 ---------------------------------------------------------
+    #: 升 rank 迟滞：``滤波谱效[最优] > 滤波谱效[当前] × gain_factor_raise``
+    #: 才允许升。现场默认 1.1，即最优 rank 的谱效要高出 10%。
+    gain_factor_raise: float = 1.1
+    #: 降 rank 迟滞。**它的含义取决于 ``switch_rule``**，见该字段。
+    gain_factor_reduce: float = 1.1
+    #: 切换判据的写法。**两份现场来源对降 rank 这一侧写得不一样**，而且两种写法
+    #: 会让 ``gain_factor_reduce`` 的含义**正好相反**，所以必须显式选、并随结果报。
+    #:
+    #: ``unified_ratio``（**默认**，用户 2026-09-03 的裁决）
+    #:     两个方向共用一条式子 ``se[best] > G · se[cur]``，G 按方向取
+    #:     ``G↑`` / ``G↓``。默认两个都是 1.1，也就是**按滤波谱效最大化选 rank，
+    #:     但任何方向的切换都要求最优 rank 超过当前 rank 10% 才允许**——
+    #:     这是用户给的判据原话。常数在两个方向上含义相同，不会读反。
+    #:
+    #: ``spec_asymmetric``（实现规格文档的写法，保留作对照）
+    #:     升：``se[best] > G↑ · se[cur]`` 才升。
+    #:     降：``se[cur] > G↓ · se[best]`` 时**保持不变**，否则降。
+    #:     因为 best 由 argmax 选出、``se[best] >= se[cur]`` 恒成立，
+    #:     所以 ``G↓ >= 1`` 时"保持不变"永远为假 → **降 rank 立即生效**。
+    #:     ``G↓ = 0.9`` 时降的门槛是 ``se[best] >= se[cur]/0.9``，即 **11.1%**
+    #:     余量——和默认那条同一个意图，只是数值差 1.1 个百分点。
+    #:
+    #: 也就是说同一个 ``G↓ = 1.1``：``unified_ratio`` 下降要 10% 余量，
+    #: ``spec_asymmetric`` 下降是"立即"。**含义相反，必须连 switch_rule 一起读**
+    #: ——这也是排查现场 rank 自适应行为异常时首先要钉死的一条。
+    #: 两条路径的实际判据都写进 diagnostics。
+    switch_rule: str = "unified_ratio"
+    #: 逐 rank 估计谱效的一阶 IIR 系数 ``se_filter_beta``：
+    #: ``filt <- beta*obs + (1-beta)*filt``。现场默认 0.1（强平滑）。
+    se_filter_beta: float = 0.1
+    #: 谱效样本的采集粒度。现场是**每 TTI** 累积一次；SuperRAN 的 AMC 坐标
+    #: （CQI 门限 + BF Gain）是**逐信道快照**的分段常数，逐 TTI 采样等于把同一个
+    #: 数重复上百次，会让 beta=0.1 的平滑在快照之间完全失效。默认因此按
+    #: ``snapshot`` 采样——一次真正的新观测算一个样本。要复现现场节拍就设成
+    #: ``tti``。这是**口径差异，不是等价实现**，必须随结果一起报。
+    se_sample_scope: str = "snapshot"
+
+    # --- 谱效估计的两个修正 -----------------------------------------------
+    #: 最小 MCS 闸门：该 rank 预估 MCS 低于它就把谱效置 0（这一层基本传不动，
+    #: 不配当有效层）。现场默认 9。
+    min_mcs_threshold: int = 9
+    #: 各 rank 的资源消耗系数（高 rank 的 DMRS 开销更大），谱效乘上它。
+    #: 现场默认 ``[1.0, 0.97, 0.95, 0.93]``，索引即 rank-1。
+    resource_cost_ratio: tuple[float, ...] = (1.0, 0.97, 0.95, 0.93)
+
+    # --- 升 rank 之后的快速回退监测 ---------------------------------------
     fallback_enabled: bool = True
-    fallback_window_ms: float = 200.0
-    fallback_bler_threshold: float = 0.2
-    #: 观察窗内至少要有这么多次首传才允许判决，否则样本太少不作数。
-    fallback_min_first_tx: int = 20
-    #: 回退之后把"刚退下来的那一档及以上"封住几个决策周期。语义是
-    #: **从回退那一刻起、连续 N 个决策周期内都不许再升到该档**：N=1 只挡住
-    #: 同一次 step 里紧接着的那次周期决策，N=2 再多挡一个完整周期。
-    #: **没有这一条就必然乒乓**：估计谱效说该升、实测误码说该降，
-    #: 两个判据每个周期互相推翻一次。0 表示不封，只用于消融。
-    fallback_bar_periods: int = 2
+    #: 硬门限：监测期内新增 NACK 超过它**立即回退**，不等窗口结束。
+    quick_fallback_nack_thld: int = 90
+    #: 软门限：窗口结束时初传 BLER ≥ 它就回退。
+    quick_fallback_ibler_thld: float = 0.3
+    #: 软门限：窗口结束时 ``新 rank 实测谱效 / 原 rank 实测谱效`` 低于它就回退。
+    #: 1.0 的含义是"没有变得更好就退回去"。
+    quick_fallback_se_ratio_thld: float = 1.0
+    #: 窗口结束时调度次数少于它，样本不足，直接退出监测（不判成功也不判失败）。
+    quick_fallback_min_sched: int = 15
+    #: 监测窗长上限，实际取 ``min(该值, 当前判决周期 - 10)``。
+    quick_fallback_window_tti: int = 400
+    #: 每回退一次，判决周期变成 ``period × 2^n``，n 最多到这里（默认 4 → ×16）。
+    #: 升 rank 成功或正常降 rank 时 n 清零。**这是现场的防乒乓机制**：
+    #: 估计谱效说该升、实测误码说该降，两个判据每周期互相推翻一次，
+    #: 指数退避让重试越来越稀。
+    max_backoff_times: int = 4
+
+    # --- 主动向上探测（现场 RankProbeSwitch，默认关）---------------------
+    probe_enabled: bool = False
+    #: 逐 rank 的探测 MCS 门限：当前 rank 的平均 MCS 高于 ``[rank-1]`` 才探。
+    #: 现场硬编码 ``{1:9, 2:22, 3:20, 4:18}``。
+    probe_mcs_threshold_by_rank: tuple[int, ...] = (9, 22, 20, 18)
 
     def __post_init__(self) -> None:
         if self.mode not in RANK_MODES:
             raise ValueError(f"rank mode 只支持 {RANK_MODES}，收到 {self.mode!r}")
-        for name in ("fixed_rank", "period_tti", "probe_mcs_threshold",
-                     "fallback_min_first_tx", "fallback_bar_periods"):
+        if self.switch_rule not in RANK_SWITCH_RULES:
+            raise ValueError(
+                f"switch_rule 只支持 {RANK_SWITCH_RULES}，"
+                f"收到 {self.switch_rule!r}")
+        if self.se_sample_scope not in SE_SAMPLE_SCOPES:
+            raise ValueError(
+                f"se_sample_scope 只支持 {SE_SAMPLE_SCOPES}，"
+                f"收到 {self.se_sample_scope!r}")
+        for name in ("fixed_rank", "period_tti", "min_filter_samples",
+                     "min_mcs_threshold", "quick_fallback_nack_thld",
+                     "quick_fallback_min_sched", "quick_fallback_window_tti",
+                     "max_backoff_times"):
             value = getattr(self, name)
             if (isinstance(value, (bool, np.bool_))
                     or not isinstance(value, (int, np.integer))):
@@ -162,26 +227,44 @@ class RankConfig:
             raise ValueError("fixed_rank 必须至少为 1")
         if int(self.period_tti) < 1:
             raise ValueError("period_tti 必须至少为 1")
-        if int(self.probe_mcs_threshold) < 0:
-            raise ValueError("probe_mcs_threshold 必须非负")
-        if int(self.fallback_min_first_tx) < 1:
-            raise ValueError("fallback_min_first_tx 必须至少为 1")
-        if int(self.fallback_bar_periods) < 0:
-            raise ValueError("fallback_bar_periods 必须非负")
-        if not np.isfinite(self.switch_se_ratio) or float(self.switch_se_ratio) < 1.0:
-            raise ValueError("switch_se_ratio 必须是 >= 1 的有限数（1.0 表示无迟滞）")
-        if (not np.isfinite(self.se_filter_lambda)
-                or not 0.0 < float(self.se_filter_lambda) <= 1.0):
-            raise ValueError("se_filter_lambda 必须在 (0,1]")
-        if not np.isfinite(self.probe_ack_ratio_threshold) or not (
-                0.0 <= float(self.probe_ack_ratio_threshold) <= 1.0):
-            raise ValueError("probe_ack_ratio_threshold 必须在 [0,1]")
-        if (not np.isfinite(self.fallback_window_ms)
-                or float(self.fallback_window_ms) <= 0):
-            raise ValueError("fallback_window_ms 必须是有限正数")
-        if not np.isfinite(self.fallback_bler_threshold) or not (
-                0.0 < float(self.fallback_bler_threshold) < 1.0):
-            raise ValueError("fallback_bler_threshold 必须在 (0,1)")
+        if int(self.min_filter_samples) < 1:
+            raise ValueError("min_filter_samples 必须至少为 1")
+        if int(self.min_mcs_threshold) < 0:
+            raise ValueError("min_mcs_threshold 必须非负")
+        if int(self.quick_fallback_nack_thld) < 1:
+            raise ValueError("quick_fallback_nack_thld 必须至少为 1")
+        if int(self.quick_fallback_min_sched) < 1:
+            raise ValueError("quick_fallback_min_sched 必须至少为 1")
+        if int(self.quick_fallback_window_tti) < 1:
+            raise ValueError("quick_fallback_window_tti 必须至少为 1")
+        if int(self.max_backoff_times) < 0:
+            raise ValueError("max_backoff_times 必须非负")
+        for name in ("gain_factor_raise", "gain_factor_reduce"):
+            value = getattr(self, name)
+            if not np.isfinite(value) or float(value) <= 0:
+                raise ValueError(f"{name} 必须是有限正数")
+        if float(self.gain_factor_raise) < 1.0:
+            raise ValueError(
+                "gain_factor_raise < 1 会让升 rank 比不升还容易，"
+                "那不是迟滞而是反向偏置；现场值为 1.1")
+        if (not np.isfinite(self.se_filter_beta)
+                or not 0.0 < float(self.se_filter_beta) <= 1.0):
+            raise ValueError("se_filter_beta 必须在 (0,1]")
+        if not np.isfinite(self.quick_fallback_ibler_thld) or not (
+                0.0 < float(self.quick_fallback_ibler_thld) < 1.0):
+            raise ValueError("quick_fallback_ibler_thld 必须在 (0,1)")
+        if (not np.isfinite(self.quick_fallback_se_ratio_thld)
+                or float(self.quick_fallback_se_ratio_thld) <= 0):
+            raise ValueError("quick_fallback_se_ratio_thld 必须是有限正数")
+        ratios = tuple(float(x) for x in self.resource_cost_ratio)
+        if not ratios or any(
+                (not np.isfinite(x)) or x <= 0 for x in ratios):
+            raise ValueError("resource_cost_ratio 必须是非空的有限正数序列")
+        object.__setattr__(self, "resource_cost_ratio", ratios)
+        probes = tuple(int(x) for x in self.probe_mcs_threshold_by_rank)
+        if not probes or any(x < 0 for x in probes):
+            raise ValueError("probe_mcs_threshold_by_rank 必须是非空非负整数序列")
+        object.__setattr__(self, "probe_mcs_threshold_by_rank", probes)
         for name in ("probe_enabled", "fallback_enabled"):
             if not isinstance(getattr(self, name), (bool, np.bool_)):
                 raise ValueError(f"{name} 必须是布尔值")
@@ -208,25 +291,57 @@ class RankConfig:
             return out
         out.update({
             "period_tti": int(self.period_tti),
-            "switch_se_ratio": float(self.switch_se_ratio),
-            "se_filter_lambda": float(self.se_filter_lambda),
-            "probe_enabled": bool(self.probe_enabled),
-            "probe_ack_ratio_threshold": float(self.probe_ack_ratio_threshold),
-            "probe_mcs_threshold": int(self.probe_mcs_threshold),
-            "probe_rho_definition": (
-                "short-term first-transmission ACK ratio used as an explicit "
-                "proxy; the field rho definition is not confirmed"),
+            "min_filter_samples": int(self.min_filter_samples),
+            "gain_factor_raise": float(self.gain_factor_raise),
+            "gain_factor_reduce": float(self.gain_factor_reduce),
+            "switch_rule": str(self.switch_rule),
+            "raise_criterion": "se[best] > gain_factor_raise * se[current]",
+            "reduce_criterion": (
+                "hold while se[current] > gain_factor_reduce * se[best]"
+                if self.switch_rule == "spec_asymmetric"
+                else "switch down only if se[best] > gain_factor_reduce"
+                     " * se[current]"),
+            "reduce_hysteresis_active": bool(
+                float(self.gain_factor_reduce) < 1.0
+                if self.switch_rule == "spec_asymmetric"
+                else float(self.gain_factor_reduce) > 1.0),
+            # 两种写法下"降 rank 需要多大余量"不是同一个换算，直接算出来。
+            "reduce_margin_pct": (
+                round((1.0 / float(self.gain_factor_reduce) - 1.0) * 100.0, 2)
+                if self.switch_rule == "spec_asymmetric"
+                else round((float(self.gain_factor_reduce) - 1.0) * 100.0, 2)),
+            "raise_margin_pct": round(
+                (float(self.gain_factor_raise) - 1.0) * 100.0, 2),
+            "reduce_hysteresis_note": (
+                "最优 rank 由 argmax 选出，se[best] >= se[current] 恒成立。"
+                "spec_asymmetric 下 gain_factor_reduce >= 1 → 降 rank 立即生效"
+                "（<1 才有降迟滞）；unified_ratio 下正好相反，>1 → 降 rank 也要"
+                "那么多余量、UE 可能卡在高 rank 下不来。同一个常数在两种写法下"
+                "含义相反，必须连 switch_rule 一起读"),
+            "se_filter_beta": float(self.se_filter_beta),
+            "se_sample_scope": str(self.se_sample_scope),
+            "se_sample_scope_note": (
+                "snapshot：一次新的 AMC 坐标算一个样本（默认，因为坐标在快照内"
+                "是常数）；tti：复现现场的逐 TTI 累积节拍。两者不等价"),
+            "min_mcs_threshold": int(self.min_mcs_threshold),
+            "resource_cost_ratio": [float(x) for x in self.resource_cost_ratio],
             "fallback_enabled": bool(self.fallback_enabled),
-            "fallback_window_ms": float(self.fallback_window_ms),
-            "fallback_bler_threshold": float(self.fallback_bler_threshold),
-            "fallback_min_first_tx": int(self.fallback_min_first_tx),
-            "fallback_bar_periods": int(self.fallback_bar_periods),
+            "quick_fallback_nack_thld": int(self.quick_fallback_nack_thld),
+            "quick_fallback_ibler_thld": float(self.quick_fallback_ibler_thld),
+            "quick_fallback_se_ratio_thld": float(
+                self.quick_fallback_se_ratio_thld),
+            "quick_fallback_min_sched": int(self.quick_fallback_min_sched),
+            "quick_fallback_window_tti": int(self.quick_fallback_window_tti),
+            "max_backoff_times": int(self.max_backoff_times),
+            "probe_enabled": bool(self.probe_enabled),
+            "probe_mcs_threshold_by_rank": [
+                int(x) for x in self.probe_mcs_threshold_by_rank],
             "anti_ping_pong": (
-                "hysteresis on the filtered-SE ratio, a periodic decision "
-                "cadence, and a post-fallback bar on the reverted rank"),
+                "升 rank 的 10% 谱效迟滞、周期判决节拍、升 rank 后的快速回退"
+                "监测，以及回退后判决周期的指数退避"),
             "constants_status": (
-                "engineering defaults pending field calibration; "
-                "switch_se_ratio / probe_* / fallback_* are not standard values"),
+                "全部取自用户 2026-09-02 提供的现场实现规格（生产级 5G MAC "
+                "仿真蓝本）；se_sample_scope 是 SuperRAN 侧显式的口径选择"),
         })
         return out
 
@@ -239,10 +354,16 @@ class RankController:
     对不齐了。
 
     ``fixed`` 模式下除了一次上限钳位之外什么都不做，开销为零。
+
+    时序（与现场规格第 9 节一致）::
+
+        每 TTI:  累积谱效滤波样本 → 快速回退监测（可立即回退）
+        每 period TTI 且样本数够: 迟滞门限判决 → 升则进入监测、降则直接生效
+        回退发生: 恢复 rank 与 OLLA 偏置，判决周期 ×2（最多 ×2^max_backoff）
     """
 
     def __init__(self, cfg: RankConfig, n_ue: int, *, tti_ms: float,
-                 max_rank_available: int) -> None:
+                 max_rank_available: int, snapshot_ms: float = 5.0) -> None:
         if int(n_ue) < 1:
             raise ValueError("n_ue 必须至少为 1")
         if not np.isfinite(tti_ms) or float(tti_ms) <= 0:
@@ -252,41 +373,45 @@ class RankController:
         self.cfg = cfg
         self.n_ue = int(n_ue)
         self.tti_ms = float(tti_ms)
+        if not np.isfinite(snapshot_ms) or float(snapshot_ms) <= 0:
+            raise ValueError("snapshot_ms 必须是有限正数")
+        self.snapshot_ms = float(snapshot_ms)
         self.max_rank = int(max_rank_available)
         start = min(int(cfg.fixed_rank), self.max_rank)
         self._rank = np.full(self.n_ue, start, dtype=int)
-        self._fallback_window_tti = max(
-            1, int(round(float(cfg.fallback_window_ms) / self.tti_ms)))
         # 逐 rank 的滤波估计谱效；NaN 表示还没有观测。
         self._se_filt = np.full((self.n_ue, self.max_rank), np.nan, dtype=float)
+        self._filter_count = np.zeros(self.n_ue, dtype=int)
         self._last_snap = np.full(self.n_ue, -1, dtype=int)
-        # 实际（ACK 加权）谱效的滤波值，用于回退判决第二条。
+        self._last_judge_tti = np.zeros(self.n_ue, dtype=int)
+        self._backoff = np.zeros(self.n_ue, dtype=int)
+        # 实际（ACK 加权）谱效的滤波值，用于快速回退的谱效比判据。
         self._realized_se = np.full(self.n_ue, np.nan, dtype=float)
-        # 回退观察窗状态
-        self._probation_until = np.full(self.n_ue, -1, dtype=int)
-        self._probation_prev_rank = np.zeros(self.n_ue, dtype=int)
-        self._probation_prev_se = np.full(self.n_ue, np.nan, dtype=float)
-        self._probation_tx = np.zeros(self.n_ue, dtype=int)
-        self._probation_nack = np.zeros(self.n_ue, dtype=int)
-        self._probation_se_sum = np.zeros(self.n_ue, dtype=float)
-        # 回退之后封住的最低 rank（含它自己）与解封时刻。
-        self._barred_from = np.zeros(self.n_ue, dtype=int)
-        self._bar_until = np.full(self.n_ue, -1, dtype=int)
-        # 短时 ACK 率（探测用代理）
+        # 快速回退监测状态（现场 raise_flag / rsvd_* / fallback_*）
+        self._monitor_until = np.full(self.n_ue, -1, dtype=int)
+        self._rsvd_rank = np.zeros(self.n_ue, dtype=int)
+        self._rsvd_olla = np.full(self.n_ue, np.nan, dtype=float)
+        self._rsvd_se = np.full(self.n_ue, np.nan, dtype=float)
+        self._mon_tx = np.zeros(self.n_ue, dtype=int)
+        self._mon_nack = np.zeros(self.n_ue, dtype=int)
+        self._mon_se_sum = np.zeros(self.n_ue, dtype=float)
+        # 短时统计（探测用）
         self._short_tx = np.zeros(self.n_ue, dtype=int)
-        self._short_ack = np.zeros(self.n_ue, dtype=int)
         self._short_mcs_sum = np.zeros(self.n_ue, dtype=float)
         self.events: list[dict[str, Any]] = []
         self._counts = {
-            "switch_up": 0, "switch_down": 0, "probe_up": 0, "fallback": 0,
-            "period_decisions": 0, "blocked_by_hysteresis": 0,
-            "blocked_by_fallback_bar": 0,
+            "switch_up": 0, "switch_down": 0, "probe_up": 0,
+            "fallback_hard_nack": 0, "fallback_ibler": 0, "fallback_se_ratio": 0,
+            "monitor_exit_low_sample": 0, "raise_confirmed": 0,
+            "period_decisions": 0, "blocked_by_raise_hysteresis": 0,
+            "blocked_by_reduce_hysteresis": 0, "blocked_by_filter_samples": 0,
+            "blocked_by_monitor": 0,
         }
 
     # -- 查询 ----------------------------------------------------------------
     @property
     def adaptive(self) -> bool:
-        """是否需要维护自适应状态（滤波、周期决策、回退窗）。"""
+        """是否需要维护自适应状态（滤波、周期决策、回退监测）。"""
         return self.cfg.mode == "adaptive"
 
     def rank_of(self, ue: int) -> int:
@@ -305,198 +430,269 @@ class RankController:
     def ranks(self) -> np.ndarray:
         return self._rank.copy()
 
+    def judge_period_tti(self, ue: int) -> int:
+        """该 UE 当前生效的判决周期（含指数退避）。"""
+        return int(self.cfg.period_tti) * (2 ** int(self._backoff[int(ue)]))
+
     # -- 观测 ----------------------------------------------------------------
-    def observe_link(self, ue: int, snap: int, se_by_rank: Any) -> None:
+    def observe_link(self, ue: int, snap: int, se_by_rank: Any,
+                     mcs_by_rank: Any = None) -> None:
         """更新某个 UE 的逐 rank 滤波谱效。
 
         ``se_by_rank[r-1]`` 是"如果这个 TTI 用 rank r 发，按当前 AMC 坐标
         （CQI 门限 + BF Gain）叠加 OLLA 后会选到的 MCS，其 rank×谱效是多少"。
-        调用方每个 UE 每个**信道快照**调一次就够——AMC 坐标本来就只在快照
-        边界变，逐 TTI 重算只是把同一个数再算十遍。
+
+        进滤波之前先做现场规格的两个修正：
+
+        * **最小 MCS 闸门**：``mcs_by_rank[r-1] < min_mcs_threshold`` 时该
+          rank 的谱效置 0——那一层基本传不动，不配当有效层。不给
+          ``mcs_by_rank`` 就跳过这一步（手工构造的调用方）。
+        * **资源消耗加权**：乘 ``resource_cost_ratio[r-1]``，体现高 rank 的
+          DMRS 开销。序列比 ``max_rank`` 短时，尾部按最后一个值延用。
+
+        采样粒度由 ``se_sample_scope`` 决定，见该字段的说明。
         """
         if not self.adaptive:
             return
         index = int(ue)
-        if int(snap) == int(self._last_snap[index]):
-            return
+        if self.cfg.se_sample_scope == "snapshot":
+            if int(snap) == int(self._last_snap[index]):
+                return
         self._last_snap[index] = int(snap)
-        lam = float(self.cfg.se_filter_lambda)
+        beta = float(self.cfg.se_filter_beta)
         values = np.asarray(se_by_rank, dtype=float)
         limit = min(self.max_rank, int(values.size))
+        if limit < 1:
+            return
+        mcs_values = (None if mcs_by_rank is None
+                      else np.asarray(mcs_by_rank, dtype=float))
+        ratios = self.cfg.resource_cost_ratio
+        updated = False
         for rank_index in range(limit):
             observation = float(values[rank_index])
             if not math.isfinite(observation):
                 continue
+            if (mcs_values is not None and rank_index < int(mcs_values.size)
+                    and float(mcs_values[rank_index])
+                    < float(self.cfg.min_mcs_threshold)):
+                observation = 0.0
+            observation *= float(
+                ratios[rank_index] if rank_index < len(ratios) else ratios[-1])
             current = self._se_filt[index, rank_index]
             self._se_filt[index, rank_index] = (
                 observation if not math.isfinite(current)
-                else current + lam * (observation - current))
+                else current + beta * (observation - current))
+            updated = True
+        if updated:
+            self._filter_count[index] += 1
 
     def record_first_tx(self, ue: int, *, ack: bool, mcs: int,
                         realized_se: float) -> None:
         """登记一次**首传**结果。重传不进任何 rank 判据。
 
         ``realized_se`` 是这次首传实际兑现的谱效：ACK 时是 ``rank × MCS 谱效``，
-        NACK 时是 0。回退判决的第二条"初传误码不高但实际频谱效率降低"用的
-        就是它的滤波值——只看 BLER 看不出这一条。
+        NACK 时是 0。快速回退的谱效比判据用的就是它的滤波值——只看 BLER 看不
+        出"误码没超标但谱效反而降了"这一条。
         """
         if not self.adaptive:
             return
         index = int(ue)
-        lam = float(self.cfg.se_filter_lambda)
+        beta = float(self.cfg.se_filter_beta)
         value = float(realized_se)
         current = self._realized_se[index]
         self._realized_se[index] = (
             value if not math.isfinite(current)
-            else current + lam * (value - current))
+            else current + beta * (value - current))
         self._short_tx[index] += 1
-        self._short_ack[index] += int(bool(ack))
         self._short_mcs_sum[index] += float(mcs)
-        if self._probation_until[index] >= 0:
-            self._probation_tx[index] += 1
-            self._probation_nack[index] += int(not bool(ack))
-            self._probation_se_sum[index] += value
+        if self._monitor_until[index] >= 0:
+            self._mon_tx[index] += 1
+            self._mon_nack[index] += int(not bool(ack))
+            self._mon_se_sum[index] += value
 
     # -- 周期决策 ------------------------------------------------------------
-    def step(self, tti: int) -> None:
-        """在每个 TTI 开始时调用：先结回退观察窗，再看是否到自适应周期。"""
+    def step(self, tti: int, *,
+             olla_by_ue: Any = None) -> list[tuple[int, float]]:
+        """每个 TTI 开始时调用。
+
+        先跑快速回退监测（可能立即回退），再看是否到判决周期。
+
+        ``olla_by_ue`` 给定时，升 rank 会把该 UE 当前的 OLLA 偏置存成回退点；
+        回退时把它连同 rank 一起恢复——现场的 ``rsvd_olla`` 就是这个意思，
+        因为新 rank 上的 OLLA 是在错误的工作点上收敛出来的，退回旧 rank 时
+        必须一起退回，否则旧 rank 会带着一个别人的偏置继续跑。
+
+        返回 ``[(ue, 恢复后的 OLLA 偏置), ...]``，调用方按它写回自己的 OLLA
+        状态。没有回退发生时返回空列表。
+        """
         if not self.adaptive:
-            return
+            return []
         now = int(tti)
+        restores: list[tuple[int, float]] = []
         if self.cfg.fallback_enabled:
-            self._resolve_probation(now)
-        if now > 0 and now % int(self.cfg.period_tti) == 0:
+            restores = self._check_quick_fallback(now)
+        for ue in range(self.n_ue):
+            if int(self._monitor_until[ue]) >= 0:
+                continue
+            if now - int(self._last_judge_tti[ue]) < self.judge_period_tti(ue):
+                continue
+            self._last_judge_tti[ue] = now
             self._counts["period_decisions"] += 1
-            self._periodic_decision(now)
-
-    def _resolve_probation(self, tti: int) -> None:
-        for ue in range(self.n_ue):
-            deadline = int(self._probation_until[ue])
-            if deadline < 0 or tti < deadline:
-                continue
-            tx = int(self._probation_tx[ue])
-            reason = ""
-            if tx >= int(self.cfg.fallback_min_first_tx):
-                bler = float(self._probation_nack[ue]) / max(tx, 1)
-                realized = float(self._probation_se_sum[ue]) / max(tx, 1)
-                previous = float(self._probation_prev_se[ue])
-                if bler > float(self.cfg.fallback_bler_threshold):
-                    reason = "first_tx_bler_above_threshold"
-                elif math.isfinite(previous) and realized < previous:
-                    reason = "realized_se_regressed"
-            if reason:
-                new_rank = int(self._probation_prev_rank[ue])
-                reverted_from = int(self._rank[ue])
-                self._log(tti, ue, reverted_from, new_rank, reason)
-                self._rank[ue] = new_rank
-                self._counts["fallback"] += 1
-                bar_periods = int(self.cfg.fallback_bar_periods)
-                if bar_periods > 0:
-                    # 刚被实测否掉的那一档先别再试，否则下一次周期决策
-                    # 会立刻按估计谱效把它顶回去。
-                    self._barred_from[ue] = reverted_from
-                    self._bar_until[ue] = (
-                        tti + bar_periods * int(self.cfg.period_tti))
-            self._clear_probation(ue)
-
-    def _periodic_decision(self, tti: int) -> None:
-        for ue in range(self.n_ue):
-            if int(self._probation_until[ue]) >= 0:
-                # 观察窗还没结，这一轮不动它。
+            if int(self._filter_count[ue]) < int(self.cfg.min_filter_samples):
+                self._counts["blocked_by_filter_samples"] += 1
                 self._reset_short_term(ue)
                 continue
-            current = int(self._rank[ue])
-            filtered = self._se_filt[ue]
-            if not np.any(np.isfinite(filtered)):
-                self._reset_short_term(ue)
-                continue
-            barred = self._barred_rank(tti, ue)
-            if barred:
-                # 先看"没有封锁的话会选谁"——只有当封锁真的挡掉了赢家时
-                # 才计数，否则这个诊断会把无关的周期也算进去。
-                if int(np.nanargmax(filtered)) + 1 >= barred:
-                    self._counts["blocked_by_fallback_bar"] += 1
-                filtered = filtered.copy()
-                filtered[barred - 1:] = np.nan
-                if not np.any(np.isfinite(filtered)):
-                    self._reset_short_term(ue)
-                    continue
-            best_index = int(np.nanargmax(filtered))
-            best_rank = best_index + 1
-            best_se = float(filtered[best_index])
-            current_se = float(filtered[current - 1])
-            switched = False
-            if best_rank != current and math.isfinite(current_se):
-                ratio = best_se / max(abs(current_se), _EPS)
-                if ratio > float(self.cfg.switch_se_ratio):
-                    self._apply_change(
-                        tti, ue, best_rank, "filtered_se_ratio", best_se)
-                    switched = True
-                else:
-                    self._counts["blocked_by_hysteresis"] += 1
-            elif best_rank != current and not math.isfinite(current_se):
-                self._apply_change(
-                    tti, ue, best_rank, "current_rank_unobserved", best_se)
-                switched = True
-            if not switched and self.cfg.probe_enabled:
-                self._maybe_probe(tti, ue)
+            self._judge(now, ue, olla_by_ue)
             self._reset_short_term(ue)
+        return restores
 
-    def _barred_rank(self, tti: int, ue: int) -> int:
-        """回退封锁：返回被封住的最低 rank（0 表示没有封锁）。"""
-        if int(self._bar_until[ue]) < 0:
-            return 0
-        if tti >= int(self._bar_until[ue]):
-            self._bar_until[ue] = -1
-            self._barred_from[ue] = 0
-            return 0
-        return int(self._barred_from[ue])
+    def _check_quick_fallback(self, tti: int) -> list[tuple[int, float]]:
+        """升 rank 之后的监测窗，每 TTI 跑一次。"""
+        restores: list[tuple[int, float]] = []
+        for ue in range(self.n_ue):
+            if int(self._monitor_until[ue]) < 0:
+                continue
+            new_nack = int(self._mon_nack[ue])
+            # 硬门限：NACK 增量超限，立即回退，不等窗口结束。
+            if new_nack > int(self.cfg.quick_fallback_nack_thld):
+                restores.append(self._do_fallback(tti, ue, "hard_nack"))
+                continue
+            if tti < int(self._monitor_until[ue]):
+                continue
+            sched = int(self._mon_tx[ue])
+            if sched < int(self.cfg.quick_fallback_min_sched):
+                # 调度次数不足，样本不够，既不判成功也不判失败。
+                self._counts["monitor_exit_low_sample"] += 1
+                self._backoff[ue] = 0
+                self._clear_monitor(ue)
+                continue
+            ibler = float(new_nack) / max(sched, 1)
+            realized = float(self._mon_se_sum[ue]) / max(sched, 1)
+            previous = float(self._rsvd_se[ue])
+            se_ratio = (realized / previous
+                        if math.isfinite(previous) and abs(previous) > _EPS
+                        else math.inf)
+            if ibler >= float(self.cfg.quick_fallback_ibler_thld):
+                restores.append(self._do_fallback(tti, ue, "ibler"))
+            elif se_ratio < float(self.cfg.quick_fallback_se_ratio_thld):
+                restores.append(self._do_fallback(tti, ue, "se_ratio"))
+            else:
+                self._counts["raise_confirmed"] += 1
+                self._backoff[ue] = 0
+                self._clear_monitor(ue)
+        return restores
 
-    def _maybe_probe(self, tti: int, ue: int) -> None:
+    def _do_fallback(self, tti: int, ue: int, reason: str) -> tuple[int, float]:
+        old = int(self._rank[ue])
+        new_rank = int(self._rsvd_rank[ue])
+        self._log(tti, ue, old, new_rank, f"quick_fallback_{reason}")
+        self._rank[ue] = new_rank
+        self._counts[f"fallback_{reason}"] += 1
+        self._backoff[ue] = min(int(self._backoff[ue]) + 1,
+                                int(self.cfg.max_backoff_times))
+        # 回退也算一次判决，重新起算周期（此时周期已经翻倍）。
+        self._last_judge_tti[ue] = tti
+        restored = float(self._rsvd_olla[ue])
+        self._clear_monitor(ue)
+        return (int(ue), restored if math.isfinite(restored) else 0.0)
+
+    def _judge(self, tti: int, ue: int, olla_by_ue: Any) -> None:
+        current = int(self._rank[ue])
+        filtered = self._se_filt[ue]
+        if not np.any(np.isfinite(filtered)):
+            return
+        best_index = int(np.nanargmax(filtered))
+        best_rank = best_index + 1
+        best_se = float(filtered[best_index])
+        current_se = float(filtered[current - 1])
+        if best_rank == current:
+            if self.cfg.probe_enabled:
+                self._maybe_probe(tti, ue, olla_by_ue)
+            return
+        if not math.isfinite(current_se):
+            self._apply_change(tti, ue, best_rank, "current_rank_unobserved",
+                               best_se, olla_by_ue)
+            return
+        if best_rank > current:
+            # 升 rank：两种写法一致——最优谱效要比当前高出 G↑ 倍。
+            if best_se > current_se * float(self.cfg.gain_factor_raise):
+                self._apply_change(tti, ue, best_rank, "filtered_se_raise",
+                                   best_se, olla_by_ue)
+            else:
+                self._counts["blocked_by_raise_hysteresis"] += 1
+                if self.cfg.probe_enabled:
+                    self._maybe_probe(tti, ue, olla_by_ue)
+            return
+        # 降 rank。
+        if current_se <= _EPS:
+            # **当前 rank 已经被最小 MCS 闸门判成"发不出去"（谱效 0）。**
+            # 守着它没有任何上行空间，迟滞在这里没有意义——而且此时
+            # ``se[best] > 1.1 · 0`` 在 best 也是 0 时同样为假，不加这条escape
+            # 的话 UE 会卡在一个已知不可用的 rank 上。降到候选里最稳的那一档。
+            self._apply_change(tti, ue, best_rank, "current_rank_gated_out",
+                               best_se, olla_by_ue)
+            return
+        # **两份来源的写法不同，且让 G↓ 的含义正好相反**，见
+        # RankConfig.switch_rule。
+        if self.cfg.switch_rule == "spec_asymmetric":
+            hold = current_se > best_se * float(self.cfg.gain_factor_reduce)
+        else:
+            hold = not (best_se > current_se
+                        * float(self.cfg.gain_factor_reduce))
+        if hold:
+            self._counts["blocked_by_reduce_hysteresis"] += 1
+            return
+        self._apply_change(tti, ue, best_rank, "filtered_se_reduce",
+                           best_se, olla_by_ue)
+
+    def _maybe_probe(self, tti: int, ue: int, olla_by_ue: Any) -> None:
+        """主动向上探一档：当前 rank 的平均 MCS 够高就试试 rank+1。"""
         tx = int(self._short_tx[ue])
-        if tx < int(self.cfg.fallback_min_first_tx):
+        if tx < int(self.cfg.quick_fallback_min_sched):
             return
-        barred = self._barred_rank(tti, ue)
-        if barred and int(self._rank[ue]) + 1 >= barred:
-            self._counts["blocked_by_fallback_bar"] += 1
+        current = int(self._rank[ue])
+        target = min(current + 1, self.max_rank)
+        if target == current:
             return
-        ack_ratio = float(self._short_ack[ue]) / max(tx, 1)
+        thresholds = self.cfg.probe_mcs_threshold_by_rank
+        threshold = float(thresholds[min(current - 1, len(thresholds) - 1)])
         mean_mcs = float(self._short_mcs_sum[ue]) / max(tx, 1)
-        if (ack_ratio > float(self.cfg.probe_ack_ratio_threshold)
-                and mean_mcs > float(self.cfg.probe_mcs_threshold)):
-            target = min(int(self._rank[ue]) + 1, self.max_rank)
-            if target != int(self._rank[ue]):
-                self._apply_change(
-                    tti, ue, target, "probe_ack_ratio_and_mcs",
-                    float(self._se_filt[ue, target - 1]))
-                self._counts["probe_up"] += 1
+        if mean_mcs >= threshold:
+            self._apply_change(tti, ue, target, "probe_mcs_threshold",
+                               float(self._se_filt[ue, target - 1]), olla_by_ue)
+            self._counts["probe_up"] += 1
 
     def _apply_change(self, tti: int, ue: int, new_rank: int, reason: str,
-                      target_se: float) -> None:
+                      target_se: float, olla_by_ue: Any) -> None:
         old = int(self._rank[ue])
         self._log(tti, ue, old, int(new_rank), reason, target_se=target_se)
         self._rank[ue] = int(new_rank)
         if new_rank > old:
             self._counts["switch_up"] += 1
             if self.cfg.fallback_enabled:
-                self._probation_until[ue] = tti + self._fallback_window_tti
-                self._probation_prev_rank[ue] = old
-                self._probation_prev_se[ue] = float(self._realized_se[ue])
-                self._probation_tx[ue] = 0
-                self._probation_nack[ue] = 0
-                self._probation_se_sum[ue] = 0.0
+                window = min(int(self.cfg.quick_fallback_window_tti),
+                             max(1, self.judge_period_tti(ue) - 10))
+                self._monitor_until[ue] = tti + window
+                self._rsvd_rank[ue] = old
+                self._rsvd_se[ue] = float(self._realized_se[ue])
+                self._rsvd_olla[ue] = (
+                    float(np.asarray(olla_by_ue, dtype=float)[ue])
+                    if olla_by_ue is not None else float("nan"))
+                self._mon_tx[ue] = 0
+                self._mon_nack[ue] = 0
+                self._mon_se_sum[ue] = 0.0
         else:
             self._counts["switch_down"] += 1
+            self._backoff[ue] = 0
 
-    def _clear_probation(self, ue: int) -> None:
-        self._probation_until[ue] = -1
-        self._probation_tx[ue] = 0
-        self._probation_nack[ue] = 0
-        self._probation_se_sum[ue] = 0.0
+    def _clear_monitor(self, ue: int) -> None:
+        self._monitor_until[ue] = -1
+        self._mon_tx[ue] = 0
+        self._mon_nack[ue] = 0
+        self._mon_se_sum[ue] = 0.0
 
     def _reset_short_term(self, ue: int) -> None:
         self._short_tx[ue] = 0
-        self._short_ack[ue] = 0
         self._short_mcs_sum[ue] = 0.0
 
     def _log(self, tti: int, ue: int, old: int, new: int, reason: str,
@@ -517,9 +713,29 @@ class RankController:
         out["max_rank_available"] = int(self.max_rank)
         out["final_rank_by_ue"] = [int(x) for x in self._rank]
         if self.adaptive:
-            out["fallback_window_tti"] = int(self._fallback_window_tti)
-            out["barred_rank_by_ue"] = [int(x) for x in self._barred_from]
+            # **谱效滤波的记忆长度必须换算成时间报出来。** beta 是"每样本"的
+            # 系数，而样本的时间间隔由 se_sample_scope 决定：按 TTI 采样时
+            # 1/beta 个样本就是 1/beta 个 TTI，按快照采样时是 1/beta 个快照
+            # ——同一个 beta 在两种粒度下差一个 snapshot/TTI 的倍数。只报 beta
+            # 会让读者以为两者可比。
+            _per_sample_ms = (self.tti_ms if self.cfg.se_sample_scope == "tti"
+                              else self.snapshot_ms)
+            out["se_filter_memory_ms"] = round(
+                _per_sample_ms / float(self.cfg.se_filter_beta), 3)
+            out["se_filter_memory_note"] = (
+                f"1/beta = {1.0 / float(self.cfg.se_filter_beta):.1f} 个样本，"
+                f"每样本 {_per_sample_ms:g} ms（scope="
+                f"{self.cfg.se_sample_scope}）")
+            out["se_filter_samples_by_ue"] = [
+                int(x) for x in self._filter_count]
+            out["backoff_times_by_ue"] = [int(x) for x in self._backoff]
+            out["effective_judge_period_by_ue"] = [
+                self.judge_period_tti(u) for u in range(self.n_ue)]
             out.update({f"count_{k}": int(v) for k, v in self._counts.items()})
+            out["count_fallback"] = int(
+                self._counts["fallback_hard_nack"]
+                + self._counts["fallback_ibler"]
+                + self._counts["fallback_se_ratio"])
             out["events"] = list(self.events)
             out["events_truncated"] = bool(len(self.events) >= 512)
         return out

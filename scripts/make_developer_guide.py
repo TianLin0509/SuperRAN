@@ -377,15 +377,20 @@ F_GRANT_SINR = M(
     r"\sum_{b\in g}\gamma^{\mathrm{lin}}_{\mathrm{RX},b}\Big)",
 )
 F_RANK_SE = M(
-    r"\widehat{SE}_r=r\cdot SE\!\left(\mathcal S(\gamma_{\mathrm{AMC,pred}}^{(r)},"
-    r"p_{\mathrm{target}})\oplus\Delta\right),\qquad "
-    r"\bar{SE}_r\leftarrow\bar{SE}_r+\lambda_{SE}\,(\widehat{SE}_r-\bar{SE}_r)",
+    r"\widehat{SE}_r=\rho_r\cdot r\cdot SE\!\left(m_r\right)\cdot"
+    r"\mathbb 1\!\left[m_r\ge m_{\min}\right],\quad "
+    r"m_r=\mathcal S(\gamma_{\mathrm{AMC,pred}}^{(r)},p_{\mathrm{target}})"
+    r"\oplus\Delta,\quad "
+    r"\bar{SE}_r\leftarrow\bar{SE}_r+\beta\,(\widehat{SE}_r-\bar{SE}_r)",
 )
 F_RANK_SWITCH = M(
-    r"r^{\star}=\arg\max_{r\notin\mathcal B}\bar{SE}_r,\qquad "
+    r"r^{\star}=\arg\max_r\bar{SE}_r,\qquad "
     r"r\leftarrow r^{\star}\ \text{iff}\ "
-    r"\frac{\bar{SE}_{r^{\star}}}{\bar{SE}_{r_{\mathrm{cur}}}}>\eta"
-    r"\ \text{and}\ t\equiv 0 \pmod{T_{\mathrm{rank}}}",
+    r"\begin{cases}\bar{SE}_{r^{\star}}>G_{\uparrow}\,\bar{SE}_{r_{\mathrm{cur}}}"
+    r"&r^{\star}>r_{\mathrm{cur}}\\[2pt]"
+    r"\bar{SE}_{r_{\mathrm{cur}}}\le G_{\downarrow}\,\bar{SE}_{r^{\star}}"
+    r"&r^{\star}<r_{\mathrm{cur}}\end{cases}"
+    r"\quad\text{每 } T_{\mathrm{rank}}\cdot 2^{n}\text{ 个 TTI 判一次}",
 )
 F_HARQ_DELAY = M(
     r"t_{\mathrm{eff}}(t)=\min\{d>u:\ \mathrm{slot}(d)\in\{D,S\}\},\qquad "
@@ -3603,8 +3608,9 @@ def csi_page() -> Page:
     body += """
 <p>系统链路表只在 report instant 更新宽带 PMI/CQI，中间 TTI 复用最后一份已到达报告。
 CQI 的长期滤波是**一阶 IIR**：<code>s ← s + λ(x − s)</code>，第一次上报直接初始化状态。
-系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>、作用域 <code>cqi_filter_domain</code>
-默认在量化后的 CQI 档上——两者都是<strong>工程默认、尚未按现场标定</strong>，随
+系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>，该取值已对照现场 CQI
+仿真核对确认（2026-09-02）；作用域 <code>cqi_filter_domain</code> 默认在量化后的 CQI 档上，
+<strong>这一项仍是工程默认、未经现场确认</strong>。两者都随
 <code>CsiConfig.as_dict()</code> 一起上报，<code>λ=1</code> 可作不滤波的反向对照。
 CSI 报告本身的额外 feedback latency 仍未单独建模（报告在其 report snapshot 到达）；
 <strong>HARQ 的 ACK/NACK 反馈时延是另一件事，已经建模</strong>，见
@@ -4314,9 +4320,10 @@ BF Gain，得到一个只属于基站的预测坐标；在这个坐标上反折�
         "warn", "从累计平均换成一阶 IIR 是一次口径变更",
         "<p>早先的滤波是对全部历史上报取平均（expanding mean）：跑得越久，新测量的"
         "权重越小，移动性或负载变化时 CQI 根本不跟踪。现在是现场口径的一阶 IIR，"
-        "系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>——这是<strong>工程默认，"
-        "尚未按现场标定</strong>，必须随结果一起报出来。<code>λ=1</code> 关闭滤波，"
-        "可用作反向对照。</p>",
+        "系数 <code>cqi_filter_lambda</code> 默认 <strong>0.25</strong>——该取值已对照"
+        "现场 CQI 仿真核对确认（2026-09-02）。<strong>作用域</strong>选在量化后的 CQI 档"
+        "（<code>cqi_filter_domain='cqi_index'</code>）仍是工程默认、未经现场确认，"
+        "必须随结果一起报出来。<code>λ=1</code> 关闭滤波，可用作反向对照。</p>",
     )
     body += """
 <div class="toy"><div><b>实算：CQI 阶跃响应（λ=0.25）</b>
@@ -4362,7 +4369,7 @@ BF Gain 的定义、两套权怎么构造、为什么必须同 rank 同功率约
         [
             ("fixed（默认）", "全程固定 rank，默认 rank2；超过链路表可用 rank 时钳位",
              "正常仿真基线：rank 不是被研究对象时就不该让它自由变动"),
-            ("adaptive", "每 period_tti 决策一次，跨过谱效比门限才切换；抬升后进入回退观察窗",
+            ("adaptive", "每 period_tti 判一次；升 rank 要谱效高 10%，降 rank 立即生效；升完进快速回退监测",
              "研究 rank 自适应本身"),
             ("link_table", "逐快照跟随 best_rank（历史行为）",
              "只作“rank 稳定买到了什么”的反向对照，不出正式结论"),
@@ -4370,23 +4377,59 @@ BF Gain 的定义、两套权怎么构造、为什么必须同 rank 同功率约
     )
     body += F_RANK_SE + F_RANK_SWITCH
     body += """
-<div class="toy"><div><b>实算：迟滞为什么必要</b>
-<p>某个用户四个 rank 的滤波估计谱效是 5.118 / 8.424 / 8.190 / 8.640
-（分别对应 MCS19 / 16 / 11 / 8）。最优是 rank4，但
-<code>8.640 / 8.424 = 1.026</code> 没跨过默认门限 1.05，<strong>rank 不动</strong>。
-没有这道门限，两个几乎并列的候选会每个周期互相顶替一次。</p></div>
-<div><b>三重防乒乓</b><p>周期节拍（默认 1000 TTI，30&nbsp;kHz 下 500&nbsp;ms）、
-谱效比迟滞、以及抬升失败后的<strong>回退封锁</strong>：被实测否掉的那一档在接下来
-<code>fallback_bar_periods</code> 个决策周期内不允许再被选中，否则"估计说该升、
-实测说该降"会每个周期互相推翻一次。</p></div></div>
+<div class="toy"><div><b>实算：升 rank 的 10% 余量</b>
+<p>某个用户四个 rank 的滤波估计谱效是 5.118 / 8.424 / 8.190 / 8.640。最优是
+rank4，但 <code>8.640 / 8.424 = 1.026</code> 没跨过 <code>G↑ = 1.1</code>，
+<strong>rank 不动</strong>。实测三个比值 1.05 / 1.10 / 1.11 分别给出
+rank1 / rank1 / rank2——门限是<strong>严格大于</strong>。</p></div>
+<div><b>降 rank 用同一条 10% 判据，迟滞是对称的</b>
+<p>默认 <code>switch_rule="unified_ratio"</code>：两个方向共用
+<code>SE̅(r★) &gt; 1.1·SE̅(r_cur)</code>，<strong>按谱效最大化选 rank，但任何方向都要
+超过 10% 才切</strong>。实测 4% / 9% 不动、11% 才切，升降完全对称。
+<strong>例外是当前 rank 被最小 MCS 闸门判死时</strong>——此时
+<code>SE̅(cur) = SE̅(r★) = 0</code>，"超过 10%" 恒为假，会把 UE 卡在一个已知发不出去
+的 rank 上，所以这种情况直接降到最稳的一档（事件原因 <code>current_rank_gated_out</code>）。</p>
+<p>另一种写法 <code>spec_asymmetric</code>（实现规格文档那种）保留作对照，因为现场究竟
+是哪一种<strong>尚未确认</strong>。<strong>同一个 <code>G↓ = 1.1</code> 在两种写法下行为相反</strong>：
+默认这条是降要 10% 余量，那一条是降立即生效；<code>spec_asymmetric + 0.9</code> 的等效
+降档余量是 11.1%，与默认同一个意图。所以 <code>as_dict()</code> 直接报
+<code>raise_margin_pct</code> / <code>reduce_margin_pct</code>，不要自己换算。</p></div>
+<div><b>防乒乓靠四件事</b>
+<p>①判决周期（默认 1000 TTI，30&nbsp;kHz 下 500&nbsp;ms）；②样本数闸门（攒够 3 个
+谱效滤波样本才判）；③升 rank 的 10% 迟滞；④<strong>快速回退 + 判决周期指数退避</strong>：
+每回退一次周期 ×2，最多 ×2⁴ = 16000 TTI。实测周期序列 100→200→400→800→1600 后封顶。</p></div></div>
+<h2>升 rank 之后的快速回退监测</h2>
+<p>升 rank 不是无条件信任。抬升的同时保存<strong>原 rank 与原 OLLA 偏置</strong>作为回退点，
+然后进入一个 <code>min(400, 判决周期−10)</code> 个 TTI 的监测窗。窗内实时判：</p>
+"""
+    body += table(
+        ["判据", "门限（现场默认）", "什么时候判"],
+        [
+            ("监测期内新增 NACK 数", "> 90 → 立即回退", "每个 TTI，不等窗口结束"),
+            ("窗内初传 BLER", "≥ 0.3 → 回退", "窗口结束时"),
+            ("新 rank / 原 rank 的实测谱效比", "< 1.0 → 回退", "窗口结束时"),
+            ("窗内调度次数", "< 15 → 退出监测，不判成败", "窗口结束时"),
+        ],
+    )
+    body += """
+<p><strong>回退要把 OLLA 一起退回去。</strong>新 rank 上的 OLLA 是在一个错误的工作点上
+收敛出来的；只退 rank 会让旧 rank 带着别人的偏置继续跑，接下来几百个 TTI 的 MCS 全是错的。
+代码里这是 <code>RankController.step()</code> 的返回值，两条主循环都必须写回自己的 OLLA
+状态——实测抬升前 OLLA 是 −1.5、新 rank 上漂到 −4.0，回退后精确恢复成 −1.5。</p>
 """
     body += callout(
-        "warn", "自适应模式的常数还没有现场标定",
-        "<p><code>switch_se_ratio</code>、探测门限、回退门限与回退封锁周期数都是"
-        "<strong>工程默认</strong>。探测环节的 ρ 现场定义尚未确认，当前实现用"
-        "<strong>短时首传 ACK 率</strong>作显式代理，因此 <code>probe_enabled</code> "
-        "默认关闭——没标定的机制不进默认路径。这些都写在结果的 "
-        "<code>rank_policy</code> 段里。</p>",
+        "decision", "常数来自现场实现规格，采样粒度是本项目的显式选择",
+        "<p>判决周期 1000、样本数 3、G↑/G↓ = 1.1、β = 0.1、最小 MCS 闸门 9、"
+        "资源消耗系数 [1.0, 0.97, 0.95, 0.93]、回退门限 90/0.3/1.0、退避上限 4 —— "
+        "<strong>全部来自用户 2026-09-02 提供的现场实现规格</strong>，不再是工程猜测。</p>"
+        "<p><strong>只有一处是本项目自己的口径选择</strong>：现场每个 TTI 累积一个谱效"
+        "滤波样本，而 SuperRAN 的 AMC 坐标在一个信道快照内是分段常数，逐 TTI 采样等于把"
+        "同一个数重复上百次，会让 β=0.1 的平滑在快照之间完全失效。因此默认 "
+        "<code>se_sample_scope='snapshot'</code>（一次真正的新观测算一个样本），"
+        "设成 <code>'tti'</code> 可复现现场节拍。<strong>两者不等价，随结果一起报。</strong></p>"
+        "<p>主动向上探测 <code>probe_enabled</code> 仍默认关闭，与现场 "
+        "<code>RankProbeSwitch</code> 一致；打开时按逐 rank 的 MCS 门限 "
+        "<code>[9, 22, 20, 18]</code> 试 rank+1。</p>",
     )
     body += """
 <h2>第五步：ACK/NACK 要等上行时隙</h2>
@@ -4648,19 +4691,73 @@ MU计划交付79,927 B，最终走MU。若SU在本TTI能清空全部队列，则
             ("用户 exposure", "每个配对用户都暴露于该 MU RBG", "误以为每人只拿一半频域"),
             ("用户归因", "共享 RBG 在两 UE 间等分，跨用户可加", "把 exposure 相加做小区资源"),
             ("MU OLLA", "每用户一条、所有 pair 共用", "误称为 pair-specific OLLA"),
-            ("legacy MU", "MU/SU 聚合标量比值", "把它当 experience_v2 的 pair 实现"),
+            ("capacity MU（默认）", "读 pair 表：MCS 与误块抽签都用真值",
+             "以为 capacity 只有标量近似"),
+            ("se_ratio_legacy", "MU/SU 聚合标量比值，仅复现旧结果",
+             "把它当默认口径或当 pair 实现"),
         ],
     )
+    body += """
+<h2>capacity 的 MU 现在也读同一张 pair 表</h2>
+<p><strong>MU 的代价有两半，必须同时记账。</strong>一半是「发得更保守」——配对后
+每流只分到 P/4、还要吃残余干扰，MCS 应当往下走；另一半是「更容易错」——同一档
+MCS 在配对状态下的误块概率本来就更高。历史的 capacity 只认了第三种东西：把 TBS
+乘一个建表阶段测出的标量 <code>mu_se_ratio</code>，于是配对表现为「包变小，但一点
+也不更容易错」。物理上说不通，而且配对越激进结果越乐观。</p>
+"""
+    body += table(
+        ["环节", "pair_table（默认，2026-09-02 起）", "se_ratio_legacy（历史）"],
+        [
+            ("MCS 决策", "AMC 坐标 + CorrLoss + PowerLoss",
+             "SU 单用户坐标，完全不减配对代价"),
+            ("TBS", "按该 MCS 全带算，不再另乘比值",
+             "按 SU 的 MCS 算，再乘 mu_se_ratio/K"),
+            ("误块抽签", "pair 表的 true_sinr_db（ZF 权打到双方 h_true）",
+             "SU 单用户真值，MU 干扰不进分母"),
+            ("OLLA", "SU / MU 两条独立状态", "只有一条 SU OLLA"),
+            ("SU/MU 判决", "逐 TTI 比聚合谱效，还要过预测 BLER≤0.5 的准入",
+             "全程一个标量：ratio>1 就一直配对"),
+            ("重传", "恒按 SU 重发（冻结身份不许改 SINR/TBS）", "同左"),
+        ],
+    )
+    body += """
+<div class="toy"><div><b>实测：代价确实进了 MCS</b>
+<p>两个独立信道 UE、几何 14/12&nbsp;dB、272&nbsp;RB：SU 臂首传平均 MCS
+<strong>23.48</strong>，开 MU 后降到 <strong>19.93</strong>（配对占 68% 的
+TTI）。历史标量口径下同一组配置是 22.68 → 22.69——<strong>一档都没降</strong>。</p></div>
+<div><b>实测：抽签坐标换了</b>
+<p>同一批快照、同一档 MCS：按 SU 真值抽签平均 BLER <strong>0.0008</strong>，
+按 pair 真值是 <strong>0.0040</strong>，两者的真值差 <strong>−3.92&nbsp;dB</strong>
+（其中 −3.01 是等功率分摊，余下是相关性损失）。</p></div>
+<div><b>实测：自适应会判 SU 赢</b>
+<p>把两个 UE 的空间相关系数拉到 0.999，ZF 无处零陷：配对占比
+<strong>0%</strong>，767 个 TTI 被显式记为「单发更划算」（<code>mu_su_wins</code>），
+不是静默不配。</p></div></div>
+<p><strong>−3.01&nbsp;dB 只是记账标签，不是近似。</strong>按 pair 表的定义，
+<code>CorrLoss = pred_MU − pred_SU − PowerLoss</code>，所以决策里真正用到的平移量
+<code>CorrLoss + PowerLoss</code> 恒等于 <code>pred_MU − pred_SU</code>——那个常数
+精确抵消，实际生效的是矩阵算出来的差。把 PowerLoss 单列只是为了让诊断能分开看
+「功率分摊占多少、相关性损失占多少」。<strong>但这条只在当前支持的 2 用户 ×
+rank2 下成立</strong>；扩到 3/4 用户或不等流数时，这个常数标签本身要重新定义。</p>
+"""
     body += callout(
         "decision", "下一阶段 MU 细化",
         "<p>当前落地的是可验证的最小真实 MU：2UE×rank2、ZF/RZF、用户级 MU OLLA。"
         "一般 rank 组合、3/4 用户、pair-specific OLLA、HARQ 进程与更大候选图仍需业务/性能约束后再扩展。</p>",
     )
-    body += "<p class=source-row>pair 表：" + source_ref("src/superran/system.py", "def build_mu_pair_tables") + " · TTI 决策：" + source_ref("src/superran/experience.py", "SU_clears_all_queues") + "</p>"
+    body += ("<p class=source-row>pair 表："
+             + source_ref("src/superran/system.py", "def build_mu_pair_tables")
+             + " · experience 的 TTI 决策："
+             + source_ref("src/superran/experience.py", "SU_clears_all_queues")
+             + " · capacity 的 MU 记账："
+             + source_ref("src/superran/system.py", "mu_accounting")
+             + "</p>")
     return Page(
         "mu", "MU-MIMO 与 SU/MU 自适应", "链路算法", "MU-MIMO",
-        "CorrLoss、PowerLoss、双 OLLA、真实 pair 表和 useful-bytes 计划比较。", body,
-        ("MU", "ZF", "RZF", "CorrLoss", "PowerLoss", "pair table"),
+        "CorrLoss、PowerLoss、双 OLLA、真实 pair 表、useful-bytes 计划比较，"
+        "以及 capacity 的 pair 表记账口径。", body,
+        ("MU", "ZF", "RZF", "CorrLoss", "PowerLoss", "pair table",
+         "mu_accounting"),
     )
 
 

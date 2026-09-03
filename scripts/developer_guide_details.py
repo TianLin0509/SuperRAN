@@ -526,9 +526,39 @@ DETAIL_SPECS.update({
             "稳态 BLER 只由上下步长之比决定，与绝对值无关。关掉 OLLA 只应该去掉"
             "这一步叠加，不应该顺带换掉决策坐标。",
             "rank 是个慢变量。它一变，每流功率、TBS、OLLA 的收敛点全跟着变，"
-            "高频切换会让链路自适应根本收敛不了。所以默认固定，自适应模式也要"
-            "周期节拍 + 谱效比迟滞 + 回退封锁三重保护。链路表里的逐快照 best_rank "
-            "只是个诊断量，不是发送 rank。",
+            "高频切换会让链路自适应根本收敛不了。所以默认固定；自适应模式是一个完整的"
+            "判决状态机，而不是“发现谱效更高就切”。链路表里的逐快照 best_rank 只是个"
+            "诊断量，不是发送 rank。",
+            "自适应的判决分成三层，三层的时间尺度完全不同。<b>每 TTI</b> 只做两件事："
+            "累积一个谱效滤波样本、以及跑一次快速回退监测。<b>每个判决周期</b>（现场"
+            "默认 1000 个 TTI，30 kHz 下 500 ms）才真正判一次该不该换 rank，而且还要先"
+            "攒够最少样本数（现场 3 个）。<b>回退是实时的</b>：升 rank 之后进入监测窗，"
+            "新增 NACK 超过硬门限当场就退，不等窗口结束更不等下一个判决周期。把这三层"
+            "压成一层——比如每 TTI 都判一次谱效——就回到了链路表逐快照跟随的行为，"
+            "所有防乒乓设计同时失效。",
+            "谱效估计不是“rank × MCS 谱效”这么简单，前面还有两道修正，而且两道都会"
+            "改变判决结果。<b>最小 MCS 闸门</b>：某个 rank 的预估 MCS 低于门限（现场 9）"
+            "时，它的谱效直接置 0——那一层基本传不动，让它参与 argmax 只会把用户推到一个"
+            "必然回退的高 rank 上。<b>资源消耗加权</b>：每个 rank 的谱效再乘一个系数"
+            "（现场 [1.0, 0.97, 0.95, 0.93]），体现高 rank 需要更多 DMRS 端口、可用 RE 更少。"
+            "少了闸门，高 rank 会靠一个发不出去的档位赢下 argmax；少了加权，rank4 相对 "
+            "rank1 会被系统性高估约 7%。",
+            "升和降是<b>不对称</b>的，这是有意的。升 rank 要求最优 rank 的滤波谱效严格"
+            "超过当前的 1.1 倍——两个几乎并列的候选不该每个周期互相顶替一次。降 rank 在"
+            "现场默认值下<b>没有迟滞、立即生效</b>：最优 rank 由 argmax 选出，"
+            "SE̅(r★) ≥ SE̅(r_cur) 必然成立，所以“当前仍明显更优”这个条件恒为假。"
+            "物理上说得通——高 rank 的弱流会把整个码字拖垮，谱效自己就掉下来了，"
+            "再加一道门槛只是让用户在坏工作点上多待 500 ms。需要真正的降迟滞时把系数"
+            "设成小于 1（0.9 表示当前 rank 还有最优的 90% 以上就不降）。",
+            "<b>快速回退必须连 OLLA 一起退。</b>升 rank 之后 OLLA 会在新工作点上重新"
+            "收敛：新 rank 的每流功率更低、预测偏差也不一样，偏置很快就漂到另一个值。"
+            "这时只把 rank 退回去，旧 rank 就带着一个属于别人的偏置继续跑，接下来几百个 "
+            "TTI 的 MCS 全是错的，而且 KPI 上看不出来——它表现为“降回 rank 之后吞吐"
+            "还是上不来”。所以抬升时要把当时的 OLLA 存成回退点，回退时一并恢复。",
+            "反复失败的抬升要付代价，否则就是另一种乒乓：估计谱效说该升、实测误码说该降，"
+            "两个判据每个周期互相推翻一次。现场的做法是<b>判决周期指数退避</b>——每回退"
+            "一次周期翻倍，最多翻 4 次（1000 → 16000 TTI）；升 rank 成功或正常降 rank 时"
+            "计数清零。这比“封锁某一档若干周期”更温和：它不禁止重试，只是让重试越来越稀。",
             "反馈有时延，解码有位置。ACK/NACK 要搭上行时隙回来，所以 OLLA 与重传"
             "都比发送晚若干个 TTI；误块抽签只能在<strong>实际授予的那几个 RBG</strong> "
             "上算 SINR，用全带均值判小包会在两个方向上都错。",
@@ -545,6 +575,12 @@ DETAIL_SPECS.update({
                           "PowerLoss 再反折。"),
             ("Rank 与资源", "RankController 给出本 TTI 的 rank；TBS 按 slot/MCS/rank/RBG "
                            "前缀表反查最小够用 RBG 数，频选模式再挑质量最好的子集。"),
+            ("Rank 谱效采样", "每个新的 AMC 坐标喂一次 observe_link：逐 rank 反折出真会发的 "
+                            "MCS，过最小 MCS 闸门、乘资源消耗系数，再做 β 一阶 IIR。"
+                            "两条评估路径共用同一个控制器，修正只有一份实现。"),
+            ("Rank 判决与回退", "step() 每 TTI 先跑回退监测（可立即回退并返回要恢复的 OLLA "
+                              "偏置），再看是否到了退避后的判决周期；主循环把返回的 OLLA "
+                              "写回自己的状态。"),
             ("解码与反馈", "同一发射权作用到 h_true，取被授 RBG 聚合成单码字 SINR，"
                           "用最终 MCS 查 NewTx 曲线抽 ACK/NACK；增量在发送时刻定下，"
                           "在反馈生效的 TTI 才落到 OLLA 状态上。"),
@@ -570,6 +606,14 @@ DETAIL_SPECS.update({
                            "且明显不等于全带均值。"),
             ("rank 稳定", "固定模式下每一次 grant 的 rank 都等于配置值，小区平均 rank "
                         "精确为整数；自适应模式在周期未到或比值未跨门限时不动。"),
+            ("升 rank 门限是严格大于", "谱效比 1.05 / 1.10 / 1.11 分别给出 rank1 / rank1 / "
+                                  "rank2；等于门限时不切。"),
+            ("闸门与加权都生效", "预估 MCS 低于闸门的 rank 滤波谱效恒为 0；输入全 1.0 时"
+                             "滤波值逐 rank 等于资源消耗系数本身。"),
+            ("回退恢复 OLLA", "抬升前 OLLA = −1.5、新 rank 上漂到 −4.0，回退后精确恢复"
+                           "成 −1.5，而不是留下 −4.0。"),
+            ("退避会封顶", "反复失败的抬升让判决周期走 100→200→400→800→1600 后停住，"
+                        "对应 max_backoff_times = 4。"),
             ("反馈时序", "DDDSU 逐相位偏移为 5/4/3/2 个 TTI；纯下行图案退化成零时延"
                        "并在 notes 里显式说明。"),
         ),
@@ -577,6 +621,9 @@ DETAIL_SPECS.update({
             "拿真实接收 SINR 反折 MCS，首传 BLER 被构造在目标值上，老化代价消失。",
             "把 OLLA 折成 dB 加进 SINR 坐标，偏置的物理含义随工作点漂移。",
             "让 rank 逐快照跟随 best_rank，OLLA 与 PF 都在追一个每 5 ms 就变的目标。",
+            "回退只退 rank 不退 OLLA，旧 rank 带着新 rank 收敛出来的偏置继续跑。",
+            "把最小 MCS 闸门省掉，让一个根本发不出去的高 rank 靠估计谱效赢下 argmax。",
+            "把“降 rank 无迟滞”当成实现漏洞去补一道门槛——那是现场刻意的不对称设计。",
             "小包用全带均值判误块；授到好子带时高估误块，授到差子带时低估。",
             "把 avg_mcs 当成链路自适应视角——它的分母含重传，重传重放的是冻结的旧档。",
         ),
@@ -590,12 +637,20 @@ DETAIL_SPECS.update({
             "比较指标是队列封顶后的真实有效 payload，而不是满业务谱效或 grant TBS。若某个小包只剩 500 B，给它 5,000 B 的 TB 仍只贡献 500 useful bytes。这样，MU 只有在同一物理 RBG 上真正多送业务时才胜出，不会因为 padding 伪造收益。若 SU 方案已经能传完所有可服务用户队列，则默认 SU：此时 MU 没有额外用户体验收益，却增加相关性、功率损失和实现复杂度。",
             "Phase A 需要预先产生真实用户对信息：候选 pair、rank、预编码器、残留相关性/干扰损失及可支持状态。Phase B 不能凭一个平均 MU 增益临时假造配对。当前可以先使用 ZF/RZF 和明确的候选规则，但 pair table 必须来自真实 h_est 设计并能在 h_true 上复评。",
             "MU 资源统计按物理 PRB 计一次。两个用户在同一 RBG 配对，已用 PRB 仍是一份；用户级 attribution 可以各记 grant 或按用户数分摊，但小区 <code>MU PRB/已用 PRB</code> 的分子分母不能把同一 RBG 双计。",
+            "配对的代价有两半，任何评估路径都必须同时记账，否则结果只会朝一个方向偏。第一半是<b>发送侧变保守</b>：配对后每流只分到 P/(K·rank) 的功率，还要吃零陷残余，AMC 坐标应当整体下移，选出的 MCS 因此更低。第二半是<b>接收侧更容易错</b>：即使 MCS 已经降过，同一档在配对状态下的误块概率仍高于单用户——因为真实接收 SINR 是把 ZF 权（按基站可能已老化的 CSI 算出）打到双方 h_true 上、再把对方的流放进干扰协方差得到的，它不等于任何 dB 项的简单相加。只记第一半会低估吞吐、只记第二半会高估 MCS，而历史 capacity 两半都没记：它按 SU 坐标选 MCS、按 SU 真值抽签，只把 TB 大小乘一个建表阶段测出的标量比值，等价于宣称「配对让包变小但一点也不更容易错」。",
+            "因此 capacity 与 experience 现在读同一张 pair 表（<code>mu_accounting=\"pair_table\"</code>，默认）。矩阵运算全部留在建表阶段，主循环只查表：实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s，与主循环十万 TTI 的开销相比可以忽略。历史的标量口径降级为 <code>se_ratio_legacy</code>，仅用于复现旧结果，选用时会写进结果 notes，并明说结果系统性乐观。两个口径不可拼在同一张趋势图里。",
+            "<code>PowerLoss = −10log10(2) = −3.0103 dB</code> 是<b>记账标签而不是近似</b>。pair 表按 <code>CorrLoss ≜ pred_MU − pred_SU − PowerLoss</code> 定义，所以决策里真正生效的平移量 <code>CorrLoss + PowerLoss</code> 恒等于 <code>pred_MU − pred_SU</code>，那个常数在代数上精确抵消；单列它只是为了让诊断能分开回答「功率分摊占多少、相关性损失占多少」。这条恒等式只在当前支持的 2 用户 × 每用户 rank2 下成立：扩到 3/4 用户或不等流数时，等功率分流的常数本身要按实际流数重新定义，届时必须同时更新标签与它在诊断里的解读，不能只改数值。",
+            "capacity 的 SU/MU 判决是逐 TTI 做的，不再依赖一个全程标量。锚点固定为 PF 第一名，先按准入判据筛伙伴（与 experience 相同：两侧的<b>预测</b> BLER 都不得超过 0.5），再在通过准入的伙伴里取聚合谱效最高的那个，最后还要赢过锚点单发的 SU 方案才真配对。capacity 是全带调度，同一 TTI 的 RE 数对 SU/MU 完全相同，所以比较 <code>Σ rank × MCS 谱效</code> 与 experience 比较 useful bytes 是同一件事。两种拒配对的原因分别计入 <code>mu_pair_rejects</code>（一个通过准入的伙伴都没有）与 <code>mu_su_wins</code>（有可配的对但单发更划算），不静默退回。",
+            "capacity 的重传恒按 SU 重发。HARQ 的合同是冻结发送身份（MCS/RBG 数/rank/TBS），而配对会同时改变真实 SINR 与 TBS，两者直接冲突。把重传也做成 MU 需要先定义「配对状态属不属于冻结身份的一部分」，这是尚未确认的现场口径，因此当前显式选择更保守的一侧，并在文档与 notes 里写清楚，而不是让它成为一个没人知道的隐含假设。",
         ),
         implementation=(
             ("一次 PF 排序", "对所有有数据且非 outage 用户计算 metric，稳定 tie-break 后得到 ordered_users；该数组同时喂给 SU 与 MU planner。"),
             ("构造 SU 方案", "按顺序为用户查 required_rbg、分配不重叠 RBG，计算队列封顶 useful bytes，并判断是否清空全部可服务队列。"),
             ("构造 MU 方案", "从同一顺序读取 Phase A pair，应用 CorrLoss、powerLoss 与 MU OLLA 重新选 MCS，在相同物理 RBG 上形成 pair grant。"),
             ("选择与落账", "SU 清空全部可服务队列则选 SU；outage或错slot HARQ backlog只作诊断；否则 MU useful≥SU useful 才选 MU。执行后按真实模式更新队列、PF、OLLA、PRB 与配对 KPI。"),
+            ("capacity 共用同一张表", "capacity 主循环把「这一格实际会发哪一档 MCS」抽成单一函数：AMC 坐标（MU 时加 CorrLoss+PowerLoss）叠 OLLA（MU 时叠 SU+MU 两条）后 floor 钳位。配对判决与真正发送调用同一个函数，避免「按什么比的」和「发了什么」悄悄漂开。"),
+            ("误块抽签换坐标", "capacity 首传的 BLER 查表输入在 MU 时改读 <code>MuPairLink.true_sinr_db[snap, side]</code>，SU 时仍读 <code>UeLinkTable.sinr_db[snap, rank-1]</code>；重传恒为 SU，因此仍查 SU 真值。"),
+            ("缺表硬失败", "开了 MU 又选 <code>pair_table</code> 却没有 pair 数据时直接抛错并给出两条明确出路（补建 pair 表，或显式改用历史口径），不静默按 1.0 降级。"),
         ),
         example_title="两个 rank-2 用户并不意味着 MU 一定更好",
         example=(
@@ -607,11 +662,18 @@ DETAIL_SPECS.update({
             ("真实比较", "plan 中同时记录 su/mu useful bytes、队列封顶值与 selected_reason，可从 allocation 重算。"),
             ("损失闭合", "MU MCS trace 展示 CQI+BF+SU OLLA+CorrLoss+powerLoss+MU OLLA 的每一项。"),
             ("资源不双计", "MU pair 的物理 RBG 在小区利用率只计一次，分摊后的用户资源和小区总量可守恒。"),
+            ("代价进 MCS", "同一批链路表下开关 MU，pair 表口径的首传平均 MCS 必须显著下降（实测 23.48 → 19.93）；历史标量口径下它几乎不动（22.68 → 22.69），这正是被修掉的问题。"),
+            ("代价进抽签", "同一档 MCS 分别按 SU 真值与 pair 真值查 BLER，后者必须更高（实测 0.0008 → 0.0040，真值差 −3.92 dB）。"),
+            ("自适应会判 SU 赢", "把两个 UE 的空间相关系数拉到 0.999，配对占比必须坍塌到 0，并且拒配对的原因被显式计数（实测 767 个 TTI 记为 mu_su_wins），不是静默不配。"),
+            ("平移量恒等式", "<code>CorrLoss + PowerLoss</code> 与 <code>pred_MU − pred_SU</code> 必须逐元素相等，证明 −3.01 dB 只是标签。"),
         ),
         pitfalls=(
             "先为 SU 排 PF，又为 MU 单独挑高相关/高吞吐用户，比较不再公平。",
             "用 sum(TBS) 而非 min(queue,TBS) 比较，padding 把 MU 方案虚增。",
             "SU 已经清空全部可服务包仍强制 MU，只为了提高 MU 配对比例。",
+            "只把配对代价记在 TB 大小上，误块抽签仍用 SU 真值——配对越激进结果越乐观，而且 KPI 上完全看不出来。",
+            "把 −3.01 dB 当成一个可以直接套用到 3/4 用户或不等流数的物理近似；它在当前实现里只是 2×rank2 下会被精确抵消的记账标签。",
+            "拿 <code>se_ratio_legacy</code> 的旧结果和 <code>pair_table</code> 的新结果放进同一张趋势图。",
         ),
         source_paths=("src/superran/experience.py", "src/superran/mumimo.py", "src/superran/system.py"),
     ),
@@ -1978,26 +2040,35 @@ FORMULA_SPECS: dict[str, FormulaSpec] = {
     "F_RANK_SE": FormulaSpec(
         "逐 rank 的估计谱效与它的滤波",
         "对每个 rank 假设，用该 rank 的 AMC 预测坐标反折出真会发下去的 MCS，"
-        "谱效记为 rank×MCS 谱效，再做与 CQI 同形式的一阶 IIR。每流功率 P/r 已经在"
-        "坐标里（CQI 与 BF Gain 都按该 rank 的每流功率算过），不需要再补 10log10 项。",
+        "谱效记为 rank×MCS 谱效，再乘一个 DMRS 开销系数，最后做一阶 IIR。"
+        "每流功率 P/r 已经在坐标里（CQI 与 BF Gain 都按该 rank 的每流功率算过），"
+        "不需要再补 10log10 项。预估 MCS 低于闸门的 rank 谱效直接置 0——那一层"
+        "基本传不动，不配当有效层。",
         (("SE&#770;<sub>r</sub>", "rank r 在当前快照下的瞬时估计谱效。"),
          ("γ<sup>(r)</sup><sub>AMC,pred</sub>", "rank r 的 AMC 预测坐标：Γ(MCS(CQI_r)) + BF Gain_r。"),
          ("S(·,p)", "在预置 NewTx 曲线中选择 BLER≤p 的最高 MCS 的查表算子。"),
          ("⊕Δ", "叠加连续 MCS 域 OLLA 偏置后 floor 并钳位，与实际发送同一条路径。"),
+         ("m<sub>r</sub>", "rank r 假设下真会发下去的 MCS。"),
+         ("m<sub>min</sub>", "最小 MCS 闸门 min_mcs_threshold，现场默认 9。"),
+         ("ρ<sub>r</sub>", "rank r 的资源消耗系数 resource_cost_ratio，现场 [1.0, 0.97, 0.95, 0.93]，体现高 rank 的 DMRS 开销。"),
          ("SE&#772;<sub>r</sub>", "滤波后的估计谱效，周期决策只看它。"),
-         ("λ<sub>SE</sub>", "谱效滤波系数 se_filter_lambda。")),
+         ("β", "谱效滤波系数 se_filter_beta，现场默认 0.1。")),
     ),
     "F_RANK_SWITCH": FormulaSpec(
         "Rank 的周期决策与迟滞",
-        "只在决策周期到达时判一次，且最优/当前的滤波谱效比必须跨过门限才切换。"
-        "两个几乎并列的候选因此不会每个周期互相顶替。被回退封锁的档位直接排除在"
-        "候选集之外，避免“估计说该升、实测说该降”来回推翻。",
-        (("r<sup>★</sup>", "本次决策选出的候选 rank。"),
-         ("B", "回退封锁集合：刚被实测否掉的那一档及以上，封锁若干个决策周期。"),
+        "只在决策周期到达、且谱效滤波样本攒够时判一次。升 rank 要求最优的滤波谱效"
+        "严格超过当前的 G↑ 倍（现场 1.1，即高 10%），两个几乎并列的候选因此不会每个"
+        "周期互相顶替。降 rank 侧在 G↓≥1 时条件恒成立——因为 r★ 由 argmax 选出，"
+        "SE̅(r★) ≥ SE̅(r_cur) 必然满足——也就是**降 rank 立即生效、无迟滞**，"
+        "这与现场“升谨慎、降果断”的设计一致；把 G↓ 设成 <1（例如 0.9）才会出现真正的"
+        "降迟滞。每次快速回退让判决周期翻倍，最多 2⁴。",
+        (("r<sup>★</sup>", "本次决策的最优 rank，由滤波谱效的 argmax 给出。"),
          ("SE&#772;<sub>r</sub>", "rank r 的滤波估计谱效。"),
          ("r<sub>cur</sub>", "当前正在使用的 rank。"),
-         ("η", "切换门限 switch_se_ratio，默认 1.05；等于 1 表示无迟滞。"),
-         ("T<sub>rank</sub>", "决策周期 period_tti，默认 1000 个 TTI。")),
+         ("G<sub>↑</sub>", "升 rank 迟滞 gain_factor_raise，现场默认 1.1。"),
+         ("G<sub>↓</sub>", "降 rank 迟滞 gain_factor_reduce，现场默认 1.1（此时降无迟滞）。"),
+         ("T<sub>rank</sub>", "判决周期 period_tti，现场默认 1000 个 TTI。"),
+         ("n", "快速回退次数，判决周期按 2ⁿ 指数退避，n ≤ max_backoff_times。")),
     ),
     "F_HARQ_DELAY": FormulaSpec(
         "ACK/NACK 生效时刻由 TDD 图案决定",

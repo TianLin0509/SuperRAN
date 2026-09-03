@@ -242,6 +242,176 @@ def experiment_grant_decode_sinr() -> dict:
     }
 
 
+def _mu_tables(corr: float, n_snap: int = 6, seed: int = 20260902):
+    """两个 UE，空间相关系数可控；corr→1 时 ZF 没有零陷空间。"""
+    rng = np.random.default_rng(seed)
+    a = ((rng.standard_normal((n_snap, 272, 16, 4))
+          + 1j * rng.standard_normal((n_snap, 272, 16, 4))) / np.sqrt(2))
+    e = ((rng.standard_normal((n_snap, 272, 16, 4))
+          + 1j * rng.standard_normal((n_snap, 272, 16, 4))) / np.sqrt(2))
+    b = corr * a + np.sqrt(max(1.0 - corr ** 2, 0.0)) * e
+    return sy.build_link_tables(
+        [a, b], [14.0, 12.0], max_rank=2, rb_per_rbg=16, mu_enabled=True,
+        csi=ca.CsiConfig(enabled=False))
+
+
+def experiment_capacity_mu_accounting() -> dict:
+    """capacity 开 MU 时，配对的代价进了哪几处。"""
+    cfg = sy.SystemConfig(evaluation_mode="capacity", duration_s=0.6,
+                          tdd_pattern="DDDSU", seed=4242)
+
+    def run(tables, *, mu_on, accounting, ratio=1.0):
+        return sy.simulate(
+            tables, sys_cfg=cfg,
+            traffic=sy.TrafficConfig(model="full_buffer"),
+            sched=sy.SchedulerConfig(mu_enabled=mu_on,
+                                     mu_accounting=accounting),
+            kpi=sy.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
+            mu_se_ratio=ratio, rng=rg.RngBook(4242, 0))
+
+    indep = _mu_tables(0.0)
+    su = run(indep, mu_on=False, accounting="pair_table")
+    pair = run(indep, mu_on=True, accounting="pair_table")
+    corr = run(_mu_tables(0.999), mu_on=True, accounting="pair_table")
+    # 历史标量口径要用不含 pair 数据的表，与它当年的输入一致
+    legacy_tabs = sy.build_link_tables(
+        [indep[0].h_true_rbg, indep[1].h_true_rbg], [14.0, 12.0],
+        max_rank=2, rb_per_rbg=16, mu_enabled=False,
+        csi=ca.CsiConfig(enabled=False))
+    legacy = run(legacy_tabs, mu_on=True,
+                 accounting="se_ratio_legacy", ratio=1.4)
+    legacy_su = run(legacy_tabs, mu_on=False, accounting="pair_table")
+
+    link = indep[0].mu_links[1]
+    delta_db = float(np.mean(link.true_sinr_db
+                             - np.column_stack((indep[0].sinr_db[:, 1],
+                                                indep[1].sinr_db[:, 1]))))
+    shift = link.corr_loss_tx_db + link.power_loss_db
+    identity_ok = bool(np.allclose(
+        shift,
+        link.predicted_sinr_db
+        - (link.predicted_sinr_db - link.corr_loss_tx_db - link.power_loss_db),
+        atol=1e-9))
+    assert pair.cell["avg_mcs_first_tx"] < su.cell["avg_mcs_first_tx"]
+    assert abs(legacy.cell["avg_mcs_first_tx"]
+               - legacy_su.cell["avg_mcs_first_tx"]) < 0.5
+    assert corr.cell["mu_share"] < 0.05
+    return {
+        "question": "capacity 开 MU 之后，配对的代价体现在哪几处",
+        "arms": {
+            "SU_only": _cell(su),
+            "MU_pair_table": _cell(pair),
+            "MU_se_ratio_legacy": _cell(legacy),
+            "SU_baseline_for_legacy": _cell(legacy_su),
+            "MU_pair_table_corr0.999": _cell(corr),
+        },
+        "pair_true_minus_su_true_db": round(delta_db, 3),
+        "power_loss_db": round(float(link.power_loss_db), 4),
+        "mcs_shift_identity_holds": identity_ok,
+        "mu_share_independent": round(float(pair.cell["mu_share"]), 4),
+        "mu_share_corr0.999": round(float(corr.cell["mu_share"]), 4),
+        "mu_su_wins_corr0.999": int(corr.cell["mu_su_wins"]),
+        "interpretation": (
+            "pair 表口径下配对的代价同时进 MCS 决策与误块抽签：首传平均 MCS 明显"
+            "下降，而历史标量口径下它几乎不动（代价只体现在 TB 变小）。"
+            "pair 真值系统性低于 SU 真值，其中 -3.01 dB 是等功率分摊、其余是相关性"
+            "损失；决策平移量 CorrLoss+PowerLoss 恒等于 pred_MU-pred_SU，"
+            "所以那个常数在决策里精确抵消。相关系数拉到 0.999 时配对率坍塌，"
+            "说明 SU/MU 自适应真的在判而不是无条件配对。"),
+        "not_a_conclusion": (
+            "两种口径的吞吐差不是 MU 的收益或损失：它们是两个不同的物理模型，"
+            "单次重复、未做配对检验，且历史口径本身已知系统性乐观。"),
+    }
+
+
+def experiment_rank_decision_machine() -> dict:
+    """rank 判决状态机：升档迟滞、降档两种写法、指数退避。"""
+    def ctl(**kw):
+        base = dict(mode="adaptive", fixed_rank=1, period_tti=100,
+                    min_filter_samples=1, se_filter_beta=1.0,
+                    min_mcs_threshold=0,
+                    resource_cost_ratio=(1.0, 1.0, 1.0, 1.0),
+                    fallback_enabled=False)
+        base.update(kw)
+        return ap.RankController(ap.RankConfig(**base), 1, tti_ms=0.5,
+                                 snapshot_ms=5.0, max_rank_available=4)
+
+    def drive(controller, se, mcs=(20, 20, 20, 20), n_tti=401, start=None,
+              olla=None):
+        if start is not None:
+            controller._rank[0] = int(start)
+        for tti in range(n_tti):
+            controller.observe_link(0, tti, list(se), list(mcs))
+            controller.step(tti, olla_by_ue=olla)
+        return controller
+
+    raise_scan = {
+        f"ratio_{r:.2f}": drive(ctl(), [1.0, r, 0.0, 0.0]).rank_of(0)
+        for r in (1.05, 1.10, 1.11, 1.50)
+    }
+    narrow = [5.20, 4.0, 5.00, 3.0]      # 当前 rank3，最优 rank1 只高 4%
+    reduce_matrix = {
+        f"{rule}/G_down={gd:.1f}": drive(
+            ctl(switch_rule=rule, gain_factor_reduce=gd), narrow,
+            start=3).rank_of(0)
+        for rule in ("spec_asymmetric", "unified_ratio")
+        for gd in (1.1, 0.9)
+    }
+    gate = drive(ctl(min_mcs_threshold=9), [1.0, 2.0, 0.0, 0.0],
+                 mcs=(20, 8, 8, 8), n_tti=301).rank_of(0)
+    cost = ctl(resource_cost_ratio=ap.RankConfig().resource_cost_ratio)
+    cost.observe_link(0, 0, [1.0, 1.0, 1.0, 1.0], [20, 20, 20, 20])
+
+    backoff = ctl(fallback_enabled=True, quick_fallback_nack_thld=5,
+                  max_backoff_times=4)
+    olla = np.zeros(1)
+    periods = set()
+    for tti in range(40000):
+        backoff.observe_link(0, tti, [1.0, 5.0, 0.0, 0.0], [20, 20, 20, 20])
+        backoff.step(tti, olla_by_ue=olla)
+        if backoff.rank_of(0) > 1:
+            backoff.record_first_tx(0, ack=False, mcs=20, realized_se=0.0)
+        periods.add(backoff.judge_period_tti(0))
+
+    assert raise_scan["ratio_1.10"] == 1 and raise_scan["ratio_1.11"] == 2
+    assert raise_scan["ratio_1.05"] == 1 and raise_scan["ratio_1.50"] == 2
+    assert (reduce_matrix["spec_asymmetric/G_down=1.1"]
+            != reduce_matrix["unified_ratio/G_down=1.1"])
+    assert gate == 1
+    return {
+        "question": "rank 判决的每一道门各自挡住了什么",
+        "raise_hysteresis_final_rank_by_se_ratio": raise_scan,
+        "reduce_rule_matrix_final_rank": reduce_matrix,
+        "reduce_matrix_setup": (
+            "当前 rank3，滤波谱效 [5.20, 4.0, 5.00, 3.0]，最优 rank1 只高 4%"),
+        "min_mcs_gate_final_rank": gate,
+        "min_mcs_gate_setup": "rank2 估计谱效高一倍，但预估 MCS 8 低于闸门 9",
+        "resource_cost_filtered_se": [
+            round(float(x), 4) for x in cost._se_filt[0]],
+        "backoff_period_values_tti": sorted(periods),
+        "backoff_final_times": int(backoff.diagnostics()
+                                   ["backoff_times_by_ue"][0]),
+        "se_filter_memory_ms": {
+            scope: ap.RankController(
+                ap.RankConfig(mode="adaptive", se_sample_scope=scope), 1,
+                tti_ms=0.5, snapshot_ms=5.0, max_rank_available=4
+            ).diagnostics()["se_filter_memory_ms"]
+            for scope in ("snapshot", "tti")},
+        "interpretation": (
+            "默认判据是对称 10% 迟滞（unified_ratio + 1.1）：按滤波谱效最大化选 "
+            "rank，但任何方向都要超过 10% 才切。升档门限是严格大于：比值 1.10 "
+            "不动、1.11 才升。降档的两种写法让同一个常数含义相反——默认这条是降"
+            "也要 10% 余量，spec_asymmetric+1.1 则是降立即生效；差距超过 10% 时"
+            "两者一致，所以差异只在临界带里。最小 MCS 闸门把一个发不出去的高 rank "
+            "直接从候选里删掉，并且当前 rank 被闸门判死时不讲迟滞、直接降。"
+            "判决周期按 2^n 退避到封顶。"),
+        "not_a_conclusion": (
+            "对称 10% 是用户 2026-09-03 给的判据，不是从现场源码确认的行为——"
+            "两份来源对降档写法不同，哪一种是现场真实行为**尚未确认**；"
+            "se_sample_scope 的两个记忆长度差 10 倍，也不是等价实现。"),
+    }
+
+
 def main() -> int:
     report = {
         "title": "下行 AMC 链改动的物理反向对照",
@@ -253,6 +423,8 @@ def main() -> int:
         "harq_feedback_delay": experiment_feedback_delay(),
         "cqi_filter": experiment_cqi_filter(),
         "grant_decode_sinr": experiment_grant_decode_sinr(),
+        "capacity_mu_accounting": experiment_capacity_mu_accounting(),
+        "rank_decision_machine": experiment_rank_decision_machine(),
     }
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(report, ensure_ascii=False, indent=2),
