@@ -23,6 +23,7 @@ import numpy as np
 
 from . import linkadapt as la
 from . import rng as rg
+from . import scheduler_edf as sedf
 from . import scheduler_finalize as sfinal
 from . import scheduler_frequency as sfreq
 from . import scheduler_mu as smu
@@ -974,6 +975,80 @@ def _immediate_service_ratio(values: Iterable[float]) -> float | None:
     return float(np.mean(np.asarray(v) <= _EPS)) if v else None
 
 
+def _scheduler_metric_identity(sched: Any) -> dict[str, Any]:
+    """把本次运行实际使用的优先级公式写进结果，避免只报一个算法名。"""
+    algorithm = str(sched.algorithm)
+    formulas = {
+        "pf": "TBS_fullband / R_avg",
+        "qos_pf": "w(priority) × TBS^beta / R_avg^alpha × delay^gamma",
+        "rr": "(u − tti) mod N",
+        "max_ci": "TBS_fullband",
+        "edf": "w(priority) × TBS_fullband / Buffer",
+        "qos_pf_edf": ("((1−w)×scale×[TBS^beta/R_avg^alpha×delay^gamma] "
+                       "+ w×[TBS/Buffer]) × w(priority)"),
+    }
+    out: dict[str, Any] = {
+        "algorithm": algorithm,
+        "formula": formulas.get(algorithm, "unknown"),
+        "units": "TBS 与 Buffer 均为 bytes；比值无量纲",
+    }
+    if algorithm in ("edf", "qos_pf_edf"):
+        out["srb_priority_boost"] = float(
+            getattr(sched, "srb_priority_boost", 5000.0))
+        out["srb_modelled"] = False
+        out["srb_note"] = (
+            "SuperRAN 不建模逻辑信道；只有显式声明 resource_type='signalling' "
+            "的业务类才会拿到 SRB 加值，默认没有这样的类，加值恒不触发")
+        out["retx_priority"] = (
+            "结构性绝对优先：HARQ pending 用户整体前置并按 first_tti 排序，"
+            "不使用蓝本的 +10000 常数")
+        out["rbg_allocation"] = (
+            "按需分配是所有算法共享的既有行为：required_rbg_for_indices "
+            "算出传完 buffer 所需 RBG 数，只取这么多")
+    if algorithm == "qos_pf_edf":
+        out["mixed_weight"] = float(getattr(sched, "edf_mixed_weight", 0.5))
+        out["mixed_epf_scale"] = float(
+            getattr(sched, "edf_mixed_epf_scale", 1.0))
+    return out
+
+
+def _mixed_component_scale(
+    epf_medians: Sequence[float], edf_medians: Sequence[float], *,
+    weight: float, epf_scale: float,
+) -> dict[str, Any]:
+    """混合模式两个分量的实测量级，用来判断权重 w 是否被量纲差吞掉。
+
+    EPF 分量是 ``bytes^beta / bytes^alpha``，EDF 分量是无量纲比值；``epf_scale``
+    （蓝本的 ``thp_filter``）没标定时，名义上的 w=0.5 可能实际等价于
+    w=0.99。这里报出逐 TTI 中位数的中位数与加权后的实际占比，让这件事可被
+    证伪，而不是让用户以为调了 w 就调了混合比例。
+    """
+    if not epf_medians or not edf_medians:
+        return {"samples": 0, "note": "测量窗内没有候选用户，无法取证"}
+    epf_med = float(np.median(np.asarray(epf_medians, dtype=float)))
+    edf_med = float(np.median(np.asarray(edf_medians, dtype=float)))
+    w = float(weight)
+    epf_term = (1.0 - w) * float(epf_scale) * epf_med
+    edf_term = w * edf_med
+    total = epf_term + edf_term
+    share = None if total <= 0 else float(edf_term / total)
+    out: dict[str, Any] = {
+        "samples": int(min(len(epf_medians), len(edf_medians))),
+        "scope": "median over measurement TTIs of the per-TTI candidate median",
+        "epf_core_median": epf_med,
+        "edf_core_median": edf_med,
+        "nominal_edf_weight": w,
+        "epf_scale": float(epf_scale),
+        "effective_edf_share": share,
+    }
+    if share is not None and 0.0 < w < 1.0 and (share < 0.05 or share > 0.95):
+        out["warning"] = (
+            f"名义 EDF 权重 {w:g}，但两个分量量级相差到实际占比只有 "
+            f"{share:.3g}——epf_scale 未标定，混合已退化成单边。"
+            "请按本次的分量中位数比值设置 edf_mixed_epf_scale。")
+    return out
+
+
 def _ordered_candidates(metric: np.ndarray, cand: Sequence[int], tti: int,
                         algorithm: str, n_ue: int,
                         tie_keys: np.ndarray) -> np.ndarray:
@@ -1852,8 +1927,18 @@ def simulate_experience(
     if str(traffic_cfg.model) not in (
             "mixed", "cdf", "ftp3", "full_buffer", "cbr"):
         raise ValueError(f"experience_v2 不支持话务 {traffic_cfg.model!r}")
-    if str(sched.algorithm) not in ("pf", "qos_pf", "rr", "max_ci"):
+    if str(sched.algorithm) not in (
+            "pf", "qos_pf", "rr", "max_ci", "edf", "qos_pf_edf"):
         raise ValueError(f"experience_v2 不支持调度器 {sched.algorithm!r}")
+    if (str(sched.algorithm) in ("edf", "qos_pf_edf")
+            and str(traffic_cfg.model) == "full_buffer"):
+        # EDF 的分母是真实待发缓冲区。full_buffer 把队列钉在 2**50 B，比值退化成
+        # max_ci 的常数缩放；更糟的是队列会随已服务字节缓慢减小，被服务得多的
+        # 用户分母更小、优先级反而更高，形成纯建模伪影的正反馈饥饿。硬失败，
+        # 不做静默降级。
+        raise ValueError(
+            f"{sched.algorithm} 需要有限队列，不接受 full_buffer 话务；"
+            "容量口径请用 pf / max_ci，长期公平口径请用 qos_pf")
     if str(getattr(sched, "qos_priority_weighting", "none")) not in (
             "none", "inverse_priority"):
         raise ValueError("qos_priority_weighting 只支持 none / inverse_priority")
@@ -2106,6 +2191,12 @@ def simulate_experience(
     class_acked: dict[str, int] = {}
     offered_before_measurement = 0
     backlog_at_measurement_start = 0
+    # EDF / 混合模式的常量与量级取证累加器（其它算法下恒不使用）。
+    srb_boost = float(getattr(sched, "srb_priority_boost", 5000.0))
+    mixed_weight = float(getattr(sched, "edf_mixed_weight", 0.5))
+    mixed_epf_scale = float(getattr(sched, "edf_mixed_epf_scale", 1.0))
+    mixed_epf_medians: list[float] = []
+    mixed_edf_medians: list[float] = []
 
     for tti in range(int(sys_cfg.num_tti)):
         in_measurement = tti >= warmup
@@ -2182,6 +2273,11 @@ def simulate_experience(
         potential = np.zeros(len(cand), dtype=float)
         delay_factor = np.ones(len(cand), dtype=float)
         priority_factor = np.ones(len(cand), dtype=float)
+        # EDF 的分母：当前待发缓冲区。与 potential 同为 bytes，比值无量纲。
+        buffer_bytes = np.zeros(len(cand), dtype=float)
+        # SuperRAN 不建模逻辑信道，只有显式声明 resource_type="signalling" 的
+        # 业务类才算 SRB；默认全 False，SRB 加值永不触发。
+        srb_flag = np.zeros(len(cand), dtype=bool)
         for i, u in enumerate(cand):
             pending = harq_pending.get(u)
             rank = (int(pending.rank) if pending is not None
@@ -2216,6 +2312,8 @@ def simulate_experience(
                                 slot, mcs, rank,
                                 tuple(range(int(sys_cfg.num_rbg)))))
             c = tr.queues[u].traffic_class
+            buffer_bytes[i] = float(tr.bytes_left(u))
+            srb_flag[i] = str(c.resource_type).strip().upper() == "SIGNALLING"
             if str(getattr(sched, "qos_priority_weighting", "none")) == \
                     "inverse_priority":
                 priority_factor[i] = 1.0 / max(float(c.priority), 1.0)
@@ -2236,6 +2334,34 @@ def simulate_experience(
                       * np.power(np.maximum(potential, 1.0), beta)
                       / np.power(np.maximum(r_avg[cand], 1e-9), alpha)
                       * np.power(delay_factor, gamma))
+        elif sched.algorithm == "edf":
+            # m = TBS / Buffer × w(priority)。分子沿用全带宽 potential，与蓝本
+            # “假设全带宽可用，只用于排序”一致；实际给几个 RBG 由后面的按需
+            # 分配决定。HARQ pending 用户的 potential 是冻结的子带 TBS，但他们
+            # 已被 pending_ready 整体前置，metric 不参与其相对顺序。
+            metric = sedf.edf_metric(
+                potential, buffer_bytes, priority_factor,
+                srb_mask=srb_flag, srb_priority_boost=srb_boost)
+        elif sched.algorithm == "qos_pf_edf":
+            alpha = float(getattr(sched, "qos_avg_rate_exponent", 1.0))
+            beta = float(getattr(sched, "qos_instant_rate_exponent", 1.0))
+            gamma = float(getattr(sched, "qos_delay_exponent", 0.0))
+            # 与 qos_pf 分支逐项相同，只是把 priority_factor 提到混合之后乘，
+            # 这样 w=0 时严格退化成 qos_pf（epf_scale 默认 1.0）。
+            epf_core = (np.power(np.maximum(potential, 1.0), beta)
+                        / np.power(np.maximum(r_avg[cand], 1e-9), alpha)
+                        * np.power(delay_factor, gamma))
+            edf_core = sedf.edf_metric(
+                potential, buffer_bytes, np.ones(len(cand), dtype=float))
+            metric = sedf.mixed_metric(
+                epf_core, edf_core, priority_factor,
+                weight=mixed_weight, epf_scale=mixed_epf_scale,
+                srb_mask=srb_flag, srb_priority_boost=srb_boost)
+            # 量级取证：两个分量不同量纲，epf_scale 未标定时 w 会被量级差吞掉。
+            # 逐 TTI 记中位数，结果里报中位数的中位数，让 w 是否生效可被证伪。
+            if in_measurement:
+                mixed_epf_medians.append(float(np.median(epf_core)))
+                mixed_edf_medians.append(float(np.median(edf_core)))
         elif sched.algorithm == "max_ci":
             metric = potential
         else:
@@ -3293,6 +3419,7 @@ def simulate_experience(
             getattr(sched, "olla_warmup_speedup", 1.0)),
         "olla_measurement_speedup": float(getattr(sched, "olla_speedup", 1.0)),
         "pf_accounting": accounting,
+        "scheduler_priority_metric": _scheduler_metric_identity(sched),
         "harq_model": {
             "max_retransmissions": 1,
             "combining": harq_combining,
@@ -3308,6 +3435,11 @@ def simulate_experience(
         "class_physical_rbg_share": class_physical_rbg_share,
         "class_acked_bytes": class_acked,
     }
+
+    if str(sched.algorithm) == "qos_pf_edf":
+        cell["scheduler_mixed_component_scale"] = _mixed_component_scale(
+            mixed_epf_medians, mixed_edf_medians,
+            weight=mixed_weight, epf_scale=mixed_epf_scale)
 
     if tr.unbounded:
         # full buffer 没有 busy-period 边界，体验速率无定义；报 None 而不是
@@ -3386,6 +3518,25 @@ def simulate_experience(
             "**OLLA 收敛门未通过**：至少一个占比不低于 1% 的传输模式在测量"
             "前后半的期望 BLER 尚未稳定到目标 ±5 个百分点；该次体验 KPI 只能"
             "用于诊断，不能进入正式比较。请延长预启动或显式使用预启动专用加速。")
+    if str(sched.algorithm) in ("edf", "qos_pf_edf"):
+        notes.append(
+            "**edf 是包长感知调度**：优先级 = TBS_fullband / Buffer × w(priority)，"
+            "即“还需几个调度机会才能排空缓冲区”的倒数。缓冲区小 + 信道好的"
+            "用户先走。**它牺牲长期公平性换小包时延**——大包用户在重载下可能"
+            "长期排在后面，请对照 ue_experienced 的分位数和 Jain 公平度判读，"
+            "不要只看小区吞吐。SRB 绝对优先未生效：SuperRAN 不建模逻辑信道。")
+    if str(sched.algorithm) == "qos_pf_edf":
+        scale_report = cell.get("scheduler_mixed_component_scale", {})
+        notes.append(
+            "**qos_pf_edf 照抄蓝本加权混合模式的原式** "
+            "((1−w)·thp_filter·EPF + w·EDF)×w(priority)。两个分量不同量纲，"
+            "w 单独一个数不定义混合比例——请看 "
+            "cell.scheduler_mixed_component_scale 里两个分量的实测中位数与 "
+            f"effective_edf_share（本次 {scale_report.get('effective_edf_share')}）"
+            "，必要时用 edf_mixed_epf_scale 配平。w=0 严格退化成 qos_pf，"
+            "w=1 严格退化成 edf。")
+        if "warning" in scale_report:
+            notes.append("**混合权重已退化**：" + str(scale_report["warning"]))
     if str(sched.algorithm) == "qos_pf":
         notes.append(
             "qos_pf 使用 w(priority) × R_inst^beta / R_avg^alpha × "

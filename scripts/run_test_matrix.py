@@ -31,6 +31,7 @@ QUICK = (
     "test_power_control.py",
     "test_results.py",
     "test_rng.py",
+    "test_scheduler_edf.py",
     "test_scheduler_p0.py",
     "test_srs_resource.py",
     "test_sysscenes.py",

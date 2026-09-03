@@ -252,10 +252,34 @@ def _scheduler() -> Family:
                           "作为公平性的另一个极端参照。",
                    when="要一个与信道无关的对照",
                    cost="最省"),
+            Option("edf", "EDF（包长感知）",
+                   formula=r"m_u = \frac{TBS_u}{Buffer_u}\cdot\frac{1}{p_u}",
+                   summary="优先调度最快能传完的用户",
+                   detail="Buffer/TBS 是“还需几个调度机会才能排空缓冲区”，取"
+                          "倒数当优先级：缓冲区小 + 信道好的用户先走，一次传完"
+                          "就释放资源；缓冲区大 + 信道差的排后面——传了也清不"
+                          "空。**分母是当前队列而不是历史吞吐量，所以它无状态**。"
+                          "代价是长期公平性：重载下大包用户可能被饿死，要看 "
+                          "ue_experienced 的低分位数而不只看小区吞吐。需要有限"
+                          "队列，full_buffer 与容量口径硬失败。",
+                   when="小包（信令/IoT/IM）占比高、时延敏感的混合业务",
+                   cost="每 TTI 一次除法，比 PF 还省——不用维护历史平均"),
+            Option("qos_pf_edf", "EPF+EDF 混合",
+                   formula=(r"m_u = \left[(1-w)\,s\,\mathrm{EPF}_u"
+                            r" + w\,\mathrm{EDF}_u\right]\cdot\frac{1}{p_u}"),
+                   summary="长期公平与小包时延之间连续可调",
+                   detail="照抄蓝本加权混合模式的原式。**两个分量"
+                          "不同量纲**：EPF 是 bytes^β/bytes^α，EDF 是无量纲比值，"
+                          "s（蓝本的 thp_filter）就是用来配平量级的。它没标"
+                          "定时名义 w=0.5 可能实际等价于 0.99，因此结果里必须看 "
+                          "scheduler_mixed_component_scale 的 effective_edf_share。"
+                          "w=0 严格退化成 qos_pf，w=1 严格退化成 edf。",
+                   when="既要长期公平又要小包低时延的混合业务",
+                   cost="两个分量都要算，略贵于任一单独模式"),
         ],
         flow=Flow(steps=[
             ("筛出有数据要发的用户", "缓冲区非空，且这个快照下不处于覆盖外"),
-            ("算调度度量", "PF 取 R_inst/R_avg；max-C/I 取 R_inst；RR 按轮次"),
+            ("算调度度量", "PF 取 R_inst/R_avg；EDF 取 TBS/Buffer；max-C/I 取 R_inst；RR 按轮次"),
             ("排序取最优", "SU 取第一名；MU 取前 K 名（还要过 SU/MU 自适应那一关）"),
             ("发送并判 ACK/NACK", "按接收侧 SINR 查 BLER 曲线抽一次"),
             ("更新历史平均速率", "R_avg ← (1−1/Tc)·R_avg + (1/Tc)·本次实发"),

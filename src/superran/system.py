@@ -57,7 +57,7 @@ S_SLOT_DL_FRACTION = 0.7
 
 EvaluationMode = Literal["capacity", "experience"]
 TrafficModel = Literal["full_buffer", "ftp3", "cbr", "bimodal", "mixed", "cdf"]
-SchedAlgorithm = Literal["pf", "qos_pf", "rr", "max_ci"]
+SchedAlgorithm = Literal["pf", "qos_pf", "rr", "max_ci", "edf", "qos_pf_edf"]
 PfAccounting = Literal["auto", "legacy_best_se", "scheduled_tbs",
                        "acked_goodput", "legacy_fullband"]
 PriorityWeighting = Literal["none", "inverse_priority"]
@@ -419,6 +419,16 @@ class SchedulerConfig:
     qos_instant_rate_exponent: float = 1.0   # beta
     qos_delay_exponent: float = 0.0          # gamma
     qos_priority_weighting: PriorityWeighting = "none"
+    # --- EDF（包长感知）---
+    # edf = TBS / Buffer × w(priority)；qos_pf_edf 是它与 qos_pf 的 蓝本原式
+    # 加权混合 ((1−w)·scale·EPF + w·EDF) × w(priority)。两个分量不同量纲，
+    # edf_mixed_epf_scale 就是 蓝本的 thp_filter 配平系数；未标定时中间的
+    # 权重会被量级差吞掉，因此结果里必须报出两个分量的实测量级。
+    edf_mixed_weight: float = 0.5        # w：0 = 纯 qos_pf，1 = 纯 edf
+    edf_mixed_epf_scale: float = 1.0     # 蓝本 thp_filter
+    # SRB 绝对优先加值。SuperRAN 不建模逻辑信道，只有显式声明
+    # resource_type="signalling" 的业务类才会触发；不声明就永远不触发。
+    srb_priority_boost: float = 5000.0
     # --- OLLA（外环链路自适应）---
     # 发送端先由 CQI 门限 + BF Gain 反折 MCS，再叠加连续 MCS 域
     # OLLA，floor 后钳位。下面 ``*_db`` 是已发布 API 的历史字段名，
@@ -460,7 +470,8 @@ class SchedulerConfig:
     mu_olla_step_down_db: float | None = None
 
     def __post_init__(self) -> None:
-        if self.algorithm not in ("pf", "qos_pf", "rr", "max_ci"):
+        if self.algorithm not in (
+                "pf", "qos_pf", "rr", "max_ci", "edf", "qos_pf_edf"):
             raise ValueError(f"未知调度器 {self.algorithm!r}")
         if (isinstance(self.pf_window_tti, (bool, np.bool_))
                 or not isinstance(self.pf_window_tti, (int, np.integer))
@@ -485,6 +496,13 @@ class SchedulerConfig:
             raise ValueError("max_logical_prb_per_tti 必须为 null 或正整数")
         if self.qos_priority_weighting not in ("none", "inverse_priority"):
             raise ValueError("qos_priority_weighting 只支持 none / inverse_priority")
+        if not np.isfinite(self.edf_mixed_weight) or not (
+                0.0 <= float(self.edf_mixed_weight) <= 1.0):
+            raise ValueError("edf_mixed_weight 必须落在 [0, 1]")
+        for name, value in (("edf_mixed_epf_scale", self.edf_mixed_epf_scale),
+                            ("srb_priority_boost", self.srb_priority_boost)):
+            if not np.isfinite(value) or float(value) < 0:
+                raise ValueError(f"{name} 必须是有限非负数")
         for name, value in (
             ("qos_avg_rate_exponent", self.qos_avg_rate_exponent),
             ("qos_instant_rate_exponent", self.qos_instant_rate_exponent),
@@ -2827,8 +2845,9 @@ def simulate(
     if sched.pf_accounting not in ("auto", "legacy_best_se"):
         raise ValueError("capacity/legacy_v1 只支持 pf_accounting=auto 或 legacy_best_se；"
                          "scheduled_tbs 请使用 evaluation_mode='experience'")
-    if sched.algorithm == "qos_pf":
-        raise ValueError("qos_pf 只属于 evaluation_mode='experience'")
+    if sched.algorithm in ("qos_pf", "edf", "qos_pf_edf"):
+        raise ValueError(
+            f"{sched.algorithm} 只属于 evaluation_mode='experience'")
     if traffic.model == "mixed":
         raise ValueError("mixed 话务只属于 evaluation_mode='experience'")
     n_ue = len(tables)

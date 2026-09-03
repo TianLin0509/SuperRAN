@@ -1925,6 +1925,9 @@ def sr_system_sim(
     qos_instant_rate_exponent: float = 1.0,
     qos_delay_exponent: float = 0.0,
     qos_priority_weighting: str = "none",
+    edf_mixed_weight: float = 0.5,
+    edf_mixed_epf_scale: float = 1.0,
+    srb_priority_boost: float = 5000.0,
     mu_enabled: bool = False,
     mu_precoder: str = "zf",
     mu_csi_error_variance: float = 0.0,
@@ -2040,6 +2043,19 @@ def sr_system_sim(
     harq_combining : ``ir``（默认，增量冗余的半谱效等效 MCS）或 ``cc``
         （追逐合并，码字 SINR +3.0103 dB）。每个 TB 最多重传一次；等效 MCS
         只用于 BLER 查表，实际重传 MCS 与 RBG 数保持和初传一致。
+    scheduler : ``pf``（默认）/ ``qos_pf`` / ``rr`` / ``max_ci`` / ``edf`` /
+        ``qos_pf_edf``。后两个是包长感知：``edf`` 用 ``TBS/Buffer``，优先调度
+        最快能传完的用户，**牺牲长期公平性换小包时延**；``qos_pf_edf`` 是它与
+        ``qos_pf`` 的 蓝本原式加权混合。两者都需要有限队列，
+        ``full_buffer`` 与 ``evaluation_mode='capacity'`` 会硬失败。
+    edf_mixed_weight : ``qos_pf_edf`` 里 EDF 的权重 w ∈ [0,1]。0 严格退化成
+        ``qos_pf``，1 严格退化成 ``edf``。
+    edf_mixed_epf_scale : 蓝本的 ``thp_filter`` 配平系数，默认 1.0。两个
+        分量不同量纲，它没标定时中间的 w 会被量级差吞掉；结果里的
+        ``cell.scheduler_mixed_component_scale`` 报出实测量级与实际占比。
+    srb_priority_boost : SRB 绝对优先加值，默认 5000。**SuperRAN 不建模逻辑
+        信道**，只有显式声明 ``resource_type="signalling"`` 的业务类才触发；
+        不声明就永远不触发，不会凭空造出信令话务。
     qos_* : ``qos_pf`` 的显式参数化形式
         ``w(priority) * R_inst^beta / R_avg^alpha * delay^gamma``。默认
         alpha=beta=1、gamma=0、w=1，严格退化成经典 PF；它不是未确认定义的 EPF。
@@ -2390,6 +2406,9 @@ def sr_system_sim(
             qos_instant_rate_exponent=float(qos_instant_rate_exponent),
             qos_delay_exponent=float(qos_delay_exponent),
             qos_priority_weighting=str(qos_priority_weighting),
+            edf_mixed_weight=float(edf_mixed_weight),
+            edf_mixed_epf_scale=float(edf_mixed_epf_scale),
+            srb_priority_boost=float(srb_priority_boost),
             mu_enabled=_flag(mu_enabled),
             mu_precoder=str(mu_precoder),
             mu_csi_error_variance=float(mu_csi_error_variance),
