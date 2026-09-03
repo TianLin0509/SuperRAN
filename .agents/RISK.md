@@ -10,7 +10,7 @@
 |---|---|
 | 链路自适应 / AMC / HARQ / rank | `linkadapt.py` `amc_policy.py` |
 | BLER 曲线与标定 | `bler_curves.py` `bler_data_20b.py` `calibration.py` |
-| 调度 | `scheduler_resource.py` `scheduler_frequency.py` `scheduler_mu.py` `scheduler_finalize.py` |
+| 调度 | `scheduler_resource.py` `scheduler_frequency.py` `scheduler_mu.py` `scheduler_finalize.py` `scheduler_edf.py` |
 | MU-MIMO | `mumimo.py` |
 | SRS | `srs_resource.py` `srs_waveform.py` `srs_metrics.py` |
 | CSI 时延 | `csi_aging.py` |

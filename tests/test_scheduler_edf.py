@@ -154,9 +154,12 @@ _LIGHT_TRAFFIC = dict(model="mixed", small_ue_share=0.5, small_file_bytes=600,
                       small_arrival_rate_hz=400.0, file_bytes=400_000,
                       arrival_rate_hz=40.0)
 #: 30% PRB 利用率：真实网络的常见负载，调度器基本没得选。
+# arrival_rate_hz 于 2026-09-03 由 4.0 重新标定为 3.5：下行 AMC 链修正
+# （HARQ 进程占用与 rank 反馈时序）下修了可达吞吐，同样的到达率现在要占 40.7%
+# 的 PRB。要保持"30% 工作点"这个场景名副其实，必须降到达率而不是放宽断言。
 _PRB30_TRAFFIC = dict(model="mixed", small_ue_share=0.5, small_file_bytes=600,
                       small_arrival_rate_hz=100.0, file_bytes=400_000,
-                      arrival_rate_hz=4.0)
+                      arrival_rate_hz=3.5)
 
 _CACHE: dict[tuple, object] = {}
 
@@ -230,9 +233,14 @@ def test_mixed_weight_zero_is_not_qos_pf_when_signalling_exists() -> None:
     一致——这条断言同时证明差异确实来自加值，而不是别的地方漏了。
     """
     traffic = sysm.TrafficConfig(model="mixed", classes=(
+        # arrival_rate_hz 于 2026-09-03 由 200 重新标定为 400：AMC 链修正之后，
+        # 200 Hz 这个工作点上加值带来的重排不再改变任何可观测量（小区级全部
+        # 数值 KPI 与逐 UE served_mbps 都逐位相同），断言会失去分辨力。
+        # 已实测确认加值本身仍然有效（400 Hz、srb_bytes=2000、data=4 Hz 三个
+        # 工作点都能看到差异），所以要改的是场景而不是被断言的机制。
         sysm.TrafficClassConfig(
             name="srb", ue_share=0.25, file_bytes=200,
-            arrival_rate_hz=200.0, priority=1, resource_type="signalling"),
+            arrival_rate_hz=400.0, priority=1, resource_type="signalling"),
         sysm.TrafficClassConfig(
             name="data", ue_share=0.75, file_bytes=400_000,
             arrival_rate_hz=40.0, priority=80),
@@ -338,7 +346,8 @@ def test_config_validates_edf_parameters() -> None:
 def test_edf_is_less_fair_than_pf() -> None:
     """判据 (a)：EDF 若不比 PF 更不公平，说明它没有真的按缓冲区排序。
 
-    实测 24 UE 饱和：Jain 0.4707 → 0.3032。
+    实测 24 UE 饱和：Jain 0.4764 → 0.2708（2026-09-03 在 AMC 链修正后的基线上
+    重测；旧基线上是 0.4707 → 0.3032，修正后公平性代价更大）。
     """
     assert _jain(_served(_run("edf", saturated=True))) < \
         _jain(_served(_run("pf", saturated=True)))
@@ -347,9 +356,11 @@ def test_edf_is_less_fair_than_pf() -> None:
 def test_edf_improves_small_packet_immediate_service() -> None:
     """判据 (b)：小包的即时服务比例必须高于 PF——这是 EDF 的全部收益。
 
-    实测 0.7665 → 0.7891。**收益只有 2.3 个百分点**：SuperRAN 的按需 RBG 分配
-    早就让小包在 PF 下也基本即时服务，EDF 能额外拿到的并不多。单种子单场景的
-    方向性观察，不是带置信区间的结论。
+    实测 0.5235 → 0.5280。**收益只有 0.45 个百分点**：SuperRAN 的按需 RBG 分配
+    早就让小包在 PF 下也基本即时服务，EDF 能额外拿到的并不多。
+    2026-09-03 在 AMC 链修正后的基线上重测；旧基线上是 0.7665 → 0.7891（+2.3 pp）。
+    修正之后收益缩到五分之一，而公平性代价反而更大——「纯 edf 不划算」这个结论
+    在新基线上比原来更成立。单种子单场景的方向性观察，不是带置信区间的结论。
     """
     assert _run("edf", saturated=True).cell["small_immediate_service_ratio"] > \
         _run("pf", saturated=True).cell["small_immediate_service_ratio"]
@@ -359,11 +370,12 @@ def test_edf_starves_edge_users_with_large_backlog_under_saturation() -> None:
     """判据 (c)：饱和下 EDF **会**把用户饿死到 0，而 PF 不会。
 
     这是钉住已知代价，不是期望行为。规格 §6.4 写明了饥饿风险，实测 24 UE
-    饱和时 2 个 UE 的 served_mbps 恰好为 0。
+    饱和时 1 个 UE 的 served_mbps 恰好为 0（2026-09-03 在 AMC 链修正后的基线上
+    重测；旧基线上是 2 个）。
 
     **受害者不是"大包用户"，是"大缓冲 + 边缘信道"**：分子是信道相关的 TBS，
     所以 EDF 对坏信道和大积压是乘性双重惩罚，且没有 PF 的 1/R_avg 补偿。实测
-    被饿死的正是全小区最差的两条链路，而其它同为 large 类的 UE 活得好好的
+    被饿死的正是全小区最差的链路，而其它同为 large 类的 UE 活得好好的
     ——下面直接断言这个因果，防止把结论误传成"大包必饿"。
     缓解手段见 :func:`test_calibrated_mixed_mode_avoids_starvation`。
     """
@@ -417,20 +429,30 @@ def test_uncalibrated_mixed_mode_still_shifts_the_schedule() -> None:
 
 
 def test_epf_scale_is_per_operating_point_not_a_constant() -> None:
-    """同一个 epf_scale 在轻载与饱和下给出相反读数——不能当常数搬走。"""
+    """同一个 epf_scale 在轻载与饱和下相差一个数量级以上——不能当常数搬走。
+
+    2026-09-03 重新标定。原断言写的是 ``sat_1 < 0.01 < 0.3 < light_1``，
+    附注"轻载下却接近平衡"。下行 AMC 链修正之后**这句话不再成立**：轻载实测
+    只有 0.0246，离"平衡"很远。被证伪的是那句措辞，不是本测试要守的结论——
+    "epf_scale 不是常数、必须按工作点标定"仍然成立，而且差距足有 20 倍。
+    """
     sat_1 = _run("qos_pf_edf", saturated=True, edf_mixed_weight=0.5).cell[
         "scheduler_mixed_component_scale"]["effective_edf_share"]
     light_1 = _run("qos_pf_edf", edf_mixed_weight=0.5).cell[
         "scheduler_mixed_component_scale"]["effective_edf_share"]
-    # s=1.0：饱和下几乎全 EPF，轻载下却接近平衡
-    assert sat_1 < 0.01 < 0.3 < light_1
+    # s=1.0 实测：饱和 0.001195（几乎全 EPF），轻载 0.024647（仍以 EPF 为主，
+    # 但 EDF 分量的占比高了一个数量级以上）。断言锚在"数量级差异"而不是绝对值，
+    # 这样它守的是机制而不是某一次仿真的小数点。
+    assert sat_1 < 0.01, sat_1
+    assert light_1 > 10.0 * sat_1, (sat_1, light_1)
 
 
 def test_calibrated_mixed_mode_avoids_starvation() -> None:
     """标定 ``epf_scale`` 后，混合模式拿到接近纯 EDF 的取舍但不饿死任何人。
 
-    实测 ``epf_scale=1e-4``：Jain 0.3096（纯 EDF 是 0.3032，纯 PF 是 0.4707），
+    实测 ``epf_scale=1e-4``：Jain 0.2788（纯 EDF 是 0.2708，纯 PF 是 0.4764），
     饿死用户数 0。这就是规格 §6.4 说的缓解手段，实测有效。
+    2026-09-03 在 AMC 链修正后的基线上重测；旧基线上依次是 0.3096 / 0.3032 / 0.4707。
     """
     run = _run("qos_pf_edf", saturated=True, edf_mixed_weight=0.5,
                edf_mixed_epf_scale=1e-4)
@@ -506,9 +528,11 @@ def test_hard_starvation_guard_eliminates_starvation() -> None:
 def test_hard_starvation_guard_costs_throughput_and_small_packet_service() -> None:
     """兜底的代价必须被钉住，不能只宣传它消灭了饥饿。
 
-    实测：小区吞吐 559.0 → 401.5 Mbps（−28%），小包即时服务 0.7891 → 0.6632，
-    **比 PF 基线的 0.7665 还低**。原因是硬兜底是字典序绝对优先，比 PF 连续的
+    实测：小区吞吐 423.1 → 322.3 Mbps（−23.8%），小包即时服务 0.5280 → 0.5161，
+    **比 PF 基线的 0.5235 还低**。原因是硬兜底是字典序绝对优先，比 PF 连续的
     1/r_avg 加权更钝，而被抬升的正是信道差、传同样字节要占更多 RBG 的用户。
+    2026-09-03 在下行 AMC 链修正后的基线上重测；旧基线上是 559.0 → 401.5 Mbps
+    （−28%）、0.7891 → 0.6632、PF 基线 0.7665。方向与结论不变。
     """
     plain = _run("edf", saturated=True)
     guarded = _run("edf", saturated=True, edf_starvation_hol_ms=200.0)
@@ -525,8 +549,10 @@ def test_calibrated_mixed_mode_dominates_the_hard_guard() -> None:
 
     EPF 的 1/r_avg 是**连续自纠正**负反馈——越饿 r_avg 越小、优先级越高，
     没有悬崖；EDF 的 1/Buffer 是反纠正——越饿积压越大、优先级越低。所以标定后的
-    混合模式在**每一个轴上**都优于硬兜底：零饿死、吞吐 579.7 vs 401.5 Mbps、
-    小包即时 0.7807 vs 0.6632。
+    混合模式在**每一个轴上**都优于硬兜底：零饿死、吞吐 429.2 vs 322.3 Mbps、
+    小包即时 0.5229 vs 0.5161。
+    2026-09-03 在下行 AMC 链修正后的基线上重测；旧基线上是 579.7 vs 401.5 Mbps、
+    0.7807 vs 0.6632。方向与结论不变。
     """
     soft = _run("qos_pf_edf", saturated=True, edf_mixed_weight=0.5,
                 edf_mixed_epf_scale=1e-4)
@@ -559,7 +585,10 @@ def test_at_thirty_percent_prb_all_schedulers_deliver_the_same_throughput() -> N
 
 
 def test_at_thirty_percent_prb_edf_still_helps_small_packets_slightly() -> None:
-    """吞吐一样，但小包即时服务仍有可测的方向性差异（0.8101 → 0.8303）。"""
+    """吞吐一样，但小包即时服务仍有可测的方向性差异（0.7243 → 0.7380）。
+
+    2026-09-03 随 prb30 话务重新标定一并重测；旧基线上是 0.8101 → 0.8303。
+    """
     assert _run("edf", scenario="prb30").cell["small_immediate_service_ratio"] > \
         _run("pf", scenario="prb30").cell["small_immediate_service_ratio"]
 
