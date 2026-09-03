@@ -58,15 +58,23 @@ def test_lch_priority_divides() -> None:
     assert sedf.edf_priority(1000.0, 100.0, 2) == pytest.approx(base / 2.0)
 
 
-def test_srb_boost_is_additive_and_absolute() -> None:
-    """相同 TBS/Buffer 下 SRB 高出恰好 5000，且足以压过任何数据承载。"""
+def test_srb_boost_is_additive_not_mathematically_absolute() -> None:
+    """相同 TBS/Buffer 下 SRB 高出恰好 5000——但那是**加性**，不是绝对优先。
+
+    反例：``TBS/Buffer`` 只要超过加值，数据承载就压过 SRB。当前包长下够不到
+    （实测逐 TTI EDF 度量上界饱和 24UE 约 143、轻载 8UE 约 239），所以运行上
+    无缺陷；但"无论 Buffer/TBS 如何都排在前面"这句话是错的，要真正的绝对优先
+    必须改成两级排序，调大常数只是把门槛推远。
+    """
     data = sedf.edf_priority(1000.0, 100.0)
     srb = sedf.edf_priority(1000.0, 100.0, is_srb=True)
     assert srb - data == pytest.approx(sedf.SRB_PRIORITY_BOOST)
-    # 最强反例：数据承载把缓冲区压到 1 字节、TBS 拉满，仍然抢不过一个信道极差
-    # 且缓冲区巨大的 SRB。
+    # 常规包长下 SRB 稳压数据承载
     assert sedf.edf_priority(1.0, 100_000.0, is_srb=True) > \
         sedf.edf_priority(4000.0, 1.0)
+    # 但 TBS/Buffer 超过加值时就压不住了——这是加性的必然结果
+    assert sedf.edf_priority(6000.0, 1.0) > \
+        sedf.edf_priority(1.0, 100_000.0, is_srb=True)
 
 
 def test_retx_boost_is_additive() -> None:
@@ -204,10 +212,39 @@ _IDENTITY_KEYS = ("cell_served_mbps", "cell_experienced_mbps",
 
 
 def test_mixed_weight_zero_is_bit_identical_to_qos_pf() -> None:
-    """最强反例 ①：w=0 必须与纯 qos_pf 逐位一致，不能只是"接近"。"""
+    """最强反例 ①：w=0 与纯 qos_pf 逐位一致。
+
+    适用范围有两条，都由下面两个测试各自钉住：**没有 signalling 业务类**，
+    且 ``qos_priority_weighting="none"``（此时 priority_factor 精确等于 1.0，
+    两条表达式的浮点重结合恰好无损）。
+    """
     base, mixed = _run("qos_pf"), _run("qos_pf_edf", edf_mixed_weight=0.0)
     for key in _IDENTITY_KEYS:
         assert mixed.cell[key] == base.cell[key], key
+
+
+def test_mixed_weight_zero_is_not_qos_pf_when_signalling_exists() -> None:
+    """SRB 加值与 w 无关，所以有 signalling 业务类时 w=0 **不**等于 qos_pf。
+
+    这是刻意的取舍：信令的优先级不该随混合权重漂移。把加值置 0 即可恢复逐位
+    一致——这条断言同时证明差异确实来自加值，而不是别的地方漏了。
+    """
+    traffic = sysm.TrafficConfig(model="mixed", classes=(
+        sysm.TrafficClassConfig(
+            name="srb", ue_share=0.25, file_bytes=200,
+            arrival_rate_hz=200.0, priority=1, resource_type="signalling"),
+        sysm.TrafficClassConfig(
+            name="data", ue_share=0.75, file_bytes=400_000,
+            arrival_rate_hz=40.0, priority=80),
+    ))
+    qos_pf = _run("qos_pf", scenario="saturated", traffic=traffic)
+    with_boost = _run("qos_pf_edf", scenario="saturated", traffic=traffic,
+                      edf_mixed_weight=0.0)
+    without = _run("qos_pf_edf", scenario="saturated", traffic=traffic,
+                   edf_mixed_weight=0.0, srb_priority_boost=0.0)
+    assert with_boost.cell["cell_served_mbps"] != qos_pf.cell["cell_served_mbps"]
+    for key in _IDENTITY_KEYS:
+        assert without.cell[key] == qos_pf.cell[key], key
 
 
 def test_mixed_weight_one_is_bit_identical_to_pure_edf() -> None:
@@ -231,6 +268,20 @@ def test_result_reports_the_formula_actually_used() -> None:
     assert identity["srb_modelled"] is False
 
 
+def test_srb_modelled_flips_true_when_the_boost_actually_fires() -> None:
+    """声明 signalling 类后加值真的生效，结果就不能再报 srb_modelled=false。"""
+    traffic = sysm.TrafficConfig(model="mixed", classes=(
+        sysm.TrafficClassConfig(
+            name="srb", ue_share=0.25, file_bytes=200,
+            arrival_rate_hz=200.0, priority=1, resource_type="signalling"),
+        sysm.TrafficClassConfig(
+            name="data", ue_share=0.75, file_bytes=400_000,
+            arrival_rate_hz=40.0, priority=80),
+    ))
+    identity = _run("edf", traffic=traffic).cell["scheduler_priority_metric"]
+    assert identity["srb_modelled"] is True
+
+
 def test_srb_boost_never_fires_without_a_signalling_class() -> None:
     """SuperRAN 默认没有 SRB：把加值改成 0 也必须逐位不变。"""
     default, no_boost = _run("edf"), _run("edf", srb_priority_boost=0.0)
@@ -252,6 +303,7 @@ def test_signalling_class_activates_the_srb_boost() -> None:
     plain = _run("edf", traffic=traffic, srb_priority_boost=0.0)
     assert boosted.cell["class_acked_bytes"]["srb"] >= \
         plain.cell["class_acked_bytes"]["srb"]
+    assert boosted.cell["scheduler_priority_metric"]["srb_modelled"] is True
 
 
 def test_edf_rejects_full_buffer() -> None:
@@ -303,18 +355,42 @@ def test_edf_improves_small_packet_immediate_service() -> None:
         _run("pf", saturated=True).cell["small_immediate_service_ratio"]
 
 
-def test_edf_starves_large_packet_users_under_saturation() -> None:
-    """判据 (c)：饱和下 EDF **会**把大包用户饿死到 0，而 PF 不会。
+def test_edf_starves_edge_users_with_large_backlog_under_saturation() -> None:
+    """判据 (c)：饱和下 EDF **会**把用户饿死到 0，而 PF 不会。
 
     这是钉住已知代价，不是期望行为。规格 §6.4 写明了饥饿风险，实测 24 UE
-    饱和时 2 个 UE 的 served_mbps 恰好为 0。谁要把它改好，必须先说明代价挪到
-    了哪里，并同步更新这条断言。缓解手段见
-    :func:`test_calibrated_mixed_mode_avoids_starvation`。
+    饱和时 2 个 UE 的 served_mbps 恰好为 0。
+
+    **受害者不是"大包用户"，是"大缓冲 + 边缘信道"**：分子是信道相关的 TBS，
+    所以 EDF 对坏信道和大积压是乘性双重惩罚，且没有 PF 的 1/R_avg 补偿。实测
+    被饿死的正是全小区最差的两条链路，而其它同为 large 类的 UE 活得好好的
+    ——下面直接断言这个因果，防止把结论误传成"大包必饿"。
+    缓解手段见 :func:`test_calibrated_mixed_mode_avoids_starvation`。
     """
-    edf_zero = sum(1 for x in _served(_run("edf", saturated=True)) if x == 0.0)
-    pf_zero = sum(1 for x in _served(_run("pf", saturated=True)) if x == 0.0)
-    assert pf_zero == 0
-    assert edf_zero > 0
+    edf = _run("edf", saturated=True)
+    starved = [u for u in edf.users if float(u["served_mbps"]) == 0.0]
+    assert starved
+    # 必须是**真饥饿**：有积压却一次都没被调度过。只看 served==0 会把"根本没有
+    # 业务到达"的 UE 也算进来（bursts==0 两种情况都会出现，不足以区分）。
+    for u in starved:
+        assert int(u["queued_bytes"]) > 0, u["ue"]
+        assert int(u["sched_tti"]) == 0, u["ue"]
+    # PF 在同一场景下一个都不饿死
+    assert all(x > 0.0 for x in _served(_run("pf", saturated=True)))
+
+    # 因果：受害者是**同业务类内信道最差**的那几个，不是"所有大包用户"。
+    # 全网第二差的链路属小包类，活得好好的——证明惩罚需要大积压与坏信道同时成立。
+    victim_class = starved[0]["traffic_class"]
+    assert all(u["traffic_class"] == victim_class for u in starved)
+    same_class = sorted(float(u["geo_sinr_db"]) for u in edf.users
+                         if u["traffic_class"] == victim_class)
+    worst_in_class = set(same_class[:len(starved)])
+    assert all(float(u["geo_sinr_db"]) in worst_in_class for u in starved)
+    assert any(u["traffic_class"] == victim_class
+               and float(u["served_mbps"]) > 0.0 for u in edf.users),         "同类用户全灭说明是按业务类饿死，不是按信道"
+    # 全网第二差的链路不属于受害者集合（它是另一个业务类）
+    all_sinr = sorted(float(u["geo_sinr_db"]) for u in edf.users)
+    assert all_sinr[1] not in {float(u["geo_sinr_db"]) for u in starved}
 
 
 def test_uncalibrated_mixed_mode_degenerates_and_says_so() -> None:
@@ -327,6 +403,27 @@ def test_uncalibrated_mixed_mode_degenerates_and_says_so() -> None:
         "scheduler_mixed_component_scale"]
     assert scale["effective_edf_share"] < 0.01
     assert "warning" in scale
+    # 告警不得把"数值占比小"说成"对排序毫无影响"——实测占比 0.002 时公平度
+    # 仍走了纯 EPF→纯 EDF 全程的约 2.4%。
+    assert "不等于它对排序毫无影响" in scale["warning"]
+    assert scale["caveats"]
+
+
+def test_uncalibrated_mixed_mode_still_shifts_the_schedule() -> None:
+    """占比 0.002 不代表零影响：公平度确实偏离了纯 qos_pf。"""
+    mixed = _run("qos_pf_edf", saturated=True, edf_mixed_weight=0.5)
+    pure = _run("qos_pf", saturated=True)
+    assert _jain(_served(mixed)) != _jain(_served(pure))
+
+
+def test_epf_scale_is_per_operating_point_not_a_constant() -> None:
+    """同一个 epf_scale 在轻载与饱和下给出相反读数——不能当常数搬走。"""
+    sat_1 = _run("qos_pf_edf", saturated=True, edf_mixed_weight=0.5).cell[
+        "scheduler_mixed_component_scale"]["effective_edf_share"]
+    light_1 = _run("qos_pf_edf", edf_mixed_weight=0.5).cell[
+        "scheduler_mixed_component_scale"]["effective_edf_share"]
+    # s=1.0：饱和下几乎全 EPF，轻载下却接近平衡
+    assert sat_1 < 0.01 < 0.3 < light_1
 
 
 def test_calibrated_mixed_mode_avoids_starvation() -> None:
@@ -471,4 +568,58 @@ def test_at_thirty_percent_prb_nobody_is_starved_by_the_scheduler() -> None:
     """30% PRB 下 EDF 不饿死任何人；零吞吐的 UE 必须是零到达，不是被饿死。"""
     run = _run("edf", scenario="prb30")
     for user, served in zip(run.users, _served(run), strict=True):
-        assert served > 0.0 or int(user["bursts"]) == 0
+        if served > 0.0:
+            continue
+        # bursts==0 不足以判"没有业务"——真被饿死的 UE 同样是 bursts==0
+        # （饱和场景实测：积压 4 MB、sched_tti=0、bursts=0）。必须看积压。
+        assert int(user["queued_bytes"]) == 0, user["ue"]
+
+# ---------------------------------------------------------------------------
+# 交付契约：结果里必须留下"这次到底用了什么参数"
+#
+# 上面的集成测试断言的都是 sysm.simulate(...) 返回的 SystemResult，而 MCP 的
+# sr_system_sim 返回的是 ReplicationResult.as_dict()。两者不是同一个契约：
+# summarize_runs 只保留数值型 KPI，结构化诊断会被整条丢掉。这一节专门盯真正
+# 交付出去的那个对象，避免"测试全绿但交付缺字段"。
+# ---------------------------------------------------------------------------
+def test_scheduler_config_echo_carries_the_edf_knobs() -> None:
+    """改了会让数字变的参数必须跟着结果一起走。
+
+    少了它们，kpi_compare 会把 w=0（纯 qos_pf）和 w=1（纯 edf）这两个调度行为
+    完全不同的臂报成"配置无差异"。
+    """
+    left = sysm.SchedulerConfig(
+        algorithm="qos_pf_edf", edf_mixed_weight=0.0,
+        edf_mixed_epf_scale=1.0, srb_priority_boost=5000.0).as_dict()
+    right = sysm.SchedulerConfig(
+        algorithm="qos_pf_edf", edf_mixed_weight=1.0,
+        edf_mixed_epf_scale=1e-4, srb_priority_boost=0.0,
+        edf_starvation_hol_ms=200.0).as_dict()
+    for key in ("edf_mixed_weight", "edf_mixed_epf_scale",
+                "srb_priority_boost", "edf_starvation_hol_ms"):
+        assert key in left, key
+        assert left[key] != right[key], key
+
+
+def test_replication_result_delivers_the_scheduler_identity() -> None:
+    """MCP 实际返回的对象里必须能读到调度器身份与混合分量量级。
+
+    ``experience.py`` 的 notes 明确指着 ``scheduler_mixed_component_scale``；
+    如果它到不了 ``as_dict()``，那就是个悬空指针。
+    """
+    res = sysm.simulate_replications(
+        _SAT_TABLES,
+        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.5,
+                                  seed=41, tdd_pattern="DDDSU"),
+        traffic=sysm.TrafficConfig(**_SAT_TRAFFIC),
+        sched=sysm.SchedulerConfig(algorithm="qos_pf_edf", mu_enabled=False,
+                                   olla_enabled=False, edf_mixed_weight=0.5),
+        kpi=sysm.KpiConfig(warmup_tti=0), num_replications=2)
+    out = res.as_dict()
+    sched = out.get("scheduler") or {}
+    assert sched.get("scheduler_priority_metric", {}).get("algorithm") == \
+        "qos_pf_edf"
+    scale = sched.get("scheduler_mixed_component_scale") or {}
+    assert scale.get("effective_edf_share") is not None
+    # 配置回显也要在同一个交付对象里
+    assert out["config"]["scheduler"]["edf_mixed_weight"] == 0.5

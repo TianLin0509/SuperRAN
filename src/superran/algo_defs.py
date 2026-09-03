@@ -270,10 +270,13 @@ def _scheduler() -> Family:
                    summary="长期公平与小包时延之间连续可调",
                    detail="照抄蓝本加权混合模式的原式。**两个分量"
                           "不同量纲**：EPF 是 bytes^β/bytes^α，EDF 是无量纲比值，"
-                          "s（蓝本的 thp_filter）就是用来配平量级的。它没标"
-                          "定时名义 w=0.5 可能实际等价于 0.99，因此结果里必须看 "
-                          "scheduler_mixed_component_scale 的 effective_edf_share。"
-                          "w=0 严格退化成 qos_pf，w=1 严格退化成 edf。",
+                          "s（蓝本的 thp_filter）就是用来配平量级的。**它是逐"
+                          "工作点的**：实测同一个 s 在轻载与饱和给出相反读数"
+                          "（s=1.0 轻载 share=0.507 恰好平衡、饱和只剩 0.002；"
+                          "s=1e-4 反过来）。每换一个负载都要重看 "
+                          "scheduler_mixed_component_scale 的 effective_edf_share，"
+                          "不能把某次标定的 s 当常数搬走。w=0 退化成 qos_pf、"
+                          "w=1 退化成 edf——**没有 signalling 业务类时逐位成立**。",
                    when="既要长期公平又要小包低时延的混合业务",
                    cost="两个分量都要算，略贵于任一单独模式"),
         ],

@@ -95,7 +95,7 @@ pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` �
 改动 `mumimo.py` / `beamforming.py` / `power_control.py` 要跑 test_mumimo +
 test_power_control + test_physics_invariants；
 改动 `system.py` / `experience.py` / `traffic.py` / `kpi_view.py` / `kpi_compare.py` 要跑 test_system +
-test_csi_aging + test_rng；改动 `scheduler_*.py` / `experience.py` 要额外跑 test_scheduler_p0；
+test_csi_aging + test_rng；改动 `scheduler_*.py` / `experience.py` 要额外跑 test_scheduler_p0 + test_scheduler_edf；
 改动 `csi_aging.py` / `srs_resource.py` 要跑 test_csi_aging + test_srs_resource；
 改动 `srs_waveform.py` 或 SRS 的 `h_ul_true` 数据合同要跑 test_srs_waveform +
 test_physics_contract_extensions + test_channel_generation_contract + test_results；

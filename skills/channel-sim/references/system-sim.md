@@ -24,7 +24,10 @@ sr_system_sim(
     scheduler="pf", pf_window_tti=100, pf_accounting="auto",
     target_bler=0.1, olla_step_up_db=0.01, olla_step_down_db=None,
     qos_avg_rate_exponent=1.0, qos_instant_rate_exponent=1.0,
-    qos_delay_exponent=0.0, qos_priority_weighting="none", mu_enabled=False,
+    qos_delay_exponent=0.0, qos_priority_weighting="none",
+    edf_mixed_weight=0.5, edf_mixed_epf_scale=1.0,
+    srb_priority_boost=5000.0, edf_starvation_hol_ms=None,
+    mu_enabled=False,
     mu_olla_step_up_db=0.01, mu_olla_step_down_db=None,
     trim="tail", small_burst_policy="fractional_slot", tdd_pattern="DDDSU",
     neighbor_prb_util=0.3, neighbor_load_jitter=0.05,
@@ -430,6 +433,35 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 `w(priority) * R_inst^beta / R_avg^alpha * delay_factor^gamma`。默认
 `alpha=beta=1, gamma=0, w=1` 严格退化经典 PF；这只是参数化 QoS-PF，**不冒充尚未确认
 厂商定义的 EPF**。
+
+`scheduler="edf"` 是**包长感知**：度量 `TBS_fullband / Buffer × w(priority)`，即"还需
+几个调度机会才能排空缓冲区"的倒数。缓冲区小 + 信道好的用户先走。它**需要有限队列**，
+`full_buffer` 与 `evaluation_mode="capacity"` 都硬失败。
+
+**EDF 用长期公平性换小包时延，而且这笔交易在本仿真里并不划算。** 24 UE 饱和实测：
+Jain 从 PF 的 0.4707 掉到 0.3032，2 个 UE 被完全饿死，换来的小包即时服务比例只从
+0.7665 升到 0.7891 —— 因为按需 RBG 分配早就让小包在 PF 下也基本即时服务。PRB 利用率
+30% 时四种调度器的小区吞吐与 Jain **完全相同**，只剩 2 个百分点的小包即时服务差异。
+**EDF 只在拥塞时才有意义。**
+
+`scheduler="qos_pf_edf"` 是 EPF 与 EDF 的加权混合
+`((1−w)·s·EPF + w·EDF) × w(priority)`（`w=edf_mixed_weight`，`s=edf_mixed_epf_scale`）。
+**两个分量不同量纲，`w` 单独一个数不定义混合比例**：EPF 是 `bytes^β/bytes^α`、EDF 是
+无量纲比值，实测中位数相差约 514 倍，`s=1.0` 时名义 `w=0.5` 的实际 EDF 占比只有
+0.002。结果里的 `cell.scheduler_mixed_component_scale.effective_edf_share` 报出真实占比，
+退化时给告警。`w=0` 严格退化成 `qos_pf`，`w=1` 严格退化成 `edf`。
+
+**抗饥饿要用 EPF 分量，不要外挂时延门限。** `1/R_avg` 是连续自纠正负反馈（越饿
+`R_avg` 越小、优先级越高），而 EDF 的 `1/Buffer` 是反纠正（越饿积压越大、优先级越低）
+—— 这就是纯 EDF 靠自身恢复不了饥饿的根因。`edf_starvation_hol_ms` 提供硬时延兜底
+（队首等待达门限者无条件排到最前，组内按等待降序），但实测它是钝器：200 ms 门限下
+饿死归零，代价是小区吞吐 −28%、小包即时服务掉到 0.6632（**比 PF 基线还低**）；
+100 ms 门限更退化成纯"最久等待优先"，小包即时只剩 0.2304。标定 `edf_mixed_epf_scale`
+到分量可比（该场景 1e-4）后，混合模式零饿死、吞吐 579.7 Mbps、小包即时 0.7807，
+在每个轴上都优于硬兜底。
+
+`srb_priority_boost` 在当前仓库**恒不触发**：SuperRAN 不建模逻辑信道，只有显式声明
+`resource_type="signalling"` 的业务类才会激活它。结果里 `srb_modelled: false` 写明这点。
 
 **基站按陈旧 CSI 选 rank 和调度**（`best_se_gnb`），不是按真实 SINR——
 拿真实 SINR 挑 rank 等于让基站预知信道，老化损失会被凭空抹掉一大半。

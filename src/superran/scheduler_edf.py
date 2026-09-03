@@ -44,8 +44,13 @@ __all__ = [
     "apply_starvation_guard",
 ]
 
-#: 信令无线承载（SRB）的绝对优先加值。蓝本 §1.4：在算出的 EDF 值上直接加一个
-#: 大常数，保证信令无论 Buffer/TBS 如何都排在所有数据承载之前。
+#: 信令无线承载（SRB）的优先加值。蓝本 §1.4：在算出的 EDF 值上直接加一个大常数。
+#:
+#: **它是加性的，不是数学意义上的绝对优先**：数据承载只要 ``TBS/Buffer`` 超过这个
+#: 加值就能压过 SRB（例如 TBS=6000 B、残余队列 1 B 时度量就是 6000 > 5000）。
+#: 当前包长下够不到——实测逐 TTI EDF 度量上界饱和 24UE 为 143、轻载 8UE 为 239，
+#: 799 + 1061 个 TTI 里 0 次超过 5000。要真正的绝对优先必须改成两级排序，不是调大
+#: 常数（调大只是把门槛推远，仍然是加性的）。
 #:
 #: **SuperRAN 当前不建模逻辑信道**：experience 模式下每个 UE 只有一个 DRB 队列，
 #: 没有 SRB。因此主循环里这个加值只在用户显式声明
@@ -205,9 +210,13 @@ def edf_metric(
     _positive_finite("srb_priority_boost", srb_priority_boost)
 
     servable = (queue > 0.0) & (tbs > 0.0)
-    # 分母只在 servable 位置有意义；其余位置先钳到 1.0 避免 0 除产生 warning，
-    # 再由 where 整体丢弃，结果与逐元素 early-return 完全一致。
-    core = np.where(servable, tbs / np.maximum(queue, 1.0), 0.0) * weight
+    # 分母只在 servable 位置有意义。不可服务位置换成 1.0 只为避免 0 除告警，
+    # 随后被 where 整体丢弃；**servable 位置必须用真实 queue**——早先写成
+    # np.maximum(queue, 1.0) 会在 0 < buffer < 1 时把比值压小，与标量参考实现
+    # 不一致。主循环里 bytes_left() 返回整数、候选又要求 queued_bytes > 0，
+    # 所以那段区间不可达；但本函数是导出的公共 API，不能只对主循环正确。
+    safe_queue = np.where(servable, queue, 1.0)
+    core = np.where(servable, tbs / safe_queue, 0.0) * weight
     boost = _srb_boost_vector(tbs.size, srb_mask, srb_priority_boost)
     return core + np.where(servable, boost, 0.0)
 
@@ -239,7 +248,9 @@ def mixed_metric(
        它没标定时中间的 w 会被量级差吞掉——w=0.5 可能实际等价于 w=0.99。
        因此 experience 结果里会报出这两个分量在本次运行的**实测中位数**
        （``scheduler_mixed_component_scale``），用来判断 w 是否真的生效。
-       w=0 与 w=1 两端不受影响，严格退化成纯 EPF / 纯 EDF。
+       w=0 与 w=1 两端不受量级影响，退化成纯 EPF / 纯 EDF；**该退化在没有
+       signalling 业务类时逐位成立**，有 signalling 类时 SRB 加值与 w 无关地
+       保留，见下方实现注释。
     """
     epf = np.asarray(epf_core, dtype=float)
     edf = np.asarray(edf_core, dtype=float)
@@ -252,7 +263,20 @@ def mixed_metric(
     scale = _positive_finite("epf_scale", epf_scale)
     _positive_finite("srb_priority_boost", srb_priority_boost)
 
-    combined = ((1.0 - w) * scale * epf + w * edf) * factor
+    # 两端短路。数学上 (1−w)·scale·epf 在 w=1 时是 0，但浮点里 0.0 * inf = nan：
+    # qos 指数取到 ~34 以上时 r_avg**alpha 会下溢到 0、epf_core 变成 inf，w=1
+    # 的度量会整片变 NaN，而 _ordered_candidates 检测不到（NaN != NaN），会静默
+    # 出垃圾顺序。短路让"w=0/w=1 严格退化"这句话在所有输入下都成立，不只是在
+    # 有限 epf 上成立。
+    if w >= 1.0:
+        combined = edf * factor
+    elif w <= 0.0:
+        combined = scale * epf * factor
+    else:
+        combined = ((1.0 - w) * scale * epf + w * edf) * factor
     boost = _srb_boost_vector(epf.size, srb_mask, srb_priority_boost)
-    # SRB 加值跟着 EDF 的语义走：只有本来就有数据可发的候选才享受绝对优先。
+    # SRB 加值只加给本来就有数据可发的候选，且**与 w 无关**——信令的优先级不该
+    # 随混合权重漂移。副作用：声明了 signalling 业务类时，``w=0`` 不再与纯
+    # ``qos_pf`` 逐位相同（后者根本没有这个加值）。这是刻意的取舍，"两端严格
+    # 退化"的说法只在没有 signalling 业务类时成立，文档与测试都按这个口径写。
     return combined + np.where(edf > 0.0, boost, 0.0)

@@ -620,6 +620,14 @@ class SchedulerConfig:
             "qos_instant_rate_exponent": self.qos_instant_rate_exponent,
             "qos_delay_exponent": self.qos_delay_exponent,
             "qos_priority_weighting": self.qos_priority_weighting,
+            # 这四个改了数字就会变，必须跟着结果一起走：少了它们，
+            # kpi_compare 会把 w=0（纯 qos_pf）和 w=1（纯 edf）两臂报成"配置无差异"。
+            "edf_mixed_weight": float(self.edf_mixed_weight),
+            "edf_mixed_epf_scale": float(self.edf_mixed_epf_scale),
+            "srb_priority_boost": float(self.srb_priority_boost),
+            "edf_starvation_hol_ms": (
+                None if self.edf_starvation_hol_ms is None
+                else float(self.edf_starvation_hol_ms)),
             "mu_enabled": self.mu_enabled, "max_mu_users": self.max_mu_users,
             "mu_rank_per_user": self.mu_rank_per_user,
             "mu_corr_threshold": self.mu_corr_threshold,
@@ -3439,6 +3447,15 @@ class ReplicationResult:
                 value = self.runs[0].diagnostics.get(key)
                 if value is not None:
                     out[key] = value
+            # summarize_runs 只保留数值型 KPI，结构化诊断会被整条丢掉。
+            # 调度器身份与混合分量量级是判读结果的前提（notes 明确指着它们），
+            # 所以按 kpi_definitions/tti_trace 同款方式搬过来。
+            for key in ("scheduler_priority_metric",
+                        "scheduler_mixed_component_scale",
+                        "scheduler_starvation_lifts"):
+                value = self.runs[0].cell.get(key)
+                if value is not None:
+                    out.setdefault("scheduler", {})[key] = value
         return out
 
     def text(self) -> str:
