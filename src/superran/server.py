@@ -1928,6 +1928,7 @@ def sr_system_sim(
     edf_mixed_weight: float = 0.5,
     edf_mixed_epf_scale: float = 1.0,
     srb_priority_boost: float = 5000.0,
+    edf_starvation_hol_ms: float | None = None,
     mu_enabled: bool = False,
     mu_precoder: str = "zf",
     mu_csi_error_variance: float = 0.0,
@@ -2053,6 +2054,10 @@ def sr_system_sim(
     edf_mixed_epf_scale : 蓝本的 ``thp_filter`` 配平系数，默认 1.0。两个
         分量不同量纲，它没标定时中间的 w 会被量级差吞掉；结果里的
         ``cell.scheduler_mixed_component_scale`` 报出实测量级与实际占比。
+    edf_starvation_hol_ms : EDF / 混合模式的**时延兜底**门限（ms）。队首等待达到
+        它的用户无条件排到最前，组内按等待降序。默认 ``None``（关闭）：EDF 的
+        分母是积压，越饿分母越大、优先级越低，与 PF 的 ``r_avg`` 越饿越小刚好
+        相反，所以纯 EDF 在饱和下必然饿死一部分大包用户，靠算法自身不会恢复。
     srb_priority_boost : SRB 绝对优先加值，默认 5000。**SuperRAN 不建模逻辑
         信道**，只有显式声明 ``resource_type="signalling"`` 的业务类才触发；
         不声明就永远不触发，不会凭空造出信令话务。
@@ -2409,6 +2414,9 @@ def sr_system_sim(
             edf_mixed_weight=float(edf_mixed_weight),
             edf_mixed_epf_scale=float(edf_mixed_epf_scale),
             srb_priority_boost=float(srb_priority_boost),
+            edf_starvation_hol_ms=(
+                None if edf_starvation_hol_ms is None
+                else float(edf_starvation_hol_ms)),
             mu_enabled=_flag(mu_enabled),
             mu_precoder=str(mu_precoder),
             mu_csi_error_variance=float(mu_csi_error_variance),

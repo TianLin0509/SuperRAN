@@ -1002,6 +1002,14 @@ def _scheduler_metric_identity(sched: Any) -> dict[str, Any]:
         out["retx_priority"] = (
             "结构性绝对优先：HARQ pending 用户整体前置并按 first_tti 排序，"
             "不使用蓝本的 +10000 常数")
+        starve = getattr(sched, "edf_starvation_hol_ms", None)
+        out["starvation_guard_hol_ms"] = (
+            None if starve is None else float(starve))
+        out["starvation_guard_note"] = (
+            "关闭：EDF 的分母是积压，越饿分母越大、优先级越低，靠算法自身不会"
+            "恢复，饱和下必然饿死一部分大包用户"
+            if starve is None else
+            f"队首等待达到 {float(starve):g} ms 的用户无条件排到最前，组内按等待降序")
         out["rbg_allocation"] = (
             "按需分配是所有算法共享的既有行为：required_rbg_for_indices "
             "算出传完 buffer 所需 RBG 数，只取这么多")
@@ -2195,6 +2203,9 @@ def simulate_experience(
     srb_boost = float(getattr(sched, "srb_priority_boost", 5000.0))
     mixed_weight = float(getattr(sched, "edf_mixed_weight", 0.5))
     mixed_epf_scale = float(getattr(sched, "edf_mixed_epf_scale", 1.0))
+    _starve = getattr(sched, "edf_starvation_hol_ms", None)
+    starvation_hol_ms = None if _starve is None else float(_starve)
+    starvation_lifts = 0
     mixed_epf_medians: list[float] = []
     mixed_edf_medians: list[float] = []
 
@@ -2278,6 +2289,8 @@ def simulate_experience(
         # SuperRAN 不建模逻辑信道，只有显式声明 resource_type="signalling" 的
         # 业务类才算 SRB；默认全 False，SRB 加值永不触发。
         srb_flag = np.zeros(len(cand), dtype=bool)
+        # 时延兜底用的队首等待；关闭时保持全零且不参与任何运算。
+        hol_ms = np.zeros(len(cand), dtype=float)
         for i, u in enumerate(cand):
             pending = harq_pending.get(u)
             rank = (int(pending.rank) if pending is not None
@@ -2313,6 +2326,8 @@ def simulate_experience(
                                 tuple(range(int(sys_cfg.num_rbg)))))
             c = tr.queues[u].traffic_class
             buffer_bytes[i] = float(tr.bytes_left(u))
+            if starvation_hol_ms is not None:
+                hol_ms[i] = float(tr.hol_delay_ms(u, tti))
             srb_flag[i] = str(c.resource_type).strip().upper() == "SIGNALLING"
             if str(getattr(sched, "qos_priority_weighting", "none")) == \
                     "inverse_priority":
@@ -2366,6 +2381,13 @@ def simulate_experience(
             metric = potential
         else:
             metric = np.zeros(len(cand), dtype=float)
+        if (starvation_hol_ms is not None
+                and str(sched.algorithm) in ("edf", "qos_pf_edf")):
+            lifted = sedf.apply_starvation_guard(
+                metric, hol_ms, threshold_ms=starvation_hol_ms)
+            if in_measurement:
+                starvation_lifts += int(np.count_nonzero(lifted != metric))
+            metric = lifted
         order = _ordered_candidates(metric, cand, tti, str(sched.algorithm),
                                     n_ue, scheduler_draw[tti, cand])
         cand_pos = {int(u): i for i, u in enumerate(cand)}
@@ -3436,6 +3458,14 @@ def simulate_experience(
         "class_acked_bytes": class_acked,
     }
 
+    if (starvation_hol_ms is not None
+            and str(sched.algorithm) in ("edf", "qos_pf_edf")):
+        cell["scheduler_starvation_lifts"] = {
+            "threshold_hol_ms": float(starvation_hol_ms),
+            "lifted_candidate_ttis": int(starvation_lifts),
+            "scope": "measurement window; counts candidate-TTI pairs, not UEs",
+        }
+
     if str(sched.algorithm) == "qos_pf_edf":
         cell["scheduler_mixed_component_scale"] = _mixed_component_scale(
             mixed_epf_medians, mixed_edf_medians,
@@ -3525,6 +3555,15 @@ def simulate_experience(
             "用户先走。**它牺牲长期公平性换小包时延**——大包用户在重载下可能"
             "长期排在后面，请对照 ue_experienced 的分位数和 Jain 公平度判读，"
             "不要只看小区吞吐。SRB 绝对优先未生效：SuperRAN 不建模逻辑信道。")
+    if (starvation_hol_ms is not None
+            and str(sched.algorithm) in ("edf", "qos_pf_edf")):
+        lifts = cell.get("scheduler_starvation_lifts", {})
+        notes.append(
+            f"**时延兜底已开启**：队首等待达到 {float(starvation_hol_ms):g} ms 的"
+            f"用户无条件排到最前，组内按等待降序；测量窗内抬升 "
+            f"{lifts.get('lifted_candidate_ttis')} 个候选-TTI。它给的是等待上界，"
+            "代价是吞吐——被抬升的用户往往正是信道差、传同样字节要占更多 RBG 的"
+            "那些。要判读代价请对比关闭兜底的同种子运行。")
     if str(sched.algorithm) == "qos_pf_edf":
         scale_report = cell.get("scheduler_mixed_component_scale", {})
         notes.append(

@@ -145,24 +145,36 @@ _SAT_TRAFFIC = dict(model="mixed", small_ue_share=0.5, small_file_bytes=600,
 _LIGHT_TRAFFIC = dict(model="mixed", small_ue_share=0.5, small_file_bytes=600,
                       small_arrival_rate_hz=400.0, file_bytes=400_000,
                       arrival_rate_hz=40.0)
+#: 30% PRB 利用率：真实网络的常见负载，调度器基本没得选。
+_PRB30_TRAFFIC = dict(model="mixed", small_ue_share=0.5, small_file_bytes=600,
+                      small_arrival_rate_hz=100.0, file_bytes=400_000,
+                      arrival_rate_hz=4.0)
 
 _CACHE: dict[tuple, object] = {}
 
 
-def _run(algorithm: str, *, saturated: bool = False, traffic=None,
-         **sched_kwargs):
-    key = (algorithm, saturated, traffic is not None,
+_SCENARIOS = {
+    "light": (lambda: _LIGHT_TABLES, _LIGHT_TRAFFIC, 0.8),
+    "saturated": (lambda: _SAT_TABLES, _SAT_TRAFFIC, 0.5),
+    "prb30": (lambda: _SAT_TABLES, _PRB30_TRAFFIC, 0.5),
+}
+
+
+def _run(algorithm: str, *, saturated: bool = False, scenario: str | None = None,
+         traffic=None, **sched_kwargs):
+    scenario = scenario or ("saturated" if saturated else "light")
+    key = (algorithm, scenario, traffic is not None,
            tuple(sorted(sched_kwargs.items())))
     if traffic is None and key in _CACHE:
         return _CACHE[key]
+    tables_of, scen_traffic, duration = _SCENARIOS[scenario]
     cfg = sysm.SystemConfig(
-        evaluation_mode="experience", duration_s=0.5 if saturated else 0.8,
+        evaluation_mode="experience", duration_s=duration,
         seed=41, tdd_pattern="DDDSU")
     run = sysm.simulate(
-        _SAT_TABLES if saturated else _LIGHT_TABLES,
+        tables_of(),
         sys_cfg=cfg,
-        traffic=traffic or sysm.TrafficConfig(
-            **(_SAT_TRAFFIC if saturated else _LIGHT_TRAFFIC)),
+        traffic=traffic or sysm.TrafficConfig(**scen_traffic),
         sched=sysm.SchedulerConfig(algorithm=algorithm, mu_enabled=False,
                                    olla_enabled=False, **sched_kwargs),
         kpi=sysm.KpiConfig(warmup_tti=0))
@@ -342,3 +354,121 @@ def test_epf_scale_monotonically_shifts_the_effective_share() -> None:
         for s in (1.0, 1e-2, 1e-4)
     ]
     assert shares[0] < shares[1] < shares[2]
+
+# ---------------------------------------------------------------------------
+# 饥饿保护：硬时延兜底 vs 软 EPF 分量
+# ---------------------------------------------------------------------------
+def test_starvation_guard_lifts_only_starved_and_orders_by_wait() -> None:
+    """内核语义：饥饿者整体抬到未饥饿者之上，组内按等待降序。"""
+    metric = np.array([9.0, 0.1, 0.2, 5.0])
+    hol = np.array([1.0, 300.0, 500.0, 2.0])
+    out = sedf.apply_starvation_guard(metric, hol, threshold_ms=100.0)
+    assert out[0] == 9.0 and out[3] == 5.0          # 未饥饿者原值不动
+    assert out[1] > 9.0 and out[2] > out[1]          # 饥饿者抬升且等待久的更高
+    assert np.argmax(out) == 2                       # 等待最久的排第一
+
+
+def test_starvation_guard_is_a_noop_when_nobody_waits_too_long() -> None:
+    metric = np.array([3.0, 1.0])
+    out = sedf.apply_starvation_guard(
+        metric, np.array([5.0, 9.0]), threshold_ms=100.0)
+    assert out == pytest.approx(metric)
+
+
+def test_starvation_guard_handles_all_starved() -> None:
+    """全员饥饿时基准取 0，仍然按等待降序。"""
+    out = sedf.apply_starvation_guard(
+        np.array([1.0, 2.0]), np.array([300.0, 900.0]), threshold_ms=100.0)
+    assert out[1] > out[0]
+
+
+def test_starvation_guard_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        sedf.apply_starvation_guard(np.ones(2), np.ones(3), threshold_ms=10.0)
+    with pytest.raises(ValueError):
+        sedf.apply_starvation_guard(np.ones(2), np.ones(2), threshold_ms=0.0)
+
+
+def test_starvation_guard_off_by_default_is_bit_identical() -> None:
+    """默认关闭必须与不带兜底的实现逐位相同。"""
+    default = _run("edf", saturated=True)
+    explicit_off = _run("edf", saturated=True, edf_starvation_hol_ms=None)
+    for key in _IDENTITY_KEYS:
+        assert explicit_off.cell[key] == default.cell[key], key
+    assert "scheduler_starvation_lifts" not in default.cell
+
+
+def test_hard_starvation_guard_eliminates_starvation() -> None:
+    """兜底确实消灭饥饿：24 UE 饱和下饿死用户 2 → 0。"""
+    guarded = _run("edf", saturated=True, edf_starvation_hol_ms=200.0)
+    assert all(x > 0.0 for x in _served(guarded))
+    assert guarded.cell["scheduler_starvation_lifts"][
+        "lifted_candidate_ttis"] > 0
+
+
+def test_hard_starvation_guard_costs_throughput_and_small_packet_service() -> None:
+    """兜底的代价必须被钉住，不能只宣传它消灭了饥饿。
+
+    实测：小区吞吐 559.0 → 401.5 Mbps（−28%），小包即时服务 0.7891 → 0.6632，
+    **比 PF 基线的 0.7665 还低**。原因是硬兜底是字典序绝对优先，比 PF 连续的
+    1/r_avg 加权更钝，而被抬升的正是信道差、传同样字节要占更多 RBG 的用户。
+    """
+    plain = _run("edf", saturated=True)
+    guarded = _run("edf", saturated=True, edf_starvation_hol_ms=200.0)
+    pf = _run("pf", saturated=True)
+    assert guarded.cell["cell_served_mbps"] < plain.cell["cell_served_mbps"]
+    assert guarded.cell["small_immediate_service_ratio"] < \
+        plain.cell["small_immediate_service_ratio"]
+    assert guarded.cell["small_immediate_service_ratio"] < \
+        pf.cell["small_immediate_service_ratio"]
+
+
+def test_calibrated_mixed_mode_dominates_the_hard_guard() -> None:
+    """关键结论：抗饥饿该用 EPF 分量，不该外挂时延门限。
+
+    EPF 的 1/r_avg 是**连续自纠正**负反馈——越饿 r_avg 越小、优先级越高，
+    没有悬崖；EDF 的 1/Buffer 是反纠正——越饿积压越大、优先级越低。所以标定后的
+    混合模式在**每一个轴上**都优于硬兜底：零饿死、吞吐 579.7 vs 401.5 Mbps、
+    小包即时 0.7807 vs 0.6632。
+    """
+    soft = _run("qos_pf_edf", saturated=True, edf_mixed_weight=0.5,
+                edf_mixed_epf_scale=1e-4)
+    hard = _run("edf", saturated=True, edf_starvation_hol_ms=200.0)
+    assert all(x > 0.0 for x in _served(soft))                    # 同样零饿死
+    assert soft.cell["cell_served_mbps"] > hard.cell["cell_served_mbps"]
+    assert soft.cell["small_immediate_service_ratio"] > \
+        hard.cell["small_immediate_service_ratio"]
+
+
+# ---------------------------------------------------------------------------
+# 30% PRB 利用率：真实网络常见负载下调度器还剩多少差异
+# ---------------------------------------------------------------------------
+def test_thirty_percent_prb_operating_point_is_actually_thirty_percent() -> None:
+    """先证明这个工作点确实在 30% 附近，否则下面的结论不成立。"""
+    util = _run("pf", scenario="prb30").cell["serving_cell_prb_utilization"]
+    assert 0.25 <= util <= 0.35
+
+
+def test_at_thirty_percent_prb_all_schedulers_deliver_the_same_throughput() -> None:
+    """30% PRB 下没有竞争，调度器选谁都一样——小区吞吐完全相同。
+
+    这是判断"要不要上 EDF"的关键：它只在拥塞时才有意义。
+    """
+    served = {
+        alg: _run(alg, scenario="prb30").cell["cell_served_mbps"]
+        for alg in ("pf", "qos_pf", "edf", "max_ci")
+    }
+    assert len(set(served.values())) == 1, served
+
+
+def test_at_thirty_percent_prb_edf_still_helps_small_packets_slightly() -> None:
+    """吞吐一样，但小包即时服务仍有可测的方向性差异（0.8101 → 0.8303）。"""
+    assert _run("edf", scenario="prb30").cell["small_immediate_service_ratio"] > \
+        _run("pf", scenario="prb30").cell["small_immediate_service_ratio"]
+
+
+def test_at_thirty_percent_prb_nobody_is_starved_by_the_scheduler() -> None:
+    """30% PRB 下 EDF 不饿死任何人；零吞吐的 UE 必须是零到达，不是被饿死。"""
+    run = _run("edf", scenario="prb30")
+    for user, served in zip(run.users, _served(run), strict=True):
+        assert served > 0.0 or int(user["bursts"]) == 0

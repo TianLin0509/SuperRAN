@@ -41,6 +41,7 @@ __all__ = [
     "edf_priority",
     "edf_metric",
     "mixed_metric",
+    "apply_starvation_guard",
 ]
 
 #: 信令无线承载（SRB）的绝对优先加值。蓝本 §1.4：在算出的 EDF 值上直接加一个
@@ -60,6 +61,51 @@ SRB_PRIORITY_BOOST = 5000.0
 #: 常数与 :func:`edf_priority` 的 ``is_retx`` 分支，是为了让内核对蓝本完整可测，
 #: 也供不带 HARQ 前置机制的调用方使用。
 RETX_PRIORITY_BOOST = 10000.0
+
+
+def apply_starvation_guard(
+    metric: np.ndarray,
+    hol_delay_ms: np.ndarray,
+    *,
+    threshold_ms: float,
+) -> np.ndarray:
+    """时延兜底：等太久的用户无条件排到最前，按等待时间从长到短。
+
+    EDF 的分母是当前积压，被饿的用户积压只会越来越大、优先级越来越低——这是
+    **反纠正**反馈，与 PF 的 ``r_avg`` 越饿越小刚好相反。所以纯 EDF 在饱和下
+    必然饿死一部分大包用户，靠算法自身不会恢复。
+
+    本函数给它一个硬上界：任何队首等待达到 ``threshold_ms`` 的候选，度量被抬到
+    「所有未饥饿候选的最大值」之上，饥饿组内部再按 HOL 降序。等价于一个两级
+    字典序（是否饥饿 → 等待多久），只是编码进同一个 float 数组，好让主循环仍然
+    只排一次序。
+
+    :param metric: 原始 EDF / 混合度量，与候选集等长。
+    :param hol_delay_ms: 每个候选的队首等待时延（ms）。
+    :param threshold_ms: 触发门限。必须为正；``None`` 由调用方负责短路。
+    :returns: 新数组；无人饥饿时是原数组的拷贝，数值不变。
+
+    .. note::
+       抬升基准取自**本 TTI 的候选集**，因此度量值在 TTI 之间不可比。它本来
+       也只用于同一 TTI 内排序；trace 里的 ``scheduler_metric`` 在饥饿抬升
+       发生时会显示这个抬升后的值，不是原始 EDF 比值。
+    """
+    values = np.asarray(metric, dtype=float)
+    hol = np.asarray(hol_delay_ms, dtype=float)
+    if values.shape != hol.shape or values.ndim != 1:
+        raise ValueError("metric 与 hol_delay_ms 必须是等长一维数组")
+    thr = _positive_finite("threshold_ms", threshold_ms)
+    if thr <= 0.0:
+        raise ValueError("threshold_ms 必须为正")
+
+    starved = hol >= thr
+    out = values.copy()
+    if not bool(starved.any()):
+        return out
+    healthy = values[~starved]
+    ceiling = float(np.max(healthy)) if healthy.size else 0.0
+    out[starved] = max(ceiling, 0.0) + 1.0 + hol[starved]
+    return out
 
 
 def _positive_finite(name: str, value: float, *, minimum: float = 0.0) -> float:

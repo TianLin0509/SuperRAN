@@ -429,6 +429,10 @@ class SchedulerConfig:
     # SRB 绝对优先加值。SuperRAN 不建模逻辑信道，只有显式声明
     # resource_type="signalling" 的业务类才会触发；不声明就永远不触发。
     srb_priority_boost: float = 5000.0
+    # 时延兜底：队首等待达到该门限的用户无条件排到最前，组内按等待降序。
+    # EDF 的分母是积压，越饿分母越大、优先级越低（与 PF 的 r_avg 越饿越小相反），
+    # 靠算法自身不会恢复，必须外挂上界。None = 关闭，行为与不带兜底逐位相同。
+    edf_starvation_hol_ms: float | None = None
     # --- OLLA（外环链路自适应）---
     # 发送端先由 CQI 门限 + BF Gain 反折 MCS，再叠加连续 MCS 域
     # OLLA，floor 后钳位。下面 ``*_db`` 是已发布 API 的历史字段名，
@@ -503,6 +507,10 @@ class SchedulerConfig:
                             ("srb_priority_boost", self.srb_priority_boost)):
             if not np.isfinite(value) or float(value) < 0:
                 raise ValueError(f"{name} 必须是有限非负数")
+        if self.edf_starvation_hol_ms is not None and (
+                not np.isfinite(self.edf_starvation_hol_ms)
+                or float(self.edf_starvation_hol_ms) <= 0):
+            raise ValueError("edf_starvation_hol_ms 必须为 null 或正数")
         for name, value in (
             ("qos_avg_rate_exponent", self.qos_avg_rate_exponent),
             ("qos_instant_rate_exponent", self.qos_instant_rate_exponent),
