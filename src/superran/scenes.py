@@ -4,12 +4,11 @@
 
 * **内置场景**（munich / etoile / florence / san_francisco）——Sionna 自带，
   开箱即用。
-* **真实城市场景**（北京中关村、上海陆家嘴、深圳福田……）——ChannelHub 仓库里
-  带 Mitsuba 场景文件，但那些 PLY 是 VTK 导出的，头部含 ``obj_info`` 字段，
-  Mitsuba 3.8 的 PLY 解析器不认，会直接报错。
+* **本地资产场景**——可选地放在 SuperRAN ``configs/scenes`` 或由
+  ``SUPERRAN_SCENES`` 指向一个独立数据目录；代码不依赖另一个仓库。
 
 所以真实城市场景首次使用时要先"准备"：把场景目录复制到 artifacts 缓存并
-清掉 PLY 头里的 ``obj_info`` 行。**不修改 ChannelHub 原文件。**
+清掉 PLY 头里的 ``obj_info`` 行。**不修改源资产。**
 准备结果带缓存，同一场景只做一次。
 """
 from __future__ import annotations
@@ -23,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 from . import scene_assets as scene_contract
-from .channelhub import channelhub_resource_roots, channelhub_root
 from .paths import artifacts_root
 
 # Sionna 自带的场景，不需要本地资产
@@ -72,23 +70,11 @@ class SceneInfo:
 
 
 def scenes_dir() -> Path:
-    """Locate the scene catalogue independently of the active code checkout.
-
-    ``SUPERRAN_SCENES`` is authoritative when set.  Otherwise prefer the
-    active ChannelHub/MSG-Platform root, then inspect the other known
-    ChannelHub roots.  A candidate is accepted only when it contains at least
-    one JSON descriptor; an empty ``configs/scenes`` directory must not mask a
-    later full asset checkout.
-    """
+    """Locate optional scene data without searching another source tree."""
     explicit = os.environ.get(_SCENES_ENV_KEY)
     if explicit:
         return Path(explicit)
-
-    candidates = [root / "configs" / "scenes" for root in channelhub_resource_roots()]
-    for candidate in candidates:
-        if candidate.is_dir() and next(candidate.glob("*.json"), None) is not None:
-            return candidate
-    return channelhub_root() / "configs" / "scenes"
+    return Path(__file__).resolve().parents[2] / "configs" / "scenes"
 
 
 def scene_cache_dir() -> Path:
@@ -99,10 +85,19 @@ def scene_cache_dir() -> Path:
 
 def list_scenes() -> list[SceneInfo]:
     """列出所有可用的射线追踪场景。"""
-    out: list[SceneInfo] = []
+    out: dict[str, SceneInfo] = {
+        sid: SceneInfo(
+            scene_id=sid,
+            display_name=sid.replace("_", " ").title(),
+            description="Sionna RT built-in scene (optional direct adapter)",
+            builtin=True,
+            needs_preparation=False,
+        )
+        for sid in BUILTIN_SCENES
+    }
     base = scenes_dir()
     if not base.is_dir():
-        return out
+        return list(out.values())
 
     for f in sorted(base.glob("*.json")):
         try:
@@ -112,8 +107,7 @@ def list_scenes() -> list[SceneInfo]:
         sid = d.get("scene_id", f.stem)
         builtin = sid in BUILTIN_SCENES
         has_assets = (base / sid / "scene.xml").is_file()
-        out.append(
-            SceneInfo(
+        out[sid] = SceneInfo(
                 scene_id=sid,
                 display_name=d.get("display_name", sid),
                 description=d.get("description", ""),
@@ -125,8 +119,7 @@ def list_scenes() -> list[SceneInfo]:
                 coverage_m=d.get("coverage_m"),
                 needs_preparation=(not builtin) and has_assets,
             )
-        )
-    return out
+    return [out[key] for key in sorted(out)]
 
 
 def get_scene(scene_id: str) -> SceneInfo | None:
@@ -171,7 +164,7 @@ def prepare_scene(scene_id: str, *, force: bool = False) -> dict[str, Any]:
     """准备真实城市场景，返回可直接用的 ``osm_path``。
 
     内置场景直接返回（Sionna 自带，无需准备）。真实城市场景会复制到
-    artifacts 缓存并修掉 PLY 头，**不动 ChannelHub 原文件**。
+    artifacts 缓存并修掉 PLY 头，**不动源资产**。
     """
     info = get_scene(scene_id)
     if info is None:
@@ -281,10 +274,10 @@ def prepare_scene(scene_id: str, *, force: bool = False) -> dict[str, Any]:
 
 
 def resolve_scene_config(scene_id: str, preset: str | None = None) -> dict[str, Any]:
-    """把场景 + 站点预设翻译成 ChannelHub 的 sionna_rt 配置片段。
+    """把场景 + 站点预设翻译成 direct Sionna RT 配置片段。
 
     真实城市场景会自动完成准备工作，并把 ``osm_path`` 解析成绝对路径
-    （ChannelHub 的 profile 里写的是相对仓库根的路径）。
+    （本地 descriptor 可以写相对资产目录的路径）。
     """
     info = get_scene(scene_id)
     if info is None:

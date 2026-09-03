@@ -334,13 +334,13 @@ def _b07(seed: int) -> dict[str, Any]:
              + 1j * random.standard_normal((2, 8, 8, 4))) / np.sqrt(2))
     noise = ((random.standard_normal(h_dl.shape) + 1j * random.standard_normal(h_dl.shape))
              / np.sqrt(2)) * 0.02
-    h_ul_est = np.conj(h_dl) + noise
+    h_ul_est = h_dl + noise
     mapped = ch.ul_estimate_to_dl_precoding_csi(h_ul_est)
     ideal = ll.link_performance(h_dl, snr_db=20.0, method="svd")
     correct = ll.link_performance(
         h_dl, snr_db=20.0, method="svd", h_for_precoding=mapped)
     wrong = ll.link_performance(
-        h_dl, snr_db=20.0, method="svd", h_for_precoding=h_ul_est)
+        h_dl, snr_db=20.0, method="svd", h_for_precoding=np.conj(h_ul_est))
     checks = [
         _check("正确互易映射优于漏共轭",
                correct.spectral_efficiency > wrong.spectral_efficiency,
@@ -350,7 +350,7 @@ def _b07(seed: int) -> dict[str, Any]:
                f"correct/ideal={correct.spectral_efficiency/ideal.spectral_efficiency:.3f}"),
     ]
     return _case("B07_tdd_srs_reciprocity",
-                 "UL-SRS reciprocity mapping restores the DL precoding convention",
+                 "Transpose-only UL-SRS reciprocity preserves the canonical DL convention",
                  checks, {
                      "ideal_se": ideal.spectral_efficiency,
                      "correct_mapping_se": correct.spectral_efficiency,

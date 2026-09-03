@@ -134,17 +134,11 @@ def _fmt(key: str, value: Any) -> str:
 def _site_positions(cfg: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
     """真实站点/扇区位置。拿不到时回空列表 + 原因。
 
-    **直接问 ChannelHub 的拓扑模块**，不自己重算——六边形栅格的站数吸附
-    （1/7/19）和线性布局的两侧交错都在那边，重算一定会漂。
+    **直接问 SuperRAN 的本地拓扑模块**，不在文档层重算——六边形栅格的站数
+    吸附（1/7/19）和线性布局的两侧交错只有一份真相源。
     """
     try:
-        from .channelhub import _ensure_path  # noqa: PLC0415
-
-        _ensure_path()
-        from msg_embedding.topology.hex_grid import (  # noqa: PLC0415
-            make_hex_grid,
-            make_linear_grid,
-        )
+        from .native import make_hex_grid, make_linear_grid  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
         return [], f"取不到拓扑模块：{type(exc).__name__}"
 
@@ -394,14 +388,11 @@ def _svg_array(spec: dict[str, Any]) -> str:
 def unit_hex_layouts() -> dict[str, list[list[float]]]:
     """ISD = 1 时的六边形站点坐标，按站数索引（"1" / "7" / "19"）。
 
-    **由 ChannelHub 现算，不硬编码。** 六边形位置随 ISD 线性缩放，所以前端
+    **由 SuperRAN 本地拓扑现算，不硬编码。** 六边形位置随 ISD 线性缩放，所以前端
     只要乘一个 ISD 就能得到精确坐标——不必在 JS 里重写栅格逻辑，也就不会漂。
     """
     try:
-        from .channelhub import _ensure_path  # noqa: PLC0415
-
-        _ensure_path()
-        from msg_embedding.topology.hex_grid import make_hex_grid  # noqa: PLC0415
+        from .native import make_hex_grid  # noqa: PLC0415
     except Exception:  # noqa: BLE001
         return {}
     out: dict[str, list[list[float]]] = {}
@@ -423,7 +414,7 @@ def planned_ue_drop(cfg: dict[str, Any], n: int = 200) -> list[tuple[float, floa
     仿真跑不跑都一样——所以从预设直接出说明书时也能算出来，
     不需要等数据集生成。
 
-    直接调 ChannelHub 的 ``_place_ues``，用它自己的 RNG 约定
+    直接调 SuperRAN first-party source 的 ``_place_ues``，用同一 RNG 约定
     （``default_rng(ue_seed + idx)``，每个样本一次），
     所以和真跑出来的坐标**逐位相同**。
 

@@ -317,7 +317,7 @@ RBG，**包含 idle TTI 的 0 桶**。不要拿 `rbg_size_hist` 代替：后者�
 
 ## 邻区负载 `neighbor_prb_util`
 
-ChannelHub 的几何 SINR 是按**所有邻区都在发**算出来的，等于 100% PRB 利用率。
+first-party source 的几何 SINR 是按**所有邻区都在发**算出来的，等于 100% PRB 利用率。
 真实 5G 网络典型是 10% / 30% / 50%。按 full buffer 算会把干扰放大到不真实的程度，
 所以默认取 **0.3**；设 1.0 退化成原行为。
 
@@ -415,8 +415,8 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 `mean_csi_staleness_ms`。只能转述 effective 值，并同时说明 requested→effective 是否升档。
 显式 `ue_speed_kmh=0` 是合法静止条件，不得当成缺省 3 km/h。
 
-**快照间隔不是一个 TTI。** ChannelHub 的多时隙输出是连续的 SRS/CSI-RS 机会，
-默认 `10 × 0.5 ms = 5 ms`，由 `system.snapshot_interval_ms(cfg)` 从配置算出。
+**快照间隔不是一个 TTI。** 新数据用显式 `sample_interval_s`（默认 5 ms），
+由 `system.snapshot_interval_ms(cfg)` 直接读取；不再从 SRS/CSI-RS 周期反推。
 把它当成 0.5 ms 会让**所有时间相关的结论差 10 倍**。
 
 ## 调度与 OLLA

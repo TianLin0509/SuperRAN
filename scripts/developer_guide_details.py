@@ -101,7 +101,7 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
     "overview": DetailSpec(
         promise="把 SuperRAN 看成一条把问题编译成可复核证据的流水线，而不是一组彼此无关的无线算法。读完后应能判断一个结果究竟来自物理信道、系统调度，还是统计与呈现层。",
         principles=(
-            "平台的窄腰是<strong>数据合同与证据合同</strong>。上游可以换 ChannelHub、Sionna RT 或内部生成器，下游可以换预编码、接收机、调度器与 KPI，但中间必须始终说清 <code>h_true</code>、<code>h_est</code>、功率参考面、随机种子、样本单位和统计窗口。只要这些角色没有混在一起，同一实验才有可能复现；一旦把估计信道偷换成真值，后续再漂亮的曲线也失去解释力。",
+            "平台的窄腰是<strong>数据合同与证据合同</strong>。上游默认是本仓 first-party source，可选接 direct Sionna RT；下游可以换预编码、接收机、调度器与 KPI，但中间必须始终说清 <code>h_true</code>、<code>h_est</code>、功率参考面、随机种子、样本单位和统计窗口。只要这些角色没有混在一起，同一实验才有可能复现；一旦把估计信道偷换成真值，后续再漂亮的曲线也失去解释力。",
             "一次可信实验同时包含三条链。<strong>物理链</strong>回答信号如何经过阵列、传播和干扰；<strong>决策链</strong>回答 gNB 在当时信息下如何选 rank、MCS、SU/MU 与资源；<strong>证据链</strong>回答样本是否独立、比较是否配对、统计是否跨过预热窗口。三条链最终在 manifest、逐样本结果和 Gate 报告中会合，结论才不仅是一次脚本输出。",
             "容量模式与体验模式分别回答“持续有数据时空口能做多快”和“有限业务到达后用户实际等多久、拿到多少有效字节”。前者可以全带调度并关注谱效，后者必须模拟 FIFO、空闲 TTI、按需 RBG、首包等待和尾料。两种模式共用物理输入，却不能共享一套含糊的 KPI 口径。",
             "交互配置 Mock 和 KPI 工作台是这三条链面向用户的两个检查点。前者在运行前把 resolved config 画成拓扑、阵列、频时资源、PDP 与算法选择，并把用户修改作为受限 delta 回到 Draft；后者在运行后只读取 Result contract，把小区、用户、CDF、资源和告警按本轮意图排序。一个负责防止“看见的配置和执行的配置不同”，另一个负责防止“平均值遮住边缘用户和口径限制”。它们不是宣传截图，而是实验合同的可视化接口。",
@@ -137,12 +137,12 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
     "quickstart": DetailSpec(
         promise="解释从一个干净 Python 环境到第一份可发布实验之间每一步真正建立了什么合同，并给出出现环境、数据或统计问题时应从哪里断点检查。",
         principles=(
-            "安装并不等于把所有后端都装上。基础包提供合同、内部轻量仿真、MCP 与分析能力；射线追踪和 ChannelHub 物理源是可探测能力。正确流程是先运行能力发现，再让计划适配当前机器，而不是在导入失败后偷偷退回另一套数据。这样，同一份计划在轻量开发机和物理仿真机上会得到明确不同、但都可解释的执行路径。",
-            "MCP 的 stdio 进程只是协议边界。Agent 发送的是结构化参数，服务端返回数据集或结果的标识、摘要和产物路径；大型数组留在磁盘合同里，不应塞进对话。绝对 Python 路径、<code>SUPERRAN_CHANNELHUB</code> 和项目根共同决定进程究竟加载哪份代码，因此首次运行要把这些值写进诊断而不是凭目录名猜。",
-            "第一次实验的目标不是追求规模，而是闭合一条最小证据链：能力可见、配置可解析、数据可生成、Gate 1 可解释、一个算法可运行、结果可回指输入。这个闭环成功后再扩大 UE、drop、snapshot 和 replication；否则大规模运行只会把同一个配置错误复制更多遍。",
-            "重命名兼容必须是单向、临时且可观察的。<code>_compat.py</code> 只在对应 <code>SUPERRAN_*</code> 新键缺失时，把旧产品环境变量的八个已登记后缀复制到当前进程；它不覆盖新值、不修改宿主配置文件，也不兼容旧 Python 包名。迁移记录可查询并发出弃用警告，避免为了平滑升级长期维护两套隐形真相源。",
+            "安装并不等于把所有可选后端都装上。基础包自带统计信道、MCP 与分析能力；射线追踪 direct adapter 是独立可探测能力。正确流程是先运行能力发现，而不是在导入失败后偷偷接另一个源码树。",
+            "MCP 的 stdio 进程只是协议边界。Agent 发送结构化参数，服务端返回数据集或结果标识、摘要和产物路径；大型数组留在磁盘合同里。绝对 Python 路径与项目根决定进程加载哪份 SuperRAN，历史外部 source-root 环境变量不能改变实现。",
+            "第一次实验的目标不是追求规模，而是闭合一条最小证据链：能力可见、配置可解析、数据可生成、Gate 1 可解释、一个算法可运行、结果可回指输入。这个闭环成功后再扩大 UE、drop、snapshot 和 replication；否则大规模运行只会把同一个配置错误复制更多遍。新环境还应先用不存在的外部根做反向检查，证明实现选择没有暗门。",
+            "重命名兼容必须是单向、临时且可观察的。<code>_compat.py</code> 只在对应 <code>SUPERRAN_*</code> 新键缺失时，把仍有效的七个数据/UI后缀复制到当前进程；外部 source-root 后缀明确排除。它不覆盖新值、不修改宿主配置文件，也不兼容旧 Python 包名。",
             "SRS 权与 PMI 权的 Hello World 必须拆成两张表。<strong>机制诊断</strong>让两臂共享同一 <code>dataset_id</code>、同一 UL-SRS <code>h_est</code>、同一 <code>h_true</code>、同一接收机与逐样本工作点，只把 <code>method</code> 从 <code>svd</code> 改为 <code>type1</code>，隔离连续方向与有限码本的构造损失；<strong>主实验</strong>按真实信息链比较 UL-SRS/SVD 与 DL-CSI-RS/PMI，并把 <code>varies=[csi,method]</code> 写进合同。两者不能混称为“只改权”，当前 PMI 也只是 Type-I-style 列码本近似，不代表已经覆盖 38.214 Type-I 的全部 RI/PMI/子带限制。",
-            "主实验里的两个 CSI 名称对应两条不同的可实现链。SRS 臂从上行估计出发，ChannelHub 的规范化 UL 张量先经过共轭互易映射回下行约定，再由 gNB 计算逐 RBG 协方差/SVD 权；PMI 臂则由 UE 在 DL CSI-RS 估计上搜索 Type-I-style 码本并把索引反馈给 gNB。评价时两臂都把各自实际下行权乘到同一 <code>h_true</code> 上，并使用同一个 MMSE 接收机与几何损伤。这样，差值包含真实方案的估计来源与码本自由度差异，却不包含重新撒点、不同噪声或不同接收机带来的额外优势。若只想回答“码本量化损失多大”，必须退回同 SRS 机制诊断，不能拿主实验的名字替代。",
+            "主实验里的两个 CSI 名称对应两条不同的可实现链。SRS 臂从上行估计出发，first-party v2 的 canonical UL 张量按 transpose-only 互易合同直接映射回下行约定，再由 gNB 计算逐 RBG 协方差/SVD 权；历史 v1 数据才显式共轭。PMI 臂由 UE 在 DL CSI-RS 估计上搜索 Type-I-style 码本并反馈索引。两臂都在同一 <code>h_true</code> 与 MMSE 接收机上评价。",
             "Hello World 的价值还在于演示失败如何被保存。当前 80 条观测来自 10 个 UE 位置、每个位置 8 个快照；推断必须先按位置取簇均值，不能把 80 行当作 80 个独立用户。历史上静态位置生成 bug 曾让所有样本落在同一点，把重复快照误报成大样本并产生漂亮的点估计；修复后 Gate 1 会检查位置覆盖，Gate 2 会显式写出 80→10 的推断单位，Gate 3 再根据 CI 与 Wilcoxon 判决。脚本退出码 0 表示主实验三道门均通过，2 表示数据门阻塞，3 表示数据和公平性可用但方向性结论被拦截；三种状态都会先写证据文件，因此退出码 3 不是“运行失败后什么也没留下”。",
         ),
         implementation=(
@@ -163,7 +163,7 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
         checks=(
             ("解释器唯一", "终端和 MCP 宿主报告同一 Python 可执行文件与同一 editable 安装。"),
             ("能力不降级", "缺失可选后端时 capability 明示 unavailable；计划中也能看到替代方案或阻塞原因。"),
-            ("兼容不覆盖", "同时设置旧键和新键时新键逐值胜出；重复迁移不重复记录，审计只包含确实复制的八类白名单键。"),
+            ("兼容不覆盖", "同时设置旧键和新键时新键逐值胜出；重复迁移不重复记录，审计只包含确实复制的数据/UI白名单键且不含 source root。"),
             ("最小闭环", "小数据集可加载、Gate 1 通过、算法结果包含 dataset/config lineage。"),
             ("Hello World 身份不混淆", "机制诊断仅 method 不同且标为 exploratory；主实验共享 dataset/h_true/receiver/工作点，显式声明 csi+method 两项差异并绑定预注册主指标。"),
             ("两张页面可交付", "spec 与 KPI HTML 均为 UTF-8 自包含文件；url 降级、回传模式、排序证据和源 Result 可追溯。"),
@@ -187,7 +187,7 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
         ),
         implementation=(
             ("编排形成 Spec", "自然语言意图被解析为场景、数据源、算法、KPI、随机策略和 Gate 约束；未决项留在 decisions，而不是被默认值悄悄覆盖。"),
-            ("生成形成 Dataset", "适配器从 ChannelHub/Sionna/内部源取样，统一轴顺序、dtype、单位与角色，写入真值、估计值及 metadata。"),
+            ("生成形成 Dataset", "first-party source 生成并统一轴顺序、dtype、单位与角色，写入真值、估计值及 metadata；可选 direct adapter 必须经过同一合同。"),
             ("算法形成 Result", "预编码只读取设计 CSI，接收评估读取真值；系统层消费链路表并产生逐 TTI 分配、用户和小区统计。"),
             ("证据形成 Conclusion", "验证模块检查数据，分析模块进行配对统计，结果合同把配置、样本、算法版本、限制和图表绑定到一起。"),
         ),
@@ -220,7 +220,7 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
         implementation=(
             ("解析硬件 profile", "<code>company_antenna_block</code> 根据 64T/256T 选择端口布局、每端口阵元数、间距、极化、方向图和默认下倾，并把临时参数化方向图标成非实测。"),
             ("建立索引合同", "<code>port_flat_index</code> 统一新模块的 pol-h-v 顺序；历史 h-v-pol 只留在显式兼容边界，<code>type1_to_port_permutation</code> 负责码本重排。"),
-            ("构造物理耦合", "ChannelHub 在物理阵元坐标上计算阵列响应，再用每端口的垂直子阵馈电权填充稀疏 F。64T 的 shape 为 192×64，256T 为 1536×256。"),
+            ("构造物理耦合", "SuperRAN native.EffectiveArray 在物理阵元坐标上计算阵列响应，再用每端口垂直子阵馈电权填充稀疏 F。64T 为 192×64，256T 为 1536×256。"),
             ("压到系统入口", "<code>H_port = H_AE F</code> 把阵元级传播压成端口级 MIMO 信道；后续预编码、SRS 与码本只看到稳定端口顺序。"),
         ),
         example_title="从 (p,h,v) 找到 256T 的端口和六个物理阵元",
@@ -274,7 +274,7 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
             "用 TDL 输出支撑需要角度、极化或 MU 用户相关性的结论。",
             "认为系统层只留一个 snapshot 就等于物理层从未生成/使用 14 个 symbol。",
         ),
-        source_paths=("src/superran/channelhub.py", "src/superran/scenes.py", "src/superran/scene_assets.py", "src/superran/spec38901.py", "src/superran/generate.py"),
+        source_paths=("src/superran/native.py", "src/superran/channelhub.py", "src/superran/scenes.py", "src/superran/scene_assets.py", "src/superran/spec38901.py", "src/superran/generate.py"),
     ),
     "antenna": DetailSpec(
         promise="从单个阵元接收一条 +45/−45° 极化射线开始，逐层叠加阵元方向图、空间相位和子阵馈电，直到得到可供预编码使用的端口级 H，并用结构不变量证明 F 矩阵没有排错。",
@@ -825,7 +825,7 @@ DETAIL_SPECS.update({
         principles=(
             "MCP 工具是窄接口，不是让 LLM 随意拼底层函数。每个工具应有稳定输入 schema、明确副作用、结构化错误、产物标识与 lineage。返回摘要适合对话决策，大数组和长报告通过 artifact 路径交付。工具名是否友好不如合同是否能阻止错误角色、未知配置和静默降级重要。",
             "正确调用顺序通常是 discover→plan→generate→gate→run→analyze/deliver。能力发现告诉 Agent 哪些后端真实可用；计划把用户问题转成冻结实验；生成与 Gate 1 建立数据可信度；算法/系统工具只消费已通过的数据；统计和交付工具再形成结论。直接从自然语言跳到某个 throughput 工具，容易遗漏基线、公平条件和门。",
-            "工具错误要区分用户可修复、环境缺失、合同失败和内部异常。比如不存在的 preset 应返回合法选项，ChannelHub 缺失应报告 capability/路径，Gate 失败应返回逐检查结果；不能捕获所有异常后改用 toy data 并继续。Agent 可以建议降级，但必须让用户知道精度和语义发生了什么变化。",
+            "工具错误要区分用户可修复、可选后端缺失、合同失败和内部异常。比如不存在的 preset 应返回合法选项，direct RT 缺失应报告 capability，first-party source contract 失败应硬停止；不能捕获异常后改用 toy data。",
             "外部算法通过注册结果合同接入，而不是让服务端执行任意用户代码。注册值要带 dataset/sample key、算法版本、输入角色和 shape，随后走同一 Gate 2/3。这样既保持安全边界，也保证自研算法与内置算法在相同证据框架中比较。",
         ),
         implementation=(
@@ -972,7 +972,7 @@ DETAIL_SPECS.update({
         checks=(
             ("扫描完整", "所有 src/superran/*.py 和非下划线顶层 symbol 都出现在 HTML，计数与 AST 一致。"),
             ("链接有效", "模块/源链接指向存在文件与正确行附近，hash heading 无重复/断链。"),
-            ("构建无副作用", "API 扫描仅 AST/文件读取，不触发 ChannelHub/Sionna 重依赖或运行仿真。"),
+            ("构建无副作用", "API 扫描仅 AST/文件读取，不触发 Sionna 可选重依赖或运行仿真。"),
             ("概念互链", "关键概念章给出 source_paths，API 参考能通过搜索返回对应模块和 symbol。"),
         ),
         pitfalls=(
@@ -1236,7 +1236,7 @@ DETAIL_SPECS.update({
         source_paths=("src/superran/measure.py", "src/superran/hardware.py", "src/superran/linklevel.py", "src/superran/system.py", "tests/test_company_256t.py"),
     ),
     "powercontrol": DetailSpec(
-        promise="把空间每天线约束、流间功率、逐 RB profile 和邻区活动拆成独立自由度，沿着用户输入、守恒求解、ChannelHub 逐小区功率分解、链路表与体验调度走到最终 SINR，并明确当前可以优化什么、仍没有开放什么。",
+        promise="把空间每天线约束、流间功率、逐 RB profile 和邻区活动拆成独立自由度，沿着用户输入、守恒求解、first-party 逐小区功率分解、链路表与体验调度走到最终 SINR。",
         principles=(
             "功率自由度必须按作用轴命名。EBF/PEBF/NEBF 改的是一个频点上 antenna×stream 的物理矩阵；equal/waterfilling 改的是 stream 轴；q[cell,RB] 改的是频率轴；neighbor_prb_util 改的是邻区在时间/资源上的活动比例。四者可以组合，但守恒对象、配置入口和失败模式都不同。把它们都写成“功控开/关”会让一次结果无法归因。",
             "逐 RB profile 是相对均匀 PSD 的连续倍率，不是给总功率加预算。每个小区独立满足 0.1≤q≤4 与 Σq=N_RB。部分指定时，未指定 RB 统一承担差额；若差额要求越界则输入不可行并硬失败。这样 RBG0 抬升必然伴随其他 RB 下降，A/B 才不会把额外能量误写成算法增益。",
@@ -1259,7 +1259,7 @@ DETAIL_SPECS.update({
         ),
         checks=(
             ("profile 守恒", "每个小区逐行检查 min/max、mean、sum_error；部分 override 不改变用户给定值，不可行输入全部硬失败。"),
-            ("S/N/I 重构", "ChannelHub source→adapter→NPZ→loader 的 S/(N+ΣI_k) 必须逐位重构原几何 SINR，服务小区列为 0。"),
+            ("S/N/I 重构", "first-party source→NPZ→loader 的 S/(N+ΣI_k) 必须逐位重构原几何 SINR，服务小区列为 0。"),
             ("耦合 toy", "三小区两 RB 手算 q_serving·S/(N+ηΣq_kI_k)，同时核对 controlled interference、IoT 与 channel scale。"),
             ("关闭退化", "enabled=False 的 link table SINR/MCS 与历史均匀 1x 路径逐位相同；enabled=True 但无 override 也显式报告仍是 1x。"),
             ("频率可见", "相反 profile 的两个 RBG 得到方向正确的不同 SINR，单 RBG grant 读取自己的 bitmap，不被全带均值抹平。"),
@@ -1333,17 +1333,17 @@ DETAIL_SPECS.update({
     "raytracing": DetailSpec(
         promise="把“射线追踪场景”拆成资产准备、后端身份、路径求解、时频采样、数据合同和快速探测六层，并明确 InternalSim probe 为什么能用于话务前的场景量级判断，却绝不能代替完整 RT/宽带信道。",
         principles=(
-            "场景名、信道模型名与真正生成后端不是一回事。Sionna 内置场景可以直接解析，ChannelHub 的城市资产则包含 OSM/PLY、站点与材料上下文；运行中还可能因依赖或资产失败进入显式 <code>tdl_fallback</code>。唯一可靠身份是结果 metadata 中的 <code>channel_generation_mode</code> 及其 fallback reason，不能因为配置写了 <code>sionna_rt</code> 就把输出称为 RT。",
+            "场景名、信道模型名与真正生成后端不是一回事。Sionna 内置场景可由未来 direct adapter 解析，自有城市资产通过独立 OSM/PLY 数据目录提供。唯一可靠身份是结果 metadata 的 <code>channel_generation_mode</code>；不能因为配置写了 <code>sionna_rt</code> 就把输出称为 RT。",
             "上游资产必须只读。Mitsuba 对部分VTK PLY头中的<code>obj_info</code>不兼容，<code>prepare_scene()</code>会在稳定进程锁内复制到独立缓存并清理副本；源树与准备后树各有内容SHA-256。缓存手改或源升级会重建，未完成发布journal会硬失败。",
             "场景几何身份与无线材料身份必须拆开。<code>scene_tree_fingerprint</code>绑定XML/PLY字节；<code>radio_config_revision</code>另绑定材料、玻璃比例和逐建筑无线覆写。这样同一几何的不同材料校准不会静默复用旧RT结果。",
             "场景fidelity必须由实际导出资产反推，而不是看OSM是否出现标签。L0只保证建筑/地面几何；L1要求道路、水体、绿地或植被同时有语义点与RT材质/mesh。材料参数存在仍不等于完成测量校准，calibration_status必须单列。",
             "RT 的时间变化来自路径几何与完整速度向量。最大 Doppler 是 |v|/λ，每条路径再按速度方向和传播方向投影；若先把速度压成到最近站的径向分量再在路径层投影，会重复乘余弦。Sionna 的 CFR 需要真实采样频率，当前先生成 slot 内 14 个 symbol 的物理响应/估计，再保留中间 symbol 作为系统 snapshot，保留因果估计结果而不把系统时长放大 14 倍。",
-            "Sionna 的 Paths 当前是生成过程中的临时物理对象，不是 SuperRAN 落盘合同。ChannelHub 用它合成 CFR 后，ChannelSample 尚未持久化逐径 delay/angle/material interaction；因此 RT 数据的 <code>Dataset.paths()</code> 必须硬失败。这样比按配置名套用 CDL 剖面诚实：现有 H 仍可算 PDP、协方差和 PMI，但报告不能展示并不存在的逐径角度。",
-            "InternalSim probe 快，是因为它刻意不回答需要完整频率矩阵的问题。它把 RB 限到 24、symbol 限到 4 并关闭 SSB，但沿用同一场景 seed 与几何；SNR 需要补回总功率在 RB 数变化产生的偏移，再与原 SIR 在线性域合成 SINR。撞到后端 ±50 dB 夹逼的原始 SNR 无法逆推出真实值，对应样本必须从可校正集合剔除。",
+            "Sionna 的 Paths 不是当前 SuperRAN 落盘合同；direct adapter 尚未实现。因此 RT 能力保持 unavailable。未来若只合成 CFR 而不持久化逐径 delay/angle/material interaction，<code>Dataset.paths()</code> 仍必须硬失败。",
+            "InternalSim probe 快，是因为它刻意不回答需要完整频率矩阵的问题。它把 RB 限到 24、symbol 限到 4 并关闭 SSB，但沿用同一场景 seed 与几何；SNR 需要补回总功率在 RB 数变化产生的偏移，再与原 SIR 在线性域合成 SINR。first-party source 不截断；只有历史导入值落在旧 ±50 dB 边界时才标记为不可逆 clipped。",
             "“不存在便宜的 RT probe”是复杂度边界，不是功能遗漏。射线求解的主要成本在几何可见性、反射/绕射和路径追踪，少几个 RB 并不能等比例省掉；需要快速比较真实场景时，应减少 UE/drop/路径深度跑小 N 完整 RT，并把不确定性写入结果。",
         ),
         implementation=(
-            ("解析 scene/preset", "<code>resolve_scene_config()</code> 把内置场景或 ChannelHub preset 展开为资产路径、载频、站点数、站高、ISD 和拓扑参数，未知/缺失字段不靠猜测补齐。"),
+            ("解析 scene/preset", "<code>resolve_scene_config()</code> 把内置场景或本地资产 descriptor 展开为资产路径、载频、站点数、站高、ISD 和拓扑参数，未知/缺失字段不靠猜测补齐。"),
             ("准备只读资产", "<code>prepare_scene()</code>在场景目录外的稳定锁上串行准备；双指纹验证缓存，复制PLY后只在副本删除不兼容header，RF revision单独记录材料物理。"),
             ("形成真实性合同", "从实际语义点计数与RT材质count生成L0/L1、逐layer布尔值和calibration_status；配置把几何/RF/fidelity三份provenance带入数据集。"),
             ("执行路径求解", "Sionna 场景按 Tx/Rx 阵列、位置、材料与射线深度形成临时 Paths，并用其中的 delay、complex amplitude 与角度合成 CFR；当前窄腰只保留 CFR，没有导出原始逐径对象。"),
@@ -1354,23 +1354,23 @@ DETAIL_SPECS.update({
         example_title="272 RB 正式场景为何不能直接复用 24 RB probe 的 SNR",
         example=(
             "<p>假设正式配置把同一总下行功率均分到 272 RB，而 probe 只生成 24 RB。后端看到的每 RB 信号功率会提高 <code>10log10(272/24)</code>，约 10.54 dB；若直接把 probe SNR 当成正式值，覆盖会虚高。实现从未夹逼的 raw SNR 中减去这项，SIR 因服务与干扰同时按 RB 功率变化而保持几何量级，再用 1/SINR=1/SNR+1/SIR 重算。</p>"
-            "<p>若 raw SNR 恰为 +50 dB，无法知道真实值是 50.2 还是 73 dB，减 10.54 dB只会制造相同的假平台。因此该样本从 SNR/SINR 校正统计中剔除，同时仍可用于距离、LOS 或 pathloss 等不依赖被夹逼值的摘要。若任务要算 PDP、频选 rank 或吞吐，则必须升级到完整 H。</p>"
+            "<p>first-party raw SNR 保留未截断值，因此可以精确减去 10.54 dB。若导入历史数据恰为旧边界 +50 dB，则无法知道截断前是真 50.2 还是 73 dB，该样本只能从 SNR/SINR 校正统计中剔除。若任务要算 PDP、频选 rank 或吞吐，仍必须升级到完整 H。</p>"
         ),
         checks=(
             ("资产不变", "准备前后源PLY不变；缓存双SHA逐字可复算，手改触发重建，发布journal阻止混版读取，RF材料变化修改revision。"),
             ("身份不冒充", "强制后端失败时 channel_generation_mode 明确为 fallback 并带原因；文档/报告标题不再按请求 source 推断。"),
             ("速度向量守恒", "正交、同向和反向路径的 Doppler toy case 与 v·k/λ 一致，不发生两次方向投影。"),
             ("snapshot 因果", "slot 内 symbol 估计完成后才抽取 snapshot；修改未来 symbol/slot 不改变当前可见 CSI。"),
-            ("probe 校正", "同 seed 的 full/probe 在 geometry、SIR、distance、LOS 上一致；未夹逼样本的修正 SNR/SINR 与 full 小样本对齐。"),
+            ("probe 校正", "同 seed 的 full/probe 在 geometry、SIR、distance、LOS 上一致；first-party 修正 SNR/SINR 与 full 小样本逐位对齐。"),
             ("逐径出口诚实", "RT 数据可计算 H/PDP/协方差/PMI，但 paths() 必须抛未支持；统计 CDL/TDL 才按实际 effective profile 返回剖面路径。"),
             ("能力边界", "PDP、SE、throughput、wideband precoding 和 NMSE 在 probe 响应中显式 not_available，而不是返回零或占位数组。"),
         ),
         pitfalls=(
             "只看 <code>channel_model=sionna_rt</code> 就把 TDL fallback 结果称为真实城市射线追踪。",
-            "为了让 Mitsuba 能读，直接就地改 ChannelHub 的 PLY 源文件。",
+            "为了让 Mitsuba 能读，直接就地改用户的 PLY 源资产。",
             "未设置 velocity 或仍用 1 Hz 采样，导致 14 个 symbol 只是静态复制。",
             "把 24 RB probe 当作 100 MHz 稀疏频点，继续计算 PDP、宽带 rank 或吞吐。",
-            "对 ±50 dB 夹逼值做统一减法并把产生的平台解释为真实用户分布。",
+            "对历史 ±50 dB 夹逼值做统一减法并把产生的平台解释为真实用户分布。",
             "声称减少 RB 就能同倍率降低 RT 的几何求解成本。",
             "在 ChannelSample 尚未导出 Sionna Paths 时，从 CDL 名称或站点几何拼一组假逐径角度。",
         ),
@@ -2267,7 +2267,7 @@ FORMULA_SPECS.update({
     "F_CONFIG_PRECEDENCE": FormulaSpec(
         "配置解析的右侧覆盖优先级",
         "默认值只补空项，preset 提供场景骨架，任务画像给高影响提示，用户显式 override 最后生效。最终落盘的是 resolved config；若页面显示值与该结果不同就是合同漂移。",
-        (("C<sub>resolved</sub>", "真正交给 ChannelHub/系统仿真的解析后配置。"),
+        (("C<sub>resolved</sub>", "真正交给 first-party source/系统仿真的解析后配置。"),
          ("C<sub>default</sub>", "决策表和本地硬件提供的缺省值。"),
          ("C<sub>preset</sub>", "信道或系统场景预设中的配置骨架。"),
          ("C<sub>task</sub>", "任务画像为该类问题补充的 config_hints。"),
@@ -2319,13 +2319,13 @@ FORMULA_SPECS.update({
     ),
     "F_PROBE_SNR": FormulaSpec(
         "缩窄 RB 探测后还原全载波每 RB SNR",
-        "总载波功率均匀分给更少 RB 时，探测口径的每 RB PSD 人为升高。减去 RB 数比对应的 dB 才回到正式载波口径；若探测值先撞到 ±50 dB 夹逼，修正已不可逆，样本必须剔除。",
+        "总载波功率均匀分给更少 RB 时，探测口径的每 RB PSD 人为升高。减去 RB 数比对应的 dB 才回到正式载波口径。first-party 值不截断；历史边界值才按不可逆 clipped 处理。",
         (("SNR<sub>full,dB</sub>", "正式全带宽配置下的每 RB SNR。"),
          ("SNR<sub>probe,dB</sub>", "缩窄 RB 探测运行直接返回的 SNR。"),
          ("N<sub>RB,full</sub>", "正式载波 RB 数。"),
          ("N<sub>RB,probe</sub>", "探测载波 RB 数，当前最多取 24。"),
          ("10log<sub>10</sub>", "功率分摊比例转 dB。"),
-         ("夹逼", "原始值被后端限幅后无法通过减常数恢复真实值。")),
+         ("夹逼", "历史值被限幅后无法通过减常数恢复真实值；新数据不采用。")),
     ),
     "F_SINR_COMBINE": FormulaSpec(
         "同一信号参考面上的 SNR 与 SIR 合成 SINR",

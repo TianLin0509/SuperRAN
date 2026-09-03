@@ -187,7 +187,8 @@ async def main() -> None:
                 scenes["ray_tracing_available"] == rt_e.get("available"),
                 "场景清单里的射线追踪可用性与引擎探测一致",
             )
-            check(len(scenes["scenes"]) >= 10, "场景清单完整（不依赖 sionna-rt 是否安装）")
+            check(len(scenes["scenes"]) >= 4,
+                  "四个内置场景始终可发现；本地资产不从外部源码树静默借用")
 
             print("\n" + "=" * 68 + "\n3  sr_plan —— 交互提案\n" + "=" * 68)
             prop = _payload(

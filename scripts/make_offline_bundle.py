@@ -13,7 +13,7 @@
 而报错只说 "pip subprocess to install build dependencies did not run successfully"，
 完全看不出缺的是什么。轻量包现在必须显式 ``--thin``，包型也写进文件名。
 
-**wheel 是平台相关的。** numpy/scipy/pydantic-core 都有编译好的二进制，
+**wheel 是平台相关的。** numpy/scipy 等包包含平台相关二进制，
 在 Windows 上下的包拿到 Linux 上装不了。所以文件名里带了平台和 Python 版本，
 **必须在与目标机器同平台、同 Python 大版本的机器上打包**。跨平台用
 ``--platform`` / ``--python-version`` 让 pip 下别的平台的轮子（只对纯二进制
@@ -25,9 +25,7 @@ wheel 有效，且必须配 ``--only-binary=:all:``）。
     python scripts/make_offline_bundle.py --thin       # 轻量包，要求目标机已有 numpy/scipy
     python scripts/make_offline_bundle.py --no-wheels  # 只打源码
 
-ChannelHub **默认不打包** —— 它没有开源许可证，默认保留所有权利，转发有法律风险。
-确认自己有权分发时（受控环境本来就有这份代码、或已获授权）用
-``--include-channelhub`` 打进去。
+统计信道物理内核已在 ``src/superran``，离线包不需要第二个源码仓库。
 """
 from __future__ import annotations
 
@@ -41,20 +39,19 @@ import sys
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 
 # 打进包里的源码。artifacts/ 是生成物，.git 是历史，都不要。
 INCLUDE = [
-    "src", "scripts", "skills", "presets", "tests",
+    "src", "scripts", "skills", "presets", "tests", "docs",
     "pyproject.toml", "README.md", "LICENSE",
     "INSTALL_AGENT.md", "SETUP.html", "CAPABILITIES.html", "SHOWCASE.html",
     "CLAUDE.md",
 ]
 EXCLUDE_DIRS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".git", "artifacts"}
 
-RUNTIME_DEPS = ["mcp>=1.0", "pydantic>=2.0", "pyyaml>=6.0", "structlog>=23.0"]
+RUNTIME_DEPS = ["mcp>=1.0", "pyyaml>=6.0", "filelock>=3.12"]
 SCIENCE_DEPS = ["numpy>=1.24", "scipy>=1.10"]
 # `pip install -e .` 会起一个隔离的构建环境去装 build-system.requires，
 # 离线时这一步也得有轮子，否则连构建后端都起不来——**比缺 numpy 更早失败**，
@@ -74,17 +71,12 @@ READ_ME_FIRST = """superran 离线安装包
     装好并验证，装完告诉我能不能用。
 
 --------------------------------------------------------------------
-需要你先准备好的两样东西
+需要你先准备好的东西
 --------------------------------------------------------------------
 
 1) Python >= 3.10
 
-2) ChannelHub 源码（物理内核）
-   本包**不含** ChannelHub —— 它没有开源许可证，不能随包转发。
-   你需要自己拿到一份，判据是目录下存在：
-       src/msg_embedding/data/contract.py
-   放在本目录的兄弟目录下（叫 ChannelHub_main）会被自动发现；
-   放别处就设环境变量 SUPERRAN_CHANNELHUB 指过去。
+统计信道物理内核已经包含在本包中，不需要任何兄弟源码目录。
 
 --------------------------------------------------------------------
 包里有什么
@@ -123,6 +115,8 @@ def _sha256(p: Path) -> str:
 _MANIFEST_FILES = (
     "INSTALL_AGENT.md", "开始安装.txt", "pyproject.toml", "README.md",
     "skills/channel-sim/SKILL.md", "scripts/mcp_server.py",
+    "src/superran/native.py", "src/superran/physical.py", "src/superran/spec38901.py",
+    "docs/index.html",
     "presets/presets.yaml", "SETUP.html", "CAPABILITIES.html", "SHOWCASE.html",
 )
 
@@ -136,11 +130,11 @@ def _git_commit(repo: Path) -> str | None:
         return None
 
 
-def _build_manifest(stage: Path, kind: str, plat: str, py: str, args: Any) -> dict:
+def _build_manifest(stage: Path, kind: str, plat: str, py: str) -> dict:
     """写一份可核对的清单。
 
     接收方拿到 zip 后能核三件事：包型对不对（thin 包别当 full 用）、
-    文件有没有被改过、ChannelHub 到底在不在里面。
+    文件有没有被改过、first-party 物理内核是否在里面。
     """
     wheels_dir = stage / "wheels"
     wheels = []
@@ -156,13 +150,12 @@ def _build_manifest(stage: Path, kind: str, plat: str, py: str, args: Any) -> di
         if p.is_file():
             files[rel] = _sha256(p)
 
-    ch_dir = stage / "ChannelHub_main"
     return {
         "bundle_kind": kind,
         "self_contained": kind == "full",
         "requires_preinstalled": (
             [] if kind == "full" else ["numpy", "scipy"] if kind == "thin"
-            else ["numpy", "scipy", "mcp", "pydantic", "pyyaml", "structlog", "setuptools"]
+            else ["numpy", "scipy", "mcp", "pyyaml", "filelock", "setuptools"]
         ),
         "superran_commit": _git_commit(REPO),
         "build_time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -170,14 +163,8 @@ def _build_manifest(stage: Path, kind: str, plat: str, py: str, args: Any) -> di
         "target_platform": plat,
         "target_python": py,
         "mcp_compat": "1.x 与 2.x 均支持（server.py 做了兼容导入）",
-        "includes_channelhub": ch_dir.is_dir(),
-        "channelhub_commit": (
-            _git_commit(Path(args.include_channelhub)) if args.include_channelhub else None
-        ),
-        "channelhub_marker_contract": (
-            None if ch_dir.is_dir()
-            else "接收方需自备含 src/msg_embedding/data/contract.py 的 ChannelHub 源码树"
-        ),
+        "physical_core": "superran-first-party",
+        "external_source_tree_required": False,
         "wheels": wheels,
         "wheels_total_bytes": sum(w["size"] for w in wheels),
         "files": files,
@@ -237,9 +224,6 @@ def main() -> None:
                     help="轻量包（约 16 MB）：不含 numpy/scipy。**要求目标机器已有科学计算栈**，"
                          "全新 venv 里装不上。默认打完整包")
     ap.add_argument("--no-wheels", action="store_true", help="不打依赖，只打源码")
-    ap.add_argument("--include-channelhub", metavar="PATH", default=None,
-                    help="把 ChannelHub 源码一起打进去。**确认自己有权分发再用**"
-                         "——该仓库没有开源许可证")
     ap.add_argument("--platform", default=None,
                     help="目标平台的 wheel tag，如 win_amd64 / manylinux2014_x86_64")
     ap.add_argument("--python-version", default=None, help="目标 Python 版本，如 3.11")
@@ -276,22 +260,8 @@ def main() -> None:
         sz = sum(f.stat().st_size for f in (stage / "wheels").glob("*")) / 1e6
         print(f"       {n} 个文件，{sz:.1f} MB")
 
-    # 2. ChannelHub（默认不打）
-    if args.include_channelhub:
-        chroot = Path(args.include_channelhub)
-        marker = chroot / "src" / "msg_embedding" / "data" / "contract.py"
-        if not marker.is_file():
-            raise SystemExit(f"[2/5] {chroot} 看起来不是 ChannelHub（缺 {marker}）")
-        print(f"[2/5] 打包 ChannelHub：{chroot}")
-        print("       !! 该仓库没有 LICENSE 文件，默认保留所有权利。")
-        print("       !! 你已用 --include-channelhub 声明自己有权分发。")
-        for sub in ("src", "configs"):
-            s = chroot / sub
-            if s.exists():
-                shutil.copytree(s, stage / "ChannelHub_main" / sub,
-                                ignore=shutil.ignore_patterns(*EXCLUDE_DIRS, "*.pyc"))
-    else:
-        print("[2/5] 不打包 ChannelHub（无开源许可证）——安装文档会指引用户自备")
+    # 2. First-party physical core is part of the normal source tree.
+    print("[2/5] first-party 物理内核随 src/superran 一起收集")
 
     # 3. 源码 + 说明
     print("[3/5] 收集源码与文档 …")
@@ -322,7 +292,7 @@ def main() -> None:
 
     # 4. manifest —— 让接收方能核对包里的东西没被改过
     print("[4/5] 写 bundle-manifest.json …")
-    manifest = _build_manifest(stage, kind, tag_plat, tag_py, args)
+    manifest = _build_manifest(stage, kind, tag_plat, tag_py)
     (stage / "bundle-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -348,10 +318,6 @@ def main() -> None:
         print("  pip 告警：")
         for w in warnings[:5]:
             print("   ", w.strip())
-    if not args.include_channelhub:
-        print()
-        print("  提醒：包里没有 ChannelHub。接收方需要自备一份含")
-        print("        src/msg_embedding/data/contract.py 的源码树。")
 
 
 if __name__ == "__main__":

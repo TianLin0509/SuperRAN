@@ -1,8 +1,7 @@
-"""3GPP TR 38.901 的标准查表值，逐字录入，用于对标而非仿真。
+"""3GPP TR 38.901 的标准查表值，逐字录入并由本地仿真直接使用。
 
-这个模块保留一份独立录入的标准原文数，作为 ChannelHub 运行表的交叉校验与
-旧版本兼容覆盖。两份表对不上就说明其中一份抄错了——而抄错的剖面表不会
-报错，只会安静地产出物理上说得通、但不是标准剖面的信道。
+这个模块是 SuperRAN 的唯一运行表真相源。差异函数保留为本地实现的自检，
+不再通过 ``sys.path`` 修改另一个仓库的全局注册表。
 
 来源：TR 38.901 V17.0.0 (2022-03)
 
@@ -16,6 +15,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 import numpy as np
@@ -197,6 +198,16 @@ CDL_TABLES: dict[str, dict] = {
 }
 
 COVERED = tuple(CDL_TABLES)
+CDL_TABLES_SHA256 = "74af711de833946ad565a5c99d47339db8efecc3deea554b8fbcc98c67652f89"
+
+
+def tables_sha256() -> str:
+    payload = {
+        name: {field: value for field, value in row.items() if field != "table"}
+        for name, row in CDL_TABLES.items()
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def as_arrays(name: str) -> dict[str, np.ndarray]:
@@ -215,7 +226,7 @@ def as_arrays(name: str) -> dict[str, np.ndarray]:
 
 
 def diff_against_channelhub() -> dict[str, dict]:
-    """逐簇比对 ChannelHub 内置的 CDL 表与标准表，返回差异明细。"""
+    """逐簇比对 first-party 运行 profile 与标准表，返回差异明细。"""
     from .channelhub import cdl_profile
 
     out: dict[str, dict] = {}
@@ -252,77 +263,33 @@ def diff_against_channelhub() -> dict[str, dict]:
 
 
 def apply_spec_tables() -> dict[str, Any]:
-    """用独立标准副本校验并防御性覆盖 ChannelHub 的剖面注册表。
-
-    这轮审查已经把 ChannelHub 源码内 CDL-A~E 五张表修到与标准副本逐项一致；
-    这里仍保留覆盖层，原因是 superran 可能接到较旧的 ChannelHub checkout。
-    当前版本覆盖前后应为零差异，旧版本则会被拉回相同的标准口径。
-
-    做法是替换 ``msg_embedding.channel_models.cdl._PROFILES`` 里对应的条目。
-    仿真器所有取剖面的路径都走 ``get_cdl_profile``，它只读这个字典，所以
-    换掉条目就够了；对当前已修正源码这是幂等操作。
-
-    设 ``SUPERRAN_CDL_SPEC=0`` 可关闭，用来复现未修正前的结果。
-    CDL-D/E 的镜面与 Laplacian 首行分别保留，避免再用 K 因子二次混合。
-    """
-    import dataclasses
-    import os
-
-    if os.environ.get("SUPERRAN_CDL_SPEC", "1") == "0":
-        return {"applied": False, "reason": "SUPERRAN_CDL_SPEC=0，按要求跳过"}
-
-    # 注意这里直接拼 sys.path，不走 channelhub._ensure_path —— 后者会回调本函数。
-    import sys
-
-    from .channelhub import channelhub_root
-
-    src = str(channelhub_root() / "src")
-    if src not in sys.path:
-        sys.path.insert(0, src)
-    from msg_embedding.channel_models import cdl as _cdl  # noqa: PLC0415
-
-    patched: list[str] = []
-    for name in COVERED:
-        prof = _cdl._PROFILES.get(name)
-        if prof is None:
-            continue
-        spec = as_arrays(name)
-        replacements: dict[str, Any] = {
-            field: spec[field].copy()
-            for field in (
-                "delays_norm", "powers_dB", "aod_deg", "aoa_deg", "zod_deg", "zoa_deg"
-            )
-        }
-        # ChannelHub releases before the ray-expansion work did not expose
-        # per-cluster spreads/XPR on CDLProfile.  Patch every field the
-        # installed dataclass actually supports instead of letting one newer
-        # keyword abort the *entire* table correction.
-        supported = {field.name for field in dataclasses.fields(prof)}
-        optional = {
-            "c_asd_deg": float(CDL_TABLES[name]["per_cluster"]["cASD"]),
-            "c_asa_deg": float(CDL_TABLES[name]["per_cluster"]["cASA"]),
-            "c_zsd_deg": float(CDL_TABLES[name]["per_cluster"]["cZSD"]),
-            "c_zsa_deg": float(CDL_TABLES[name]["per_cluster"]["cZSA"]),
-            "xpr_db": float(CDL_TABLES[name]["per_cluster"]["XPR"]),
-        }
-        replacements.update({key: value for key, value in optional.items() if key in supported})
-        _cdl._PROFILES[name] = dataclasses.replace(prof, **replacements)
-        patched.append(name)
-    missing = [name for name in COVERED if name not in patched]
-    if missing:
-        # 旧/分叉 checkout 的 _PROFILES 键名变迁会让覆盖整个落空或只盖一半——
-        # 落空不算失败是这层防御最要防的场景：异常要阻断，落空更要阻断。
+    """Validate the immutable local runtime profiles (idempotent)."""
+    actual_sha = tables_sha256()
+    if actual_sha != CDL_TABLES_SHA256:
         return {
             "applied": False,
-            "profiles": patched,
+            "profiles": list(COVERED),
             "error": (
-                f"ChannelHub 的 CDL 剖面注册表缺少 {missing}"
-                "（_PROFILES 键名可能随版本变迁），五张表未能全部覆盖；"
-                "设 SUPERRAN_CDL_SPEC=0 可复现未校准行为（数据不得称为标准 CDL）"),
+                "local CDL standard-table hash mismatch: "
+                f"expected {CDL_TABLES_SHA256}, got {actual_sha}"
+            ),
+        }
+    diffs = diff_against_channelhub()
+    mismatched = {
+        name: row["n_mismatched_clusters"]
+        for name, row in diffs.items()
+        if row["n_mismatched_clusters"]
+    }
+    if mismatched:
+        return {
+            "applied": False,
+            "profiles": list(COVERED),
+            "error": f"local CDL runtime tables differ from the standard copy: {mismatched}",
         }
     return {
-        "applied": bool(patched),
-        "profiles": patched,
+        "applied": True,
+        "profiles": list(COVERED),
         "source": "TR 38.901 V17.0.0 Table 7.7.1-1 through 7.7.1-5",
-        "note": "五张 CDL 表及每簇角扩展/XPR 均逐字段覆盖",
+        "sha256": actual_sha,
+        "note": "五张 CDL 表及每簇角扩展/XPR 由 SuperRAN 本地不可变真相源提供",
     }

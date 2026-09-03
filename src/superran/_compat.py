@@ -2,7 +2,8 @@
 
 New code and documentation use only ``SUPERRAN_*``.  Existing developer
 machines may still have the former product's environment variables set; an
-in-place rename must not silently change data roots or physics backends.  We
+in-place rename must not silently change data roots.  Physics-source roots are
+intentionally excluded: the first-party backend cannot be overridden.  We
 therefore copy a legacy value only when the corresponding SuperRAN key is
 absent.  The mapping is inspectable and can be removed after the announced
 migration window.
@@ -16,7 +17,6 @@ _LEGACY_PREFIX = "SUPER" + "WIRELESS"
 _SUFFIXES = (
     "ARTIFACTS",
     "CDL_SPEC",
-    "CHANNELHUB",
     "DEBUG",
     "NO_BROWSER",
     "NO_SERVE",

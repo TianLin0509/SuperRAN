@@ -11,9 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
-    "pydantic>=2.0",
     "pyyaml>=6.0",
-    "structlog>=23.0",
     "filelock>=3.12",
     # 1.x 与 2.x 都支持。2.0 把 mcp.server.fastmcp.FastMCP 挪成了
     # mcp.server.mcpserver.MCPServer 并删掉了旧模块，server.py 里做了兼容导入。
@@ -21,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-rt = ["sionna-rt"]          # Phase 2 射线追踪，会连带装 mitsuba + drjit
+rt = ["sionna-rt"]          # 可选运行栈；direct adapter 尚未宣称可用
 dev = ["pytest>=7.0", "ruff>=0.1", "playwright>=1.45"]
 
 [project.scripts]
