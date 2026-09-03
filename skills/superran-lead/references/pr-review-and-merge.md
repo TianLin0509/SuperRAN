@@ -9,6 +9,12 @@ merge candidate until the current-head report exists.
 Fetch the PR into a clean isolated worktree; never reuse the Author worktree or modify
 the Author branch.
 
+The PR author may be the repository Owner/project lead. That is not rehearsal and not a
+review blocker when `TEAM_MODE: FORMAL` is recorded. In that case, require a fresh lead
+Agent session with no Author-session transcript or mutable worktree reuse. The human is
+still the sole final decision-maker; independence here means a new evidence-gathering
+Agent context, not a second human approver.
+
 Open the report in a real browser and verify:
 
 - its PR number, base, and full head SHA match current GitHub metadata;

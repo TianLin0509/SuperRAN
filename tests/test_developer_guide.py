@@ -405,18 +405,26 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
         encoding="utf-8", errors="strict")
     assert member_html.startswith("<!doctype html>\n")
     assert lead_html.startswith("<!doctype html>\n")
+    assert ".textContent" in member_html and ".innerText" not in member_html
+    assert ".textContent" in lead_html and ".innerText" not in lead_html
 
     member_match = re.search(
         r'<pre id="member-prompt">(.*?)</pre>', member_html, re.S)
     lead_match = re.search(r'<pre id="lead-prompt">(.*?)</pre>', lead_html, re.S)
-    assert member_match and lead_match
+    rehearsal_match = re.search(
+        r'<pre id="rehearsal-prompt">(.*?)</pre>', lead_html, re.S)
+    assert member_match and lead_match and rehearsal_match
     member_prompt = html_lib.unescape(member_match.group(1))
     lead_prompt = html_lib.unescape(lead_match.group(1))
+    rehearsal_prompt = html_lib.unescape(rehearsal_match.group(1))
 
     for required in (
-        "upstream/develop", "--role member", "probe_source_contract",
+        "TEAM_MODE: FORMAL", "upstream/develop", "--role member", "probe_source_contract",
         "superran-member-task/SKILL.md",
-        "channel-sim/SKILL.md", "35 个工具", "[REHEARSAL]", "不得代替组长",
+        "channel-sim/SKILL.md", "35 个工具",
+        "普通组员，也可能是组长本人", "GitHub 身份只决定推送路径",
+        "绝不能因为登录账号是 Owner 就改成 REHEARSAL", "author/TianLin0509",
+        "非 Draft", "[REHEARSAL]", "另一个全新组长 Agent Session",
         "技术术语", "白话解释", "具体例子", "我理解你要的是", "不等于",
         "证明了什么、没有证明什么", "不能当作实现或性能证据",
         "交互式改动说明 HTML", "references/change-report.md",
@@ -424,6 +432,7 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
         assert required in member_prompt
     assert "--role lead" not in member_prompt
     assert "同意合并 PR" not in member_prompt
+    assert member_prompt.strip().startswith("TEAM_MODE: FORMAL")
     assert not re.search(r"\b[0-9a-f]{40}\b", member_prompt), \
         "member bootstrap must follow current develop, not a stale pinned SHA"
 
@@ -431,20 +440,50 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
         "--role lead", "probe_source_contract", "superran-lead/SKILL.md", "channel-sim/SKILL.md",
         "同意合并 PR #N，HEAD <完整 SHA>", "[REHEARSAL]", "永远不得合并",
         "full regression", "35 个工具", "技术术语", "白话解释", "具体例子",
+        "最重要的正式 PR 提出者之一", "自己做实现", "TEAM_MODE: FORMAL",
+        "author/TianLin0509", "另一个全新的组长 Agent Session",
+        "TEAM_MODE: REHEARSAL", "绝不能根据 GitHub Owner 身份自动判断演练",
         "我理解为", "不等于", "证明了什么、没有证明什么", "不能冒充当前证据",
         "交互式改动说明 HTML", "报告缺失/过期", "不能替代 diff"):
         assert required in lead_prompt
     assert 'href="member-start.html"' in lead_html
+    assert rehearsal_prompt.strip().startswith("TEAM_MODE: REHEARSAL")
+    for required in (
+        "GitHub 身份只决定推送路径", "绝不能用它推断 FORMAL 或 REHEARSAL",
+        "Draft=true", "[REHEARSAL]", "永远不得", "TEAM_MODE: FORMAL"):
+        assert required in rehearsal_prompt
+    assert "会识别 Owner 账号，" + "自动建立" not in member_html + lead_html
+    assert "因为登录账号是 Owner，" + "Agent 会自动进入体验模式" not in member_html + lead_html
 
     workflow = json.loads(
         (ROOT / "docs" / "team" / "workflow.json").read_text(encoding="utf-8"))
-    assert workflow["schema_version"] == "1.2.0"
+    assert workflow["schema_version"] == "1.3.0"
     assert workflow["development_branch"] == "develop"
     assert workflow["release_branch"] == "main"
     assert workflow["merge_method"] == "squash"
     assert workflow["mcp_tool_count"] == 35
     assert workflow["rehearsal_merge_allowed"] is False
+    assert workflow["author_modes"] == {
+        "identity_selects_mode": False,
+        "formal": {
+            "marker": "TEAM_MODE: FORMAL",
+            "merge_candidate_allowed": True,
+            "owner_push_strategy": "upstream_topic_branch",
+            "non_owner_push_strategy": "fork_topic_branch",
+        },
+        "rehearsal": {
+            "marker": "TEAM_MODE: REHEARSAL",
+            "explicit_only": True,
+            "merge_candidate_allowed": False,
+        },
+        "lead_authored_review": {
+            "fresh_agent_session_required": True,
+            "isolated_worktree_required": True,
+            "author_session_may_review": False,
+        },
+    }
     assert workflow["change_report"] == {
+        "required_for_author_pr": True,
         "required_for_member_pr": True,
         "role": "author_summary_not_review_approval",
         "directory": "output/change-reports",

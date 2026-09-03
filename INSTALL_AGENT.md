@@ -232,7 +232,7 @@ claude mcp list        # 应看到 superran ... ✔ Connected
 仓库是 Skill 的版本真源。不要从聊天记录复制旧版本；按角色运行统一安装器：
 
 ```bash
-# 组员：仿真门 + 实现任务问答/开发/PR
+# 正式 Author（普通组员，或组长另开的实现会话）：仿真门 + 任务问答/开发/PR
 <PYTHON> scripts/install_agent_skills.py --role member
 
 # 组长：再增加分任务、状态、PR 审核与合并
@@ -242,7 +242,7 @@ claude mcp list        # 应看到 superran ... ✔ Connected
 安装器会复制并逐树 SHA-256 对账：
 
 - `channel-sim`：仿真设计与门 1/2/3；
-- `superran-member-task`：组员的需求问答、实现、测试与 PR；
+- `superran-member-task`：普通组员或组长本人在独立 Author 会话中的需求问答、实现、测试与 PR；
 - `superran-lead`：仅组长使用的分工、状态、审核与 SHA 绑定合并。
 
 当前会话仍要直接完整读取仓库里的对应 `SKILL.md`；新会话会从用户 Skill 目录自动发现。

@@ -1,6 +1,6 @@
 interface:
-  display_name: "SuperRAN 组员实现"
-  short_description: "引导一个无线实现任务并由 Agent 完成验证和 PR"
+  display_name: "SuperRAN 正式实现"
+  short_description: "引导组员或组长本人完成无线实现、验证和正式 PR"
   default_prompt: "Use $superran-member-task to clarify my SuperRAN implementation task, implement it, verify it, and prepare a PR."
 policy:
   allow_implicit_invocation: true

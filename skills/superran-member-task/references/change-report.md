@@ -1,7 +1,7 @@
 # User-facing change report
 
 Read this after a PR exists or its head changes. The report is the Author's explanation
-material for the member and lead; it is not a Reviewer approval or release claim.
+material for the human Author and lead; it is not a Reviewer approval or release claim.
 
 ## Identity and delivery
 
@@ -15,7 +15,7 @@ under the new head name before handoff.
 
 Do not commit the report by default. The repository is public and a report may contain
 local paths, internal assumptions, or evidence not intended for publication. Give the
-member the absolute path, SHA-256, size, PR URL, and bound head SHA so they can send the
+human Author the absolute path, SHA-256, size, PR URL, and bound head SHA so they can send the
 HTML file to the lead together with the PR link. Publish or commit a sanitized report
 only when the lead explicitly authorizes that separate action.
 
@@ -88,7 +88,7 @@ Before handoff:
    text;
 7. re-read the PR head and invalidate the page if the SHA changed during QA.
 
-## Final member handoff
+## Final Author handoff
 
 Return only:
 

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
   <link rel="icon" href="data:,">
-  <title>SuperRAN 组员：复制一段 Prompt 开工</title>
+  <title>SuperRAN 正式实现者：复制一段 Prompt 开工</title>
   <style>
     :root{--ink:#183047;--muted:#687b8d;--line:#dbe5ec;--blue:#0b67a3;--green:#087f6e;--bg:#edf3f6;--paper:#fff;--dark:#102b42}
     *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif;line-height:1.62}main{max-width:930px;margin:auto;padding:28px 20px 64px}
@@ -20,9 +20,9 @@
 <body>
 <main>
   <header>
-    <div class="eyebrow">SUPERRAN · MEMBER QUICK START</div>
-    <h1>复制一段 Prompt，剩下交给 Agent</h1>
-    <p>你不用学 Git、安装环境或写代码。只需要用无线专业知识告诉 Agent：想完善什么、怎样才算物理上正确。</p>
+    <div class="eyebrow">SUPERRAN · FORMAL AUTHOR START</div>
+    <h1>正式实现：复制一段 Prompt</h1>
+    <p>普通组员和组长本人都能使用。你不用学 Git、安装环境或写代码，只需用无线专业知识说明想完善什么、怎样才算物理上正确。</p>
   </header>
 
   <section>
@@ -30,7 +30,7 @@
     <div class="steps">
       <div class="step"><div class="num">1</div><h3>打开新 Agent 会话</h3><p>打开 Codex，不用先下载任何东西。</p></div>
       <div class="step"><div class="num">2</div><h3>复制完整 Prompt</h3><p>点击下面蓝色按钮，整段粘贴，一个字都不用改。</p></div>
-      <div class="step"><div class="num">3</div><h3>回答无线问题</h3><p>正常聊天。完成后把 Agent 给你的 PR 链接和改动说明 HTML 一起发给组长。</p></div>
+      <div class="step"><div class="num">3</div><h3>回答无线问题</h3><p>正常聊天。Agent 会提交正式 PR；完成后把 PR 链接和改动说明 HTML 一起交给组长审核。</p></div>
     </div>
     <div class="callout"><b>第一次可能需要你做一件小事：</b>GitHub 登录或系统授权弹出时，按 Agent 给的一步提示操作，完成后回复“好了”。</div>
   </section>
@@ -38,19 +38,21 @@
   <section>
     <h2>你负责什么，Agent 负责什么</h2>
     <div class="yesno">
-      <div class="box yes"><h3>你只负责</h3><ul><li>说清想完善的 SuperRAN 能力</li><li>判断物理流程与信息边界</li><li>确认成功场景和反向对照</li><li>把最终 PR 链接和 HTML 文件发给组长</li></ul></div>
-      <div class="box no"><h3>全部交给 Agent</h3><ul><li>GitHub 账号、Fork、下载和分支</li><li>SuperRAN、MCP 和 Skill 安装</li><li>读代码、写代码、补测试、跑回归</li><li>commit、push、填写并提交 PR</li></ul></div>
+      <div class="box yes"><h3>你只负责</h3><ul><li>说清想完善的 SuperRAN 能力</li><li>判断物理流程与信息边界</li><li>确认成功场景和反向对照</li><li>把正式 PR 链接和 HTML 文件交给组长审核</li></ul></div>
+      <div class="box no"><h3>全部交给 Agent</h3><ul><li>GitHub 账号、Fork/上游推送、下载和分支</li><li>SuperRAN、MCP 和 Skill 安装</li><li>读代码、写代码、补测试、跑回归</li><li>commit、push、填写并提交 PR</li></ul></div>
     </div>
   </section>
 
   <section>
     <h2>把下面整段直接发给 Agent</h2>
-    <div class="copybar"><p>技术细节默认折叠。Prompt 会从 GitHub 安装仓库里的最新版 Skill。</p><button class="copy" onclick="copyPrompt(this)">复制完整 Prompt</button></div>
-    <details><summary>想看内容可以展开；不看也不影响使用</summary><pre id="member-prompt">你是我的 SuperRAN 实现 Agent。请完整执行，不要让我修改本 Prompt，也不要把编程、Git、安装或路径选择推回给我。
+    <div class="copybar"><p>这是正式开发 Prompt，适用于组员和组长本人；不会因为 Owner 账号变成演练。</p><button class="copy" onclick="copyPrompt(this)">复制正式实现 Prompt</button></div>
+    <details><summary>想看内容可以展开；不看也不影响使用</summary><pre id="member-prompt">TEAM_MODE: FORMAL
 
-我的角色：无线专家，只说明需求并判断物理含义。
-你的角色：组员 Author Agent，负责环境、GitHub、主动提问、实现、测试和 PR。
-边界：项目管理、其他组员安排、最终审核、合并和发布全部由组长负责；你不得代替组长。
+你是我的 SuperRAN 正式实现 Agent。请完整执行，不要让我修改本 Prompt，也不要把编程、Git、安装或路径选择推回给我。
+
+我的角色：实现者，可能是普通组员，也可能是组长本人；我只说明需求并判断物理含义。
+你的角色：FORMAL Author Agent，负责环境、GitHub、主动提问、实现、测试、交互 HTML 和正式 PR。
+边界：最终审核、合并和发布属于组长角色；即使我本人是组长，这个 Author Session 也不得自写自审或自行合并。
 
 固定上游：https://github.com/TianLin0509/SuperRAN.git
 团队开发分支：develop
@@ -58,7 +60,7 @@
 
 先自动准备环境：
 1. 选择新的安全项目目录；不得覆盖已有目录或未提交修改。检查并自动准备 Git、GitHub CLI（gh）和 Python >= 3.10。只有登录、管理员授权或系统弹窗无法自动完成时，才给我一个最短动作，等我回复“好了”后继续。
-2. 用 gh auth status 检查登录并自行读取 GitHub 用户名。普通组员账号没有 Fork 时自行创建 Fork、clone 自己的 Fork，并设置 upstream。若登录账号正是上游 Owner TianLin0509，不要尝试 Fork 自己的仓库，自动进入体验模式：使用隔离目录和 rehearsal/... 分支，最终只建标题以 [REHEARSAL] 开头的 Draft PR，永不合并。
+2. 用 gh auth status 检查登录并自行读取 GitHub 用户名。任务模式已由本 Prompt 明确为 FORMAL；GitHub 身份只决定推送路径，绝不能因为登录账号是 Owner 就改成 REHEARSAL。普通组员账号没有 Fork 时自行创建 Fork，以自己的 Fork 作为 origin；若登录账号是上游 Owner TianLin0509，不要 Fork 自己的仓库，直接 clone 上游到新的隔离目录。两条路径都必须确认名为 upstream 的 remote 指向固定上游，并从 upstream/develop 建立分支：普通组员使用自己的 topic branch，Owner 使用 author/TianLin0509/<任务短名> 普通 topic branch 并推送到上游。两种情况最终都创建非 Draft、标题不带 [REHEARSAL] 的正式 PR 到 develop。
 3. fetch upstream/develop；若远端没有 develop，停止并只说“团队 develop 尚未发布，请联系组长”。从当前远端 develop 记录 base 完整 SHA。不要使用旧 main，也不要在 Prompt 中寻找固定 SHA。
 4. 完整读取 develop 中的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md。仓库代码与当前可执行证据优先于历史文档。
 5. 在仓库内创建独立 .venv，用其 Python 执行 pip install -e .，并按 INSTALL_AGENT.md 自动定位或安装团队有权使用的 ChannelHub。必须执行 channelhub.probe_source_contract()，只有 compatible=true 才继续；缺少来源、授权或出现 blocker 时如实阻断并请组长提供批准版本，不伪造、不静默降级。
@@ -72,7 +74,7 @@
 
 交流时保留准确技术术语，但首次出现必须紧跟一句白话解释；关键物理问题再给一个贴近本任务的具体例子，必要时用最小维度、单位或时间线。实现前先复述“我理解你要的是……，不等于……”。把代码事实、我的决定、你的建议和尚未确认分开标明。测试不能只报名称和 PASS/FAIL，还要说“证明了什么、没有证明什么”。例子只用于理解，不能当作实现或性能证据；我已明确理解时不要反复讲基础知识。
 
-我回答后，你先检查相关当前代码和测试，再按 Skill 最多问两轮短问题并给推荐答案。确认五行任务卡后，自主完成实现、物理反向对照、当前 SHA 测试、commit、push 和 PR。PR 提交或更新后，按 skills/superran-member-task/references/change-report.md 自动生成绑定当前远端 PR HEAD 的离线交互式改动说明 HTML，真实浏览器检查后给我绝对路径和 SHA-256；任何新 commit 都要重生成。该报告是 Author 汇报，不是审核通过，默认不提交公开仓库。不得管理其他任务、审核别人的 PR 或合并。
+我回答后，你先检查相关当前代码和测试，再按 Skill 最多问两轮短问题并给推荐答案。确认五行任务卡后，自主完成实现、物理反向对照、当前 SHA 测试、commit、push 和正式 PR。PR 提交或更新后，按 skills/superran-member-task/references/change-report.md 自动生成绑定当前远端 PR HEAD 的离线交互式改动说明 HTML，真实浏览器检查后给我绝对路径和 SHA-256；任何新 commit 都要重生成。该报告是 Author 汇报，不是审核通过，默认不提交公开仓库。若我本人是组长，提醒我把 PR 和 HTML 交给另一个全新组长 Agent Session，在隔离 worktree 中审核；当前 Author Session 不得切换成 Reviewer。不得管理其他任务、审核别人的 PR 或合并。
 
 最后给我：做成了什么；PR 链接与完整 HEAD；交互式 HTML 的绝对路径、SHA-256、大小；测试证明了什么/没有证明什么；需要组长决定什么；并提醒我把 PR 链接和 HTML 文件一起发给组长。</pre></details>
   </section>
@@ -91,12 +93,12 @@
 
   <section>
     <h2>最后怎么交给组长</h2>
-    <div class="finish">把 <b>PR 链接 + Agent 生成的交互式改动说明 HTML + 是否需要组长决定</b> 一起发给组长。不要自己点 Merge。</div>
+    <div class="finish">把 <b>正式 PR 链接 + Agent 生成的交互式改动说明 HTML + 是否需要组长决定</b> 一起交给组长审核。你本人是组长时，也要换到另一个全新组长 Agent Session；不要在 Author Session 点 Merge。</div>
   </section>
-  <footer>所有组员使用同一份页面；具体任务通过与 Agent 的无线问答形成。</footer>
+  <footer>所有正式实现者使用同一份页面：普通组员走 Fork，组长本人走上游 topic branch。</footer>
 </main>
 <script>
-function copyPrompt(button){var text=document.getElementById('member-prompt').innerText;function ok(){var old=button.textContent;button.textContent='已复制，可以粘贴给 Agent';setTimeout(function(){button.textContent=old;},6000);}function fallback(){var a=document.createElement('textarea');a.value=text;a.setAttribute('readonly','');a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);ok();}if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(ok).catch(fallback);}else{fallback();}}
+function copyPrompt(button){var text=document.getElementById('member-prompt').textContent;function ok(){var old=button.textContent;button.textContent='已复制，可以粘贴给 Agent';setTimeout(function(){button.textContent=old;},6000);}function fallback(){var a=document.createElement('textarea');a.value=text;a.setAttribute('readonly','');a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);ok();}if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(ok).catch(fallback);}else{fallback();}}
 </script>
 </body>
 </html>

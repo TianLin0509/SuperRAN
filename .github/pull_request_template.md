@@ -1,5 +1,6 @@
 ## 任务卡
 
+- Author mode：`FORMAL` / `REHEARSAL`
 - 要实现什么：
 - 核心物理流程：
 - 怎样算成功：
