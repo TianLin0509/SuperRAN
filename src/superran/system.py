@@ -59,7 +59,7 @@ S_SLOT_DL_FRACTION = 0.7
 
 EvaluationMode = Literal["capacity", "experience"]
 TrafficModel = Literal["full_buffer", "ftp3", "cbr", "bimodal", "mixed", "cdf"]
-SchedAlgorithm = Literal["pf", "qos_pf", "rr", "max_ci"]
+SchedAlgorithm = Literal["pf", "qos_pf", "rr", "max_ci", "edf", "qos_pf_edf"]
 PfAccounting = Literal["auto", "legacy_best_se", "scheduled_tbs",
                        "acked_goodput", "legacy_fullband"]
 PriorityWeighting = Literal["none", "inverse_priority"]
@@ -425,6 +425,20 @@ class SchedulerConfig:
     qos_instant_rate_exponent: float = 1.0   # beta
     qos_delay_exponent: float = 0.0          # gamma
     qos_priority_weighting: PriorityWeighting = "none"
+    # --- EDF（包长感知）---
+    # edf = TBS / Buffer × w(priority)；qos_pf_edf 是它与 qos_pf 的 蓝本原式
+    # 加权混合 ((1−w)·scale·EPF + w·EDF) × w(priority)。两个分量不同量纲，
+    # edf_mixed_epf_scale 就是 蓝本的 thp_filter 配平系数；未标定时中间的
+    # 权重会被量级差吞掉，因此结果里必须报出两个分量的实测量级。
+    edf_mixed_weight: float = 0.5        # w：0 = 纯 qos_pf，1 = 纯 edf
+    edf_mixed_epf_scale: float = 1.0     # 蓝本 thp_filter
+    # SRB 绝对优先加值。SuperRAN 不建模逻辑信道，只有显式声明
+    # resource_type="signalling" 的业务类才会触发；不声明就永远不触发。
+    srb_priority_boost: float = 5000.0
+    # 时延兜底：队首等待达到该门限的用户无条件排到最前，组内按等待降序。
+    # EDF 的分母是积压，越饿分母越大、优先级越低（与 PF 的 r_avg 越饿越小相反），
+    # 靠算法自身不会恢复，必须外挂上界。None = 关闭，行为与不带兜底逐位相同。
+    edf_starvation_hol_ms: float | None = None
     # --- OLLA（外环链路自适应）---
     # 发送端先由 CQI 门限 + BF Gain 反折 MCS，再叠加连续 MCS 域
     # OLLA，floor 后钳位。下面 ``*_db`` 是已发布 API 的历史字段名，
@@ -485,7 +499,8 @@ class SchedulerConfig:
     mu_accounting: MuAccounting = "pair_table"
 
     def __post_init__(self) -> None:
-        if self.algorithm not in ("pf", "qos_pf", "rr", "max_ci"):
+        if self.algorithm not in (
+                "pf", "qos_pf", "rr", "max_ci", "edf", "qos_pf_edf"):
             raise ValueError(f"未知调度器 {self.algorithm!r}")
         if not isinstance(self.rank, ap.RankConfig):
             raise ValueError("rank 必须是 amc_policy.RankConfig")
@@ -512,6 +527,17 @@ class SchedulerConfig:
             raise ValueError("max_logical_prb_per_tti 必须为 null 或正整数")
         if self.qos_priority_weighting not in ("none", "inverse_priority"):
             raise ValueError("qos_priority_weighting 只支持 none / inverse_priority")
+        if not np.isfinite(self.edf_mixed_weight) or not (
+                0.0 <= float(self.edf_mixed_weight) <= 1.0):
+            raise ValueError("edf_mixed_weight 必须落在 [0, 1]")
+        for name, value in (("edf_mixed_epf_scale", self.edf_mixed_epf_scale),
+                            ("srb_priority_boost", self.srb_priority_boost)):
+            if not np.isfinite(value) or float(value) < 0:
+                raise ValueError(f"{name} 必须是有限非负数")
+        if self.edf_starvation_hol_ms is not None and (
+                not np.isfinite(self.edf_starvation_hol_ms)
+                or float(self.edf_starvation_hol_ms) <= 0):
+            raise ValueError("edf_starvation_hol_ms 必须为 null 或正数")
         for name, value in (
             ("qos_avg_rate_exponent", self.qos_avg_rate_exponent),
             ("qos_instant_rate_exponent", self.qos_instant_rate_exponent),
@@ -626,6 +652,14 @@ class SchedulerConfig:
             "qos_instant_rate_exponent": self.qos_instant_rate_exponent,
             "qos_delay_exponent": self.qos_delay_exponent,
             "qos_priority_weighting": self.qos_priority_weighting,
+            # 这四个改了数字就会变，必须跟着结果一起走：少了它们，
+            # kpi_compare 会把 w=0（纯 qos_pf）和 w=1（纯 edf）两臂报成"配置无差异"。
+            "edf_mixed_weight": float(self.edf_mixed_weight),
+            "edf_mixed_epf_scale": float(self.edf_mixed_epf_scale),
+            "srb_priority_boost": float(self.srb_priority_boost),
+            "edf_starvation_hol_ms": (
+                None if self.edf_starvation_hol_ms is None
+                else float(self.edf_starvation_hol_ms)),
             "mu_enabled": self.mu_enabled, "max_mu_users": self.max_mu_users,
             "mu_rank_per_user": self.mu_rank_per_user,
             "mu_corr_threshold": self.mu_corr_threshold,
@@ -2955,8 +2989,9 @@ def simulate(
     if sched.pf_accounting not in ("auto", "legacy_best_se"):
         raise ValueError("capacity/legacy_v1 只支持 pf_accounting=auto 或 legacy_best_se；"
                          "scheduled_tbs 请使用 evaluation_mode='experience'")
-    if sched.algorithm == "qos_pf":
-        raise ValueError("qos_pf 只属于 evaluation_mode='experience'")
+    if sched.algorithm in ("qos_pf", "edf", "qos_pf_edf"):
+        raise ValueError(
+            f"{sched.algorithm} 只属于 evaluation_mode='experience'")
     if traffic.model == "mixed":
         raise ValueError("mixed 话务只属于 evaluation_mode='experience'")
     n_ue = len(tables)
@@ -3845,6 +3880,15 @@ class ReplicationResult:
                 value = self.runs[0].diagnostics.get(key)
                 if value is not None:
                     out[key] = value
+            # summarize_runs 只保留数值型 KPI，结构化诊断会被整条丢掉。
+            # 调度器身份与混合分量量级是判读结果的前提（notes 明确指着它们），
+            # 所以按 kpi_definitions/tti_trace 同款方式搬过来。
+            for key in ("scheduler_priority_metric",
+                        "scheduler_mixed_component_scale",
+                        "scheduler_starvation_lifts"):
+                value = self.runs[0].cell.get(key)
+                if value is not None:
+                    out.setdefault("scheduler", {})[key] = value
         return out
 
     def text(self) -> str:

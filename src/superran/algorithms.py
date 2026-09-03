@@ -217,7 +217,9 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
                    "调度器会死盯着他。实测这能把全小区首传 BLER 从 0.011 拖到 0.811。"
                    "现在覆盖外的用户（SINR 够不到 MCS 0 门限）会被剔出调度并单独报出。",
             source="经典 PF；本项目 system.simulate",
-            alternatives=["max_ci（吞吐最大但极不公平）", "rr（轮询）"],
+            alternatives=["max_ci（吞吐最大但极不公平）", "rr（轮询）",
+                          "edf（包长感知，小包优先，牺牲公平性）",
+                          "qos_pf_edf（EPF+EDF 混合，需标定量纲）"],
         ),
         Algorithm(
             key="traffic",
