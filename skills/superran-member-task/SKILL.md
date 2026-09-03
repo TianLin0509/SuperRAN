@@ -24,6 +24,11 @@ Mode comes from task intent, never from GitHub identity:
 - `TEAM_MODE: REHEARSAL` — a workflow exercise that must stay Draft, carry the
   `[REHEARSAL]` title prefix, and never merge.
 
+Before any branch, push, or PR mutation, require the checked-out `develop` contract to
+have `schema_version >= 1.3.0`, `author_modes.identity_selects_mode=false`, and the
+matching explicit marker. If not, stop and ask the lead to publish the current workflow;
+never fall back to an older identity-derived mode.
+
 Do not infer rehearsal because the authenticated login is the upstream Owner. If the
 bootstrap marker is absent, ask one question before any branch, push, or PR mutation:
 

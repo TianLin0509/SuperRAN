@@ -424,6 +424,7 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
         "channel-sim/SKILL.md", "35 个工具",
         "普通组员，也可能是组长本人", "GitHub 身份只决定推送路径",
         "绝不能因为登录账号是 Owner 就改成 REHEARSAL", "author/TianLin0509",
+        "schema_version 不低于 1.3.0", "author_modes.identity_selects_mode=false",
         "非 Draft", "[REHEARSAL]", "另一个全新组长 Agent Session",
         "技术术语", "白话解释", "具体例子", "我理解你要的是", "不等于",
         "证明了什么、没有证明什么", "不能当作实现或性能证据",
@@ -443,6 +444,7 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
         "最重要的正式 PR 提出者之一", "自己做实现", "TEAM_MODE: FORMAL",
         "author/TianLin0509", "另一个全新的组长 Agent Session",
         "TEAM_MODE: REHEARSAL", "绝不能根据 GitHub Owner 身份自动判断演练",
+        "schema_version 不低于 1.3.0", "author_modes.identity_selects_mode=false",
         "我理解为", "不等于", "证明了什么、没有证明什么", "不能冒充当前证据",
         "交互式改动说明 HTML", "报告缺失/过期", "不能替代 diff"):
         assert required in lead_prompt
@@ -450,6 +452,7 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
     assert rehearsal_prompt.strip().startswith("TEAM_MODE: REHEARSAL")
     for required in (
         "GitHub 身份只决定推送路径", "绝不能用它推断 FORMAL 或 REHEARSAL",
+        "schema_version 不低于 1.3.0", "author_modes.identity_selects_mode=false",
         "Draft=true", "[REHEARSAL]", "永远不得", "TEAM_MODE: FORMAL"):
         assert required in rehearsal_prompt
     assert "会识别 Owner 账号，" + "自动建立" not in member_html + lead_html

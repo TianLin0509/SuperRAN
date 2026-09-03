@@ -107,6 +107,7 @@ def validate() -> list[str]:
         "superran-member-task/SKILL.md", "channel-sim/SKILL.md", "35 个工具",
         "普通组员，也可能是组长本人", "GitHub 身份只决定推送路径",
         "绝不能因为登录账号是 Owner 就改成 REHEARSAL", "author/TianLin0509",
+        "schema_version 不低于 1.3.0", "author_modes.identity_selects_mode=false",
         "非 Draft", "[REHEARSAL]", "另一个全新组长 Agent Session",
         "技术术语", "白话解释", "具体例子",
         "我理解你要的是", "不等于", "证明了什么、没有证明什么",
@@ -129,6 +130,7 @@ def validate() -> list[str]:
         "最重要的正式 PR 提出者之一", "自己做实现", "TEAM_MODE: FORMAL",
         "author/TianLin0509", "另一个全新的组长 Agent Session",
         "TEAM_MODE: REHEARSAL", "绝不能根据 GitHub Owner 身份自动判断演练",
+        "schema_version 不低于 1.3.0", "author_modes.identity_selects_mode=false",
         "技术术语", "白话解释", "具体例子", "我理解为", "不等于",
         "证明了什么、没有证明什么", "不能冒充当前证据",
         "交互式改动说明 HTML", "报告缺失/过期", "不能替代 diff"):
@@ -140,6 +142,7 @@ def validate() -> list[str]:
     for item in (
         "TEAM_MODE: REHEARSAL", "GitHub 身份只决定推送路径",
         "绝不能用它推断 FORMAL 或 REHEARSAL", "Draft=true",
+        "schema_version 不低于 1.3.0", "author_modes.identity_selects_mode=false",
         "[REHEARSAL]", "永远不得", "TEAM_MODE: FORMAL",
     ):
         if item not in rehearsal_prompt:

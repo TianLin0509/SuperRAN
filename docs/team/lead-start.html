@@ -60,7 +60,7 @@
 先自动建立组长工作台：
 1. 检查 gh auth status，必须确认当前 GitHub 登录账号是上游 Owner TianLin0509；不一致就只引导我完成一次登录切换。
 2. 检查真实仓库、所有 git worktree 和未提交修改。不得切换、覆盖或清理我正在使用的工作区。fetch origin/develop；如果需要检出或审核，使用 C:\Vibe\Worktrees\SuperRAN 下明确、隔离的 worktree。
-3. 完整读取 origin/develop 当前版本的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md。若本机尚无干净 develop worktree，安全创建；已存在则验证后复用。
+3. 完整读取 origin/develop 当前版本的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md。确认 workflow 的 schema_version 不低于 1.3.0、author_modes.identity_selects_mode=false，且 formal/rehearsal marker 均存在；若缺少任一项，停止且只说“团队 develop 尚未发布显式 Author 模式合同”，不得回退到 Owner 自动演练。若本机尚无干净 develop worktree，安全创建；已存在则验证后复用。
 4. 使用仓库可用 Python 环境；必要时按 INSTALL_AGENT.md 准备 .venv、ChannelHub 和 superran MCP。必须运行 channelhub.probe_source_contract() 并确认 compatible=true，不能把能 import 当成物理内核可用。然后运行“<对应 Python> scripts/install_agent_skills.py --role lead”，确认 status=pass。
 5. 当前会话完整读取 skills/superran-lead/SKILL.md、skills/superran-member-task/SKILL.md 和 skills/channel-sim/SKILL.md。用同一 Python 的绝对路径注册或校正 superran MCP，并验证实际有 35 个工具。
 6. 运行 python tests/test_lazy_imports.py 与 python tests/test_carrier.py。不要向我粘贴安装日志；成功只报告“组长工作台已就绪”，失败只问我唯一必须亲自处理的动作。
@@ -109,7 +109,7 @@
 
 先自动准备环境：
 1. 检查 gh auth status 并告诉我当前登录账号。GitHub 身份只决定推送路径，绝不能用它推断 FORMAL 或 REHEARSAL；本 Prompt 已显式指定 REHEARSAL。
-2. 在独立目录安全 clone/fetch 最新 origin/develop，不得复用、切换、覆盖或清理其他人的工作区。读取最近的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md。
+2. 在独立目录安全 clone/fetch 最新 origin/develop，不得复用、切换、覆盖或清理其他人的工作区。读取最近的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md；确认 workflow 的 schema_version 不低于 1.3.0、author_modes.identity_selects_mode=false，且 rehearsal.marker=`TEAM_MODE: REHEARSAL`。不满足就停止并联系组长，不得使用旧协议演练。
 3. 按 INSTALL_AGENT.md 使用仓库 Python 环境，运行 scripts/install_agent_skills.py --role member，并完整读取 skills/superran-member-task/SKILL.md 与它要求的无线仿真 Skill。完成环境合同探测和仓库规定的基础测试；不得静默降级。
 4. 使用 `rehearsal/<GitHub登录名>/<任务短名>` 分支。Owner 可推送上游演练分支，非 Owner 可推送自己的 Fork；两者都不改变 REHEARSAL 身份。
 

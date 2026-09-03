@@ -17,7 +17,9 @@ sessions and worktrees for each PR.
 
 Read `AGENTS.md`, `CLAUDE.md`, and `docs/team/workflow.json`. Use the current remote
 `develop` branch as the team integration truth and treat `main` as a separate release
-boundary.
+boundary. Before directing any Author flow, require `schema_version >= 1.3.0`,
+`author_modes.identity_selects_mode=false`, and both explicit mode markers. Fail closed
+when the current `develop` contract is older; never revive Owner-derived rehearsal.
 
 ## Communication contract
 
