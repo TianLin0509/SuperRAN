@@ -290,12 +290,20 @@ PMI 给码本索引而非嵌入向量。
 
 ## 团队 Agent 开发
 
-- 组员只需打开 `docs/team/member-start.html`，复制唯一 Prompt，随后用无线专业语言回答 Agent。
+- 普通组员或组长本人做具体实现时，都打开 `docs/team/member-start.html`；该页面固定启动正式 `FORMAL` Author 流程。
 - 组长使用 `docs/team/lead-start.html` 分任务、看状态、审核 PR，并按当前完整 SHA 决定合并。
-- `develop` 是组员 PR 的目标分支；`main` 是组长单独控制的发布分支。
+- `develop` 是所有实现 PR 的目标分支；`main` 是组长单独控制的发布分支。
+
+GitHub Owner 身份不会再自动触发演练：Owner 在正式模式下直接推送上游 topic branch，
+普通组员推送自己的 Fork。演练只能从组长页复制明确的 `TEAM_MODE: REHEARSAL` Prompt。
+组长本人提交正式 PR 后，用另一个全新 Agent Session 和隔离 worktree 完成审核。
 
 两份页面会自动引导 Agent 安装仓库版本的 `channel-sim`、`superran-member-task` 与
 `superran-lead`，无需人手改 Prompt 或复制 Skill 文件。
+
+任一 Author PR 提交或更新后，Author Agent 还会生成绑定当前远端 PR HEAD 的离线交互式改动
+说明 HTML；人类 Author 把该文件与 PR 链接一起交给组长审核会话。它用于理解改动，不代表审核通过，
+默认不提交到公开仓库。
 
 ## 安装
 

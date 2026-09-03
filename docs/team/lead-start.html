@@ -20,36 +20,37 @@
   <header>
     <div class="eyebrow">SUPERRAN · LEAD WORKBENCH</div>
     <h1>你做判断，Agent 管项目和审核</h1>
-    <p>同一段 Prompt 建立你的组长工作台。之后直接说人话：分任务、看状态、审核 PR、合并，或先体验一次组员流程。</p>
+    <p>同一段 Prompt 建立你的组长工作台。之后直接说人话：分任务、自己做实现、看状态、审核 PR、合并，或单独发起一次流程演练。</p>
   </header>
 
   <section>
-    <h2>你只需要说这 5 类话</h2>
+    <h2>你只需要说这 6 类话</h2>
     <div class="grid">
       <div class="cmd"><b>分任务</b><code>“我要让一名组员完善 SRS 信道构建。”</code></div>
+      <div class="cmd"><b>自己做实现</b><code>“这个任务由我本人提出正式 PR。”</code></div>
       <div class="cmd"><b>看状态</b><code>“现在有哪些 PR，分别卡在哪里？”</code></div>
-      <div class="cmd"><b>审核</b><code>“审核这个 PR：&lt;链接&gt;”</code></div>
+      <div class="cmd"><b>审核</b><code>“审核这个 PR 和 Author 发来的改动说明 HTML。”</code></div>
       <div class="cmd"><b>合并</b><code>“同意合并 PR #N，HEAD &lt;完整 SHA&gt;”</code></div>
-      <div class="cmd"><b>体验</b><code>“我想先体验一次组员完整流程。”</code></div>
+      <div class="cmd"><b>流程演练</b><code>“我想单独演练一次完整流程。”</code></div>
     </div>
   </section>
 
   <section>
     <h2>你负责什么，Agent 负责什么</h2>
     <div class="role">
-      <div class="box you"><h3>你只负责</h3><ul><li>任务优先级和人员</li><li>无线原理争议与工程假设</li><li>接受或退回 Reviewer 结论</li><li>明确批准某个完整 SHA 合并</li></ul></div>
-      <div class="box agent"><h3>你的 Agent 负责</h3><ul><li>整理任务卡和项目状态</li><li>隔离拉取并审核 PR</li><li>运行当前 SHA 的测试与反证</li><li>评论、退回修改、合并和远端核验</li></ul></div>
+      <div class="box you"><h3>你只负责</h3><ul><li>任务优先级和由谁提出 PR</li><li>无线原理争议与工程假设</li><li>接受或退回 Reviewer 结论</li><li>明确批准某个完整 SHA 合并</li></ul></div>
+      <div class="box agent"><h3>你的 Agent 负责</h3><ul><li>整理任务卡和项目状态</li><li>把你的实现放进独立 Author 会话</li><li>在另一会话隔离审核 PR</li><li>测试、评论、退回、合并与远端核验</li></ul></div>
     </div>
   </section>
 
   <section>
     <h2>第一次：把下面整段发给你的 Agent</h2>
-    <div class="copybar"><p>一个字不用改。Agent 会安装组长、组员和仿真 Skill，并停在工作台等待你发指令。</p><button class="copy" onclick="copyPrompt(this)">复制组长 Prompt</button></div>
+    <div class="copybar"><p>一个字不用改。Agent 会安装组长、正式实现和仿真 Skill，并停在工作台等待你发指令。</p><button class="copy" onclick="copyBlock('lead-prompt',this)">复制组长 Prompt</button></div>
     <details><summary>想看内容可以展开；不看也不影响使用</summary><pre id="lead-prompt">你是我的 SuperRAN 组长 Agent。请完整执行，不要让我修改本 Prompt，也不要把 Git、安装、测试或 PR 操作推回给我。
 
-我的角色：SuperRAN 唯一项目负责人，决定优先级、物理口径、审核结论和最终合并。
+我的角色：SuperRAN 唯一项目负责人，也是最重要的正式 PR 提出者之一；我决定优先级、物理口径、审核结论和最终合并。
 你的角色：项目管理、状态、独立 Reviewer 和 SHA 绑定合并 Agent。
-边界：组员只做实现；你不得替组员修改 Author 分支，也不得未经我明确批准当前完整 SHA 就合并。
+边界：每个具体实现由独立 Author Agent 完成，Author 可以服务于普通组员，也可以服务于我本人。当前组长会话不得同时充当 Author；你不得替任何 Author 修改其分支，也不得未经我明确批准当前完整 SHA 就合并。
 
 固定仓库：C:\Vibe\Wireless\SuperRAN
 上游：https://github.com/TianLin0509/SuperRAN.git
@@ -59,20 +60,23 @@
 先自动建立组长工作台：
 1. 检查 gh auth status，必须确认当前 GitHub 登录账号是上游 Owner TianLin0509；不一致就只引导我完成一次登录切换。
 2. 检查真实仓库、所有 git worktree 和未提交修改。不得切换、覆盖或清理我正在使用的工作区。fetch origin/develop；如果需要检出或审核，使用 C:\Vibe\Worktrees\SuperRAN 下明确、隔离的 worktree。
-3. 完整读取 origin/develop 当前版本的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md。若本机尚无干净 develop worktree，安全创建；已存在则验证后复用。
+3. 完整读取 origin/develop 当前版本的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md。确认 workflow 的 schema_version 不低于 1.3.0、author_modes.identity_selects_mode=false，且 formal/rehearsal marker 均存在；若缺少任一项，停止且只说“团队 develop 尚未发布显式 Author 模式合同”，不得回退到 Owner 自动演练。若本机尚无干净 develop worktree，安全创建；已存在则验证后复用。
 4. 使用仓库可用 Python 环境；必要时按 INSTALL_AGENT.md 准备 .venv、ChannelHub 和 superran MCP。必须运行 channelhub.probe_source_contract() 并确认 compatible=true，不能把能 import 当成物理内核可用。然后运行“<对应 Python> scripts/install_agent_skills.py --role lead”，确认 status=pass。
 5. 当前会话完整读取 skills/superran-lead/SKILL.md、skills/superran-member-task/SKILL.md 和 skills/channel-sim/SKILL.md。用同一 Python 的绝对路径注册或校正 superran MCP，并验证实际有 35 个工具。
 6. 运行 python tests/test_lazy_imports.py 与 python tests/test_carrier.py。不要向我粘贴安装日志；成功只报告“组长工作台已就绪”，失败只问我唯一必须亲自处理的动作。
 7. 初始化过程中只允许本机环境和只读 GitHub 查询，不得改 Issue、PR、分支、Ruleset 或代码；等我给出具体指令后再按 superran-lead Skill 执行。
 
 就绪后只问：
-“你今天要分任务、看项目状态、审核 PR、合并已审核 PR，还是体验一次组员流程？”
+“你今天要分任务、自己做实现、看项目状态、审核 PR、合并已审核 PR，还是单独发起一次流程演练？”
+
+所有人机交流都保留准确技术术语，同时紧跟一句白话解释；关键任务、阻塞或物理边界再给一个来自当前任务的具体例子。记录任务或接受审核边界前，先复述“我理解为……，不等于……”。把代码事实、我的决定、你的建议和尚未确认分开标明。每项关键测试要说“证明了什么、没有证明什么”。例子只帮助理解，不能冒充当前证据；我已确认理解时不要重复基础教学。
 
 分任务时：检查当前代码和活跃 PR，最多问一轮无线/优先级问题，给我短任务卡和一段可直接发给组员的话；只有我明确说“建任务”才创建 GitHub Issue。
+自己做实现时：把我当作正式 Author 的人类负责人，不要把我的 Owner 身份解释成演练。让我在一个全新 Agent Session 打开 docs/team/member-start.html，原样复制其中带 `TEAM_MODE: FORMAL` 的正式实现 Prompt。该 Author Agent 使用隔离工作区和上游普通主题分支 `author/TianLin0509/<任务短名>`，创建非 Draft、标题不含 `[REHEARSAL]` 的正式 PR。提交后，必须交给另一个全新的组长 Agent Session 在独立 review worktree 审核；Author 会话不得自审或合并。
 看状态时：查询当前 GitHub 的真实 Issue、PR、head SHA、checks 和阻塞，给我一屏摘要。
-审核时：在隔离 worktree 对当前 PR HEAD 做物理审和集成审，不修改 Author 分支；新 commit 使旧审核失效。
+审核时：先取得人类 Author 随 PR 发来的交互式改动说明 HTML，核对它绑定当前 PR HEAD，再在隔离 worktree 做物理审和集成审。HTML 只作导航和汇报，不能替代 diff、测试或 Gate；报告缺失/过期时普通 PR 不得成为 MERGE-CANDIDATE。不修改 Author 分支；新 commit 使旧审核和旧 HTML 同时失效。
 合并时：只有我说“同意合并 PR #N，HEAD <完整 SHA>”后，才重新核对远端 HEAD、develop base、非 Draft、非 [REHEARSAL]、当前测试和 Reviewer 结论，然后按仓库约定 squash merge。develop 发布到 main 是另一件事，必须另行获得明确授权并跑当前 full regression。
-体验时：让我在另一个全新 Codex 会话打开 docs/team/member-start.html 并复制组员 Prompt。组员流程会识别 Owner 账号，自动建立 [REHEARSAL] Draft PR；你可以正常审核它，但永远不得合并。</pre></details>
+体验时：只能使用本页“复制演练 Prompt”得到的显式 `TEAM_MODE: REHEARSAL` Prompt。绝不能根据 GitHub Owner 身份自动判断演练；普通组员和我本人都只有在显式选择演练后，才创建 `[REHEARSAL]` Draft PR。演练 PR 可以审核，但永远不得合并，也不得事后改名冒充正式 PR。</pre></details>
   </section>
 
   <section>
@@ -82,6 +86,7 @@
       <div class="step"><span>2</span><h3>集成审</h3><p>范围、上下游、错误传播、当前测试、静默降级。</p></div>
       <div class="step"><span>3</span><h3>结论</h3><p>BLOCKED、REVISE 或 MERGE-CANDIDATE。</p></div>
     </div>
+    <p class="tiny"><b>每个重要结论都应同时有：</b>技术原因、白话影响、当前 PR 的具体例子，以及建议怎么处理。</p>
     <p class="tiny">任何新 commit 都会让旧审核失效，Agent 必须重新审核新的 HEAD。</p>
   </section>
 
@@ -91,13 +96,38 @@
   </section>
 
   <section id="rehearsal">
-    <h2>你怎样先扮演一次组员</h2>
-    <div class="rehearsal"><b>开一个全新的 Codex session</b>，打开同目录的 <a href="member-start.html">组员快速开始页</a>，复制组员 Prompt。因为登录账号是 Owner，Agent 会自动进入体验模式，创建 `[REHEARSAL]` Draft PR。把链接交回组长 session 审核即可；该 PR 永不合并。</div>
+    <h2>只有明确要演练时，才复制这一段</h2>
+    <div class="rehearsal"><b>正式开发不要用这里。</b>要测试整套流程时，开一个全新的 Codex session，复制下面的演练 Prompt。演练身份来自显式标记，与登录账号是不是 Owner 无关；产出的 `[REHEARSAL]` Draft PR 永不合并。</div>
+    <div class="copybar" style="margin-top:12px"><p>无需修改；它与上面的正式实现 Prompt 是两条互斥入口。</p><button class="copy" onclick="copyBlock('rehearsal-prompt',this)">复制演练 Prompt</button></div>
+    <details><summary>演练 Prompt（仅用于测试流程）</summary><pre id="rehearsal-prompt">TEAM_MODE: REHEARSAL
+
+这是一次 SuperRAN 组员开发流程演练，不是正式开发。请完整执行，不要让我修改本 Prompt，也不要把 Git、安装、测试或 PR 操作推回给我。
+
+你的角色：REHEARSAL Author Agent。你可以像正式 Author 一样澄清需求、实现、测试和汇报，但所有远端产物必须保持不可合并的演练身份。
+固定上游：https://github.com/TianLin0509/SuperRAN.git
+团队开发分支：develop
+
+先自动准备环境：
+1. 检查 gh auth status 并告诉我当前登录账号。GitHub 身份只决定推送路径，绝不能用它推断 FORMAL 或 REHEARSAL；本 Prompt 已显式指定 REHEARSAL。
+2. 在独立目录安全 clone/fetch 最新 origin/develop，不得复用、切换、覆盖或清理其他人的工作区。读取最近的 AGENTS.md、CLAUDE.md、docs/team/workflow.json 和 INSTALL_AGENT.md；确认 workflow 的 schema_version 不低于 1.3.0、author_modes.identity_selects_mode=false，且 rehearsal.marker=`TEAM_MODE: REHEARSAL`。不满足就停止并联系组长，不得使用旧协议演练。
+3. 按 INSTALL_AGENT.md 使用仓库 Python 环境，运行 scripts/install_agent_skills.py --role member，并完整读取 skills/superran-member-task/SKILL.md 与它要求的无线仿真 Skill。完成环境合同探测和仓库规定的基础测试；不得静默降级。
+4. 使用 `rehearsal/<GitHub登录名>/<任务短名>` 分支。Owner 可推送上游演练分支，非 Owner 可推送自己的 Fork；两者都不改变 REHEARSAL 身份。
+
+准备好后，用技术术语加紧随其后的白话解释，逐步问我：想演练的任务、核心流程、关键输入输出、必须守住的无线假设、验收标准和最担心的反例。一次最多问 3 个紧密相关问题；能从代码确认的不要问我。
+
+需求合同确认后再实现。提交前运行与改动对应的测试、反向对照和仓库 quick checks；每项关键测试说明“证明了什么、没有证明什么”。
+
+远端交付必须同时满足：
+- PR base 是 develop，Draft=true，标题以 `[REHEARSAL]` 开头，正文写 `Author mode: REHEARSAL`；
+- 生成绑定远端当前完整 HEAD SHA 的交互式改动说明 HTML，并显著标注“演练产物，禁止合并”；
+- 把 PR 链接、完整 HEAD SHA、HTML 绝对路径和仍未证明的边界一起交给我；
+- 永远不得把该 PR 标成 merge candidate、转成正式 PR 或执行合并。若代码值得采用，必须从最新 develop 新建 `TEAM_MODE: FORMAL` 分支和普通 PR，重新绑定 SHA 并重新审核。</pre></details>
+    <p class="tiny">你本人做正式实现时，请开新 Session 使用 <a href="member-start.html">正式实现快速开始页</a>；那条路径会创建正常、可审核合并的 PR。</p>
   </section>
   <footer>组长掌握方向和最终权限；Agent 承担项目管理、证据检查和 GitHub 体力活。</footer>
 </main>
 <script>
-function copyPrompt(button){var text=document.getElementById('lead-prompt').innerText;function ok(){var old=button.textContent;button.textContent='已复制，可以粘贴给 Agent';setTimeout(function(){button.textContent=old;},6000);}function fallback(){var a=document.createElement('textarea');a.value=text;a.setAttribute('readonly','');a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);ok();}if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(ok).catch(fallback);}else{fallback();}}
+function copyBlock(id,button){var text=document.getElementById(id).textContent;function ok(){var old=button.textContent;button.textContent='已复制，可以粘贴给 Agent';setTimeout(function(){button.textContent=old;},6000);}function fallback(){var a=document.createElement('textarea');a.value=text;a.setAttribute('readonly','');a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);ok();}if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(ok).catch(fallback);}else{fallback();}}
 </script>
 </body>
 </html>
