@@ -10,6 +10,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from superran import amc_policy as ap  # noqa: E402
 from superran import experience as exp  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import system as sy  # noqa: E402
@@ -98,7 +99,11 @@ def _frequency_experiment() -> dict[str, object]:
             tables, sys_cfg=cfg, traffic=traffic,
             sched=sy.SchedulerConfig(
                 mu_enabled=False, olla_enabled=False,
-                frequency_selective=mode),
+                frequency_selective=mode,
+                # 这两张表把互补的强子带放在 rank1 行上，rank2 行是平的。
+                # rank 现在是显式策略而不是链路表属性，所以要说清楚用 rank1，
+                # 否则默认的固定 rank2 会把频选结构整个读不到。
+                rank=ap.RankConfig(fixed_rank=1)),
             kpi=kpi)
     off = results["off"].cell
     on = results["on"].cell

@@ -453,8 +453,67 @@ check(ca.CsiConfig().as_dict()["csi_report_period_ms"] == 20.0,
       "PMI/CQI 工程默认 20 ms，并与 SRS 周期、trace 间隔分开")
 _csi_dict = ca.CsiConfig().as_dict()
 check(_csi_dict["csi_report_feedback_latency_ms"] == 0.0
-      and "expanding mean" in _csi_dict["cqi_filter"],
-      "CSI report 的零额外反馈时延与因果 expanding-mean 近似显式上报")
+      and "IIR" in _csi_dict["cqi_filter"]
+      and _csi_dict["cqi_filter_lambda"] == 0.25
+      and _csi_dict["cqi_filter_domain"] == "cqi_index",
+      "CSI report 的零额外反馈时延与一阶 IIR CQI 滤波显式上报")
+
+# --- CQI 滤波是一阶 IIR，不是无限记忆的累计平均 -------------------------
+# 旧实现用 expanding mean：跑得越久新测量的权重越小，移动性或负载变化时
+# CQI 根本不跟踪。现在是 ``s <- s + lambda*(x - s)``，lambda 由配置给。
+for _bad_lambda in (0.0, -0.1, 1.5, float("nan")):
+    try:
+        ca.CsiConfig(cqi_filter_lambda=_bad_lambda)
+        check(False, f"cqi_filter_lambda={_bad_lambda} 应当被拒")
+    except ValueError:
+        check(True, f"cqi_filter_lambda={_bad_lambda} 被拒")
+try:
+    ca.CsiConfig(cqi_filter_domain="both")
+    check(False, "未知 cqi_filter_domain 应当被拒")
+except ValueError:
+    check(True, "未知 cqi_filter_domain 被拒，不静默退回默认域")
+
+# 构造一个 CQI 会真正变化的序列：前四个快照几何 SINR 低、后四个高，
+# 且 CSI report 每个快照都更新（5 ms），这样只剩滤波这一个变量。
+# **信道幅度不能拿来做阶跃**——噪声锚点按几何 SINR 反解，把幅度变化全吸收了。
+_step_one = np.zeros((1, 17, 4, 2), dtype=complex)
+_step_one[0, :, 0, 0] = 1.0
+_step_one[0, :, 1, 1] = 0.7
+_step_h = [_step_one.copy() for _ in range(8)]
+_step_geo = [6.0] * 4 + [24.0] * 4
+_step_kwargs = dict(num_ues=1, snapshot_ms=5.0, max_rank=2, rb_per_rbg=1,
+                    power_constraint="ebf")
+_cqi_no_filter = sy.build_link_tables(
+    _step_h, _step_geo,
+    csi=ca.CsiConfig(enabled=False, csi_report_period_ms=5.0,
+                     cqi_filter_lambda=1.0),
+    **_step_kwargs)[0].reported_cqi_codepoint_per_snapshot[:, 0]
+_cqi_filtered = sy.build_link_tables(
+    _step_h, _step_geo,
+    csi=ca.CsiConfig(enabled=False, csi_report_period_ms=5.0,
+                     cqi_filter_lambda=0.25),
+    **_step_kwargs)[0].reported_cqi_codepoint_per_snapshot[:, 0]
+check(_cqi_no_filter[0] == _cqi_no_filter[3]
+      and _cqi_no_filter[4] == _cqi_no_filter[7]
+      and _cqi_no_filter[4] > _cqi_no_filter[0],
+      f"lambda=1 时 CQI 立刻跟随阶跃（{_cqi_no_filter.tolist()}）")
+check(_cqi_filtered[0] == _cqi_no_filter[0],
+      "第一次上报直接初始化滤波状态，不从 0 缓慢爬升")
+check(_cqi_filtered[4] < _cqi_no_filter[4]
+      and _cqi_filtered[7] > _cqi_filtered[4],
+      f"lambda=0.25 时 CQI 逐步逼近新稳态而不是一步到位（{_cqi_filtered.tolist()}）")
+check(bool(np.all(np.diff(_cqi_filtered[4:]) >= 0))
+      and _cqi_filtered[-1] <= _cqi_no_filter[-1],
+      "阶跃后滤波值单调上升且不超过无滤波稳态，符合一阶响应")
+
+# 在 SINR 域滤波是另一套口径：允许显式选择，但不能与档域悄悄混用。
+_cqi_sinr_domain = sy.build_link_tables(
+    _step_h, _step_geo,
+    csi=ca.CsiConfig(enabled=False, csi_report_period_ms=5.0,
+                     cqi_filter_lambda=0.25, cqi_filter_domain="sinr_db"),
+    **_step_kwargs)[0].reported_cqi_codepoint_per_snapshot[:, 0]
+check(not np.array_equal(_cqi_sinr_domain, _cqi_filtered),
+      f"量化前/后两个滤波域给出不同轨迹（sinr_db={_cqi_sinr_domain.tolist()}）")
 
 # 周期 trace 历史只有显式开启才可用；它代表预启动前上一轮 trace，冷启动仍钳零。
 _trace = [np.full((1, 1, 1), x, dtype=float) for x in (10, 20, 30)]

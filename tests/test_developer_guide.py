@@ -116,7 +116,48 @@ def test_guide_is_offline_utf8_hash_routed_and_accessible() -> None:
     assert 'data-kpi-workbench="standard-output"' in text
     assert "交互配置 Mock · 仿真说明书" in text
     assert "Agent 自适应编排" in text
-    assert "26 项小区 KPI、24 项用户 KPI" in text
+    # 计数从代码算出来，别再手写——手写的数字上一轮就漂过。
+    from superran import kpi_view as _kv  # noqa: PLC0415
+
+    assert (f"{len(_kv.CELL_KPIS)} 项小区 KPI、"
+            f"{len(_kv.USER_KPIS)} 项用户 KPI") in text
+    # 下行 AMC 全链章节：四条信息面、rank 策略、反馈时序与解码位置都要在页面上。
+    assert 'data-page="dlamc"' in text
+    assert "下行 AMC 全链" in text
+    assert 'data-formula="F_CQI_IIR"' in text
+    assert 'data-formula="F_GRANT_SINR"' in text
+    assert 'data-formula="F_RANK_SE"' in text
+    assert 'data-formula="F_RANK_SWITCH"' in text
+    assert 'data-formula="F_HARQ_DELAY"' in text
+    dlamc_start = text.index('<article class="doc-page" data-page="dlamc"')
+    dlamc_end = text.index('<article class="doc-page" data-page="bler"', dlamc_start)
+    dlamc = text[dlamc_start:dlamc_end]
+    for required in (
+        "四条信息面，混一条就出错",
+        "把预测面当真实面用，等于让基站预知波束打没打准",
+        "关掉 OLLA 只去掉最后这一步叠加",
+        "从累计平均换成一阶 IIR 是一次口径变更",
+        "Rank 从哪来",
+        "防乒乓靠四件事",
+        "常数来自现场实现规格，采样粒度是本项目的显式选择",
+        "ACK/NACK 要等上行时隙",
+        "首传 ACK 与 NACK 都建立 in-flight 状态",
+        "t0 首传 NACK → t5 重传 → t10 终次反馈",
+        "尚未经现场测量/设备数据标定",
+        "解码 SINR 只在实际授予的 RBG 上取",
+        "小包用全带均值判误块，两个方向都会错",
+        "当前不建模的东西",
+        "每流固定 15 dB BF 惩罚",
+        "CQI floor/reset",
+        "15.1016",       # 端到端手算例子的中间量
+        "amc_policy.py",
+    ):
+        assert required in dlamc, required
+    assert dlamc.index("四条信息面，混一条就出错") < dlamc.index("当前不建模的东西")
+    assert "升/降 rank 都要最优谱效高 10%" in text
+    assert "BREAKING migration：失败已前移到建表入口" in text
+    assert "缺 1↔2 仍立即失败" in text
+    assert "叠加 SU+MU OLLA 后的实发 MCS" in text
     assert "应用到仿真" in text
     assert "多算法 KPI 对比与单 TTI 复盘" in text
     assert "sr_compare_system_results" in text

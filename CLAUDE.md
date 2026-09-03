@@ -104,6 +104,7 @@ test_csi_aging + test_rng；改动 `scheduler_*.py` / `experience.py` 要额外�
 改动 `srs_waveform.py` 或 SRS 的 `h_ul_true` 数据合同要跑 test_srs_waveform +
 test_physics_contract_extensions + test_channel_generation_contract + test_results；
 改动 `scenes.py` / `scene_assets.py` 要跑 test_physics_contract_extensions + test_raytracing；
+改动 `amc_policy.py` 要跑 test_system + test_scheduler_p0 + test_csi_aging；
 改动 `rng.py` 要跑 test_rng + test_system；
 改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）；
 改动开发者文档生成器要跑 `tests/test_developer_guide.py`。
@@ -412,12 +413,27 @@ ReTx 行保留作来源审计。CC 保持原 MCS 并把查询 SINR 增加 `10log
 IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在不变 SINR 上查表。
 等效 MCS 只用于 BLER lookup；空口 MCS、RBG 数、rank 与 TBS 必须和初传完全一致。
 重传失败后结束本次 HARQ，payload 留队并在后续成为新 TB；不得再挂第二次重传。
+
+**"最多一次重传 + 单 HARQ 进程"是显式决定，不是待补的半成品**（用户
+2026-09-02 确认："HARQ 我们先仅考虑一次重传"）。现场实现规格里是 16 个 HARQ
+进程、`max_retx=3`（共 4 次传输）；扩到那一档会同时改动队列模型、反馈时延语义
+（一个 UE 可以在等反馈时继续发别的进程）和全部 BLER/时延口径，因此**当前显式
+不做**。所有 residual BLER 都要按"一次重传后仍失败"来读。
 表 3 使用版本化256QAM映射：历史内部表行0..14为
 `[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28]`，对应上报4-bit CQI1..15；
 上报CQI0是out-of-range。自动量化用各映射MCS的NewTx目标BLER门限。当前曲线仅
 有MCS0..27，最高行请求MCS28但必须显式钳到27，不得伪造MCS28曲线。
 所有高层链路/吞吐/SNR扫频接口默认都用表3的256QAM profile；
 表1的64QAM和表2的标准256QAM只在调用方显式指定时使用。
+**`build_link_tables` 硬拒绝非表 3**：只有 preset_20b_256qam 同时具备 28 档 NewTx
+曲线与内部 CQI 映射，混用会让量化门限与选档口径各用一张表且不报错。
+这是 **breaking migration**：旧代码若调用 `build_link_tables(table=1/2)`，现在会在建表
+入口立即失败；系统/体验路径请迁移到 `table=3`，Table 1/2 仅保留在显式链路级接口。
+`target_bler` 可配，但必须落在 28 档曲线的**共同实测区间 [0.001, 0.998]** 内，
+越界提前硬失败而不是在深层抛一个看不出哪档的 ValueError。注意这条链里目标 BLER
+**开环几乎抵消**（它同时出现在 CQI→Γ 与 Γ→MCS 两侧，两次平移方向相同），真正
+吃到它的是 OLLA 闭环：实测 10%→30% 时稳态偏置 1.65→1.85 档、首传 BLER
+0.067→0.178。
 
 TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sr_tdd_mcs` 实现：
 `CQI表行/上报codepoint → 显式离散表映射初始 MCS → 该 MCS 的 NewTx 目标 BLER SINR 门限
@@ -793,6 +809,18 @@ Python 侧：反斜杠 + 数字 是合法的八进制转义，
 真要写转义就用 raw 字符串，并给每个转义补足 6 位或补一个空格作结束符。
 这个只有在浏览器里看 `getComputedStyle(el,'::before').content` 才发现得了。
 
+### 解码 SINR 要取实际授予的那几个 RBG
+
+误块抽签用的是**最终发送 MCS + 真实接收 SINR**，而这个 SINR 由同一个 gNB 发射权
+作用到 `h_true`、经经典 MMSE 逐 RB 逐流算出——**是算出来的，不是从全带值折的**。
+聚合只能在**本次 grant 实际占用的 RBG** 上做（`experience._granted_true_sinr_db`
+与 MU 的 `_granted_pair_true_sinr_db`）。
+
+宽带路径早先直接用全带均值，于是一个只占 1~2 个 RBG 的小包按 17 个 RBG 的平均
+信道判误码，**两个方向都会错**：授到好子带时高估误块、授到坏子带时低估。量级
+不小——最终 MCS15 在 15.1 dB 上的 NewTx BLER 是 0.0006，在 13.2 dB 上是 0.997，
+不到 2 dB 跨越整条瀑布。手工构造、逐 RBG 宽度对不上载波栅格的链路表退回全带值。
+
 ### 仿真粒度降到 RBG 是安全的
 
 一个 RBG 内的 16 个 RB 共用同一个 MCS、同一次调度决策、同一个预编码，
@@ -811,11 +839,29 @@ rank 与 MCS **逐位相同**、谱效差 0.1%，建表快一倍。
 按 `1/K` 分 RE，MU 的聚合吞吐就和 SU **一模一样**——等于把空间复用做成了
 时频复用，MU 增益整个消失。测试里"切到 MU 之后小区吞吐确实更高"当场抓到。
 
-配对后每人只分到 `1/K` 的功率、还要吃残余干扰，这部分由
-`measure_mu_gain()` 在建表阶段用真实的 `su_mu_adaptation` 测出**聚合比值**，
-主循环按 `ratio/K` 折算。**这是标量近似**：逐 TTI 真配对要在每个 TTI 做
-SVD + 矩阵求逆，十万 TTI 跑不完。返回值带逐快照比值与离散度，
-离散度就是这个近似的可信度——实测 3.7%~13.1%，超过 30% 就不该用标量。
+配对后每人只分到 `1/K` 的功率、还要吃残余干扰。**两条评估路径现在都从同一张
+pair 表读这部分代价**（`SchedulerConfig.mu_accounting="pair_table"`，默认）：
+MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、**误块抽签用
+`MuPairLink.true_sinr_db`**——ZF 权按基站（可能已老化的）CSI 打，但打在双方
+`h_true` 上，对方的流进干扰协方差。逐 TTI 只查表，矩阵运算全在建表阶段
+（实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s）。
+
+开 `pair_table` 前会校验完整、双向、维度一致的 pair graph；三 UE 缺任意一条边（例如
+1↔2）都硬失败。MU 准入的 predicted BLER 使用叠加 **SU+MU OLLA 后的实际发送 MCS**；
+OLLA 前基准 MCS 即使不过 0.5，也不能替实际发送档放行配对。
+
+**MU 的代价有两半，必须同时记账**：一半是「发得更保守」（MCS 往下走），
+一半是「更容易错」（同一档 MCS 的误块概率更高）。历史的 capacity 只把 TBS 乘一个
+`measure_mu_gain()` 测出的标量 `mu_se_ratio`，等于「包变小但一点也不更容易错」，
+物理上说不通、且配对越激进越乐观。它保留为 `mu_accounting="se_ratio_legacy"`，
+**只用于复现旧结果**，会写进 `notes`。实测同一组配置：pair 表口径下开 MU 把首传
+平均 MCS 从 23.48 压到 19.93，历史口径是 22.68 → 22.69（一档都没降）。
+
+**−3.01 dB 只是记账标签，不是近似。** 按定义 `CorrLoss = pred_MU − pred_SU −
+PowerLoss`，所以决策里真正用的平移量 `CorrLoss + PowerLoss` 恒等于
+`pred_MU − pred_SU`，那个常数精确抵消。单列 PowerLoss 只为诊断能分开看
+「功率分摊占多少、相关性损失占多少」。**这条只在当前支持的 2 用户 × rank2 下
+成立**，扩到 3/4 用户或不等流数时标签本身要重新定义。
 
 实测在 10 用户 / 64 端口下 **MU/SU 比值 < 1**（密集城区 0.755、城区宏站 0.917），
 自适应因此全程选 SU。这不是 bug：SU 无干扰且能到 rank4，
@@ -884,7 +930,47 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
    不成立就说明老化是叠加上去的第二套物理，那样任何"老化损失"都只是两套物理的差。
 2. **rank 由基站按陈旧 CSI 选**。拿真实 SINR 去挑 rank 等于让基站预知信道，
    它会自动避开老化最狠的那个 rank，**损失被凭空抹掉一大半**。
-   同理 PF 调度的 `inst_se` 只能用 `best_se_gnb`，不能用 `best_se`。
+   同理 PF 调度的 `inst_se` 只能用基站估计的谱效，不能用真实谱效。
+
+**但 `best_rank` 已经不是发送 rank 了**（2026-09-02，用户确认）。它是**逐快照的
+瞬时谱效最优值**，默认 5 ms 就可能换一次；rank 一变，每流功率 `P/r`、TBS 和 OLLA
+的收敛点全跟着变，链路自适应根本收敛不了。现在 rank 是 `amc_policy.RankConfig`
+给的显式策略：默认 `fixed` + `fixed_rank=2`（现网基线），`link_table` 保留逐快照
+跟随的历史行为**只作反向对照**，`adaptive` 按现场实现规格实现（用户 2026-09-02 给
+的文档）。`best_rank` 现在只是诊断量与 `link_table` 模式的输入。
+
+`adaptive` 的判决是**三层不同时间尺度**的状态机，别压成一层：
+
+- **每 TTI**：累积一个谱效滤波样本（`se_filter_beta=0.1` 的一阶 IIR）+ 跑一次快速回退监测。
+- **每 `period_tti`（1000）且样本数 ≥ `min_filter_samples`（3）**：判一次该不该换 rank。
+- **切换判据（用户 2026-09-03 裁决）：按滤波谱效最大化选 rank，但任何方向的切换
+  都要求最优 rank 超过当前 rank 10%。** 也就是 `switch_rule="unified_ratio"` +
+  `gain_factor_raise = gain_factor_reduce = 1.1`，两个方向共用一条式子
+  `se[best] > 1.1 · se[cur]`，常数含义相同、不会读反。实测 4% / 9% 不动、11% 才切，
+  升降完全对称。
+- **但当前 rank 被最小 MCS 闸门判死（谱效 0）时不讲迟滞**，直接降到候选里最稳的一档。
+  否则 `se[cur] = se[best] = 0`，"超过 10%" 恒为假，UE 会卡在一个已知发不出去的
+  rank 上。事件原因记作 `current_rank_gated_out`。
+- 另一种写法 `spec_asymmetric`（实现规格文档那种：`se[cur] > G↓·se[best]` 时保持）
+  **保留作对照**，因为现场到底是哪一种尚未确认。**同一个 `G↓=1.1` 在两种写法下
+  行为相反**：`unified_ratio` 是降要 10% 余量，`spec_asymmetric` 是降立即生效；
+  `spec_asymmetric + 0.9` 的等效降档余量是 11.1%，和默认那条同一个意图。
+  `as_dict()` 直接报 `raise_margin_pct` / `reduce_margin_pct`，不要自己换算。
+
+谱效估计前有两道修正，都会改判决：预估 MCS < `min_mcs_threshold`（9）的 rank 谱效
+**置 0**（那一层根本发不出去，不能让它赢 argmax）；再乘 `resource_cost_ratio`
+（`[1.0,0.97,0.95,0.93]`，高 rank 的 DMRS 开销）。
+
+升 rank 后进 **快速回退监测窗**（`min(400, 周期−10)` TTI）：窗内新增 NACK > 90 **当场退**；
+窗末初传 BLER ≥ 0.3 或新旧 rank 实测谱效比 < 1.0 也退；窗内调度 < 15 次样本不足，
+不判成败直接退出。**回退要把 OLLA 一起退回**（`RankController.step()` 的返回值，两条主
+循环都必须写回）——新 rank 上的 OLLA 是在错误工作点收敛的，只退 rank 会让旧 rank 带着
+别人的偏置继续跑，KPI 上看不出来。每回退一次判决周期 `×2`，最多 `2^4`（1000→16000 TTI）。
+
+**唯一一处本项目自己的口径选择是 `se_sample_scope`**：现场每 TTI 采一个谱效样本，
+而这里的 AMC 坐标在一个快照内是分段常数，逐 TTI 采样会让 β=0.1 的平滑在快照之间完全
+失效。默认 `snapshot`（一次新观测算一个样本），设 `tti` 复现现场节拍。**两者不等价。**PF 度量也要取**实际会用的那个 rank** 的估计谱效，不能继续用
+`best_se_gnb`（那是"瞬时最优 rank 的谱效"，与实际发送的 rank 不是同一档）。
 
 表里因此有两套量：`sinr/mcs/se`（真实，用于 BLER 与吞吐对账）与
 `se_gnb/best_se_gnb`（基站以为的，用于 rank 与调度）。零时延时两套逐位相同。
@@ -929,6 +1015,15 @@ SRS/CSI-RS 机会。`internal_sim.py:3252` 把 UE 每个快照推进
 每次更新只能使用该时刻可见的CSI，不能跨完整仿真时间先平均后偷看未来。历史
 API的表行0映射MCS0、对应上报CQI1；真实上报**CQI=0是out-of-range**。
 
+**CQI 的长期滤波是一阶 IIR，不是累计平均**（2026-09-02 换的口径）：
+`s <- s + λ(x - s)`，第一次上报直接初始化状态。旧的 expanding mean 记忆无限长，
+跑得越久新测量权重越小，移动性或负载变化时 CQI 根本不跟踪。λ 由
+`CsiConfig.cqi_filter_lambda` 给，**0.25 已由负责人确认为当前工程默认，但尚未经现场
+测量/设备数据标定**，
+必须随结果报出来；λ=1 关闭滤波可作反向对照。`cqi_filter_domain` 默认
+`cqi_index`（现场口径：在量化后的 CQI 档上滤波），`sinr_db` 只用于量化前后的
+口径消融，两个域的结果不能混着比。
+
 `Dataset.tdd_mcs` / `sr_tdd_mcs` 也必须遵守同一因果边界：进入 MCS 的
 `bf_gain_user_db` 只能在 gNB 可见的 `h_prec` 上计算。同一权打到
 `h_true` 得到的 `bf_gain_true_user_db` 与 prediction error 只作事后审计，
@@ -953,8 +1048,35 @@ CQI/BF/OLLA 标量时 BLER 必须是 unknown，不能拿 AMC 预测坐标查出�
 必须重新跑收敛标定；2026-08-23 之前 dB-domain OLLA 的 BLER/速率数字仅供历史
 追溯，不能写成当前实测结论。
 
+当前**没有**实现“每流固定 15 dB BF 惩罚”、CQI floor/reset 状态机或已标定的现场
+OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工程近似。不得据此声称
+现场等价，也不得在本次迁移中擅自补成另一套未确认算法。
+
+**`olla_enabled=False` 只去掉"叠加偏置"这一步，决策坐标不变。** 早先它会掉进
+另一条分支、改用**真实接收 SINR** 反折 MCS——那是上帝视角：首传 BLER 被构造在
+目标值上，CSI 老化与 BF 失配的代价整个消失，于是"开/关 OLLA"的消融同时换掉了
+链路自适应的信息面。只有链路表**根本没有** `sinr_tx_db`（手工构造的表）时才
+退回表自带的 MCS，那不是"关 OLLA"，是"没有 CQI/BF 可用"。
+
+**ACK/NACK 要等上行时隙**（2026-09-02 确认）。TB 在 D/S 发出，反馈搭其后第一个
+`U` 时隙回来，OLLA 更新与该 TB 的重传资格都从**该 U 之后第一个 D/S** 起生效。
+偏移由 TDD 图案算出（`amc_policy.feedback_effective_offsets`），`DDDSU` 在
+30 kHz 下逐相位是 5/4/3/2 个 TTI；两个周期即 8 下行配 2 上行，与现场 8:2 一致。
+等待期间该 UE 因单 HARQ 进程模型不参与调度，单独计数为
+`harq_feedback_wait_skips`。**ACK 与 NACK 都建立 in-flight 状态**，所以 ACK 也不能在
+反馈回来前连续发新 TB；抽样结果只能在反馈到达时交给 OLLA 与 RankController。图案里
+没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
+零时延并在 notes 里说明。**k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。**
+
+唯一一次重传发出后，其终次 ACK/NACK 也保留为 `await_final_feedback`，直到同样的反馈
+生效时刻才释放单 HARQ 进程。终次反馈只做释放：**不再进入首传 OLLA/Rank 学习，也不
+触发第三次发送**。DDDSU 的最小反例是 t0 首传 NACK、t5 重传，下一份新 TB 最早 t10，
+不能在 t6 提前发送。
+
 顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 先用
 `sinr_tx_db` 反折 `mcs_without_olla`，再调 `apply_olla_mcs`），即实际调度下去的档位。
+**但它的分母含重传**，而重传重放的是冻结的旧 MCS，所以它不是"链路自适应现在选到
+哪一档"。要那个视角用 `avg_mcs_first_tx`（只统计首传），两条路径都提供。
 
 `simulate_experience` 作为公开入口**自己**也会兑现"留空=按目标反解"：
 它拿链路表的 `target_bler` 调 `resolved_for_target`，不再依赖调用方先解析
@@ -1288,6 +1410,8 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 - 新的表驱动 BLER → 原始常量放独立数据模块，必须有 SHA-256、全 MCS 覆盖、
   横轴/BLER 单调、目标门限覆盖检查；来源不是标准就不能塞进 `verify_tables`
 - 新的门禁判据 → `gates.py`（门 2/门 3）或 `validate.py`（门 1，会自动进门 1）
+- 新的 rank 策略 / HARQ 反馈时序 → `amc_policy.py`；两条评估路径共用同一份实现，
+  别在 `system.py` 和 `experience.py` 里各写一套
 - 新的随机流 → `rng.register_stream(名字, 用途)`，**别直接改 `STREAMS` 的顺序**
   （流键来自名字的 crc32，加流不会扰动已有流；改顺序也不会，但改用途会）。
   统计判决一律走 `rng.compare_replications`，它复用 `gates.py`，不要另写

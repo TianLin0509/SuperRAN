@@ -395,7 +395,7 @@ def bugs_table() -> tuple[str, int]:
         ("S-06", "干扰", "Ruu 快照不足时给同一信道加 5% 抖动补样本", "凭空造观测、抬高协方差秩，让 IRC 获得不存在的信息", "只用 min(requested,T) 个真实快照，奇异性由 diagonal loading 处理", "T=1 时请求1/100样本结果一致且 rank=1", "src/superran/linklevel.py", "n_s = min"),
         ("S-07", "CSI", "CSI 陈旧时长/快照间隔用 round", "2ms/5ms→0，相当于使用测量发生前的当前信道", "离散陈旧时长一律 ceil，保证取到的 CSI 不新于真实测量", "2ms→1、7ms→2", "src/superran/csi_aging.py", "np.ceil"),
         ("S-08", "CSI", "整个仿真时域只搜一次 PMI", "snapshot 0 偷看未来快照，形成 oracle", "每个快照只在当时可用的 stale h_prec 上搜宽带 PMI", "任意改未来信道，snapshot0 PMI/BF gain 不变", "src/superran/system.py", "w_pmi_s"),
-        ("S-09", "CSI", "CQI 用全程 PMI SINR 均值回填所有快照", "当前 TTI 获得未来 SINR 信息", "使用 0..s expanding mean 的透明因果基线", "任意改未来信道，snapshot0 CQI/Tx SINR 不变", "src/superran/system.py", "filtered_pmi"),
+        ("S-09", "CSI", "CQI 用全程 PMI SINR 均值回填所有快照", "当前 TTI 获得未来 SINR 信息", "改用只吃 0..s 的一阶 IIR（λ 可配，默认 0.25）", "任意改未来信道，snapshot0 CQI/Tx SINR 不变", "src/superran/system.py", "filter_state"),
         ("E-01", "业务", "CBR 每 TTI 直接 int(bytes)", "小数永久丢失；低速率甚至每 TTI 都为0", "每 UE 累积分数字节 carry，再 floor 入队", "0.001 Mbps ×1s 精确到达125B", "src/superran/system.py", "_cbr_carry"),
         ("E-02", "业务", "先跳过 U slot，再生成业务到达", "DDDSU 固定漏掉20%外生到达，负载/排队被低估", "每个 D/S/U TTI 先 step traffic，再判断能否下行调度", "1 Mbps CBR 在 DDDSU 仍报告1 Mbps offered", "src/superran/system.py", "tr.step(tti)"),
         ("E-03", "体验", "PDB 分母只含已完成 arrival object", "最差的未完成对象消失，过载越重 PDB 越好看", "已过 deadline 的未完成对象记确定 miss；未到 deadline 单列右删失", "过载窗同时出现 overdue miss 与 right-censored", "src/superran/experience.py", "overdue_incomplete"),
@@ -421,7 +421,7 @@ def decision_cards() -> str:
         ("D5 · burst 边界", "必须拍板", "大包按 RLC DRB buffer busy period；small 1500B 是小包代理，不等同 PDCP SDU。CBR 每 TTI 字节块也只是工程对象。", "推荐把 FTP 文件定义为 large busy period；small KPI 用 arrival object wait/completion/PDB，不报 DRB throughput。"),
         ("D6 · SRS 历史长度", "阻塞绝对标定", "体验数据只有 8×5ms=40ms 历史；10ms SRS ×17 RBG 跳频需要约170ms。超龄 RBG 会钳到最早快照，5s 主循环还周期回放8快照。", "相对 PF 记账对比可保留（两臂共用同一 trace）；上线绝对 KPI 前生成 ≥40 快照/UE，或本阶段明确改用全带 non-hopping SRS。"),
         ("D7 · 邻区真实波束", "阻塞空间干扰标定", "数据保存受害 UE 的交叉信道，但没有邻区被服务 UE 的信道/实际 W。当前默认 W 与交叉信道独立，并由几何 SIR 重标总功率。", "推荐下一版数据同时保存 neighbor served-UE channel 与 scheduler W；当前结果标注 spatial-shape approximation。"),
-        ("D8 · PMI/CQI 周期", "建议确认", "当前 PMI 每5ms快照重搜，CQI 用 expanding mean；都因果，但不等于现场反馈周期/IIR。", "推荐由现场给 PMI/CQI 周期、滤波系数和反馈延迟；没有参数前不伪造标准值。"),
+        ("D8 · PMI/CQI 周期", "建议确认", "PMI 按 CSI report 周期更新（默认 20 ms）；CQI 用一阶 IIR，λ=0.25 已确认为工程默认但尚未经现场测量/设备数据标定；都因果。", "推荐后续用现场数据标定 PMI/CQI 周期与 λ；HARQ 的 ACK/NACK 反馈时延已按 TDD 图案建模。"),
         ("D9 · TBS RE 开销", "阻塞绝对容量标定", "TBS 量化遵循38.214，但 D slot 用12数据符号/RB，S slot乘0.7；未精确建 DMRS/PTRS/CORESET。MCS 用预置 20B profile。", "推荐把实际 slot format、DMRS type/ports、PTRS、CORESET overhead 做成 profile 并回归 TBS 表。"),
         ("D10 · 逐 RBG SINR 与 MU", "可延期", "本轮全带 SINR 判 BLER，体验模式关闭 MU。逐RBG信道会扩 UeLinkTable 维度；MU 会引入配对、功率与层数耦合。", "推荐先把 SU/全带链条校准完，再分别立 P1-A（逐RBG）与 P1-B（MU）实验，避免同时改数据结构。"),
         ("D11 · Type-I 完整码本", "建议确认", "当前是 Type-I-style 单面板列码本增量贪心，不冒充完整38.214多层/子带/多面板码本。", "若用于标准对标，接入完整 RI/PMI 枚举与反馈开销；当前只适合作为工程基线。"),
@@ -622,7 +622,7 @@ table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(
 
 <section><div class="section-head"><h2><span class="num">2</span>Phase A：SRS、PMI、CQI、rank 与链路表</h2></div>
 <div class="formula">{F_AGE}</div><p>CSI 陈旧时长量化必须向上取整。2ms处理时延在5ms快照上是1个快照，不允许 round 成0。每个快照的 SVD 与 PMI 都只看同一份 stale h_prec，真实当前信道只用于评估。</p>
-<div class="formula">{F_CQI}</div><p>CQI 采用从0到当前 s 的 expanding mean 作为透明因果基线；它不是现场 IIR 的替代品。随后按 CQI 门限 + BF gain 得到发送侧 SINR/MCS；rank 只能按 gNB 估计 SE 选。</p>
+<div class="formula">{F_CQI}</div><p>CQI 采用只吃 0..s 的一阶 IIR（λ=0.25 已由负责人确认为工程默认，但尚未经现场测量/设备数据标定）。随后按 CQI 门限 + BF gain 得到发送侧 SINR/MCS；rank 由显式策略给出（默认固定 rank2），不再逐快照跟随瞬时最优 rank。</p>
 <div class="scroll"><table><thead><tr><th>UE</th><th>几何 SINR</th><th>IoT</th><th>平均 CSI lag</th><th>选 rank</th><th>gNB SE</th><th>true SINR</th><th>CQI</th><th>Tx SINR</th><th>Tx MCS</th></tr></thead><tbody>{''.join(rank_rows)}</tbody></table></div>
 <div class="callout warn"><b>绝对标定限制：</b>代表快照的平均 lag 是17 snapshots≈85ms，但现有每 UE 只有8×5ms=40ms历史；超出部分钳到最早快照。A/B 的 PF 因果对比共享同一链路表，因此主对比仍可解释；绝对 CSI-aging / 现场体验值不能据此定标。待决策 D6 给出修法。</div>
 {source_excerpt('src/superran/csi_aging.py','ratio = np.maximum(staleness',before=6,after=8,title='实际实现：CSI 陈旧时长因果量化')}

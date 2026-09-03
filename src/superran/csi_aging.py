@@ -107,6 +107,9 @@ CSI_REPORT_PERIOD_CHOICES: tuple[float, ...] = (5.0, 10.0, 20.0, 40.0, 80.0)
 SRS_C_SRS_FULL_BAND = 63
 SRS_B_SRS_ONE_RBG = 1
 DEFAULT_HOP_FACTOR = 17
+
+#: 宽带 CQI 滤波的两个可选作用域。现场口径是在量化后的 CQI 档上滤波。
+CQI_FILTER_DOMAINS: tuple[str, ...] = ("cqi_index", "sinr_db")
 @dataclass
 class CsiConfig:
     """CSI 时延链的配置。
@@ -135,6 +138,15 @@ class CsiConfig:
     srs_period_adaptive: bool = True
     #: 重放有限信道 trace 时，是否把上一轮 trace 当作预启动阶段的因果历史
     periodic_trace_history: bool = False
+    #: 宽带 CQI 的一阶 IIR 滤波系数：``s <- s + lambda*(x - s)``。
+    #: 1.0 表示不做滤波（每次上报直接生效），越小记忆越长。
+    #: 现场口径是 ``CQI = CQI + lambda*(最新测量 - CQI)``。**0.25 已由负责人
+    #: 确认为当前工程默认，但尚未经现场测量/设备数据标定**；它不是协议标准值，
+    #: 也不得表述成现场等价。
+    cqi_filter_lambda: float = 0.25
+    #: 滤波作用域。``cqi_index`` 在量化后的连续 CQI 档上滤波（现场口径），
+    #: ``sinr_db`` 在量化前的 PMI-SINR 上滤波（便于做口径消融）。
+    cqi_filter_domain: str = "cqi_index"
 
     def __post_init__(self) -> None:
         for name in (
@@ -163,6 +175,14 @@ class CsiConfig:
         if (not np.isfinite(self.csi_report_period_ms)
                 or self.csi_report_period_ms <= 0):
             raise ValueError("csi_report_period_ms 必须是有限正数")
+        if (isinstance(self.cqi_filter_lambda, (bool, np.bool_))
+                or not np.isfinite(self.cqi_filter_lambda)
+                or not 0.0 < float(self.cqi_filter_lambda) <= 1.0):
+            raise ValueError("cqi_filter_lambda 必须是 (0,1] 内的有限数")
+        if self.cqi_filter_domain not in CQI_FILTER_DOMAINS:
+            raise ValueError(
+                f"cqi_filter_domain 只支持 {CQI_FILTER_DOMAINS}，"
+                f"收到 {self.cqi_filter_domain!r}")
 
     @property
     def full_sweep_ms(self) -> float:
@@ -214,8 +234,14 @@ class CsiConfig:
                 "not modelled beyond processing_delay_ms; report becomes available "
                 "at its report snapshot"),
             "cqi_filter": (
-                "causal expanding mean over report-instant wideband PMI-SINR "
-                "observations; no field IIR coefficient configured"),
+                "causal first-order IIR over report instants: "
+                "s <- s + lambda*(x - s), initialised by the first report"),
+            "cqi_filter_lambda": float(self.cqi_filter_lambda),
+            "cqi_filter_domain": str(self.cqi_filter_domain),
+            "cqi_filter_lambda_basis": (
+                "lead-confirmed engineering default, not yet calibrated against "
+                "field measurements or device data; "
+                "lambda=1 disables filtering"),
             "periodic_trace_history": self.periodic_trace_history,
             "full_sweep_ms": round(self.full_sweep_ms, 2),
             "mean_csi_staleness_ms": round(self.mean_csi_staleness_ms, 2),
