@@ -14,13 +14,13 @@
    Author 报告与 Reviewer 结论的路径。
 6. 把准确的分支名、完整 SHA、PR 编号给维护者。**远端合并由维护者批准，Agent 不许自己合。**
 
-## 公司 Agent 回路（单向）
+## 内网 Agent 回路（单向）
 
 给它的合同是 `.agents/COMPANY.md`，连同 GitHub 下载的 zip 一起发。
 它的报告放 `docs/inbox/`（该目录已 gitignore，不进公开仓库）。
 
-公司 Agent 拿到的是 zip 快照，它给回来的 patch 大概率打不上当前 HEAD。所以：
+内网 Agent 拿到的是 zip 快照，它给回来的 patch 大概率打不上当前 HEAD。所以：
 
-- 公司 Agent **只产出问题清单**：文件 + 行号 + 物理论据 + 最强反例。
+- 内网 Agent **只产出问题清单**：文件 + 行号 + 物理论据 + 最强反例。
 - **不接受 patch、不做冲突合并。**
 - 本地 Agent 按清单当作新任务重新实现，走正常的 Author → Reviewer 流程。
