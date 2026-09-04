@@ -3,8 +3,9 @@
 **这一层回答的问题和链路级不一样。** 链路级问"这个信道能跑多快"，
 系统级问"**这个小区里的用户实际体验到多快**"——后者要把话务的到达与结束、
 调度器在多用户间的取舍与缓冲区排空算进去。两个模式都把一次用户 grant
-视为一个单码字 TB，并只允许一次 IR/CC 重传：空口 MCS/RBG 数/rank/TBS 冻结，
-BLER 从预置 NewTx 曲线推导。当前不展开 RV、LLR、并行 HARQ process 或标准时序。
+视为一个单码字 TB，并只允许一次 IR/CC 重传：空口 MCS/RBG 数/rank/TBS 冻结。
+表 3 的 BLER 从预置 NewTx 曲线推导；表 1/2 明确使用有限码长解析近似。
+当前不展开 RV、LLR、并行 HARQ process 或标准时序。
 
 本文件保留历史 ``legacy_v1`` 口径以复现旧结果；它的 ``tail/head_tail`` 是
 项目早期的近似实现，不能再冒充 28.552。标准化的 DRB busy-period、首传起点、
@@ -1190,7 +1191,7 @@ class UeLinkTable:
     # 零时延时它与 ``se`` / ``best_se`` 逐位相同。
     se_gnb: np.ndarray | None = None       # [snapshot, rank]
     best_se_gnb: np.ndarray | None = None  # [snapshot]
-    mcs_table: int = 3                     # experience_v2 当前只接受预置表 3
+    mcs_table: int = 3                     # capacity 可用 1/2/3；experience 只接受表 3
     # 建表时用的目标 BLER。**主循环必须读它，不能自己写死 0.1**——
     # 否则 build_link_tables(target_bler=...) 选出来的 rank 和主循环选出来的 MCS
     # 是按两个不同判据来的，而这种不一致在结果里完全看不出来。
@@ -1311,11 +1312,10 @@ def _reported_cqi_of(sinr_db: float, target_bler: float, *,
 def _cqi_threshold_sinr(cqi_index: int, target_bler: float, *,
                         mcs_table: int = 3) -> float:
     """内部 CQI → 离散映射 MCS → 目标 BLER 的 NewTx SINR 门限。"""
-    from . import bler_curves as bc  # noqa: PLC0415
     from . import linkadapt as la  # noqa: PLC0415
 
-    m = la.internal_cqi_to_mcs(int(cqi_index), mcs_table=int(mcs_table))
-    return float(bc.get_curve(int(m["mcs"]), "newtx").required_sinr_db(float(target_bler)))
+    return float(la._internal_cqi_thresholds(
+        float(target_bler), int(mcs_table))[int(cqi_index)])
 
 
 def _nan_safe(fn, values, *args) -> float:
@@ -1500,7 +1500,6 @@ def build_link_tables(
     信道分辨率，并按 ``q_serving*S / (N + sum(q_k*I_k))`` 同时更新期望信号与
     每个邻区的干扰；聚合 SIR 不足以完成这一步，因此缺数据会硬失败。
     """
-    from . import bler_curves as bc_probe  # noqa: PLC0415
     from . import linkadapt as la  # noqa: PLC0415
 
     if precoder not in ("svd", "type1"):
@@ -1508,27 +1507,26 @@ def build_link_tables(
     if str(power_constraint).lower() not in ("ebf", "pebf", "nebf"):
         raise ValueError("power_constraint 只支持 ebf / pebf / nebf")
     # **CQI 量化门限、CQI→MCS 映射和 BF 后重选档必须用同一张表。**
-    # 当前只有 preset_20b_256qam（表 3）同时具备 28 档 NewTx 曲线与内部 CQI
-    # 映射；表 1/2 没有配套曲线，硬拒绝好过让两侧各用一张表安静地跑下去。
-    if int(table) != 3:
-        raise ValueError(
-            "系统链路表当前只支持 MCS table 3（preset_20b_256qam）："
-            f"收到 table={table}。表 1/2 没有配套的 NewTx 预置曲线与内部 CQI "
-            "映射，混用会让量化门限与选档口径不一致。")
-    # 目标 BLER 是可配的，但它必须落在预置曲线**实测覆盖**的区间内：
+    # 表 1/2 明确走有限码长解析 BLER；表 3 才走预置曲线，不能交叉借表。
+    if int(table) not in la.MCS_TABLES:
+        raise ValueError(f"未知 MCS table={table}")
+    # 表 3 的目标 BLER 必须落在预置曲线**实测覆盖**的区间内：
     # 越界时深层 required_sinr_db 会抛 ValueError，报的错看不出是哪一档。
     # 这里提前对全部 28 档求一次门限，越界就把可用区间原样告诉调用方。
     if not (np.isfinite(float(target_bler)) and 0.0 < float(target_bler) < 1.0):
         raise ValueError(f"target_bler 必须在 (0,1)，收到 {target_bler!r}")
-    _lo = max(float(bc_probe.get_curve(m.index, "newtx").bler_points[-1])
-              for m in la.MCS_TABLE_3)
-    _hi = min(float(bc_probe.get_curve(m.index, "newtx").bler_points[0])
-              for m in la.MCS_TABLE_3)
-    if not _lo <= float(target_bler) <= _hi:
-        raise ValueError(
-            f"target_bler={target_bler} 超出预置 NewTx 曲线的实测覆盖区间 "
-            f"[{_lo:.4g}, {_hi:.4g}]；该区间由 28 档曲线的共同范围决定，"
-            "越界只能外推，本项目不外推。")
+    if int(table) == 3:
+        from . import bler_curves as bc_probe  # noqa: PLC0415
+
+        _lo = max(float(bc_probe.get_curve(m.index, "newtx").bler_points[-1])
+                  for m in la.MCS_TABLE_3)
+        _hi = min(float(bc_probe.get_curve(m.index, "newtx").bler_points[0])
+                  for m in la.MCS_TABLE_3)
+        if not _lo <= float(target_bler) <= _hi:
+            raise ValueError(
+                f"target_bler={target_bler} 超出预置 NewTx 曲线的实测覆盖区间 "
+                f"[{_lo:.4g}, {_hi:.4g}]；该区间由 28 档曲线的共同范围决定，"
+                "越界只能外推，本项目不外推。")
     power_cfg = rb_power_control or pc.RbPowerControlConfig()
     if not isinstance(power_cfg, pc.RbPowerControlConfig):
         raise ValueError("rb_power_control 必须是 RbPowerControlConfig")
@@ -2147,7 +2145,13 @@ def build_link_tables(
         # 较大时仍会被调度，与已选定的 4-bit CQI 合同矛盾。
         outage = np.array([
             bool(reported_cqi_by_snapshot[t, best[t]] == 0)
-            or _bler_lookup(int(mcs[t, best[t]]), float(sinr[t, best[t]])) > 0.5
+            or (
+                _bler_lookup(int(mcs[t, best[t]]), float(sinr[t, best[t]]))
+                if int(table) == 3 else
+                _bler_lookup(
+                    int(mcs[t, best[t]]), float(sinr[t, best[t]]),
+                    table=int(table))
+            ) > 0.5
             for t in range(n_s)
         ])
         out.append(UeLinkTable(
@@ -2957,6 +2961,20 @@ def simulate(
     # 步长反解。显式 down 值是有意的研究 override，不会被覆盖。
     sched = sched.resolved_for_target(_target_bler)
     _mcs_table = la.MCS_TABLES[_table_id]
+
+    def _active_bler_lookup(
+        mcs: int,
+        sinr_db: float,
+        *,
+        n_coded_bits: int = 20000,
+        n_code_blocks: int = 1,
+    ) -> float:
+        # 保持表 3 的历史两参数调用形态：部分物理反例会 monkeypatch 这个边界。
+        if _table_id == 3:
+            return _bler_lookup(mcs, sinr_db)
+        return _bler_lookup(
+            mcs, sinr_db, table=_table_id,
+            n_coded_bits=n_coded_bits, n_code_blocks=n_code_blocks)
     serving_cells = {
         int(table.serving_cell_index) for table in tables
         if table.serving_cell_index is not None
@@ -2983,6 +3001,10 @@ def simulate(
             "RB 功控要求链路表带唯一 serving_cell_index；"
             "请按当前数据集 metadata 重新 build_link_tables")
     if sys_cfg.evaluation_mode == "experience":
+        if _table_id != 3:
+            raise ValueError(
+                "experience_v2 当前只支持 MCS table 3 的预置单码字 TB-BLER profile；"
+                f"table={_table_id} 仅开放给 capacity 的解析 BLER 路径")
         # 独立路径把两种 profile 的资源分配与 KPI 语义彻底隔开。
         from . import experience as ex  # noqa: PLC0415
 
@@ -3329,7 +3351,19 @@ def simulate(
                     # admit a pair whose final MCS has predicted BLER > 0.5.
                     _pred_mcs = _planned_mcs(
                         _cand_u, snap, _mu_r, _link)
-                    if _bler_lookup(_pred_mcs, _in) > 0.5:
+                    _pred_obj = _mcs_table[_pred_mcs]
+                    _pred_tbs = la.transport_block_size(
+                        re_per_tti, _pred_obj.rate, _pred_obj.q_m,
+                        layers=_mu_r)
+                    _pred_blocks, _ = la.code_blocks(
+                        _pred_tbs, _pred_obj.rate)
+                    if _active_bler_lookup(
+                        _pred_mcs,
+                        _in,
+                        n_coded_bits=(
+                            re_per_tti * _pred_obj.q_m * _mu_r),
+                        n_code_blocks=_pred_blocks,
+                    ) > 0.5:
                         _ok = False
                         break
                 if not _ok:
@@ -3411,8 +3445,15 @@ def simulate(
             if pend is not None:
                 # 重传恒为 SU（见上面的配对分支），所以查 SU 真值是对的。
                 sinr = float(tables[u].sinr_db[snap, r - 1])
-                retx = la.harq_retransmission_bler(
-                    m, sinr, combining=sys_cfg.harq_combining, table=_table_id)
+                if _table_id == 3:
+                    retx = la.harq_retransmission_bler(
+                        m, sinr, combining=sys_cfg.harq_combining, table=_table_id)
+                else:
+                    retx = la.harq_retransmission_bler(
+                        m, sinr, combining=sys_cfg.harq_combining, table=_table_id,
+                        n_coded_bits=re_per_tti * mcs_obj.q_m * r,
+                        n_code_blocks=la.code_blocks(
+                            int(pend.tb_bytes) * 8, mcs_obj.rate)[0])
                 bler = float(retx["bler"])
                 retx_cnt[u] += 1
                 if harq_draw[tti, u] > bler:
@@ -3438,7 +3479,12 @@ def simulate(
             sinr = (float(_mu_link.true_sinr_db[snap, int(_mu_link.side(u))])
                     if _mu_link is not None
                     else float(tables[u].sinr_db[snap, r - 1]))
-            bler = _bler_lookup(m, sinr)
+            bler = _active_bler_lookup(
+                m,
+                sinr,
+                n_coded_bits=re_per_tti * mcs_obj.q_m * r,
+                n_code_blocks=la.code_blocks(tb_bytes * 8, mcs_obj.rate)[0],
+            )
             tx_first[u] += 1
             sched_cnt[u] += 1
             mcs_sum[u] += m
@@ -3757,6 +3803,11 @@ def simulate(
         if _fb_modelled else
         ("**HARQ 反馈按零时延处理**：TDD 图案里没有 U 时隙，或反向对照显式"
          "关掉了时延模型。这是上界不是现网。"))
+    if _table_id in (1, 2):
+        notes.append(
+            f"**MCS table {_table_id} 使用有限码长解析 BLER**：CQI/MCS/首传与一次"
+            "重传都走同一解析模型，但它没有特定译码器或现场曲线标定；本结果只能"
+            "用于解析机制研究，不能冒充预置或实测 BLER 性能。")
     return SystemResult(
         config={"system": sys_cfg.as_dict(), "traffic": traffic.as_dict(),
                 "scheduler": sched.as_dict(), "kpi": kpi.as_dict(),
@@ -3764,7 +3815,9 @@ def simulate(
                 "harq_model": {
                     "max_retransmissions": 1,
                     "combining": str(sys_cfg.harq_combining).lower(),
-                    "bler_source": "preset NewTx curves only",
+                    "bler_source": (
+                        "preset NewTx curves only" if _table_id == 3
+                        else "finite-blocklength analytic approximation"),
                     "identity": "same MCS/RBG-count/rank/TBS as initial TB",
                     "timing": (
                         "retransmit on the same D/S slot type AND no earlier "
@@ -4461,10 +4514,18 @@ _BLER_CACHE: dict[tuple[str, int, int, str], float] = {}
 _BLER_CACHE_STEP_DB = 0.05
 
 
-def _bler_lookup(mcs: int, sinr_db: float, tx_mode: str = "newtx") -> float:
-    """查表 BLER，按源曲线 0.05 dB 网格量化后缓存。
+def _bler_lookup(
+    mcs: int,
+    sinr_db: float,
+    tx_mode: str = "newtx",
+    *,
+    table: int = 3,
+    n_coded_bits: int = 20000,
+    n_code_blocks: int = 1,
+) -> float:
+    """按 MCS 表路由 BLER；表 3 查曲线，表 1/2 用解析模型。
 
-    预置曲线的原始横轴步长就是 0.05 dB。旧实现按 0.5 dB 缓存，在瀑布区会把
+    表 3 预置曲线的原始横轴步长就是 0.05 dB。旧实现按 0.5 dB 缓存，在瀑布区会把
     工作点最多平移 0.25 dB，足以显著改变 ACK/NACK；缓存不能以牺牲源数据一个
     数量级的分辨率为代价。
 
@@ -4477,6 +4538,26 @@ def _bler_lookup(mcs: int, sinr_db: float, tx_mode: str = "newtx") -> float:
     # 一个用户的一个快照能把整条系统级仿真挂掉，报的错还看不出是谁。
     if sinr_db != sinr_db:                      # nan
         return 1.0                              # 发不出去
+    if int(table) not in (1, 2, 3):
+        raise ValueError(f"mcs table must be 1, 2 or 3, got {table}")
+    if int(table) in (1, 2):
+        if tx_mode != "newtx":
+            raise ValueError("解析 BLER 没有独立 ReTx 曲线；重传请走 harq_retransmission_bler")
+        from . import linkadapt as la  # noqa: PLC0415
+
+        table_rows = la.MCS_TABLES[int(table)]
+        if (isinstance(mcs, (bool, np.bool_))
+                or not isinstance(mcs, (int, np.integer))
+                or not 0 <= int(mcs) < len(table_rows)):
+            raise ValueError(
+                f"MCS 必须是 0..{len(table_rows) - 1} 的整数，收到 {mcs!r}")
+        model = la.make_bler_model(int(table))
+        return float(model.bler(
+            float(np.clip(float(sinr_db), -60.0, 60.0)),
+            table_rows[int(mcs)],
+            int(n_coded_bits),
+            int(n_code_blocks),
+        )[0])
     from . import bler_curves as bc  # noqa: PLC0415
 
     clipped = min(max(float(sinr_db), -60.0), 60.0)

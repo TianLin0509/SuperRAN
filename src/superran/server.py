@@ -1271,6 +1271,9 @@ def _throughput_sync(*, dataset_id: str, mcs_table: int, target_bler: float,
 def sr_mcs_info(
     table: int = 3,
     show_bler_anchors: bool = False,
+    reference_thresholds: dict[str, float] | None = None,
+    eesm_sinr_db_list: list[float] | None = None,
+    eesm_beta: float | list[float] | None = None,
 ) -> dict[str, Any]:
     """查 MCS / CQI 表，以及分析模型或表驱动 BLER 的门限。
 
@@ -1286,6 +1289,10 @@ def sr_mcs_info(
     其 `cqi_table` 同时给历史表行0..14和上报4-bit CQI1..15；上报CQI0是
     out-of-range。表行14/上报CQI15的 `requested_mcs=28` 在当前MCS0..27
     profile上会显式标记钳位。
+
+    `reference_thresholds` 可传 ``{"0": -6.0}`` 这种外部 10% BLER 门限，只返回
+    差值，不落盘也不内嵌参考曲线。`eesm_sinr_db_list` 与 `eesm_beta` 必须同时给出，
+    用于调用显式 EESM 压缩；beta 数组可一次计算多档 MCS。
     """
     from . import linkadapt as la
 
@@ -1313,10 +1320,26 @@ def sr_mcs_info(
         "cqi_source": la.INTERNAL_CQI_SOURCE if table == 3 else "same table family",
     }
     if show_bler_anchors:
+        refs = ({int(key): float(value) for key, value in reference_thresholds.items()}
+                if reference_thresholds is not None else None)
         out["bler_anchors"] = (
-            la.curve_anchor_check() if table == 3
-            else la.DEFAULT_BLER.anchor_check(table=table)
+            la.curve_anchor_check(reference_thresholds=refs) if table == 3
+            else la.DEFAULT_BLER.anchor_check(
+                table=table, reference_thresholds=refs)
         )
+    if (eesm_sinr_db_list is None) != (eesm_beta is None):
+        raise ValueError("eesm_sinr_db_list 与 eesm_beta 必须同时提供")
+    if eesm_sinr_db_list is not None and eesm_beta is not None:
+        compressed = la.eesm_compress(
+            np.asarray(eesm_sinr_db_list, dtype=float),
+            np.asarray(eesm_beta, dtype=float),
+        )
+        out["eesm"] = {
+            "sinr_db": [float(value) for value in eesm_sinr_db_list],
+            "beta": _jsonable(eesm_beta),
+            "effective_sinr_db": _jsonable(compressed),
+            "beta_contract": "must be calibrated for the same channel/receiver/BLER profile",
+        }
     return _jsonable(out)
 
 
@@ -1326,6 +1349,7 @@ def sr_bler_curve(
     tx_mode: str = "newtx",
     sinr_db_list: list[float] | None = None,
     target_bler: float = 0.1,
+    source_id: str = "preset_20b_256qam",
 ) -> dict[str, Any]:
     """查预置表中的单档 BLER 曲线，并可在任意 SINR 点插值。
 
@@ -1341,7 +1365,7 @@ def sr_bler_curve(
 
     return _jsonable(la.bler_curve(
         mcs=mcs, tx_mode=tx_mode, target_bler=target_bler,
-        sinr_db=sinr_db_list,
+        sinr_db=sinr_db_list, source_id=source_id,
     ))
 
 

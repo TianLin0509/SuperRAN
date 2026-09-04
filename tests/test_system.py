@@ -2355,14 +2355,31 @@ for _bad_target in (0.0, 1.0, 0.0005, 0.999):
         check(False, f"target_bler={_bad_target} 应当被拒")
     except ValueError:
         check(True, f"target_bler={_bad_target} 越出预置曲线覆盖区间，被拒")
-for _unsupported_table in (1, 2):
+for _analytic_table in (1, 2):
+    _analytic_tabs = sysm.build_link_tables(
+        [np.ones((2, 16, 4, 2), dtype=complex)], [10.0],
+        table=_analytic_table, num_snapshots=2)
+    check(_analytic_tabs[0].mcs_table == _analytic_table,
+          f"build_link_tables table={_analytic_table} 走同表解析 BLER")
+    _analytic_run = sysm.simulate(
+        _analytic_tabs,
+        sys_cfg=sysm.SystemConfig(
+            evaluation_mode="capacity", duration_s=0.01, tdd_pattern="DDDSU"),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(olla_enabled=False))
+    check(any("有限码长解析 BLER" in note for note in _analytic_run.notes),
+          f"capacity table={_analytic_table} 显式标注解析、未标定边界")
     try:
-        sysm.build_link_tables([np.ones((1, 4, 2, 2), dtype=complex)], [10.0],
-                               table=_unsupported_table)
-        check(False, f"table={_unsupported_table} 应当被拒")
+        sysm.simulate(
+            _analytic_tabs,
+            sys_cfg=sysm.SystemConfig(
+                evaluation_mode="experience", duration_s=0.01,
+                tdd_pattern="DDDSU"),
+            traffic=sysm.TrafficConfig(model="full_buffer"))
+        check(False, f"experience_v2 不应接受 table={_analytic_table}")
     except ValueError as _exc:
-        check("只支持 MCS table 3" in str(_exc),
-              f"breaking migration：build_link_tables 在入口硬拒绝 table={_unsupported_table}")
+        check("experience_v2 当前只支持 MCS table 3" in str(_exc),
+              f"experience_v2 table={_analytic_table} 不静默借用错误 TBLER profile")
 
 
 # ---------------------------------------------------------------------------

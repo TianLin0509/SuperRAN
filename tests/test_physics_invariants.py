@@ -463,6 +463,20 @@ def test_s_slot_fraction_single_source_of_truth() -> None:
 test_s_slot_fraction_single_source_of_truth()
 
 
+def test_bler_factory_and_eesm_are_explicit() -> None:
+    """BLER 后端选择和频选 SINR 压缩都必须是显式、可审计输入。"""
+    model = la.make_bler_model(
+        1, config={"c": 2.5, "implementation_loss_db": 1.5})
+    assert isinstance(model, la.BlerModel)
+    assert model.c == 2.5 and model.implementation_loss_db == 1.5
+    assert isinstance(la.make_bler_model(3), la.CurveBlerModel)
+    assert la.eesm_compress(
+        np.array([0.0, 5.0, 10.0]), beta=np.array([1.0, 10.0])).shape == (2,)
+
+
+test_bler_factory_and_eesm_are_explicit()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")
