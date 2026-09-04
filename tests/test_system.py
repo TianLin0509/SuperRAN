@@ -153,21 +153,23 @@ check(_out["pf"][1] > _out["max_ci"][1],
 check(_out["rr"][1] > _out["max_ci"][1], "轮询也比 max-C/I 公平")
 
 # full buffer 下 buffer 永不排空 ⇒ 每个 UE 恰好一个永不结束的 busy period。
-# **这不等于测不出体验速率**：在飞 busy period 的窗内段照常统计（没有尾巴可掐），
-# 只有明确需要 burst 传完的键才留 None。
+# TS 128 552 V19.5.0 p54：样本只在 "DRB DL buffer emptied" 事件上形成，
+# **所以标准 KPI 在这里没有样本**——这是标准的定义，不是实现缺陷。
+# 需要数的用户看两个工程字段：ue_served_*（ITU 口径）与 active_window_goodput。
 _fb = sysm.simulate(_T, sys_cfg=sysm.SystemConfig(duration_s=2.0),
                     traffic=sysm.TrafficConfig(model="full_buffer"))
 check(_fb.cell["drb_throughput_completed_bursts"] == 0
       and _fb.cell["drb_throughput_inflight_bursts"] == len(_T),
       "full buffer 下每个 UE 恰好一个在飞 busy period，没有已完成的")
-check(_fb.cell["measured_bursts"] == len(_T),
-      f"在飞 busy period 也是可测样本（实得 {_fb.cell['measured_bursts']}）")
-check(_fb.cell["drb_throughput_rel19_mbps"] is not None
-      and _fb.cell["drb_throughput_rel19_mbps"] > 0,
-      "28.552 体验速率在 full buffer 下有值")
-check(_fb.cell["cell_experienced_completed_only_mbps"] is None
-      and _fb.cell["cell_head_inclusive_experienced_mbps"] is None,
-      "只有明确需要 burst 传完的两个键留 None")
+check(_fb.cell["measured_bursts"] == 0,
+      f"标准样本数为 0（实得 {_fb.cell['measured_bursts']}）——在飞段不算标准样本")
+check(_fb.cell["drb_throughput_rel19_mbps"] is None
+      and _fb.cell["cell_experienced_mbps"] is None,
+      "标准 KPI 报 None：工程量不许顶 TS 28.552 的名字")
+check(_fb.cell["active_window_goodput_mbps"] is not None
+      and _fb.cell["active_window_goodput_mbps"] > 0
+      and _fb.cell["ue_served_p5_mbps"] > 0,
+      "两个工程字段照常有值，用户拿得到数")
 
 # ---------------------------------------------------------------------------
 sect("5  负载与告警")
