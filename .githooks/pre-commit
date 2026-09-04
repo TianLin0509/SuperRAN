@@ -1,0 +1,44 @@
+#!/bin/sh
+# 拒绝在主工作区提交。主工作区是“最终版本”，不是干活的地方。
+#
+# 生效方式（每台机器装一次，worktree 会自动继承）：
+#     git config core.hooksPath .githooks
+#
+# 临时绕过（你自己确实要在主工作区提交时）：
+#     git commit --no-verify
+# 或   SUPERRAN_ALLOW_MAIN_COMMIT=1 git commit
+
+if [ "$SUPERRAN_ALLOW_MAIN_COMMIT" = "1" ]; then
+    exit 0
+fi
+
+here=$(git rev-parse --show-toplevel 2>/dev/null)
+main=$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')
+
+# 路径大小写与分隔符在 Windows 上会不一致，统一成小写正斜杠再比
+norm() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '\\' '/'; }
+
+if [ -n "$here" ] && [ -n "$main" ] && [ "$(norm "$here")" = "$(norm "$main")" ]; then
+    cat >&2 <<'MSG'
+
+  ┌────────────────────────────────────────────────────────────────┐
+  │  拒绝提交：这里是主工作区，不是干活的地方                      │
+  └────────────────────────────────────────────────────────────────┘
+
+  主工作区只保存“已经合并好的最终版本”。多个 Agent 同时在这里改文件会
+  互相覆盖，而且不会报错。
+
+  请去建自己的工作区再干活：
+
+      git worktree add -b <分支名> C:/Vibe/Worktrees/SuperRAN/<任务>-<日期>-<你的席位> develop
+
+  规则见 .agents/AUTHOR.md。
+
+  合并回主线走 GitHub PR，不要在这里直接提交
+  （develop 有分支保护，本来也直推不上去）。
+
+MSG
+    exit 1
+fi
+
+exit 0
