@@ -409,28 +409,28 @@ def experiment_capacity_mu_accounting() -> dict:
     cfg = sy.SystemConfig(duration_s=0.6,
                           tdd_pattern="DDDSU", seed=4242)
 
-    def run(tables, *, mu_on, accounting, ratio=1.0):
+    def run(tables, *, mu_on, accounting="pair_table"):
         return sy.simulate(
             tables, sys_cfg=cfg,
             traffic=sy.TrafficConfig(model="full_buffer"),
             sched=sy.SchedulerConfig(mu_enabled=mu_on,
                                      mu_accounting=accounting),
             kpi=sy.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
-            mu_se_ratio=ratio, rng=rg.RngBook(4242, 0))
+            rng=rg.RngBook(4242, 0))
 
     indep = _mu_tables(0.0)
     pair_graph = smu.validate_pair_graph(indep)
     su = run(indep, mu_on=False, accounting="pair_table")
     pair = run(indep, mu_on=True, accounting="pair_table")
-    corr = run(_mu_tables(0.999), mu_on=True, accounting="pair_table")
-    # 历史标量口径要用不含 pair 数据的表，与它当年的输入一致
-    legacy_tabs = sy.build_link_tables(
-        [indep[0].h_true_rbg, indep[1].h_true_rbg], [14.0, 12.0],
-        max_rank=2, rb_per_rbg=16, mu_enabled=False,
-        csi=ca.CsiConfig(enabled=False))
-    legacy = run(legacy_tabs, mu_on=True,
-                 accounting="se_ratio_legacy", ratio=1.4)
-    legacy_su = run(legacy_tabs, mu_on=False, accounting="pair_table")
+    corr = run(_mu_tables(0.999), mu_on=True)
+    # 历史标量口径 se_ratio_legacy 已随 legacy 容量路径下线（给了就在
+    # SchedulerConfig 构造处硬失败），这条对照臂随之删除。它当年证明的事
+    # ——"标量口径下配对完全不压 MCS"——现在由配置入口的硬失败直接保证。
+    legacy_rejected = False
+    try:
+        sy.SchedulerConfig(mu_enabled=True, mu_accounting="se_ratio_legacy")
+    except ValueError:
+        legacy_rejected = True
 
     link = indep[0].mu_links[1]
     delta_db = float(np.mean(link.true_sinr_db
@@ -490,22 +490,25 @@ def experiment_capacity_mu_accounting() -> dict:
                 mu_enabled=True, mu_accounting="pair_table",
                 mu_corr_threshold=1.0, mu_olla_step_up_db=3.0,
                 olla_max_db=6.0),
+            kpi=sy.KpiConfig(warmup_s=0.0),
             rng=rg.RngBook(313, 0))
     finally:
         sy._bler_lookup = old_lookup
     assert olla_admission.cell["mu_share"] > 0
-    assert olla_admission.cell["mu_pair_rejects"] > 0
+    # 拒配原因改由 mu_candidate_scoring.rejection_reasons 上报（更细），
+    # 容量分支的标量计数 mu_pair_rejects 随该分支一起下线。
+    assert sum(int(v) for v in
+               olla_admission.cell["mu_candidate_scoring"][
+                   "rejection_reasons"].values()) > 0
     assert pair.cell["avg_mcs_first_tx"] < su.cell["avg_mcs_first_tx"]
-    assert abs(legacy.cell["avg_mcs_first_tx"]
-               - legacy_su.cell["avg_mcs_first_tx"]) < 0.5
     assert corr.cell["mu_share"] < 0.05
+    assert legacy_rejected
     return {
-        "question": "capacity 开 MU 之后，配对的代价体现在哪几处",
+        "question": "开 MU 之后，配对的代价体现在哪几处（容量口径 = full_buffer 话务）",
         "arms": {
             "SU_only": _cell(su),
             "MU_pair_table": _cell(pair),
-            "MU_se_ratio_legacy": _cell(legacy),
-            "SU_baseline_for_legacy": _cell(legacy_su),
+            "se_ratio_legacy_rejected_at_config": legacy_rejected,
             "MU_pair_table_corr0.999": _cell(corr),
         },
         "pair_true_minus_su_true_db": round(delta_db, 3),
@@ -517,11 +520,12 @@ def experiment_capacity_mu_accounting() -> dict:
             "pre_olla_mcs": base_mcs,
             "step_bler_reject_mcs": bler_step_mcs,
             "mu_share": round(float(olla_admission.cell["mu_share"]), 4),
-            "mu_pair_rejects": int(olla_admission.cell["mu_pair_rejects"]),
+            "mu_candidate_rejection_reasons": dict(
+            olla_admission.cell["mu_candidate_scoring"]["rejection_reasons"]),
         },
         "mu_share_independent": round(float(pair.cell["mu_share"]), 4),
         "mu_share_corr0.999": round(float(corr.cell["mu_share"]), 4),
-        "mu_su_wins_corr0.999": int(corr.cell["mu_su_wins"]),
+        "su_selected_tti_corr0.999": int(corr.cell["su_mu_plan"]["su_selected"]),
         "interpretation": (
             "pair 表口径下配对的代价同时进 MCS 决策与误块抽签：首传平均 MCS 明显"
             "下降，而历史标量口径下它几乎不动（代价只体现在 TB 变小）。"

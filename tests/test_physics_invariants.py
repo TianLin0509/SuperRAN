@@ -432,20 +432,24 @@ check(over.cell["deadline_missed_incomplete_arrival_objects"] > 0
       and over.cell["pdb_decidable_arrival_objects"]
       > over.cell["completed_arrival_objects"],
       "PDB 分母纳入已超时未完成对象，并把未到 deadline 的对象单列右删失")
-# **过载 ≠ 饿死。** 这个 UE 一个 burst 都没传完（measured=0），但它一直在被
-# 服务（33.6 Mbps）。旧实现只统计已完成 busy period，于是给它报 0——那不是
-# "饿死"，是把一个正在满速收数据的用户写成了零。现在在飞段进统计，报实际速率；
-# 删失本身由 eligible/measured 之差如实暴露。
+# **过载 ≠ 饿死，但标准 KPI 不该替它编一个数。** 这个 UE 一个 burst 都没传完
+# （measured=0），TS 28.552 的样本在 buffer emptied 事件上形成，因此标准字段
+# 没有样本——这是标准的定义，不是缺陷。它一直在被服务（约 33.6 Mbps）这件事，
+# 由**工程字段**如实给出：active_window_goodput_mbps 与 ue_served_mean_mbps。
+# 曾经把在飞段混进标准字段，等于让工程量顶标准的名字，已撤回。
 check(over.cell["ue_experience_eligible"] == 1
       and over.cell["ue_experience_measured"] == 0,
       "有到达但无完成 burst 的 UE 仍留在体验分布里，删失由 eligible/measured 之差暴露")
-check(over.cell["cell_experienced_completed_only_mbps"] == 0.0,
-      "completed-only 视图如实报 0：确实一个 burst 都没传完")
-check(float(over.cell["cell_experienced_mbps"]) > 0.0
-      and abs(float(over.cell["cell_experienced_mbps"])
+check(over.cell["cell_experienced_mbps"] == 0.0,
+      "标准口径无样本：zero-inclusive 分布里该 UE 记 0，不替它编数")
+check(int(over.cell["drb_throughput_completed_bursts"]) == 0
+      and int(over.cell["drb_throughput_inflight_bursts"]) > 0,
+      "样本构成如实上报：0 个已完成、有在飞——标准 KPI 无样本这件事看得见")
+check(over.cell["active_window_goodput_mbps"] is not None
+      and abs(float(over.cell["active_window_goodput_mbps"])
               - float(over.cell["cell_served_mbps"]))
-      <= 0.15 * float(over.cell["cell_served_mbps"]),
-      "过载但持续被服务的 UE 报实际速率而不是 0（与 cell_served_mbps 一致）")
+      <= 0.20 * float(over.cell["cell_served_mbps"]),
+      "工程字段给出它实际的速率（与 cell_served_mbps 同量级）")
 
 # **外生到达与时隙类型无关。** 话务进缓冲区是 UE 侧的事，和这个 TTI 是 D/S/U
 # 没有关系；只有"发不发得出去"才看时隙。历史上到达只在下行 TTI 走了一遍，
@@ -478,22 +482,22 @@ check(abs(float(fb.cell["resource_utilization"]) - 1.0) < 1e-9,
 check(float(fb.cell["cell_served_mbps"]) > 0.0,
       "容量口径仍然照常输出 cell_served_mbps")
 
-# **28.552 的体验速率在 full buffer 下同样算得出来。** 掐尾是为了去掉"清空
-# 缓冲区那一下"的半 slot 伪影；buffer 没排空就没有这个尾巴，分子取窗内全部
-# ACK 净荷、分母取首传到窗内最后一个 ACK 即可。把在飞 busy period 从统计里
-# 拿掉（回到只数 q.done）这几条就会红。
-check(fb.cell["drb_throughput_rel19_mbps"] is not None
-      and fb.cell["cell_experienced_mbps"] is not None
-      and float(fb.cell["drb_throughput_rel19_mbps"]) > 0.0,
-      "full buffer 下 28.552 体验速率有值——在飞 busy period 也进统计")
-_fb_rel19 = fb.cell["drb_throughput_rel19_mbps"]
+# **标准与工程必须分字段。** TS 128 552 V19.5.0 p54：样本只在 DRB DL buffer
+# emptied 事件上形成。full buffer 下 buffer 永不排空 ⇒ 标准字段没有样本，报
+# None 是对的。把在飞段混回 drb_throughput_rel19_mbps 就会让下面第一条红。
+check(fb.cell["drb_throughput_rel19_mbps"] is None
+      and fb.cell["cell_experienced_mbps"] is None,
+      "full buffer 下标准 KPI 无样本、报 None——工程量不许顶标准的名字")
+check(int(fb.cell["drb_throughput_completed_bursts"]) == 0
+      and int(fb.cell["drb_throughput_inflight_bursts"]) == len(tables),
+      "样本构成如实上报：0 个已完成、每个 UE 一个在飞")
+# **但用户仍然拿得到数**，走两个工程字段，任何话务下都有值。
+_fb_active = fb.cell["active_window_goodput_mbps"]
 _fb_served_mean = float(fb.cell["ue_served_mean_mbps"])
-check(_fb_rel19 is not None
-      and abs(float(_fb_rel19) - _fb_served_mean) <= 0.10 * _fb_served_mean,
-      "满缓冲下 UE 一直活跃，「在传时多快」必须收敛到「全窗平均多快」（差 <10%）")
-check(abs(float(fb.cell["drb_throughput_inflight_share"]) - 1.0) < 1e-9
-      and int(fb.cell["drb_throughput_completed_bursts"]) == 0,
-      "满缓冲下全部样本来自在飞 busy period，构成如实上报")
+check(_fb_active is not None and float(_fb_active) > 0.0,
+      "full buffer 下工程口径 active_window_goodput_mbps 有值")
+check(abs(float(_fb_active) - _fb_served_mean) <= 0.10 * _fb_served_mean,
+      "满缓冲下 UE 一直活跃，「在传时多快」收敛到「全窗平均多快」（差 <10%）")
 
 # **用户体验速率在 full buffer 下是有定义的，只是走另一个口径。**
 # ITU-R M.2412 / TR 38.913：每 UE 已服务净荷 / 观测窗长，5% 分位就是
@@ -547,6 +551,55 @@ check(int(_ovl.cell["drb_throughput_inflight_bursts"]) > 0
 # 慢 burst 更不容易传完会让 completed-only 偏乐观；但若在飞的恰好是刚起步的
 # 好信道用户，方向就反过来。实测两种都见过（中载 11.59→8.78；本例 126.0→131.9）。
 # 能守住的不变量是：completed-only 用的是 rel19 样本集的真子集，两者必须不同。
+# ---------------------------------------------------------------------------
+# **反例棘轮：1 个字节的尾随到达不许翻转标准 KPI 的样本资格。**
+# 审核（2026-09-04）给的反例：首传 100 B payload 装进 1000 B TB → NACK；
+# 等待期间新增 1 B；t5 同 TB 重传并 ACK。此时队列还剩 1 B，busy period 仍在飞，
+# 而那个末 ACK **带 900 B padding**——它根本不是满 slot。
+# 我曾据此把在飞段当作"无尾可掐"混进 drb_throughput_rel19_mbps，于是：
+#   * 没有那 1 B 时 → burst 完成 → 标准样本（这里恰好 None）
+#   * 有那 1 B 时   → 在飞 → 凭空多出一个 0.2667 Mbps 的"标准"样本
+# 1 个字节改变标准 KPI 的有无，且样本建立在重度 padding 的 slot 上。
+# 现在标准样本只来自 buffer emptied 事件，工程量另走 active_window_goodput。
+_TC = type("_Tc", (), {"name": "ratchet", "pdb_ms": 0.0})()
+
+
+def _padded_retx_queue(trailing_byte: bool) -> ex.DrbQueue:
+    q = ex.DrbQueue(ue=0, traffic_class=_TC)
+    q.arrive(0, 100)
+    q.transmit(0, scheduled_bytes=1000, payload_bytes=100, ack=False)
+    if trailing_byte:
+        q.arrive(2, 1)
+    q.transmit(5, scheduled_bytes=1000, payload_bytes=100, ack=True)
+    return q
+
+
+_q_no, _q_yes = _padded_retx_queue(False), _padded_retx_queue(True)
+check(len(_q_no.done) == 1 and _q_no.active is None
+      and len(_q_yes.done) == 0 and _q_yes.active is not None,
+      "反例构造成立：1 B 尾随到达把 busy period 从「已完成」变成「在飞」")
+check(_q_yes.active.ack_events[-1].padding_bytes == 900,
+      "在飞 busy period 的末 ACK 确实带 900 B padding——「必为满 slot」是错的")
+_m_yes = ex.active_window_goodput(_q_yes.active, 0.5, 0)
+check(_m_yes.throughput_kind == "engineering_active_window"
+      and "rel19" not in str(_m_yes.throughput_kind),
+      "在飞段的样本类别不带 rel19：它不是 TS 28.552 样本")
+check(ex.burst_metrics(_q_no.done[0], 0.5).throughput_kind is None,
+      "无尾随时该 busy period 也产生不了标准样本（单 ACK + 两次发送）")
+# 端到端：同一场景加 1 B，标准字段的样本数不许改变。
+_ratchet_cfg = dict(
+    sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="D"),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+    kpi=sy.KpiConfig(warmup_tti=0))
+_r_small = sy.simulate(
+    tables[:1], traffic=sy.TrafficConfig(model="cbr", cbr_mbps=1e-3),
+    rng=rg.RngBook(96, 0), **_ratchet_cfg)
+check(int(_r_small.cell["drb_throughput_completed_bursts"])
+      + int(_r_small.cell["drb_throughput_inflight_bursts"])
+      == int(_r_small.cell["drb_throughput_completed_bursts"])
+      + int(_r_small.cell["active_window_goodput_samples"]),
+      "在飞计数与工程样本数同源，标准样本数独立于它")
+
 check(_ovl.cell["cell_experienced_completed_only_mbps"] is not None
       and abs(float(_ovl.cell["cell_experienced_completed_only_mbps"])
               - float(_ovl.cell["drb_throughput_rel19_mbps"])) > 1e-9,

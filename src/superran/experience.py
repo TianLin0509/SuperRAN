@@ -403,20 +403,24 @@ class BurstMetrics:
     head_inclusive_throughput_mbps: float | None = None
 
 
-def inflight_burst_metrics(burst: BusyPeriod, tti_ms: float,
-                           warmup_tti: int) -> BurstMetrics:
-    """还在飞的 busy period 在测量窗内那一段的 28.552 吞吐。
+def active_window_goodput(burst: BusyPeriod, tti_ms: float,
+                          warmup_tti: int) -> BurstMetrics:
+    """还在飞的 busy period 在测量窗内那一段的**工程口径 goodput**。
 
-    **不计它等于把"慢到没传完"的 burst 系统性丢掉。** 长/慢 burst 更容易在仿真
-    结束时还没排空，只统计已完成 busy period 会让吞吐系统性偏乐观——这和
-    :func:`arrival_item_metrics` 里已经修过的那个删失是同一个 bug。
-    full buffer 只是它的极端情形：**每个 UE 恰好有一个永不结束的 busy period，
-    于是全部被丢掉**，KPI 因此看起来"无定义"。
+    **这不是 TS 28.552 的吞吐样本，名字里绝不能出现 rel19。** 标准的样本只在
+    "DRB DL buffer emptied" 事件上形成（TS 128 552 V19.5.0 p54），并排除清空
+    buffer 的最后一个 piece。buffer 没排空就没有该事件，也就没有标准样本。
 
-    **在飞的 burst 没有尾巴可掐。** 掐尾是为了去掉"清空缓冲区那一下"的伪影：
-    最后那个 TTI 通常只用了一部分就把数据发完，算进去等于用整个 TTI 的时间去除
-    半个 TTI 的数据。buffer 没排空就没有这个半 slot，窗内最后一个 ACK 是满的，
-    所以分子取窗内全部 ACK 净荷、分母取首传（或窗起点）到窗内最后一个 ACK。
+    那为什么还要报它：**过载与满缓冲下标准样本可能一个都没有**，此时用户仍然
+    需要知道"正在传的时候有多快"。所以另起一个字段、另起一个名字，
+    与标准字段并列上报，任何时候都不混进 ``drb_throughput_rel19_mbps``。
+
+    **不掐尾，是因为它本来就是 goodput（有用字节 ÷ 经过时间），不是标准吞吐。**
+    我曾断言"在飞的末 ACK 必是满 slot 所以无尾可掐"——**那个断言是错的**，
+    审核给了反例：首传 100B 装进 1000B TB 后 NACK，等待期间新增 1 B，重传 ACK
+    时队列仍非空、该 ACK 却带 900 B padding。padding 对 goodput 无影响
+    （分子本来就只数有用字节），但它足以否定"满 slot"这个说法，
+    因此也否定了"可以按标准口径处理在飞段"的想法。
 
     含头速率只在**该 busy period 本身起始于测量窗内**时才给：起始于窗外的 burst，
     它的排队等待发生在窗外，加进窗内分母是两个口径混用。
@@ -437,15 +441,9 @@ def inflight_burst_metrics(burst: BusyPeriod, tti_ms: float,
     if int(burst.start_tti) >= int(warmup_tti):
         wait = max(0, burst.first_tx_tti - burst.start_tti) * float(tti_ms)
         head_thp = vol * 8.0 / ((wait + duration_ms) / 1000.0) / 1e6
-    # **分类要与已完成 burst 用同一个判据**，否则大包视图会继续带着这个删失：
-    # >=2 个窗内 ACK 就是"大 burst 在传"，和 rel19_large_burst 归同一视图；
-    # 只有 1 个 ACK 的在飞段样本太短，只进总量不进大包视图。
-    # 单 TB 就发完的小 burst 不可能"在飞"（那说明 buffer 已排空），所以
-    # 这里永远不会产生 fractional_slot 类。
-    kind = ("rel19_large_burst_inflight" if len(events) >= 2
-            else "rel19_inflight_burst")
     # 完成时延与 PDB 需要对象真的传完，在飞的 burst 给不出，保持 None。
-    return BurstMetrics(thp, kind, None, None, None, head_thp)
+    # kind 刻意不含 rel19：大/小 burst 分视图是标准口径的，这个样本不进那里。
+    return BurstMetrics(thp, "engineering_active_window", None, None, None, head_thp)
 
 
 def burst_metrics(burst: BusyPeriod, tti_ms: float,
@@ -3129,6 +3127,7 @@ def simulate_experience(
     class_arrival_kpis: dict[str, dict[str, Any]] = {}
     measured_bursts = completed_bursts = 0
     completed_burst_count = inflight_burst_count = 0
+    active_window_goodputs: list[float] = []
     completed_arrival_objects = 0
     queue_wait_observed_objects = 0
     queue_wait_right_censored_objects = 0
@@ -3138,21 +3137,23 @@ def simulate_experience(
     for u, q in enumerate(tr.queues):
         done = [b for b in q.done if b.start_tti >= warmup]
         metrics = [burst_metrics(b, sys_cfg.tti_ms, small_policy) for b in done]
-        # **在飞的 busy period 也要计入。** 只统计已排空的会把"慢到没传完"的
-        # burst 系统性丢掉，吞吐偏乐观；full buffer 是这个删失的极端情形。
-        # 它单独计数，覆盖率随结果上报，判读时能看出有多少来自在飞样本。
-        inflight_metric = (
-            inflight_burst_metrics(q.active, sys_cfg.tti_ms, warmup)
-            if q.active is not None else None)
-        if inflight_metric is not None and inflight_metric.throughput_mbps is not None:
-            metrics = [*metrics, inflight_metric]
-            inflight_burst_count += 1
-        thp_completed = [m.throughput_mbps for m in metrics[:len(done)]
-                         if m.throughput_mbps is not None]
-        completed_burst_count += len(thp_completed)
+        # **标准样本只来自已排空的 busy period。** TS 128 552 V19.5.0 p54：
+        # 样本在 "DRB DL buffer emptied" 事件上形成。在飞的 busy period 不产生
+        # 标准样本，绝不能混进 drb_throughput_rel19_mbps —— 混了就等于让工程量
+        # 顶着标准的名字，跨实现对标和历史趋势都失去定义一致性。
         thp = [m.throughput_mbps for m in metrics if m.throughput_mbps is not None]
+        completed_burst_count += len(thp)
         head_thp = [m.head_inclusive_throughput_mbps for m in metrics
                     if m.head_inclusive_throughput_mbps is not None]
+        # 工程口径的在飞窗内 goodput 另存一路，另起名字上报。
+        active_metric = (
+            active_window_goodput(q.active, sys_cfg.tti_ms, warmup)
+            if q.active is not None else None)
+        ue_active_goodput = None
+        if active_metric is not None and active_metric.throughput_mbps is not None:
+            ue_active_goodput = float(active_metric.throughput_mbps)
+            active_window_goodputs.append(ue_active_goodput)
+            inflight_burst_count += 1
         busy_waits = [m.queue_wait_ms for m in metrics if m.queue_wait_ms is not None]
         busy_completes = [m.completion_delay_ms for m in metrics
                           if m.completion_delay_ms is not None]
@@ -3190,12 +3191,12 @@ def simulate_experience(
         shead = [m.head_inclusive_throughput_mbps for m in metrics
                  if m.throughput_kind == "rel19_fractional_slot"
                  and m.head_inclusive_throughput_mbps is not None]
-        _large_kinds = ("rel19_large_burst", "rel19_large_burst_inflight")
+        # 大/小 burst 分视图是**标准口径**的，工程 goodput 不进这里。
         lvals = [m.throughput_mbps for m in metrics
-                 if m.throughput_kind in _large_kinds
+                 if m.throughput_kind == "rel19_large_burst"
                  and m.throughput_mbps is not None]
         lhead = [m.head_inclusive_throughput_mbps for m in metrics
-                 if m.throughput_kind in _large_kinds
+                 if m.throughput_kind == "rel19_large_burst"
                  and m.head_inclusive_throughput_mbps is not None]
         all_wait.extend(float(x) for x in waits)
         all_completion.extend(float(x) for x in completes)
@@ -3264,9 +3265,9 @@ def simulate_experience(
             # **"measured" 保持原义 = 有已完成 burst 的样本**，它是删失诊断：
             # 和 experience_kpi_eligible 之差就是"有话务但一个 burst 都没传完"。
             # 在飞样本进 experienced_mbps，但不许把这个诊断也填满。
-            "experience_kpi_measured": bool(thp_completed),
-            "experienced_completed_only_mbps": (
-                float(np.mean(thp_completed)) if thp_completed else None),
+            "experience_kpi_measured": bool(thp),
+            # 工程口径：在飞 busy period 在窗内那一段的 goodput。**不是标准样本。**
+            "active_window_goodput_mbps": ue_active_goodput,
             "large_burst_experienced_mbps": _mean(lvals),
             "large_burst_head_inclusive_mbps": _mean(lhead),
             "small_burst_fractional_mbps": _mean(svals),
@@ -3341,9 +3342,10 @@ def simulate_experience(
                 if bool(u["experience_kpi_eligible"])]
     user_head_exp = [float(u["head_inclusive_experienced_mbps"]) for u in users
                      if bool(u["experience_kpi_eligible"])]
-    user_exp_completed_only = [float(u["experienced_completed_only_mbps"])
-                               for u in users
-                               if u["experienced_completed_only_mbps"] is not None]
+    # 标准样本本来就只来自已完成 busy period，所以 completed-only 与
+    # experienced_mbps 现在同源；保留这个键是为了旧消费者不断。
+    user_exp_completed_only = [float(u["experienced_mbps"]) for u in users
+                               if bool(u["experience_kpi_measured"])]
     offered = int(tr.offered_bytes)
     offered_measured = max(0, offered - int(offered_before_measurement))
     backlog = int(tr.backlog_bytes)
@@ -3551,20 +3553,33 @@ def simulate_experience(
             len(user_exp_completed_only) / max(len(user_exp), 1)),
         "drb_throughput_rel19_mbps": _mean(all_thp),
         "drb_throughput_head_inclusive_mbps": _mean(all_head_thp),
-        # **样本构成必须可见。** 在飞 busy period 的那一段没有尾巴可掐，口径与
-        # 已完成 burst 略有差别（分母到窗内最后一个 ACK 而不是倒数第二个）；
-        # 不报构成的话，"这个吞吐里有多少来自没传完的 burst"就无从判读。
+        # --- 工程口径，与上面的标准字段并列、绝不混入 ---------------------
+        # 过载与满缓冲下标准样本可能一个都没有（buffer 永不排空 ⇒ 无 emptied
+        # 事件）。此时仍需要知道"正在传的时候有多快"，所以另起字段另起名字。
+        "active_window_goodput_mbps": _mean(active_window_goodputs),
+        "active_window_goodput_samples": int(inflight_burst_count),
+        "active_window_goodput_definition": (
+            "ENGINEERING metric, NOT a TS 28.552 sample: ACKed payload of the "
+            "still-in-flight busy period within the measurement window divided by "
+            "the elapsed time from its first transmission (or window start) to its "
+            "last in-window ACK. No tail trimming because this is goodput, not a "
+            "standard throughput sample; the last in-window ACK may itself carry "
+            "padding. Reported alongside drb_throughput_rel19_mbps, never merged "
+            "into it."),
+        # **标准样本的统计有效性必须可见。** 过载时已完成 busy period 会变得很少
+        # 甚至为 0，此时 drb_throughput_rel19_mbps 是少数样本的均值或 None。
         "drb_throughput_completed_bursts": int(completed_burst_count),
         "drb_throughput_inflight_bursts": int(inflight_burst_count),
         "drb_throughput_inflight_share": float(
             inflight_burst_count
             / max(completed_burst_count + inflight_burst_count, 1)),
         "drb_throughput_sample_scope": (
-            "completed busy periods (tail-trimmed at the penultimate ACK) plus the "
-            "in-window segment of each still-in-flight busy period (no tail to trim, "
-            "since the buffer never drained). Dropping in-flight bursts would "
-            "systematically discard the slow ones and bias throughput optimistic; "
-            "full buffer is the extreme case where every busy period is in flight."),
+            "TS 128 552 V19.5.0 p54: samples form on the DRB DL buffer-emptied "
+            "event only, with the buffer-clearing final piece excluded. "
+            "Still-in-flight busy periods produce NO standard sample; they are "
+            "reported separately as active_window_goodput_mbps. "
+            "drb_throughput_inflight_share high means the standard KPI rests on "
+            "few samples."),
         "large_burst_drb_throughput_mbps": _mean(large_thp),
         "large_burst_head_inclusive_mbps": _mean(large_head_thp),
         "large_flow_drb_throughput_p5_mbps": _pct(large_user_thp, 5),
@@ -3860,14 +3875,21 @@ def simulate_experience(
             weight=mixed_weight, epf_scale=mixed_epf_scale)
 
     if tr.unbounded:
-        # **吞吐类的键现在有值**：在飞 busy period 的窗内段照常统计（没有尾巴
-        # 可掐），full buffer 只是"每个 busy period 都在飞"的极端情形。
-        # 只有**明确需要 burst 真的传完**的那两个键留 None：
-        #   * cell_experienced_completed_only_mbps 顾名思义只收已完成 burst；
-        #   * 含头速率需要该 busy period 起始于窗内，而无界话务的 burst 起于 0。
-        # 报 None 而不是 0.0：把"测不了"写成 0 会被当成"测到了 0 Mbps"。
-        for _k in ("cell_head_inclusive_experienced_mbps",
-                   "cell_experienced_completed_only_mbps"):
+        # **TS 28.552 的样本在 buffer emptied 事件上形成**，而 full buffer 下
+        # buffer 永不排空 ⇒ 一个标准样本都没有。这不是实现缺陷，是标准的定义。
+        # 报 None 而不是 0.0：把"标准未定义"写成 0 会被当成"测到了 0 Mbps"。
+        #
+        # **需要一个数的用户看这两个工程字段**（任何话务下都有值）：
+        #   * ue_served_p5/median/mean_mbps —— ITU-R M.2412 / TR 38.913 口径，
+        #     每 UE 已服务净荷 ÷ 观测窗长，5% 分位即 cell-edge user throughput；
+        #   * active_window_goodput_mbps —— 在飞 busy period 窗内段的 goodput。
+        for _k in ("cell_experienced_mbps",
+                   "cell_head_inclusive_experienced_mbps",
+                   "cell_experienced_completed_only_mbps",
+                   "ue_experienced_mean_mbps", "ue_experienced_median_mbps",
+                   "ue_experienced_p5_mbps",
+                   "drb_throughput_rel19_mbps",
+                   "drb_throughput_head_inclusive_mbps"):
             cell[_k] = None
 
     notes: list[str] = [

@@ -409,7 +409,7 @@ def _run_ab(uniform_tables: list[Any], shaped_tables: list[Any],
     scheduler = sysm.SchedulerConfig(
         algorithm="pf", pf_accounting="scheduled_tbs", mu_enabled=False,
         olla_speedup=1.0, olla_warmup_speedup=1.0)
-    kpi = sysm.KpiConfig(trim="tail", warmup_s=1.0,
+    kpi = sysm.KpiConfig(warmup_s=1.0,
                          small_burst_policy="fractional_slot")
     t0 = time.perf_counter()
     uniform = sysm.simulate_replications(
