@@ -179,9 +179,15 @@ def _run(algorithm: str, *, saturated: bool = False, scenario: str | None = None
     if traffic is None and key in _CACHE:
         return _CACHE[key]
     tables_of, scen_traffic, duration = _SCENARIOS[scenario]
+    # **HARQ 进程数在这整套对照里必须钉死。** 本文件比的是调度算法之间的差异，
+    # 进程数是另一个自变量：单进程时"UE 在等自己反馈就不参与调度"本身提供了一层
+    # 隐式公平——强用户被迫轮空，弱用户才排得上。放开进程数后这层公平消失，
+    # 各条阈值（尤其是饿死兜底的 edf_starvation_hol_ms）都要重新标定。
+    # 那条交互单独钉在 test_multiprocess_harq_weakens_the_starvation_guard 里，
+    # 不在这里混着测。
     cfg = sysm.SystemConfig(
         evaluation_mode="experience", duration_s=duration,
-        seed=41, tdd_pattern="DDDSU")
+        seed=41, tdd_pattern="DDDSU", harq_max_processes=1)
     run = sysm.simulate(
         tables_of(),
         sys_cfg=cfg,
@@ -515,6 +521,41 @@ def test_starvation_guard_off_by_default_is_bit_identical() -> None:
     for key in _IDENTITY_KEYS:
         assert explicit_off.cell[key] == default.cell[key], key
     assert "scheduler_starvation_lifts" not in default.cell
+
+
+def test_multiprocess_harq_weakens_the_starvation_guard() -> None:
+    """**单进程 HARQ 在做一件调度器没在做的事：强制轮空。**
+
+    单进程下 UE 发完一个 TB 就要等反馈，这期间不参与调度——等于给了弱用户
+    一个天然的插空机会。放开到 8 进程后强用户不再轮空，24 UE 饱和小区里
+    最弱那个（geo SINR −0.74 dB）即使被饿死兜底抬进候选集 5000 多次，
+    仍然抢不到足够的 RBG，实测 served = 0。
+
+    **这不是 bug，是把调度器的真实公平性暴露出来了**：以前的"不饿死"有一部分
+    是 HARQ 阻塞白送的。阈值 200 ms 是在旧行为上标定的，需要维护者重新决定。
+    这条用例把这个交互钉住，免得以后当成回归去修。
+    """
+    def _run_mp(procs: int):
+        tables_of, scen_traffic, duration = _SCENARIOS["saturated"]
+        return sysm.simulate(
+            tables_of(),
+            sys_cfg=sysm.SystemConfig(
+                evaluation_mode="experience", duration_s=duration, seed=41,
+                tdd_pattern="DDDSU", harq_max_processes=procs),
+            traffic=sysm.TrafficConfig(**scen_traffic),
+            sched=sysm.SchedulerConfig(algorithm="edf", mu_enabled=False,
+                                       olla_enabled=False,
+                                       edf_starvation_hol_ms=200.0),
+            kpi=sysm.KpiConfig(warmup_tti=0))
+
+    single = _run_mp(1)
+    multi = _run_mp(8)
+    starved_single = sum(1 for x in _served(single) if x <= 0.0)
+    starved_multi = sum(1 for x in _served(multi) if x <= 0.0)
+    assert starved_single == 0, starved_single
+    assert starved_multi > 0, starved_multi
+    # 兜底确实在动，不是没触发
+    assert multi.cell["scheduler_starvation_lifts"]["lifted_candidate_ttis"] > 0
 
 
 def test_hard_starvation_guard_eliminates_starvation() -> None:

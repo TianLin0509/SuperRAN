@@ -709,8 +709,14 @@ class _PlannedGrant:
 
 @dataclass(frozen=True)
 class _HarqTb:
-    """单进程 HARQ 状态；ACK/NACK 在反馈到达前都保持 in-flight。"""
+    """一个在途 HARQ TB；ACK/NACK 在反馈到达前都保持 in-flight。
 
+    ``harq_id`` 是该 UE 的进程号（0 .. ``harq_max_processes``-1）。不同 id
+    之间互不阻塞：一个 id 在等反馈，UE 仍可以用别的空闲 id 发新 TB。
+    ACK 之后 id 归还进程池，NACK 之后 id 留着给这一次重传用。
+    """
+
+    harq_id: int
     mcs: int
     rank: int
     n_rbg: int
@@ -2415,7 +2421,43 @@ def simulate_experience(
     nack_count_measured = np.zeros(n_ue, dtype=int)
     retx_count_measured = np.zeros(n_ue, dtype=int)
     retx_nack_count_measured = np.zeros(n_ue, dtype=int)
-    harq_pending: dict[int, _HarqTb] = {}
+    # 每个 UE 一张 ``harq_id -> TB`` 的表，外加一个空闲 id 池。
+    # ``harq_max_processes=1`` 时退化成历史的"每 UE 一个槽位"，行为逐位一致。
+    _max_proc = int(getattr(sys_cfg, "harq_max_processes", 1))
+    harq_inflight: dict[int, dict[int, _HarqTb]] = {u: {} for u in range(n_ue)}
+    harq_free_ids: dict[int, list[int]] = {
+        u: list(range(_max_proc)) for u in range(n_ue)}
+
+    def _release_id(ue: int, harq_id: int) -> None:
+        """TB 结束，把进程号还回池子。**池内保持有序**，否则同一场景换个到达
+        顺序就会分到不同 id，诊断输出跟着抖。"""
+        harq_inflight[ue].pop(int(harq_id), None)
+        ids = harq_free_ids[ue]
+        if int(harq_id) not in ids:
+            ids.append(int(harq_id))
+            ids.sort()
+
+    def _retx_now(slot_type: str) -> dict[int, _HarqTb]:
+        """本时隙每个 UE **最早的**那个可重传 TB。
+
+        一个 UE 一个 TTI 只发一个 TB（NR 里一个 DCI 一个 TB），所以给
+        plan builder 的仍然是"每 UE 至多一个"的视图——它们一行都不用改。
+        完整的在途状态留在 ``harq_inflight`` 里。
+        """
+        out: dict[int, _HarqTb] = {}
+        for ue, slots in harq_inflight.items():
+            ready = [tb for tb in slots.values()
+                     if tb.state == "retx_ready" and tb.slot == slot_type]
+            if ready:
+                out[ue] = min(ready, key=lambda tb: (tb.first_tti, tb.harq_id))
+        return out
+
+    def _can_send(ue: int, slot_type: str) -> bool:
+        """本时隙这个 UE 发得出东西吗：有空闲进程能发新传，或有重传就绪。"""
+        if harq_free_ids[ue]:
+            return True
+        return any(tb.state == "retx_ready" and tb.slot == slot_type
+                   for tb in harq_inflight[ue].values())
     # 用户级资源量同时保留两种口径：grant exposure 便于回答“这个 UE 有多少
     # 资源处于 MU 配对”，attribution 把共享 MU RBG 等分给配对 UE，跨 UE 求和
     # 必须精确回到小区物理占用。两者不能混为一个分母。
@@ -2540,27 +2582,35 @@ def simulate_experience(
         tr.step(tti)
         # 到期的 ACK/NACK 先同时交给 OLLA 与 RankController，再做本 TTI
         # 的决策。ACK 删除进程；NACK 转为唯一一次重传就绪状态。
-        for _u_fb, _pending_fb in list(harq_pending.items()):
-            if _pending_fb.state == "await_final_feedback":
-                if _pending_fb.final_feedback_tti is None:
-                    raise RuntimeError("终次 HARQ 反馈状态缺少生效 TTI")
-                if tti >= int(_pending_fb.final_feedback_tti):
-                    # 终次反馈只释放进程；不再进入首传 OLLA/rank 学习，
-                    # 也不产生第三次传输。
-                    harq_pending.pop(_u_fb, None)
-                continue
-            if (_pending_fb.state != "await_feedback"
-                    or not _pending_fb.feedback.due(tti)):
-                continue
-            _pending_fb.feedback.apply(
-                rank_controller=rank_ctl, su_olla=olla_db, mu_olla=mu_olla_db,
-                olla_min=float(sched.olla_min_db),
-                olla_max=float(sched.olla_max_db))
-            if _pending_fb.first_ack:
-                harq_pending.pop(_u_fb, None)
-            else:
-                harq_pending[_u_fb] = replace(
-                    _pending_fb, state="retx_ready")
+        # **一个 UE 一个 TTI 可能有多个 TB 同时到期**，要遍历完。进程号从小到大
+        # 处理，保证同一批到期事件的 OLLA/rank 更新顺序与 id 分配顺序一致。
+        for _u_fb in range(n_ue):
+            for _id_fb in sorted(harq_inflight[_u_fb]):
+                _pending_fb = harq_inflight[_u_fb].get(_id_fb)
+                if _pending_fb is None:
+                    continue
+                if _pending_fb.state == "await_final_feedback":
+                    if _pending_fb.final_feedback_tti is None:
+                        raise RuntimeError("终次 HARQ 反馈状态缺少生效 TTI")
+                    if tti >= int(_pending_fb.final_feedback_tti):
+                        # 终次反馈只释放这个进程；不再进入首传 OLLA/rank 学习，
+                        # 也不产生第三次传输。
+                        _release_id(_u_fb, _id_fb)
+                    continue
+                if (_pending_fb.state != "await_feedback"
+                        or not _pending_fb.feedback.due(tti)):
+                    continue
+                _pending_fb.feedback.apply(
+                    rank_controller=rank_ctl, su_olla=olla_db,
+                    mu_olla=mu_olla_db,
+                    olla_min=float(sched.olla_min_db),
+                    olla_max=float(sched.olla_max_db))
+                if _pending_fb.first_ack:
+                    _release_id(_u_fb, _id_fb)
+                else:
+                    # NACK：进程号不还，留给这一次重传用。
+                    harq_inflight[_u_fb][_id_fb] = replace(
+                        _pending_fb, state="retx_ready")
         # 快速回退会把 rank 与 OLLA 一起退回：新 rank 上的 OLLA 是在错误
         # 工作点上收敛出来的，只退 rank 会让旧 rank 带着别人的偏置继续跑。
         for _u_rk, _olla_rk in rank_ctl.step(tti, olla_by_ue=olla_db):
@@ -2577,18 +2627,20 @@ def simulate_experience(
             available_prb_equiv += total_prb * slot_fraction
         snap = (tti // snap_every) % n_snap
         # 待重传的 TB 要等两件事：同类型时隙，以及 ACK/NACK 真的回来了。
-        # 单 HARQ 进程模型下，这期间该 UE 也发不了新 TB。
+        # 有空闲进程就能发新传；有同类型时隙的重传就绪就能发重传。两者都没有
+        # 才真的发不出——这正是单进程时的常态。
+        harq_pending = _retx_now(slot)
         cand = [u for u in range(n_ue) if tr.has_data(u)
-                and (u not in harq_pending
-                     or (harq_pending[u].state == "retx_ready"
-                         and harq_pending[u].slot == slot))
+                and _can_send(u, slot)
                 and not (tables[u].outage is not None and tables[u].outage[snap])]
         if in_measurement:
+            # "被在途反馈挡住"的口径没变：有数据、进程全满、且在途的每个 TB
+            # 都还在等反馈。``harq_max_processes=1`` 时与历史计数逐值一致。
             feedback_wait_skips += sum(
                 1 for u in range(n_ue)
-                if tr.has_data(u) and u in harq_pending
-                and harq_pending[u].state in (
-                    "await_feedback", "await_final_feedback"))
+                if tr.has_data(u) and harq_inflight[u] and not harq_free_ids[u]
+                and all(tb.state in ("await_feedback", "await_final_feedback")
+                        for tb in harq_inflight[u].values()))
         blocked_this_tti = sum(
             1
             for u in range(n_ue)
@@ -2772,7 +2824,8 @@ def simulate_experience(
              and harq_pending[u].state == "retx_ready"),
             key=lambda u: harq_pending[u].first_tti)
         ordered_users = pending_ready + [
-            u for u in metric_order if u not in harq_pending]
+            u for u in metric_order
+            if u not in harq_pending and harq_free_ids[u]]
         queue_bytes = {int(u): tr.bytes_left(int(u)) for u in cand}
         true_sinr_of = {
             int(u): float(tables[int(u)].sinr_db[
@@ -2782,9 +2835,7 @@ def simulate_experience(
             tr.has_data(u) and tables[u].outage is not None
             and bool(tables[u].outage[snap]) for u in range(n_ue))
         blocked_data = blocked_data or any(
-            tr.has_data(u) and u in harq_pending
-            and (harq_pending[u].state == "await_feedback"
-                 or harq_pending[u].slot != slot)
+            tr.has_data(u) and not _can_send(u, slot)
             for u in range(n_ue))
         cursor = tti % int(sys_cfg.num_rbg)
         su_plan = _build_su_plan(
@@ -2998,7 +3049,7 @@ def simulate_experience(
                         retx_nack_count_measured[u] += int(not ack)
                     # 只允许一次重传。终次 ACK/NACK 在发送时抽样，但 gNB
                     # 要等反馈回来才释放单进程；失败 payload 之后成为新 TB。
-                    harq_pending[u] = replace(
+                    harq_inflight[u][int(pending_tb.harq_id)] = replace(
                         pending_tb, state="await_final_feedback",
                         final_feedback_tti=(
                             tti + int(feedback_offsets[tti % pattern_len])))
@@ -3067,7 +3118,9 @@ def simulate_experience(
                     # 单 HARQ 进程：首传 ACK/NACK 都占住 UE，直到反馈到达。
                     # outcome 在发送时抽样，但只能由下一轮顶部的 due-event
                     # 路径交给 OLLA 与 RankController。
-                    harq_pending[u] = _HarqTb(
+                    _new_id = harq_free_ids[u].pop(0)
+                    harq_inflight[u][_new_id] = _HarqTb(
+                        harq_id=int(_new_id),
                         mcs=mcs, rank=rank, n_rbg=n_alloc, n_prb=grant_prb,
                         tb_bytes=tb_bytes, payload_bytes=payload,
                         slot=slot, first_tti=tti,
@@ -3229,17 +3282,17 @@ def simulate_experience(
             progress(tti, int(sys_cfg.num_tti))
 
     pending_measured = np.asarray([
-        int(u in harq_pending and harq_pending[u].first_tti >= warmup)
+        int(any(tb.first_tti >= warmup for tb in harq_inflight[u].values()))
         for u in range(n_ue)
     ], dtype=int)
     unresolved_terminal_measured = np.asarray([
         int(
-            u in harq_pending
-            and harq_pending[u].first_tti >= warmup
-            and not (
-                harq_pending[u].state == "await_final_feedback"
-                or (harq_pending[u].state == "await_feedback"
-                    and harq_pending[u].first_ack)
+            any(
+                tb.first_tti >= warmup
+                and not (
+                    tb.state == "await_final_feedback"
+                    or (tb.state == "await_feedback" and tb.first_ack))
+                for tb in harq_inflight[u].values()
             )
         )
         for u in range(n_ue)

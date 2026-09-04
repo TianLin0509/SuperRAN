@@ -2049,6 +2049,63 @@ check(_mp_sys_cfg["harq_max_processes"] == 8
       "进程数与合同文字随结果显式上报")
 check(int(_mp_runs[8].cell["harq_max_processes"]) == 8,
       "cell 层也带上进程数，分析脚本不必去 config 里翻")
+# --- 17.2e experience 侧多进程：收益在**用户体验速率**，不在小区吞吐 ------
+# **棘轮。** 把 experience 的 harq_inflight 换回"每 UE 一个槽位"会让这一节全红。
+# 全带/按需分配下小区吞吐由话务决定（offered-limited），多进程几乎不动它；
+# 真正被单进程压住的是**单个文件多久传完**，也就是体验速率。
+_mp_exp_rng = np.random.default_rng(20260904)
+_mp_exp_tabs = []
+for _u in range(4):
+    _s = np.full((20, 4), 14.0 + _mp_exp_rng.normal(0, 2.0))
+    _m = np.stack([np.full(20, la.select_mcs(float(_s[0, k]), table=3).index)
+                   for k in range(4)], axis=1).astype(int)
+    _se = np.stack([np.full(20, la.MCS_TABLE_3[int(_m[0, k])].se)
+                    for k in range(4)], axis=1)
+    _rbg = np.repeat(_s[:, :, None], 17, axis=2)
+    _mp_exp_tabs.append(sysm.UeLinkTable(
+        ue=_u, sinr_db=_s, mcs=_m, se=_se,
+        best_rank=np.full(20, 2, dtype=int), best_se=_se[:, 1],
+        geo_sinr_db=14.0, outage=np.zeros(20, dtype=bool), iot_db=3.0,
+        sir_db=12.0, se_gnb=_se.copy(), best_se_gnb=_se[:, 1].copy(),
+        sinr_rbg_db=_rbg, sinr_tx_db=_s.copy(), sinr_tx_rbg_db=_rbg.copy()))
+
+
+def _mp_exp_run(procs: int):
+    return sysm.simulate(
+        _mp_exp_tabs,
+        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=3.0,
+                                  tdd_pattern="DDDSU", harq_max_processes=procs),
+        traffic=sysm.TrafficConfig(model="ftp3", file_bytes=500_000,
+                                   arrival_rate_hz=4.0),
+        sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+        kpi=sysm.KpiConfig(warmup_tti=0), rng=rg.RngBook(7, 0)).cell
+
+
+_mp_exp1 = _mp_exp_run(1)
+_mp_exp8 = _mp_exp_run(8)
+print(f"  experience 1→8 进程：体验中位 {_mp_exp1['ue_experienced_median_mbps']:.1f}→"
+      f"{_mp_exp8['ue_experienced_median_mbps']:.1f} Mbps，完成 p50 "
+      f"{_mp_exp1['completion_delay_ms_p50']:.1f}→"
+      f"{_mp_exp8['completion_delay_ms_p50']:.1f} ms，小区 "
+      f"{_mp_exp1['cell_served_mbps']:.1f}→{_mp_exp8['cell_served_mbps']:.1f} Mbps")
+check(_mp_exp8["ue_experienced_median_mbps"]
+      > 2.0 * _mp_exp1["ue_experienced_median_mbps"],
+      f"experience 侧多进程让体验速率中位翻倍以上"
+      f"（{_mp_exp1['ue_experienced_median_mbps']:.1f} → "
+      f"{_mp_exp8['ue_experienced_median_mbps']:.1f} Mbps）")
+check(_mp_exp8["completion_delay_ms_p50"]
+      < 0.5 * _mp_exp1["completion_delay_ms_p50"],
+      f"文件完成时延 p50 减半以上（{_mp_exp1['completion_delay_ms_p50']:.1f} → "
+      f"{_mp_exp8['completion_delay_ms_p50']:.1f} ms）")
+check(abs(_mp_exp8["cell_served_mbps"] / _mp_exp1["cell_served_mbps"] - 1.0) < 0.05,
+      f"小区吞吐几乎不动（{_mp_exp1['cell_served_mbps']:.1f} → "
+      f"{_mp_exp8['cell_served_mbps']:.1f} Mbps）：它由话务决定，不是被 HARQ 挡住的")
+check(_mp_exp1["harq_feedback_wait_skips"] > 0
+      and _mp_exp8["harq_feedback_wait_skips"] == 0,
+      f"进程够用后没有 UE 再被在途反馈挡住"
+      f"（{_mp_exp1['harq_feedback_wait_skips']} → "
+      f"{_mp_exp8['harq_feedback_wait_skips']}）")
+
 # 进程数非法值必须在配置入口就被拒
 for _bad_mp in (0, 17, 1.5, True):
     _expect_value_error(
@@ -2467,14 +2524,21 @@ check(float(np.mean(_open_loop_delta == 0)) > 0.8,
       "同一个目标在量化与选档两侧大部分抵消")
 _bler_runs = {}
 for _target, _tabs in _bler_tables.items():
+    # **这一组守的是 OLLA 的稳态，所以要跑到稳态、而且不能被钳位截住。**
+    # buffer 改成发送时扣减 + 多进程放开之后，同一段时间里 OLLA 收到的反馈量
+    # 和 MCS 工作点都变了，1 s 不够收敛（实测两臂 1.65 / 1.64，差异淹没在噪声里）。
+    # 跑满 2 s 并把钳位放到 6 dB 之后两臂才真正分开。
     _bler_runs[_target] = sysm.simulate(
         _tabs,
-        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=1.0,
+        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=2.0,
                                   tdd_pattern="DDDSU", seed=11),
         traffic=sysm.TrafficConfig(model="full_buffer"),
-        sched=sysm.SchedulerConfig(mu_enabled=False),
+        sched=sysm.SchedulerConfig(mu_enabled=False, olla_max_db=6.0),
         kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"))
 _c10, _c30 = _bler_runs[0.1].cell, _bler_runs[0.3].cell
+check(max(_c10["olla_mcs_mean"], _c30["olla_mcs_mean"]) < 5.5,
+      f"两臂的 OLLA 都没顶到 6 dB 钳位，比的是稳态而不是钳位值"
+      f"（{_c10['olla_mcs_mean']:.2f} / {_c30['olla_mcs_mean']:.2f}）")
 check(_c30["olla_mcs_mean"] > _c10["olla_mcs_mean"],
       f"目标放宽后 OLLA 稳态偏置更激进（{_c10['olla_mcs_mean']:.2f} → "
       f"{_c30['olla_mcs_mean']:.2f} MCS 档）")
