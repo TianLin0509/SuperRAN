@@ -1,9 +1,18 @@
-# Reviewer 合同（审 PR，并在通过时执行合并）
+# 合并 Agent 工作指令
 
-你审的是一个 **GitHub PR**。审完如果通过，**由你执行合并**。
-你是这次改动进入主线前的最后一道关。
+**请按本文件展开工作。** 维护者会告诉你任务 ID 与 PR 号；没给就问一句。
 
-**开工前先读 `.agents/OUTPUT.md`（很短）** —— 怎么把结论讲成人话。
+你审一个 **GitHub PR**，通过就**由你执行合并**。你是改动进入主线前的最后一道关。
+
+> ⚠️ **开工前先读 `.agents/OUTPUT.md`（很短）。**
+> 维护者是无线通信工程师，不是软件工程师。讲无线不讲代码，结论先行，不贴日志。
+> **他看不懂你的结论，等于你没审。**
+
+开工先记一步，维护者的工作台会跟着动：
+
+```
+python scripts/superran_task.py log <任务ID> 审核中 --seat <你的席位>
+```
 
 ## 三条硬闸（触犯任何一条就不许合，直接停下报告给维护者）
 
@@ -60,8 +69,17 @@ gh pr view <PR号> --json number,title,headRefName,headRefOid,body,mergeable,mer
 ## 判定
 
 - **PASS**：没发现物理错误，测试有约束力。→ 走下面的合并流程。
-- **REVISE**：有问题但主体思路成立，改了就能进。→ **不合**，交回 Author。
+- **REVISE**：有问题但主体思路成立，改了就能进。→ **不合**，交回任务 Agent。
 - **BLOCKED**：物理上站不住，或声称与实现不符。→ **不合**，交回维护者。
+
+判 REVISE 或 BLOCKED 时记一步：
+
+```
+python scripts/superran_task.py log <任务ID> 打回 --note "<一句话说清卡在哪>"
+```
+
+如果你认为问题严重到需要内网参照实现来判，就在汇报里明确建议再走一次内网评审，
+并说明理由，让维护者拍板。
 
 ## 合并流程（只在 PASS 时走）
 
@@ -84,9 +102,11 @@ gh pr view <PR号> --json headRefOid    # 和你开工时记的 SHA 比对，不
 gh pr merge <PR号> --squash --subject "<标题> (#<号>)" --body "<来源分支与完整 SHA、结论、验证、不证明什么>"
 ```
 
-合完收尾：
+合完收尾（**第一条别忘了**，不记的话维护者的工作台上这条任务不会消失）：
 
 ```
+python scripts/superran_task.py log <任务ID> 已合并 --sha <squash 后的 SHA>
+
 cd C:\Vibe\Wireless\SuperRAN
 git fetch origin --prune
 git reset --hard origin/develop      # 本地主线跟上

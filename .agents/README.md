@@ -9,8 +9,8 @@
 
 | 你想干什么 | 你说这一句 |
 |---|---|
-| 让 Agent 改代码 | `读 .agents/AUTHOR.md 按它工作。任务：<一句话>` |
-| 审核 + 合并 PR | 把 Author 结尾自动生成的那段**原样转发**给新会话。它审完通过就直接合 |
+| 让 Agent 改代码 | `请根据 C:\Vibe\Wireless\SuperRAN\.agents\AUTHOR.md 展开工作。任务：<一句话>` |
+| 审核 + 合并 PR | 把任务 Agent 结尾生成的那段**原样转发**给新会话。它审完通过就直接合 |
 | **每天开工先看这个** | 运行 `scripts\superran_tasks.ps1` —— 它直接告诉你「现在该做什么」，并给出可复制的命令 |
 | 看工作区细节 | 运行 `scripts\superran_board.ps1` |
 | 补对外改动文档 | `读 .agents/SYNC.md 按它工作` |
@@ -22,6 +22,20 @@
 除此之外不需要记任何路径、SHA、分支名或命令。
 
 ---
+
+## 任务 ID：把所有东西串起来的那根线
+
+每个任务开工时由 Agent 生成一个 ID，形如 `T20260904-cqi-event-driven`，
+**四样东西都用它**，你一眼就能认出哪个文件属于哪个任务：
+
+```
+分支      T20260904-cqi-event-driven
+PR 标题   [T20260904-cqi-event-driven] CQI 改为运行时事件驱动
+审核包    T20260904-cqi-event-driven_CQI改为运行时事件驱动.zip
+内网意见  docs\inbox\T20260904-cqi-event-driven_内网审核.md
+```
+
+工作台也靠它把一条任务的所有节点串成一条泳道。
 
 ## 流程长什么样
 
@@ -88,8 +102,8 @@ git config core.hooksPath .githooks
 ## 目录里其他文件
 
 - `OUTPUT.md` — **怎么跟你说话**。所有角色开工前必读，讲人话的五条铁律
-- `AUTHOR.md` — 实现者合同
-- `REVIEWER.md` — 审核者合同。**审 PR，通过就由它执行合并**（含三条硬闸）
+- `AUTHOR.md` — 任务 Agent 指令（含任务 ID 与全流程）
+- `MERGER.md` — 合并 Agent 指令。**审 PR，通过就由它执行合并**（含三条硬闸）
 - `TESTING.md` — 怎么跑测试。**两个坑会让 Agent 得出假的"测试通过"**，
   Author 和 Reviewer 都必读
 - `RISK.md` — 风险分档（按文件路径写死，Agent 不许自己判断）

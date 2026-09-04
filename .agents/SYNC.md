@@ -1,7 +1,7 @@
 # 对外文档与批次记录
 
 > 推分支、开 PR 现在是 Author 的收尾动作，见 `.agents/AUTHOR.md`。
-> 审 PR 与执行合并是 Reviewer 的事，见 `.agents/REVIEWER.md`。
+> 审 PR 与执行合并是 Reviewer 的事，见 `.agents/MERGER.md`。
 > 这份文件只管**对外能读懂的改动记录**。
 
 ## 什么时候写

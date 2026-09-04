@@ -1,238 +1,243 @@
 #!/usr/bin/env python3
-"""任务看板：一眼看清「我现在该做什么」。
+"""任务看板（泳道式）—— 一屏看清每个任务走到哪了、轮到谁。
 
     python scripts/superran_tasks.py [--no-open]
 
-按「轮到谁」分组，不按分支名排列。每条都给出可直接复制的下一步命令。
-状态全部自动推导，不需要人工维护任何清单。
+数据来自 `C:\\VibeData\\SuperRAN-Tasks\\*.json`（Agent 每完成一步自己记一行），
+PR 状态从 GitHub 实时补齐。已合并的任务从主区消失，收进历史区。
 
 只读：会 fetch 远端引用，不改任何分支、文件或提交。
 """
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import sys
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from make_agent_report import CSS, REPORT_DIR, esc  # noqa: E402
+from superran_task import LEDGER, STEPS, TERMINAL  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
-PACK_DIR = Path.home() / "Desktop" / "claude-artifacts"
 INBOX = REPO / "docs" / "inbox"
+NODES = ["实现", "内网审查", "修改", "PR 审核", "合并"]
 
-# 与 .agents/RISK.md 的红档表保持一致。改那张表时这里也要改。
-RED_FILES = {
-    "linkadapt.py", "amc_policy.py", "bler_curves.py", "bler_data_20b.py",
-    "calibration.py", "scheduler_resource.py", "scheduler_frequency.py",
-    "scheduler_mu.py", "scheduler_finalize.py", "scheduler_edf.py", "mumimo.py",
-    "srs_resource.py", "srs_waveform.py", "srs_metrics.py", "csi_aging.py",
-    "native.py", "channelhub.py", "generate.py", "spec38901.py", "carrier.py",
-    "physical.py", "linklevel.py", "interference.py", "power_control.py",
-    "beamforming.py", "rng.py", "gates.py", "system.py", "experience.py",
-    "measure.py", "kpi_compare.py", "analysis.py",
-}
+# 台账里的步骤 → 泳道上第几个节点已完成
+STEP_TO_NODE = {"实现": 1, "送内网": 1, "内网已回": 2, "修改": 3,
+                "提PR": 3, "审核中": 4, "打回": 3, "已合并": 5}
 
 
-def run(cmd: list[str], cwd: Path | None = None) -> str:
+def run(cmd: list[str]) -> str:
     try:
-        r = subprocess.run(cmd, cwd=str(cwd or REPO), capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", timeout=90)
+        r = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=90)
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
 
 
-def git(*a: str, cwd: Path | None = None) -> str:
-    return run(["git", *a], cwd)
-
-
-def open_prs() -> list[dict]:
-    out = run(["gh", "pr", "list", "--state", "open", "--limit", "50", "--json",
-               "number,title,headRefName,headRefOid,mergeable,mergeStateStatus,updatedAt"])
-    try:
-        return json.loads(out) if out else []
-    except json.JSONDecodeError:
+def load_tasks() -> list[dict]:
+    if not LEDGER.exists():
         return []
-
-
-def risk_of(head: str) -> str:
-    """按改动文件查 RISK.md 的表。红档要走内网评审。"""
-    base = git("merge-base", "origin/develop", head)
-    if not base:
-        return "?"
-    files = git("diff", "--name-only", base, head).splitlines()
-    touched_code = False
-    for f in files:
-        name = Path(f).name
-        if f.startswith("src/superran/"):
-            touched_code = True
-            if name in RED_FILES:
-                return "红"
-        elif f.startswith("tests/") or f.startswith("presets/"):
-            touched_code = True
-    return "黄" if touched_code else "绿"
-
-
-def packs_by_sha() -> dict[str, Path]:
-    """桌面上打过的审核包，按短 SHA 索引。"""
-    out = {}
-    for p in PACK_DIR.glob("SuperRAN-review-*.zip"):
-        m = re.search(r"SuperRAN-review-([0-9a-f]{7})-", p.name)
-        if m:
-            out[m.group(1)] = p
-    return out
-
-
-def inbox_files() -> list[Path]:
-    if not INBOX.exists():
-        return []
-    return [p for p in INBOX.glob("*.md") if p.name != "README.md"]
-
-
-def classify(pr: dict, packs: dict, inbox: list[Path]) -> dict:
-    """判定这条 PR 卡在哪一步、下一步该谁做。"""
-    head, short = pr["headRefOid"], pr["headRefOid"][:7]
-    risk = risk_of(head)
-    conflicting = pr.get("mergeable") == "CONFLICTING"
-    pack = packs.get(short)
-    # 意见文件名里带短 SHA 就认为是这条 PR 的
-    opinion = next((f for f in inbox if short in f.name), None)
-
-    if conflicting:
-        return dict(who="agent", state="需要同步主线", tone="warn", risk=risk,
-                    why="和主线冲突了，冲突多半在机器生成的手册上",
-                    action=f'读 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\AUTHOR.md 按它工作。\n'
-                           f'任务：把 PR #{pr["number"]} 同步到最新主线，'
-                           f'docs/index.html 冲突用生成器重跑，不要手工解')
-    if opinion:
-        return dict(who="you", state="内网意见已回，待改", tone="warn", risk=risk,
-                    why=f"意见在 {opinion.name}",
-                    action=f'内网评审意见已放在 docs\\inbox\\{opinion.name}，'
-                           f'按它修改并更新 PR #{pr["number"]}，附意见对照表')
-    if risk == "红" and pack:
-        age_h = (datetime.now().timestamp() - pack.stat().st_mtime) / 3600
-        age = f"{age_h:.0f} 小时前打的" if age_h < 48 else f"{age_h / 24:.0f} 天前打的"
-        # 脚本无法知道你有没有真的把包带走，所以给一个覆盖两种情况的说法
-        return dict(who="pack", state="内网评审这一环", tone="warn", risk=risk,
-                    why=f"包已就绪（{age}）：{pack.name}",
-                    action=f"还没带走 → 把 {pack.name} 发给内网 Agent\n"
-                           f"已经带走 → 等回复，**这期间别让 Agent 动这个分支**\n"
-                           f"回来的 md 放进 docs\\inbox\\，文件名带上 {short}")
-    if risk == "红" and not pack:
-        return dict(who="you", state="红档，待打审核包", tone="bad", risk=risk,
-                    why="动了物理核心，按流程要走内网评审",
-                    action=f'powershell -File C:\\Vibe\\Wireless\\SuperRAN\\scripts\\'
-                           f'superran_review_pack.ps1 {pr["headRefName"]}')
-    return dict(who="you", state="待审核合并", tone="ok", risk=risk,
-                why="CI 绿，可以交给审核 Agent",
-                action=f'读 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\REVIEWER.md 按它工作。\n'
-                       f'审 PR #{pr["number"]}，通过就由你合并。\n'
-                       f'PR head SHA：{head}\n风险档：{risk}')
-
-
-def working_branches(pr_branches: set[str]) -> list[dict]:
-    """有工作区但还没开 PR 的 —— agent 还在干活。"""
-    items, cur = [], {}
-    for line in git("worktree", "list", "--porcelain").splitlines():
-        if line.startswith("worktree "):
-            if cur:
-                items.append(cur)
-            cur = {"path": line[9:], "branch": ""}
-        elif line.startswith("branch "):
-            cur["branch"] = line[7:].replace("refs/heads/", "")
-    if cur:
-        items.append(cur)
-
     out = []
-    for w in items[1:]:                       # 第一个是主工作区
-        b = w["branch"]
-        name = Path(w["path"]).name
-        if not b or b in pr_branches or name.startswith("review-"):
+    for p in sorted(LEDGER.glob("T*.json")):
+        try:
+            out.append(json.loads(p.read_text(encoding="utf-8")))
+        except json.JSONDecodeError:
             continue
-        dirty = len([x for x in git("status", "--porcelain",
-                                    cwd=Path(w["path"])).splitlines() if x])
-        ahead = git("rev-list", "--count", f"origin/develop..{b}") or "0"
-        out.append(dict(name=name, branch=b, dirty=dirty, ahead=int(ahead)))
     return out
 
 
-def card(title: str, body: str, note: str = "") -> str:
-    n = f'<p style="color:var(--soft);font-size:13px;margin:0 0 14px">{note}</p>' if note else ""
-    return '<div class="card"><h2>' + esc(title) + "</h2>" + n + body + "</div>"
+def pr_states() -> dict[int, dict]:
+    raw = run(["gh", "pr", "list", "--state", "all", "--limit", "60", "--json",
+               "number,state,mergeable,mergeStateStatus,title"])
+    try:
+        return {p["number"]: p for p in json.loads(raw)} if raw else {}
+    except json.JSONDecodeError:
+        return {}
 
 
-def pr_rows(items: list[tuple[dict, dict]]) -> str:
-    if not items:
-        return "<p style='color:var(--soft)'>暂时没有。</p>"
+def inbox_for(tid: str) -> Path | None:
+    if not INBOX.exists():
+        return None
+    return next((p for p in INBOX.glob("*.md")
+                 if p.name != "README.md" and tid in p.name), None)
+
+
+def state_of(t: dict, prs: dict) -> dict:
+    """判定：走到第几个节点、轮到谁、下一步该干什么。"""
+    last = t["events"][-1]["step"] if t["events"] else ""
+    node = STEP_TO_NODE.get(last, 0)
+    tid, title = t["id"], t["title"]
+    pr = t.get("pr")
+    pr_info = prs.get(pr) if pr else None
+    opinion = inbox_for(tid)
+
+    if last == "已合并":
+        return dict(node=5, who="done", label="已合并", tone="ok",
+                    why=f"完成于 {t['events'][-1]['at']}", action="")
+
+    # 内网意见回来了但还没记 —— 文件系统比 Agent 的记录更靠谱
+    if last == "送内网" and opinion:
+        return dict(node=2, who="you", label="意见已回，待转交", tone="warn",
+                    why=f"{opinion.name} 已经在收件箱里了",
+                    action=f"请根据 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\AUTHOR.md 展开工作。\n"
+                           f"任务 {tid}：内网意见在 docs\\inbox\\{opinion.name}，"
+                           f"按它修改，改完提 PR")
+    if last == "送内网":
+        return dict(node=2, who="you", label="等内网回复", tone="warn",
+                    why="包已同步给内网。回来的 md 放进 docs\\inbox\\，文件名带上任务 ID",
+                    action=f"内网给的 md → 存成 docs\\inbox\\{tid}_内网审核.md")
+    if last == "实现":
+        if t.get("risk") == "红":
+            return dict(node=1, who="you", label="待送内网", tone="warn",
+                        why="红档，按流程要走内网这一圈（约 20 分钟）",
+                        action=f"右键 {tid}_{title}.zip 的 URL → AI HUB 同步选项")
+        return dict(node=1, who="agent", label="待提 PR", tone="", risk_skip=True,
+                    why=f"{t.get('risk') or '非红'}档，跳过内网，直接提 PR", action="")
+    if last in ("内网已回", "打回"):
+        return dict(node=node, who="you", label="待转交 Agent 修改", tone="warn",
+                    why=t["events"][-1].get("note", ""),
+                    action=f"请根据 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\AUTHOR.md 展开工作。\n"
+                           f"任务 {tid}：按 docs\\inbox\\ 里的意见修改，改完更新 PR")
+    if last == "修改":
+        return dict(node=3, who="agent", label="Agent 修改中", tone="", why="", action="")
+    if last == "提PR":
+        conflict = pr_info and pr_info.get("mergeable") == "CONFLICTING"
+        if conflict:
+            return dict(node=4, who="agent", label="PR 冲突，需同步主线", tone="bad",
+                        why="冲突多半在机器生成的手册上，重新生成即可", action="")
+        return dict(node=4, who="you", label="待转给合并 Agent", tone="warn",
+                    why=f"PR #{pr} 已就绪" if pr else "",
+                    action=f"请根据 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\MERGER.md 展开工作。\n"
+                           f"任务 {tid}，审 PR #{pr}，通过就由你合并。")
+    if last == "审核中":
+        return dict(node=4, who="agent", label="合并 Agent 审核中", tone="", why="", action="")
+    return dict(node=0, who="agent", label="Agent 实现中", tone="", why="", action="")
+
+
+def track(node: int, tone: str) -> str:
+    """五个节点的进度条。当前节点按 tone 上色。"""
+    cur = "stuck" if tone in ("warn", "bad") else "now"
     out = []
-    for pr, c in items:
-        out.append(
-            '<div style="border-bottom:1px solid var(--line);padding:14px 0">'
-            f'<div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">'
-            f'<span class="badge {c["tone"]}">{esc(c["state"])}</span>'
-            f'<b>#{pr["number"]}</b> {esc(pr["title"][:56])}'
-            f'<span style="color:var(--soft);font-size:12px">'
-            f'{esc(c["risk"])}档 · {esc(pr["headRefName"])} · {esc(pr["headRefOid"][:7])}</span>'
-            "</div>"
-            f'<p style="margin:6px 0 8px;font-size:14px">{esc(c["why"])}</p>'
-            f'<pre style="font-size:12px">{esc(c["action"])}</pre>'
-            "</div>")
-    return "".join(out)
+    for i in range(5):
+        if i < node:
+            cls = "done"
+        elif i == node:
+            cls = cur
+        else:
+            cls = ""
+        out.append(f'<span class="node {cls}" title="{NODES[i]}"></span>')
+        if i < 4:
+            out.append(f'<span class="seg {"done" if i < node - 1 else ""}"></span>')
+    return '<div class="track">' + "".join(out) + "</div>"
+
+
+def lane(t: dict, s: dict) -> str:
+    mine = s["who"] == "you"
+    badge = {"红": "red", "黄": "yellow", "绿": "green"}.get(t.get("risk", ""), "green")
+    act = (f'<pre class="act">{esc(s["action"])}</pre>' if s.get("action") else "")
+    tag = ('<span class="badge mine">轮到你</span>' if mine
+           else f'<span class="badge {s["tone"] or "idle"}">{esc(s["label"])}</span>')
+    return (f'<div class="lane{" mine" if mine else ""}">'
+            f'<div class="left"><span class="t">{esc(t["title"])}</span>'
+            f'<span class="tid">{esc(t["id"])}</span> '
+            f'<span class="badge {badge}">{esc(t.get("risk") or "?")}</span></div>'
+            f"{track(s['node'], s['tone'])}"
+            f'<div class="st">{tag}<small>{esc(s.get("why", ""))}</small></div>'
+            f"</div>{act}")
 
 
 def build() -> str:
-    git("fetch", "origin", "--prune", "--quiet")
-    prs = open_prs()
-    packs, inbox = packs_by_sha(), inbox_files()
-    classified = [(pr, classify(pr, packs, inbox)) for pr in prs]
+    run(["git", "fetch", "origin", "--prune", "--quiet"])
+    tasks, prs = load_tasks(), pr_states()
+    rows = [(t, state_of(t, prs)) for t in tasks]
 
-    mine = [x for x in classified if x[1]["who"] == "you"]
-    agents = [x for x in classified if x[1]["who"] == "agent"]
-    waiting = [x for x in classified if x[1]["who"] == "pack"]
-    working = working_branches({pr["headRefName"] for pr in prs})
+    active = [(t, s) for t, s in rows if s["who"] != "done"]
+    done = [(t, s) for t, s in rows if s["who"] == "done"]
+    active.sort(key=lambda x: (x[1]["who"] != "you", x[0]["id"]))
+    mine = sum(1 for _, s in active if s["who"] == "you")
 
-    if working:
-        rows = "".join(
-            f'<tr><td><b>{esc(w["name"])}</b></td><td>{esc(w["branch"])}</td>'
-            f'<td>{w["ahead"]} 个提交</td>'
-            f'<td>{"有 " + str(w["dirty"]) + " 个未提交" if w["dirty"] else "干净"}</td></tr>'
-            for w in working)
-        working_html = ('<div class="scroll"><table><tr><th>工作区</th><th>分支</th>'
-                        f"<th>已做</th><th>状态</th></tr>{rows}</table></div>")
+    if active:
+        lanes = "".join(lane(t, s) for t, s in active)
     else:
-        working_html = "<p style='color:var(--soft)'>没有在干活的 Agent。</p>"
+        lanes = ('<p style="color:var(--soft)">没有进行中的任务。'
+                 '让 Agent 跑 <code>superran_task.py new "标题"</code> 开一个。</p>')
 
-    head = (f'<p class="lead">你有 <b>{len(mine)}</b> 件事要做，'
-            f'<b>{len(waiting)}</b> 件卡在内网评审这一环，'
-            f'<b>{len(agents) + len(working)}</b> 件在 Agent 手上。</p>')
-    if len(waiting) >= 3:
-        head += ('<div class="tint"><h3>内网评审是当前的瓶颈</h3>'
-                 f'有 {len(waiting)} 条红档 PR 都等着走内网这一圈。'
-                 '不必一次全带走——挑物理风险最高的先送，其余可以先合，'
-                 '有问题后面当新任务修。<b>流程是为你服务的，不是反过来。</b></div>')
+    hist = "".join(
+        f'<div class="hrow"><span class="tid">{esc(t["id"])}</span>'
+        f'<b>{esc(t["title"])}</b>'
+        f'<span class="age">{esc(s.get("why", ""))}</span></div>'
+        for t, s in sorted(done, key=lambda x: x[0]["id"], reverse=True))
+
+    head = (f'<p class="lead"><b>{mine}</b> 件事等你，'
+            f'<b>{len(active) - mine}</b> 件在 Agent 手上，'
+            f'已完成 <b>{len(done)}</b> 件。</p>'
+            + ('<div class="tint">下面每条<b>橙色</b>的都轮到你了，'
+               '框里的话复制到新会话就行。</div>' if mine else
+               '<div class="tint">暂时没有需要你操作的，等 Agent 交付。</div>'))
 
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            "<title>SuperRAN 任务看板</title><style>" + CSS +
-            "pre{white-space:pre-wrap}</style></head>"
-            '<body><div class="wrap"><h1>我现在该做什么</h1>'
-            f'<p class="sub">{datetime.now():%Y-%m-%d %H:%M} · 状态自动推导，无需手工维护</p>'
-            + card("总览", head)
-            + card(f"① 轮到你了（{len(mine)}）", pr_rows(mine),
-                   "复制下面的命令，开新会话粘贴进去就行。")
-            + card(f"② 内网评审这一环（{len(waiting)}）", pr_rows(waiting),
-                   "脚本判断不了你有没有真把包带走，所以两种情况的做法都写了。")
-            + card(f"③ 要 Agent 处理（{len(agents)}）", pr_rows(agents))
-            + card(f"④ Agent 还在干活（{len(working)}）", working_html,
-                   "还没开 PR，等它自己交付。")
-            + f'<p class="foot">由 scripts/superran_tasks.py 生成 · 只读 · '
+            '<meta http-equiv="refresh" content="120">'
+            "<title>SuperRAN 工作台</title><style>" + CSS + EXTRA + "</style></head>"
+            '<body><div class="wrap"><h1>SuperRAN 工作台</h1>'
+            f'<p class="sub">{datetime.now():%Y-%m-%d %H:%M} · 每 2 分钟自动刷新 · '
+            "节点：实现 → 内网审查 → 修改 → PR 审核 → 合并</p>"
+            '<div class="card">' + head + "</div>"
+            '<div class="card"><h2>进行中</h2>' + lanes +
+            '<div class="legend"><span><i class="ok"></i>已完成</span>'
+            '<span><i class="ac"></i>进行中</span><span><i class="wn"></i>等你</span>'
+            '<span><i class="id"></i>未开始</span></div></div>'
+            + (f'<details class="card"><summary>历史（{len(done)} 件已完成）</summary>'
+               f'<div style="margin-top:12px">{hist}</div></details>' if done else "")
+            + f'<p class="foot">数据来自任务台账，Agent 每完成一步自己记一行 · '
               f'<a href="{esc((REPORT_DIR / "index.html").as_uri())}">全部报告</a></p>'
             "</div></body></html>")
+
+
+EXTRA = """
+.lane{display:grid;grid-template-columns:250px 1fr 210px;gap:14px;align-items:center;
+padding:14px 0;border-bottom:1px solid var(--line)}
+.lane .left .t{font-weight:600;font-size:14.5px;display:block;margin-bottom:2px}
+.tid{font-family:"SF Mono",Consolas,monospace;font-size:11.5px;color:var(--soft)}
+.lane.mine{background:var(--tint);border-left:3px solid var(--warn);
+margin:0 -24px;padding:14px 24px 14px 21px;border-bottom:0}
+.track{display:flex;align-items:center}
+.node{width:11px;height:11px;border-radius:6px;background:var(--line);flex:none}
+.node.done{background:var(--ok)}
+.node.now{background:var(--accent);box-shadow:0 0 0 4px var(--accent);
+outline:3px solid var(--card);outline-offset:-3px}
+.node.stuck{background:var(--warn);box-shadow:0 0 0 4px var(--warn);
+outline:3px solid var(--card);outline-offset:-3px}
+.seg{height:2px;flex:1;background:var(--line)}
+.seg.done{background:var(--ok)}
+.st{font-size:13px;text-align:right}
+.st small{display:block;color:var(--soft);font-size:11.5px;margin-top:3px}
+.badge.idle{background:var(--line);color:var(--ink)}
+.badge.red{background:var(--bad);color:#fff}
+.badge.yellow{background:var(--warn);color:#1d1d1f}
+.badge.green{background:var(--ok);color:#1d1d1f}
+.badge.mine{background:var(--warn);color:#1d1d1f}
+.act{background:var(--code-bg);color:var(--code-ink);border-radius:8px;
+padding:11px 13px;font-size:12px;white-space:pre-wrap;word-break:break-word;
+margin:0 0 14px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--soft);
+margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:5px;margin-right:5px}
+.legend i.ok{background:var(--ok)}.legend i.ac{background:var(--accent)}
+.legend i.wn{background:var(--warn)}.legend i.id{background:var(--line)}
+.hrow{display:flex;gap:12px;align-items:baseline;padding:8px 0;
+border-bottom:1px solid var(--line);font-size:13.5px}
+.hrow:last-child{border-bottom:0}
+.hrow .age{margin-left:auto;color:var(--soft);font-size:12px}
+summary{cursor:pointer;font-weight:700;font-size:16px}
+@media(max-width:900px){.lane{grid-template-columns:1fr;gap:8px}
+.st{text-align:left}.lane.mine{margin:0;padding:14px 0 14px 12px}}
+"""
 
 
 def main() -> int:
@@ -245,15 +250,14 @@ def main() -> int:
     out = REPORT_DIR / "tasks.html"
     out.write_text(build(), encoding="utf-8")
 
-    prs = open_prs()
-    packs, inbox = packs_by_sha(), inbox_files()
+    prs = pr_states()
     print()
-    for pr in prs:
-        c = classify(pr, packs, inbox)
-        flag = {"you": "→ 轮到你", "pack": "  内网这环",
-                "agent": "  等 Agent"}.get(c["who"], "  ?")
-        print(f"  {flag}  #{pr['number']:<3} [{c['risk']}] {c['state']:<16} "
-              f"{pr['title'][:38]}")
+    for t in load_tasks():
+        s = state_of(t, prs)
+        if s["who"] == "done":
+            continue
+        mark = "→ 轮到你 " if s["who"] == "you" else "         "
+        print(f"  {mark}[{t.get('risk') or '?'}] {s['label']:<18} {t['title']}")
     print(f"\n绝对路径：{out}")
     if "--no-open" not in sys.argv:
         webbrowser.open(out.as_uri())
