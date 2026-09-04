@@ -1983,6 +1983,7 @@ def sr_system_sim(
     tti_trace_max_points: int = 256,
     kpi_focus: list[str] | None = None,
     kpi_intent: str = "",
+    serving_cell: int | None = None,
 ) -> dict[str, Any]:
     """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI，全部带置信区间。**
 
@@ -2092,6 +2093,16 @@ def sr_system_sim(
         ``num_slots_per_sample=1`` 且 ``num_samples/num_ues>=8``，既保留时间序列，
         又避免门 1 的 IoT 自洽性失败。
     duration_s : 仿真时长，3~20 秒。逐 TTI 的 FIFO 与 RBG 分配是主要开销。
+    serving_cell : 多小区数据集里只取这个 serving cell 的 UE 做单小区调度。
+        **3GPP TR 36.814 的标准撒点密度是每扇区 10 个 UE**，7 站 21 扇区就要撒
+        210 个；而本仿真器一次只调度一个小区，所以必须能挑出属于某个小区的那批。
+        不给（默认）时，多小区数据集仍按原来那样硬失败。
+        挑哪个小区是**物理选择**：拓扑没有 wrap-around，边缘站的邻区不完整、
+        干扰被低估，应当挑被邻区包围最完整的中心站小区；结果里的
+        ``serving_cell_selection`` 会回报实际选中的小区、它有几个 UE 以及
+        该小区 UE 的 IoT 中位，便于核对选得对不对。
+        与 ``rb_power_control_enabled`` 同开会硬失败：逐 RB 功控的几何量直接来自
+        数据集、不随样本筛选走，混用会得到一个半对半错的资源池。
     traffic_model : ``ftp3``（3GPP FTP Model 3，评价体验速率的标准话务）/
         ``cdf``（两份 value,cdf 文件驱动包大小与包间隔 renewal process）/
         ``mixed``（推荐：大小 UE 混跑，包长与到达率外生定义）/
@@ -2337,16 +2348,91 @@ def sr_system_sim(
                 f"UE {ue} 的时间快照跨越多个 serving cell {cells}；"
                 "当前系统仿真没有实现切换，拒绝混表。")}
         serving_cell_ids_by_ue.append(int(cells[0]))
+    try:
+        sir = [float(x) for x in np.asarray(ds.scalar("sir_dB"))]
+    except Exception:  # noqa: BLE001
+        sir = None
+
+    # --- 按 serving cell 挑出单小区的那批 UE ------------------------------
+    serving_cell_selection: dict[str, Any] | None = None
+    if serving_cell is not None:
+        if (isinstance(serving_cell, bool)
+                or not isinstance(serving_cell, (int, np.integer))):
+            return {"error": "serving_cell 必须是整数小区编号或 None"}
+        # _flag 在下面才定义；这里内联同一判据（"off"/"false"/"0" 等字符串
+        # 直接 bool() 会是真值，开关会无声失灵）。
+        _rbpc_raw = rb_power_control_enabled
+        _rbpc_on = (_rbpc_raw.strip().lower() not in
+                    ("off", "false", "0", "no", "")
+                    if isinstance(_rbpc_raw, str) else bool(_rbpc_raw))
+        if _rbpc_on:
+            return {"error": (
+                "serving_cell 筛选不能与 rb_power_control_enabled 同开："
+                "逐 RB 功控的几何量（DownlinkPowerGeometry）直接来自数据集、"
+                "不随样本筛选走，混用会得到一个半对半错的资源池。"
+                "请先关掉 RB 功控，或生成本来就只含单个 serving cell 的数据集。")}
+        target_cell = int(serving_cell)
+        selected_ues = [ue for ue, cell in enumerate(serving_cell_ids_by_ue)
+                        if cell == target_cell]
+        if not selected_ues:
+            return {"error": (
+                f"serving_cell={target_cell} 在数据集里没有任何 UE；可选小区与 UE 数："
+                + str({c: serving_cell_ids_by_ue.count(c)
+                       for c in sorted(set(serving_cell_ids_by_ue))}))}
+        if len(selected_ues) < 2:
+            return {"error": (
+                f"serving_cell={target_cell} 只有 {len(selected_ues)} 个 UE，"
+                "调度是多用户之间的取舍，单用户小区测不出调度器。"
+                "请提高撒点密度（3GPP TR 36.814 用每扇区 10 个 UE）后重新生成。")}
+        # **保持轮转不变式**：样本 i 必须属于 UE i % n_ue，下游 group_samples_by_ue
+        # 依赖它。按 (snapshot, 选中 UE) 的顺序重排，新样本 j -> 新 UE j % k。
+        total_samples = len(h_users)
+        n_snapshots = total_samples // int(n_ue)
+        order = [ue + snap * int(n_ue)
+                 for snap in range(n_snapshots)
+                 for ue in selected_ues]
+        h_users = [h_users[i] for i in order]
+        h_est_users = [h_est_users[i] for i in order]
+        sinr = np.asarray(sinr)[order]
+        if sir is not None:
+            sir = [sir[i] for i in order]
+        _iot_median = None
+        try:
+            _iot_all = np.asarray(ds.scalar("iot_dl_dB")).ravel()
+            _sel_iot = np.asarray([float(_iot_all[i]) for i in order], dtype=float)
+            _sel_iot = _sel_iot[np.isfinite(_sel_iot)]
+            if _sel_iot.size:
+                _iot_median = round(float(np.median(_sel_iot)), 3)
+        except Exception:  # noqa: BLE001
+            _iot_median = None
+        serving_cell_selection = {
+            "requested": target_cell,
+            "ues_in_cell": len(selected_ues),
+            "ues_in_dataset": int(n_ue),
+            "cells_in_dataset": len(set(serving_cell_ids_by_ue)),
+            "ue_count_by_cell": {
+                str(c): serving_cell_ids_by_ue.count(c)
+                for c in sorted(set(serving_cell_ids_by_ue))},
+            "selected_iot_db_median": _iot_median,
+            "sample_layout": (
+                "re-interleaved as (snapshot, selected UE) so that sample i still "
+                "belongs to UE i % num_ues, which group_samples_by_ue relies on"),
+            "note": (
+                "single-cell scheduling over one cell of a multi-cell drop; "
+                "inter-cell interference enters through the geometric SINR/SIR of "
+                "the drop plus the analytic neighbour load, not through the "
+                "discarded UEs of other cells"),
+        }
+        n_ue = len(selected_ues)
+        serving_cell_ids_by_ue = [target_cell] * n_ue
+
     distinct_serving_cells = sorted(set(serving_cell_ids_by_ue))
     if len(distinct_serving_cells) != 1:
         return {"error": (
             "当前 SystemResult 是单小区调度结果，不能把不同 serving cell 的 UE "
             f"放进同一 272-RB 资源池（实得 {distinct_serving_cells}）。"
-            "请按 serving cell 筛选后分别运行；联合调度属于下一阶段。")}
-    try:
-        sir = [float(x) for x in np.asarray(ds.scalar("sir_dB"))]
-    except Exception:  # noqa: BLE001
-        sir = None
+            "请用 serving_cell=<小区编号> 挑出其中一个小区，"
+            "或生成本来就只含单个 serving cell 的数据集；联合调度属于下一阶段。")}
     # **快照间隔由配置算出来，不能拍脑袋。** ChannelHub 的多时隙输出是连续的
     # SRS/CSI-RS 机会（默认 5 ms），不是连续 TTI——当成 TTI 会让所有时间相关的
     # 结论差 10 倍，见 CLAUDE.md「多时隙的快照间隔是 5 ms」。
@@ -2801,6 +2887,8 @@ def sr_system_sim(
             "生成信道时的版本一致；正式结论建议用当前版本重新生成。"
         )
     out["num_samples"] = len(h_users)
+    if serving_cell_selection is not None:
+        out["serving_cell_selection"] = serving_cell_selection
     out["summary"] = res.text()
     out["timing"] = {
         "build_tables_s": round(build_s, 3),

@@ -253,6 +253,62 @@ def test_multi_serving_cell_hard_fails_even_when_rb_power_control_is_off() -> No
     assert "272-RB" in out["error"]
 
 
+def test_serving_cell_selection_picks_one_cell_and_keeps_ue_rotation() -> None:
+    """多小区数据集里挑一个小区做单小区调度。
+
+    3GPP TR 36.814 的标准撒点密度是每扇区 10 个 UE，21 扇区要撒 210 个；
+    仿真器一次只调度一个小区，所以必须能挑出属于某个小区的那批。
+    **最容易错的地方是轮转不变式**：样本 i 必须属于 UE i % num_ues，
+    下游 group_samples_by_ue 依赖它；筛完不重排就会静默把不同 UE 的快照混掉。
+    """
+    # 8 个样本 / 4 个 UE：UE0,UE2 在小区 0，UE1,UE3 在小区 1（按轮转布局）
+    _write_dataset(n_samples=8, n_ues=4,
+                   serving_cell_indices=np.asarray([0, 1, 0, 1] * 2),
+                   cells_configured=2)
+    out = _run(serving_cell=0)
+    assert "error" not in out, out.get("error")
+    sel = out["serving_cell_selection"]
+    assert sel["requested"] == 0
+    assert sel["ues_in_cell"] == 2 and sel["ues_in_dataset"] == 4
+    assert sel["ue_count_by_cell"] == {"0": 2, "1": 2}
+    # 只剩被选中那两个 UE，且样本数按快照数 x 选中 UE 数收缩
+    assert len(out["users"]) == 2
+    assert out["num_samples"] == 4
+
+
+def test_serving_cell_selection_rejects_empty_and_single_ue_cells() -> None:
+    _write_dataset(n_samples=8, n_ues=4,
+                   serving_cell_indices=np.asarray([0, 1, 0, 1] * 2),
+                   cells_configured=2)
+    # 不存在的小区：报错里要把可选小区和各自 UE 数给出来
+    out = _run(serving_cell=7)
+    assert "error" in out and "没有任何 UE" in out["error"]
+    assert "'0': 2" in out["error"] or "0: 2" in out["error"]
+    # 只有 1 个 UE 的小区：调度是多用户取舍，单用户测不出调度器
+    _write_dataset(n_samples=8, n_ues=4,
+                   serving_cell_indices=np.asarray([0, 1, 1, 1] * 2),
+                   cells_configured=2)
+    out = _run(serving_cell=0)
+    assert "error" in out and "单用户小区测不出调度器" in out["error"]
+
+
+def test_serving_cell_selection_refuses_to_mix_with_rb_power_control() -> None:
+    """逐 RB 功控的几何量直接来自数据集、不随样本筛选走，混用是半对半错。"""
+    _write_dataset(n_samples=8, n_ues=4,
+                   serving_cell_indices=np.asarray([0, 1, 0, 1] * 2),
+                   cells_configured=2)
+    out = _run(serving_cell=0, rb_power_control_enabled=True)
+    assert "error" in out and "不能与 rb_power_control_enabled 同开" in out["error"]
+
+
+def test_multi_serving_cell_error_points_at_the_selection_parameter() -> None:
+    _write_dataset(
+        serving_cell_indices=np.asarray([0, 1] * 4),
+        cells_configured=2)
+    out = _run(rb_power_control_enabled=False)
+    assert "error" in out and "serving_cell=<小区编号>" in out["error"]
+
+
 def test_multicell_dataset_missing_serving_identity_hard_fails() -> None:
     _write_dataset(
         include_serving_cell_indices=False,
