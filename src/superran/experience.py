@@ -1327,10 +1327,21 @@ def _retx_indices(ordered: Sequence[int], lookup: TbsLookup,
 
     重传必须复现首传的 TBS，而 TBS 只取决于 RE 数，也就是 PRB 数——不是 RBG
     个数。等长分组下（``rbg_prb_sizes`` 全相同，绝大多数配置）本函数按顺序取
-    前 k 个，与旧的 ``ordered[:n]`` 逐位一致；只有首尾组不足名义 P 的载波
-    （51 RB → ``(8,...,8,3)``）才会走到跳过分支。
+    前 k 个，与旧的 ``ordered[:n]`` 逐位一致。
 
-    凑不出恰好 ``n_prb``（例如尾组这一 TTI 被别人占了）时返回 ``None``，
+    **必须回溯，不能只做贪心。** 优先级最高的那个组不一定进得了解：
+    51 RB 的 ``(8,8,8,8,8,8,3)`` 下如果 3 PRB 的尾组排在最前、而要凑的是
+    8 PRB，先拿走尾组就再也补不齐（剩下全是 8，只差 5）——纯贪心会返回
+    "无解"，可实际上随便一个 8 PRB 组就是解。这不是罕见组合：非频选时
+    ``rotated_order`` 的 cursor 每 ``num_rbg`` 个 TTI 就会把尾组轮到最前，
+    频选时尾组只要信道好也会排最前。返回假的"无解"会让这次重传被无限推迟。
+
+    所以这里做的是**带回溯的优先级搜索**：优先尝试"包含当前最高优先级的组"，
+    走不通再回退成"跳过它"，并把走不通的 ``(下标, 还差多少)`` 记下来，
+    避免指数级重试。取值集合很小（组数 ≤ 20 上下、目标 ≤ 275 PRB），
+    状态数是 O(组数 × 目标)，主循环里可以忽略。
+
+    凑不出恰好 ``n_prb``（例如尾组这一 TTI 真的被别人占了）时返回 ``None``，
     调用方把这次重传推迟到下一个同类型时隙——**不允许**退而求其次用别的
     PRB 数，那等于让重传的 TB 变了大小。
     """
@@ -1338,17 +1349,36 @@ def _retx_indices(ordered: Sequence[int], lookup: TbsLookup,
     target = int(n_prb)
     if target <= 0:
         return None
+    order = [int(value) for value in ordered]
+    widths = [int(sizes[idx]) for idx in order]
+    count = len(order)
+    # 后缀和剪枝：剩下的全加起来都不够就不用再往下试
+    suffix = [0] * (count + 1)
+    for i in range(count - 1, -1, -1):
+        suffix[i] = suffix[i + 1] + widths[i]
+    dead: set[tuple[int, int]] = set()
     picked: list[int] = []
-    total = 0
-    for idx in ordered:
-        width = int(sizes[int(idx)])
-        if total + width > target:
-            continue
-        picked.append(int(idx))
-        total += width
-        if total == target:
-            return tuple(picked)
-    return None
+
+    def _search(start: int, remaining: int) -> bool:
+        if remaining == 0:
+            return True
+        if start >= count or suffix[start] < remaining:
+            return False
+        key = (start, remaining)
+        if key in dead:
+            return False
+        # 先试"要这个组"——这样等长分组下解就是 ordered[:k]，与旧行为逐位一致
+        if widths[start] <= remaining:
+            picked.append(order[start])
+            if _search(start + 1, remaining - widths[start]):
+                return True
+            picked.pop()
+        if _search(start + 1, remaining):
+            return True
+        dead.add(key)
+        return False
+
+    return tuple(picked) if _search(0, target) else None
 
 
 def _build_su_plan(

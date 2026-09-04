@@ -1,7 +1,9 @@
 """Unit and stress tests for the P0 scheduling contracts."""
 from __future__ import annotations
 
+import itertools
 import json
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -286,21 +288,32 @@ def test_retx_indices_is_bit_identical_to_head_slice_when_groups_are_equal():
         assert exp_mod._retx_indices(ordered, lookup, 16 * n) == ordered[:n]
 
 
-def _retx_su_plan(*, frequency_aware: bool, cursor: int):
-    """构造一个"首传占了 3 PRB 尾组、重传时优先级把 8 PRB 组排前面"的 TTI。"""
+def _retx_su_plan(*, frequency_aware: bool, cursor: int,
+                  first_tx_indices: tuple[int, ...] = (6,),
+                  tail_first: bool = False):
+    """构造一个"首传占了某几个组、重传时优先级换了个顺序"的 TTI。
+
+    ``tail_first=True`` 把 3 PRB 的尾组顶到优先级最前——这正是纯贪心会翻车的
+    形状：先拿走尾组就再也补不齐 8 PRB（剩下全是 8，只差 5）。
+    非频选靠 ``cursor=6`` 达到同样效果（``rotated_order`` 从 cursor 开始排）。
+    """
     lookup = _uneven_lookup()
     n_rbg = len(_UNEVEN_SIZES)
-    frozen_tbs = int(lookup.tbs_bytes_for_indices("D", 23, 2, (6,)))
+    frozen_tbs = int(lookup.tbs_bytes_for_indices("D", 23, 2, first_tx_indices))
+    frozen_prb = int(sum(_UNEVEN_SIZES[i] for i in first_tx_indices))
     pending = exp_mod._HarqTb(
-        mcs=23, rank=2, n_rbg=1, n_prb=3,
+        mcs=23, rank=2, n_rbg=len(first_tx_indices), n_prb=frozen_prb,
         tb_bytes=frozen_tbs, payload_bytes=frozen_tbs,
         slot="D", first_tti=0, first_mode="SU",
         feedback=ap.FirstTxFeedback(
             ue=0, ack=False, mcs=23, rank=2, realized_se=0.0,
             tx_tti=0, effective_tti=1, use_mu_olla=False),
         state="retx_ready")
-    # 逐 RBG SINR 让 8 PRB 的组看起来更好，频选一定先拿它们。
-    per_rbg = np.array([30.0, 29.0, 28.0, 27.0, 26.0, 25.0, 5.0])
+    # 逐 RBG SINR 决定频选的优先级顺序。默认让 8 PRB 的组更好；
+    # tail_first 时把尾组抬成最好的，逼频选先看它。
+    per_rbg = (np.array([25.0, 24.0, 23.0, 22.0, 21.0, 20.0, 30.0])
+               if tail_first
+               else np.array([30.0, 29.0, 28.0, 27.0, 26.0, 25.0, 5.0]))
     table = SimpleNamespace(
         sinr_db=np.full((1, 4), 25.0),
         sinr_tx_db=np.full((1, 4), 25.0),
@@ -331,6 +344,75 @@ def test_retransmission_reproduces_the_frozen_tbs_on_an_uneven_carrier(
     assert prb == 3, (grant.rbg_indices, prb)
     assert int(grant.tbs_bytes[0]) == int(
         lookup.tbs_bytes_for_indices("D", 23, 2, (6,)))
+
+
+def test_retx_indices_backtracks_when_the_tail_group_is_highest_priority():
+    """**纯贪心会在这里返回假的「无解」。**（2026-09-04 合并 Agent 发现）
+
+    ``(8,8,8,8,8,8,3)`` 下要凑 8 PRB，如果 3 PRB 的尾组排在优先级最前，
+    先拿走它就再也补不齐（剩下全是 8，只差 5）。可实际上随便一个 8 PRB
+    组就是解。返回假的「无解」会让这次重传被无限推迟。
+
+    这不是罕见组合：非频选时 ``rotated_order`` 的 cursor 每 ``num_rbg`` 个
+    TTI 就把尾组轮到最前；频选时尾组只要信道好也会排最前。
+    """
+    lookup = _uneven_lookup()
+    tail_first = (6, 0, 1, 2, 3, 4, 5)
+    # 尾组进不了解 → 必须跳过它
+    assert exp_mod._retx_indices(tail_first, lookup, 8) == (0,)
+    assert exp_mod._retx_indices(tail_first, lookup, 16) == (0, 1)
+    assert exp_mod._retx_indices(tail_first, lookup, 24) == (0, 1, 2)
+    # 尾组进得了解 → 优先级最高就该用它
+    assert exp_mod._retx_indices(tail_first, lookup, 3) == (6,)
+    assert exp_mod._retx_indices(tail_first, lookup, 11) == (6, 0)
+    # 真的无解时仍然返回 None，不许退而求其次换个 PRB 数
+    assert exp_mod._retx_indices(tail_first, lookup, 7) is None
+    assert exp_mod._retx_indices((6,), lookup, 8) is None
+
+
+def test_retx_indices_matches_brute_force_on_every_priority_order():
+    """穷举核对：任何优先级顺序、任何目标 PRB 数，可解性与暴力搜索一致，
+    且返回的组合 PRB 数精确等于目标。"""
+    lookup = _uneven_lookup()
+    sizes = _UNEVEN_SIZES
+
+    def _solvable(order, target):
+        return any(
+            sum(sizes[order[i]] for i in combo) == target
+            for k in range(1, len(order) + 1)
+            for combo in itertools.combinations(range(len(order)), k))
+
+    rng = random.Random(20260904)
+    for _ in range(60):
+        order = tuple(rng.sample(range(len(sizes)), rng.randint(1, len(sizes))))
+        for target in range(1, sum(sizes[i] for i in order) + 1):
+            got = exp_mod._retx_indices(order, lookup, target)
+            assert (got is not None) == _solvable(order, target), (order, target)
+            if got is not None:
+                assert sum(sizes[i] for i in got) == target, (order, target, got)
+
+
+@pytest.mark.parametrize(
+    ("frequency_aware", "cursor", "tail_first"),
+    [(False, 6, False), (True, 0, True)])
+def test_retransmission_survives_the_tail_group_being_first(
+        frequency_aware, cursor, tail_first):
+    """端到端：首传占了一个 8 PRB 组，重传时尾组排在优先级最前。
+
+    非频选靠 ``cursor=6``（``rotated_order`` 从 cursor 开始排），频选靠把尾组
+    的 SINR 抬到最高。两条路径都必须挑出 8 PRB、复现冻结的 TBS，而不是
+    因为凑不齐把重传推掉。
+    """
+    lookup = _uneven_lookup()
+    plan = _retx_su_plan(frequency_aware=frequency_aware, cursor=cursor,
+                         first_tx_indices=(0,), tail_first=tail_first)
+    assert len(plan.grants) == 1, "重传被错误地推迟了（贪心返回了假的无解）"
+    grant = plan.grants[0]
+    prb = sum(_UNEVEN_SIZES[i] for i in grant.rbg_indices)
+    assert prb == 8, (grant.rbg_indices, prb)
+    assert 6 not in grant.rbg_indices, "3 PRB 的尾组不可能凑出 8 PRB"
+    assert int(grant.tbs_bytes[0]) == int(
+        lookup.tbs_bytes_for_indices("D", 23, 2, (0,)))
 
 
 if __name__ == "__main__":
