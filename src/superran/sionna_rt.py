@@ -562,15 +562,38 @@ class SionnaRTSource(InternalSimSource):
         spec = array_spec_from_config(self.cfg, n_bs, n_ue)
         if rays is None:
             if role == "serving":
+                # 先分清是「这个 UE 真的没覆盖」还是「38.901 选的服务小区
+                # 恰好被挡住，而别的小区是通的」——两者的处理方式完全不同，
+                # 一句「覆盖空洞」会把后者误导成前者。
+                reachable = sum(1 for item in per_cell if item is not None)
+                if reachable > 0:
+                    cause = (
+                        f"该 UE 还有 {reachable} 个物理站可达，只是 38.901 按路损+扇区增益"
+                        "选出的这个服务小区在射线追踪下追不到径。这是**大尺度用 38.901、"
+                        "小尺度用射线追踪**这个混合口径的固有后果：服务小区的选择不知道"
+                        "建筑遮挡。"
+                    )
+                    hint = (
+                        "处理办法：用 custom_ue_positions 挑同时满足两边的位置；"
+                        "或减少站数/改 isd_m 让选择与可达一致；"
+                        "或把 rt_max_depth 调大、打开 rt_diffuse_reflection / "
+                        "rt_edge_diffraction 让被挡的链路也能追到径。"
+                    )
+                else:
+                    cause = "该 UE 对**所有**物理站都追不到径，是真实的覆盖空洞。"
+                    hint = (
+                        "处理办法：换 UE 位置（custom_ue_positions）、调 tx_height_m / "
+                        "rt_scene_offset_m，或打开 rt_diffuse_reflection / rt_edge_diffraction。"
+                    )
                 raise RuntimeError(
-                    "Sionna RT 在服务链路上没有追到任何径（全遮挡）："
+                    "Sionna RT 在服务链路上没有追到任何径："
                     f"scene={self._scene_name!r} cell={index} "
                     f"bs={np.round(np.asarray(cell.position) + self._scene_offset_m, 2).tolist()} "
                     f"ue={np.round(np.asarray(ue_position) + self._scene_offset_m, 2).tolist()}"
                     f"（含场景平移 {np.round(self._scene_offset_m[:2], 2).tolist()}）。"
-                    "这是真实的覆盖空洞，不会退回统计信道。可用 custom_ue_positions "
-                    "指定已知有覆盖的位置，或调 isd_m / tx_height_m / rt_scene_offset_m，"
-                    "也可以把 rt_max_depth 调大、打开 rt_diffuse_reflection。"
+                    + cause
+                    + "不会退回统计信道。"
+                    + hint
                 )
             # 干扰小区被完全遮挡是正常物理结果：该小区不产生干扰信道。
             self._sample_diag.append(
@@ -652,6 +675,21 @@ class SionnaRTSource(InternalSimSource):
                     # 假角度。loader.paths() 认这个键并拒绝返回错误结果。
                     "rt_large_scale_source": "3gpp-tr38901-formula-not-ray-traced",
                     "rt_array_model": "superran-effective-subarray-shared-with-cdl",
+                    # internal_sim 是逐位可复现的；射线追踪不是。Sionna 的
+                    # PathSolver 即使固定 seed、单线程、同一进程内连跑，返回的
+                    # 时延与复幅度仍有末位差异（实测 max|Δa|/|a| ~ 1e-5）。
+                    # 传到信道矩阵上实测 NMSE −65 ~ −122 dB，物理上可忽略，
+                    # 但**字节不同**：RT 数据集不能靠重跑逐位复算。
+                    "rt_bit_reproducible": False,
+                    "rt_reproducibility_note": (
+                        "sionna PathSolver is not bit-deterministic; measured "
+                        "run-to-run channel NMSE -65..-122 dB on munich"
+                    ),
+                    # 阵元方向图只进链路预算（按链路方位的标量），没有逐径加权；
+                    # 阵列响应在整个 100 MHz 上是常数（无 beam squint）。
+                    # 这两条与 CDL 路径一致，但 RT 的径角度散得更开，误差更值得注意。
+                    "rt_element_pattern_per_ray": False,
+                    "rt_beam_squint_modeled": False,
                     "polarization_slant_angles_deg": list(self._slant_angles_deg()),
                 }
             )

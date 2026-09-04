@@ -455,6 +455,66 @@ def test_synthesis_matches_sionna_own_frequency_response() -> None:
 
 
 @requires_sionna
+def test_ray_traced_channel_is_reproducible_in_physics_but_not_in_bytes() -> None:
+    """射线追踪**不是**逐位可复现的，但抖动必须小到物理上可忽略。
+
+    Sionna 的 PathSolver 即使固定 seed、单线程、同一进程内连跑，返回的时延与
+    复幅度仍有末位差异——这是 Sionna/Dr.Jit 的性质，不是本仓能修的。所以这里
+    守的是**上界**而不是 bit 相等：一旦缓存失效、seed 没传进去或者场景被重建，
+    偏差会从 1e-4 量级跳到 O(1)，这条就会红。
+
+    同时断言 meta 明确声明了「不逐位可复现」，免得有人拿 CDL 的复算习惯套上来。
+    """
+    first = list(ch.iter_samples("sionna_rt", _rt_cfg()))
+    second = list(ch.iter_samples("sionna_rt", _rt_cfg()))
+    assert first[0].meta["rt_bit_reproducible"] is False
+    assert first[0].meta["rt_element_pattern_per_ray"] is False
+    assert first[0].meta["rt_beam_squint_modeled"] is False
+    for a, b in zip(first, second, strict=True):
+        num = float(np.sum(np.abs(a.h_dl_true - b.h_dl_true) ** 2))
+        den = float(np.sum(np.abs(a.h_dl_true) ** 2))
+        nmse_db = 10.0 * math.log10(max(num / den, 1e-300))
+        assert nmse_db < -40.0, f"重跑偏差过大：NMSE {nmse_db:.1f} dB"
+        # 大尺度那半边仍然必须逐位相同——它根本不经过射线追踪
+        assert a.meta["pathloss_dB"] == b.meta["pathloss_dB"]
+        assert a.snr_dB == b.snr_dB and a.sir_dB == b.sir_dB
+
+
+def test_serving_outage_message_separates_blocked_cell_from_real_coverage_hole(
+    monkeypatch,
+) -> None:
+    """服务小区被挡 ≠ UE 没覆盖。两种情况必须给出不同的诊断。
+
+    实测 7 站场景里 1/6 的 UE 属于前者（还有 12 个小区可达，最强的只低 2.8 dB），
+    把它报成「真实的覆盖空洞」会把人引到错误的修法上。
+    """
+    cfg = _company_cfg(
+        num_ues=1, num_samples=1, num_sites=1, sectors_per_site=3, scene="munich",
+        num_bs_tx_ant=64, num_bs_rx_ant=64, num_ue_tx_ant=4, num_ue_rx_ant=4,
+    )
+    cell = native.Cell(np.asarray([0.0, 0.0, 25.0]), 0.0, 0, 0)
+    kwargs = dict(
+        n_time=1, n_rb=4, n_bs=64, n_ue=4, doppler_hz=0.0, realization_index=0,
+        link_aod_rad=0.0, link_aoa_rad=0.0, link_zod_rad=1.5, link_zoa_rad=1.5,
+        cell=cell, ue_position=np.asarray([10.0, 0.0, 1.5]), is_los=False,
+        role="serving",
+    )
+    fake = _one_ray()
+
+    blocked = srt.SionnaRTSource(cfg)
+    monkeypatch.setattr(blocked, "_cell_to_source", [0, 1, 2])
+    monkeypatch.setattr(blocked, "_solve", lambda sites, position: [None, fake, fake])
+    with pytest.raises(RuntimeError, match="2 个物理站可达"):
+        blocked._small_scale_channel(None, None, **kwargs)  # noqa: SLF001
+
+    isolated = srt.SionnaRTSource(cfg)
+    monkeypatch.setattr(isolated, "_cell_to_source", [0, 1, 2])
+    monkeypatch.setattr(isolated, "_solve", lambda sites, position: [None, None, None])
+    with pytest.raises(RuntimeError, match="真实的覆盖空洞"):
+        isolated._small_scale_channel(None, None, **kwargs)  # noqa: SLF001
+
+
+@requires_sionna
 def test_cosited_sectors_share_one_ray_trace() -> None:
     """同站三扇区共用一次追踪：传播环境相同，差别只在天线朝向。"""
     samples = list(ch.iter_samples("sionna_rt", _rt_cfg(num_samples=1, num_ues=1)))
