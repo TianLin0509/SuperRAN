@@ -477,6 +477,31 @@ def test_bler_factory_and_eesm_are_explicit() -> None:
 test_bler_factory_and_eesm_are_explicit()
 
 
+def test_mu_admission_gates_are_explicit_and_reversible() -> None:
+    """低 MCS、PF 增益和 Schmidt 缺口都不能被静默吞掉。"""
+    h_eff = np.zeros((3, 1, 1, 3), dtype=np.complex128)
+    h_eff[0, 0, 0, 0] = 1.0
+    h_eff[1, 0, 0, 1] = 0.9
+    h_eff[2, 0, 0, 2] = 0.8
+    gated = mu.pair_users(
+        h_eff, criterion="all", mcs_indices=np.array([3, 10, 10]),
+        min_pairing_mcs=4)
+    assert gated.users == [1, 2] and gated.dropped_by_mcs == [0]
+    legacy = mu.pair_users(
+        h_eff, criterion="all", mcs_indices=np.array([3, 10, 10]),
+        min_pairing_mcs=0)
+    assert legacy.users == [0, 1, 2]
+    try:
+        mu.pair_users(h_eff, orthogonalization_mode="schmidt")
+    except NotImplementedError as exc:
+        assert "TODO" in str(exc) and "Schmidt" in str(exc)
+    else:
+        raise AssertionError("schmidt 未实现时必须硬失败")
+
+
+test_mu_admission_gates_are_explicit_and_reversible()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

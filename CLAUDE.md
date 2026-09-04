@@ -851,6 +851,13 @@ OLLA 前基准 MCS 即使不过 0.5，也不能替实际发送档放行配对。
 **只用于复现旧结果**，会写进 `notes`。实测同一组配置：pair 表口径下开 MU 把首传
 平均 MCS 从 23.48 压到 19.93，历史口径是 22.68 → 22.69（一档都没降）。
 
+MU 准入还有三层显式门：`min_pairing_mcs` 默认 4，低于该档的用户只参与 SU；
+`pf_gain_threshold` 默认 0（关闭、保持历史行为），启用后用当前
+`Σ(useful_bytes / PF_R_avg)` 比较 MU/SU 计划并作否决；`orthogonalization_mode`
+默认 `select`（相关性筛选），`none` 关闭筛选，`schmidt` 目前硬报
+`NotImplementedError`，绝不静默退回 `select`。这些是准入门，不替代最终的小区谱效或
+队列封顶 useful-bytes 方案比较；设 `min_pairing_mcs=0,pf_gain_threshold=0` 可复现旧准入。
+
 **−3.01 dB 只是记账标签，不是近似。** 按定义 `CorrLoss = pred_MU − pred_SU −
 PowerLoss`，所以决策里真正用的平移量 `CorrLoss + PowerLoss` 恒等于
 `pred_MU − pred_SU`，那个常数精确抵消。单列 PowerLoss 只为诊断能分开看

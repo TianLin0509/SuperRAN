@@ -954,6 +954,11 @@ check(sysm.SchedulerConfig(
           mu_precoder="rzf", mu_csi_error_variance=0.03).as_dict()[
               "mu_csi_error_variance"] == 0.03,
       "系统配置与结果合同显式携带鲁棒 RZF 误差方差")
+_mu_gate_cfg = sysm.SchedulerConfig()
+check(_mu_gate_cfg.min_pairing_mcs == 4
+      and _mu_gate_cfg.pf_gain_threshold == 0.0
+      and _mu_gate_cfg.orthogonalization_mode == "select",
+      "MU 门限默认值显式进入 SchedulerConfig；PF 门默认关闭以保兼容")
 try:
     sysm.SchedulerConfig(mu_csi_error_variance=-1e-3)
     check(False, "负 CSI 误差方差应硬失败")
@@ -973,6 +978,37 @@ _large = sysm.simulate(
 check(_large.cell["mu_share"] > 0
       and _large.cell["su_mu_plan"]["mu_selected"] > 0,
       "大队列下数据受限 MU 方案确实被选中，不再用固定 MU 增益比例")
+_mcs_blocked = sysm.simulate(
+    _mu_tables,
+    sys_cfg=sysm.SystemConfig(
+        evaluation_mode="experience", duration_s=0.1, seed=51,
+        tdd_pattern="DDDSU"),
+    traffic=sysm.TrafficConfig(
+        model="mixed", small_ue_share=0.0,
+        file_bytes=500_000, arrival_rate_hz=20.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=True, max_mu_users=2, mu_corr_threshold=0.99,
+        min_pairing_mcs=28),
+    kpi=sysm.KpiConfig(warmup_tti=0))
+check(_mcs_blocked.cell["mu_share"] == 0
+      and (_mcs_blocked.cell["mu_candidate_scoring"]["rejection_reasons"].get(
+          "mcs_below_min_pairing", 0) > 0),
+      "experience_v2 的最低 MCS 门在实际 pair 计划入口否决并留原因")
+_pf_blocked = sysm.simulate(
+    _mu_tables,
+    sys_cfg=sysm.SystemConfig(
+        evaluation_mode="experience", duration_s=0.1, seed=51,
+        tdd_pattern="DDDSU"),
+    traffic=sysm.TrafficConfig(
+        model="mixed", small_ue_share=0.0,
+        file_bytes=500_000, arrival_rate_hz=20.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=True, max_mu_users=2, mu_corr_threshold=0.99,
+        min_pairing_mcs=0, pf_gain_threshold=100.0),
+    kpi=sysm.KpiConfig(warmup_tti=0))
+check(_pf_blocked.cell["mu_share"] == 0
+      and _pf_blocked.cell["su_mu_plan"]["pf_gain_rejects"] > 0,
+      "experience_v2 的 PF 增益否决读取真实 R_avg，不用和速率冒充")
 check(0 < _large.cell["mu_paired_prb_utilization"]
       <= _large.cell["serving_cell_prb_utilization"] + 1e-12
       and 0 < _large.cell["mu_paired_prb_share_of_used"] <= 1.0
@@ -1024,7 +1060,8 @@ _mixed_queue_plan = expm._build_mu_plan(
     base_tx_sinr_of=_base_of, mcs_without_olla_of=_mcs_of,
     true_sinr_of=_true_of, potential_of=_potential_of,
     tables=_mu_tables, snap=_snap,
-    sched=sysm.SchedulerConfig(mu_enabled=True, mu_corr_threshold=1.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=True, mu_corr_threshold=1.0, min_pairing_mcs=0),
     su_olla_db=np.zeros(len(_ordered)),
     mu_olla_db=np.zeros(len(_ordered)), blocked_data=False)
 _mixed_mu = next(
@@ -1119,7 +1156,8 @@ _floor_plan = expm._build_mu_plan(
     base_tx_sinr_of=_base_of, mcs_without_olla_of=_mcs_of,
     true_sinr_of=_true_of, potential_of=_potential_of,
     tables=_mu_tables, snap=_snap,
-    sched=sysm.SchedulerConfig(mu_enabled=True, mu_corr_threshold=1.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=True, mu_corr_threshold=1.0, min_pairing_mcs=0),
     su_olla_db=np.full(len(_ordered), -100.0),
     mu_olla_db=np.zeros(len(_ordered)), blocked_data=False)
 check(_floor_plan.has_mu,
@@ -1244,6 +1282,18 @@ _expect_value_error(
 _expect_value_error(
     lambda: sysm.SchedulerConfig(mu_rank_per_user=True),
     "mu_rank_per_user", "MU rank 拒绝布尔值冒充整数")
+_expect_value_error(
+    lambda: sysm.SchedulerConfig(min_pairing_mcs=-1),
+    "min_pairing_mcs", "最低配对 MCS 拒绝负数")
+_expect_value_error(
+    lambda: sysm.SchedulerConfig(pf_gain_threshold=float("nan")),
+    "pf_gain_threshold", "PF 增益门限拒绝 NaN")
+try:
+    sysm.SchedulerConfig(orthogonalization_mode="schmidt")
+    check(False, "SchedulerConfig 不应把 schmidt 静默降级为 select")
+except NotImplementedError as _exc:
+    check("TODO" in str(_exc) and "Schmidt" in str(_exc),
+          "SchedulerConfig 的 schmidt 未实现时显式硬失败")
 _expect_value_error(
     lambda: sysm.KpiConfig(warmup_tti=-1),
     "warmup_tti", "预启动 TTI 拒绝负数")
@@ -2549,10 +2599,12 @@ check(bool(np.allclose(
 _T_corr = _mu_pair_tables(0.999)
 _corr_arm = _mu_run(_T_corr, mu_on=True)
 print(f"  相关系数 0.999：MU 占比 {_corr_arm.cell['mu_share']:.0%}，"
-      f"判定单发更划算 {_corr_arm.cell['mu_su_wins']} 个 TTI")
+      f"相关性门否决 "
+      f"{_corr_arm.cell['mu_pair_rejection_reasons'].get('correlation_threshold', 0)} 次")
 check(_corr_arm.cell["mu_share"] < 0.05,
       "信道几乎同向时 ZF 无处零陷，SU/MU 自适应判 SU 赢")
-check(_corr_arm.cell["mu_su_wins"] > 0,
+check(_corr_arm.cell["mu_pair_rejection_reasons"].get(
+          "correlation_threshold", 0) > 0,
       "拒配对的原因被显式计数，不是静默不配")
 
 # 历史标量口径的反向对照：MCS 完全不因配对下降。

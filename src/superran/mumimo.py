@@ -32,6 +32,7 @@ from . import carrier as carrier_grid
 _EPS = 1e-30
 
 PairingCriterion = Literal["sus", "greedy_sum_rate", "all", "best_single"]
+OrthogonalizationMode = Literal["none", "select", "schmidt"]
 MuPrecoder = Literal["zf", "rzf", "mrt"]
 PowerAllocation = Literal["equal", "waterfilling"]
 
@@ -263,6 +264,11 @@ class Pairing:
     correlations: list[float] = field(default_factory=list)  # 入选时与已选集的最大相关
     dropped_by_corr: list[int] = field(default_factory=list)
     weights_used: bool = False
+    dropped_by_mcs: list[int] = field(default_factory=list)
+    pairing_mcs: list[int] = field(default_factory=list)
+    pf_gain_threshold: float = 0.0
+    weighted_rate_ratios: list[float] = field(default_factory=list)
+    orthogonalization_mode: str = "select"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -274,6 +280,12 @@ class Pairing:
             "correlations": [round(float(c), 4) for c in self.correlations],
             "dropped_by_corr": self.dropped_by_corr,
             "weights_used": self.weights_used,
+            "dropped_by_mcs": self.dropped_by_mcs,
+            "pairing_mcs": self.pairing_mcs,
+            "pf_gain_threshold": float(self.pf_gain_threshold),
+            "weighted_rate_ratios": [
+                round(float(value), 6) for value in self.weighted_rate_ratios],
+            "orthogonalization_mode": self.orthogonalization_mode,
         }
 
 
@@ -311,6 +323,12 @@ def pair_users(
     corr_threshold: float = 0.5,
     weights: np.ndarray | None = None,
     noise_power: float = 0.0,
+    min_pairing_mcs: int = 4,
+    pf_gain_threshold: float = 0.0,
+    orthogonalization_mode: OrthogonalizationMode = "select",
+    mcs_indices: np.ndarray | None = None,
+    mcs_table: int = 3,
+    target_bler: float = 0.1,
 ) -> Pairing:
     """选出这一次一起发的用户集合。
 
@@ -337,10 +355,31 @@ def pair_users(
 
     ``weights`` 给比例公平用：长度 ``K`` 的正权重（通常取历史速率的倒数），
     会乘进选择度量。不给就是纯吞吐最大化，**会饿死边缘用户**。
+
+    ``min_pairing_mcs`` 在配对前排除低档用户；给 ``mcs_indices`` 时使用调用方
+    已有的因果 MCS，否则从 ``h_eff + noise_power`` 的单用户链路估计。
+    ``pf_gain_threshold`` 只作用于 ``greedy_sum_rate``，比较加入候选前后的
+    加权速率比；0 关闭并精确保持旧行为。``orthogonalization_mode='select'``
+    使用当前相关性筛选，``none`` 不筛，``schmidt`` 尚未实现并硬失败。
     """
     he = np.asarray(h_eff)
     if criterion not in ("sus", "greedy_sum_rate", "all", "best_single"):
         raise ValueError(f"未知 MU 配对准则 {criterion!r}")
+    if orthogonalization_mode not in ("none", "select", "schmidt"):
+        raise ValueError("orthogonalization_mode 只支持 none / select / schmidt")
+    if orthogonalization_mode == "schmidt":
+        raise NotImplementedError("TODO: Schmidt 正交化未实现")
+    if (isinstance(min_pairing_mcs, (bool, np.bool_))
+            or not isinstance(min_pairing_mcs, (int, np.integer))
+            or int(min_pairing_mcs) < 0):
+        raise ValueError("min_pairing_mcs 必须是非负整数")
+    if not np.isfinite(pf_gain_threshold) or float(pf_gain_threshold) < 0.0:
+        raise ValueError("pf_gain_threshold 必须是有限非负数")
+    if not np.isfinite(corr_threshold) or not 0.0 <= float(corr_threshold) <= 1.0:
+        raise ValueError("corr_threshold 必须落在 [0,1]")
+    if (isinstance(mcs_table, (bool, np.bool_))
+            or not isinstance(mcs_table, (int, np.integer))):
+        raise ValueError("mcs_table 必须是整数表号")
     n_k, n_s, _n_rb, n_bs = he.shape
     # 宽带配对：对 E_f[h^H h] 取主方向；不能跨 RB 直接平均复信道。
     g = _wideband_user_vectors(he)                        # [K, BS]
@@ -348,23 +387,77 @@ def pair_users(
     w = np.ones(n_k) if weights is None else np.asarray(weights, dtype=float)
     if w.shape != (n_k,):
         raise ValueError(f"weights 长度必须是 {n_k}，实得 {w.shape}")
+    if np.any(~np.isfinite(w)) or np.any(w <= 0.0):
+        raise ValueError("weights 必须全部是有限正数")
+
+    if mcs_indices is None:
+        if int(min_pairing_mcs) > 0:
+            from . import linkadapt as la  # noqa: PLC0415
+
+            inferred = []
+            for user in range(n_k):
+                perf = mu_link_performance_from_effective(
+                    he[[user]], he[[user]], noise_power=float(noise_power),
+                    precoder="zf")
+                inferred.append(int(la.select_mcs(
+                    float(perf.sinr_per_user_db[0]), table=int(mcs_table),
+                    target_bler=float(target_bler)).index))
+            pairing_mcs = np.asarray(inferred, dtype=int)
+        else:
+            pairing_mcs = np.full(n_k, -1, dtype=int)
+    else:
+        raw_mcs = np.asarray(mcs_indices)
+        if (raw_mcs.shape != (n_k,)
+                or not np.issubdtype(raw_mcs.dtype, np.integer)
+                or np.any(raw_mcs < 0)):
+            raise ValueError(f"mcs_indices 必须是长度 {n_k} 的非负整数数组")
+        pairing_mcs = raw_mcs.astype(int, copy=True)
+        from . import linkadapt as la  # noqa: PLC0415
+
+        if int(mcs_table) not in la.MCS_TABLES:
+            raise ValueError(f"未知 mcs_table={mcs_table}")
+        if np.any(pairing_mcs >= len(la.MCS_TABLES[int(mcs_table)])):
+            raise ValueError(
+                f"mcs_indices 超出 table {mcs_table} 的 0.."
+                f"{len(la.MCS_TABLES[int(mcs_table)]) - 1}")
+    eligible = [
+        user for user in range(n_k)
+        if int(min_pairing_mcs) == 0
+        or int(pairing_mcs[user]) >= int(min_pairing_mcs)
+    ]
+    dropped_by_mcs = sorted(set(range(n_k)) - set(eligible))
 
     cap = max(1, min(int(max_users), n_bs // max(n_s, 1), n_k))
 
     if criterion == "best_single":
-        return Pairing([int(np.argmax(norms * w))], criterion, cap, corr_threshold,
-                       weights_used=weights is not None)
+        users = ([max(eligible, key=lambda user: float(norms[user] * w[user]))]
+                 if eligible else [])
+        return Pairing(
+            users, criterion, cap, corr_threshold,
+            weights_used=weights is not None, dropped_by_mcs=dropped_by_mcs,
+            pairing_mcs=[int(value) for value in pairing_mcs],
+            pf_gain_threshold=float(pf_gain_threshold),
+            orthogonalization_mode=orthogonalization_mode)
     if criterion == "all":
-        return Pairing(list(range(n_k)), criterion, cap, corr_threshold,
-                       weights_used=weights is not None)
+        return Pairing(
+            eligible, criterion, cap, corr_threshold,
+            weights_used=weights is not None, dropped_by_mcs=dropped_by_mcs,
+            pairing_mcs=[int(value) for value in pairing_mcs],
+            pf_gain_threshold=float(pf_gain_threshold),
+            orthogonalization_mode=orthogonalization_mode)
     if criterion == "greedy_sum_rate":
-        return _greedy_sum_rate(he, cap, noise_power, w, corr_threshold)
+        return _greedy_sum_rate(
+            he, cap, noise_power, w, corr_threshold,
+            candidates=eligible, dropped_by_mcs=dropped_by_mcs,
+            pairing_mcs=pairing_mcs,
+            pf_gain_threshold=float(pf_gain_threshold),
+            orthogonalization_mode=orthogonalization_mode)
 
     # --- SUS ---
     sel: list[int] = []
     corrs: list[float] = []
     dropped: list[int] = []
-    cand = set(range(n_k))
+    cand = set(eligible)
     basis: list[np.ndarray] = []                          # 已选方向的正交基
 
     while cand and len(sel) < cap:
@@ -395,37 +488,65 @@ def pair_users(
             basis.append(gb / nb)
 
         # 剔除与刚选中的这个太相关的候选——它们再进来只会互相压
-        for i in list(cand):
-            c = abs(complex(g[i].conj() @ g[best])) / max(norms[i] * norms[best], _EPS)
-            if c > corr_threshold:
-                cand.discard(i)
-                dropped.append(i)
+        if orthogonalization_mode == "select":
+            for i in list(cand):
+                c = abs(complex(g[i].conj() @ g[best])) / max(
+                    norms[i] * norms[best], _EPS)
+                if c > corr_threshold:
+                    cand.discard(i)
+                    dropped.append(i)
 
-    return Pairing(sel, "sus", cap, corr_threshold, corrs, sorted(dropped),
-                   weights_used=weights is not None)
+    return Pairing(
+        sel, "sus", cap, corr_threshold, corrs, sorted(dropped),
+        weights_used=weights is not None, dropped_by_mcs=dropped_by_mcs,
+        pairing_mcs=[int(value) for value in pairing_mcs],
+        pf_gain_threshold=float(pf_gain_threshold),
+        orthogonalization_mode=orthogonalization_mode)
 
 
-def _greedy_sum_rate(he: np.ndarray, cap: int, noise_power: float,
-                     w: np.ndarray, corr_threshold: float) -> Pairing:
-    """每轮真算一遍 ZF 和速率，选增量最大的；增量为负就停。"""
-    n_k = he.shape[0]
+def _greedy_sum_rate(
+    he: np.ndarray,
+    cap: int,
+    noise_power: float,
+    w: np.ndarray,
+    corr_threshold: float,
+    *,
+    candidates: list[int],
+    dropped_by_mcs: list[int],
+    pairing_mcs: np.ndarray,
+    pf_gain_threshold: float,
+    orthogonalization_mode: str,
+) -> Pairing:
+    """每轮真算 ZF 加权速率；增量或配置的 PF 增益比不过门就停。"""
     sel: list[int] = []
     best_rate = 0.0
+    accepted_ratios: list[float] = []
     while len(sel) < cap:
-        gain_best, cand_best = 0.0, -1
-        for i in range(n_k):
+        gain_best, cand_best, rate_best = 0.0, -1, 0.0
+        for i in candidates:
             if i in sel:
                 continue
             trial = [*sel, i]
             r = float(np.sum(_zf_sum_rate(he[trial], noise_power) * w[trial]))
             if r - best_rate > gain_best:
-                gain_best, cand_best = r - best_rate, i
+                gain_best, cand_best, rate_best = r - best_rate, i, r
         if cand_best < 0:
             break
+        if sel and pf_gain_threshold > 0.0:
+            ratio = rate_best / max(best_rate, _EPS)
+            if ratio < pf_gain_threshold + 1e-9:
+                break
+            accepted_ratios.append(float(ratio))
         sel.append(cand_best)
-        best_rate += gain_best
-    return Pairing(sel, "greedy_sum_rate", cap, corr_threshold,
-                   weights_used=not np.allclose(w, 1.0))
+        best_rate = rate_best
+    return Pairing(
+        sel, "greedy_sum_rate", cap, corr_threshold,
+        weights_used=not np.allclose(w, 1.0),
+        dropped_by_mcs=dropped_by_mcs,
+        pairing_mcs=[int(value) for value in pairing_mcs],
+        pf_gain_threshold=float(pf_gain_threshold),
+        weighted_rate_ratios=accepted_ratios,
+        orthogonalization_mode=orthogonalization_mode)
 
 
 def _zf_sum_rate(he_sel: np.ndarray, noise_power: float) -> np.ndarray:
@@ -1123,6 +1244,11 @@ def su_mu_adaptation(
     target_bler: float = 0.1,
     power_constraint: bf.PowerConstraint | str = "ebf",
     rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
+    min_pairing_mcs: int = 4,
+    pf_gain_threshold: float = 0.0,
+    pf_weights: np.ndarray | None = None,
+    corr_threshold: float = 0.5,
+    orthogonalization_mode: OrthogonalizationMode = "none",
 ) -> CellDecision:
     """SU / MU 自适应：同一个 TTI 里，两种发法哪个小区谱效高就用哪个。
 
@@ -1139,8 +1265,31 @@ def su_mu_adaptation(
 
     配对候选用贪心粗选（用户说"简单粗估即可，不用特别精细"）：
     按等效信道范数排序，逐个加入直到 ``max_mu_users`` 或加了反而更差。
+
+    ``min_pairing_mcs`` 使用每个用户在 ``mu_rank`` 下、基站可见 CSI 算出的 MCS
+    做 MU 前置筛选；被排除的用户仍可参加 SU。``pf_gain_threshold`` 比较加入候选
+    前后的加权谱效比，0 表示关闭；只有传入历史速率倒数 ``pf_weights`` 时它才是
+    PF（Proportional Fair，比例公平）口径，否则只是和谱效增益门。
+    本低层函数的 ``orthogonalization_mode`` 默认 ``none`` 以保持原贪心路径；
+    系统级配置会显式传入 ``select``，与相关性准入门使用同一选择。
     """
     n_k = len(h_users)
+    if (isinstance(min_pairing_mcs, (bool, np.bool_))
+            or not isinstance(min_pairing_mcs, (int, np.integer))
+            or int(min_pairing_mcs) < 0):
+        raise ValueError("min_pairing_mcs 必须是非负整数")
+    if not np.isfinite(pf_gain_threshold) or float(pf_gain_threshold) < 0.0:
+        raise ValueError("pf_gain_threshold 必须是有限非负数")
+    if orthogonalization_mode not in ("none", "select", "schmidt"):
+        raise ValueError("orthogonalization_mode 只支持 none / select / schmidt")
+    if orthogonalization_mode == "schmidt":
+        raise NotImplementedError("TODO: Schmidt 正交化未实现")
+    if not np.isfinite(corr_threshold) or not 0.0 <= float(corr_threshold) <= 1.0:
+        raise ValueError("corr_threshold 必须落在 [0,1]")
+    pf_w = (np.ones(n_k, dtype=float) if pf_weights is None
+            else np.asarray(pf_weights, dtype=float))
+    if pf_w.shape != (n_k,) or np.any(~np.isfinite(pf_w)) or np.any(pf_w <= 0.0):
+        raise ValueError(f"pf_weights 必须是长度 {n_k} 的有限正数数组")
     if h_users_for_precoding is None:
         hp = h_users
     else:
@@ -1164,6 +1313,7 @@ def su_mu_adaptation(
 
     # --- SU 候选：逐用户 rank 自适应，取最好的那个 ---
     su_best, su_user = None, 0
+    su_choices: list[RankChoice] = []
     for u in range(n_k):
         if h_users_for_precoding is None:
             rc = su_rank_adaptation(
@@ -1197,20 +1347,50 @@ def su_mu_adaptation(
             rc = RankChoice(
                 aged.rank, aged.sinr_db, aged.mcs, aged.se,
                 candidates=aged.candidates)
+        su_choices.append(rc)
         if su_best is None or rc.se > su_best.se:
             su_best, su_user = rc, u
     assert su_best is not None
 
     # --- MU 候选：贪心加人，每人 rank=mu_rank ---
     he_all = effective_user_channels(hp, streams_per_user=mu_rank)
-    order = list(np.argsort(-np.linalg.norm(_wideband_user_vectors(he_all), axis=1)))
+    pairing_mcs: list[int] = []
+    for choice in su_choices:
+        row = next(
+            (candidate for candidate in choice.candidates
+             if int(candidate["rank"]) == int(mu_rank)),
+            None,
+        )
+        pairing_mcs.append(int(row["mcs"]) if row is not None else int(choice.mcs))
+    excluded = [
+        user for user, mcs in enumerate(pairing_mcs)
+        if int(mcs) < int(min_pairing_mcs)
+    ]
+    excluded_set = set(excluded)
+    eligible = [user for user in range(n_k) if user not in excluded_set]
+    wideband_vectors = _wideband_user_vectors(he_all)
+    wideband_norms = np.linalg.norm(wideband_vectors, axis=1)
+    strength_order = list(np.argsort(-wideband_norms))
+    eligible_set = set(eligible)
+    order = [int(user) for user in strength_order if int(user) in eligible_set]
     cap = max(1, min(int(max_mu_users), n_k, he_all.shape[-1] // max(mu_rank, 1)))
 
     sel: list[int] = []
     mu_best_se, mu_best_detail = 0.0, []
+    mu_best_weighted = 0.0
+    pf_rejected: list[tuple[int, float]] = []
+    corr_rejected: list[tuple[int, float]] = []
     for cand in order:
         if len(sel) >= cap:
             break
+        if orthogonalization_mode == "select" and sel:
+            correlation = max(
+                abs(complex(wideband_vectors[cand].conj() @ wideband_vectors[user]))
+                / max(float(wideband_norms[cand] * wideband_norms[user]), _EPS)
+                for user in sel)
+            if correlation > float(corr_threshold):
+                corr_rejected.append((int(cand), float(correlation)))
+                continue
         trial = [*sel, int(cand)]
         se, detail = _mu_cell_se(h_users, hp, trial, noise_power=noise_user,
                                  rank=mu_rank, precoder=precoder, table=table,
@@ -1220,21 +1400,45 @@ def su_mu_adaptation(
                                  rbg_boundaries=rbg_boundaries)
         if se <= mu_best_se and sel:          # 加了反而更差就不加
             continue
+        weighted = float(sum(
+            float(row["se"]) * float(pf_w[int(row["user"])])
+            for row in detail))
+        if sel and float(pf_gain_threshold) > 0.0:
+            ratio = weighted / max(mu_best_weighted, _EPS)
+            if ratio < float(pf_gain_threshold) + 1e-9:
+                pf_rejected.append((int(cand), float(ratio)))
+                continue
         sel, mu_best_se, mu_best_detail = trial, se, detail
+        mu_best_weighted = weighted
 
     # 用户口径是 SU > MU 才走 SU；有真实两用户方案时平局归 MU。只有一个
     # 用户的 rank2 候选不是 MU，不能借平局被错误标成 MU。
     mode = "MU" if len(sel) >= 2 and mu_best_se >= su_best.se else "SU"
+    note_parts = [
+        f"MU 配 {len(sel)} 个用户每人 rank{mu_rank}，"
+        f"SU 单用户 rank{su_best.rank}；"
+        f"{'MU' if mode == 'MU' else 'SU'} 高 "
+        f"{abs(mu_best_se - su_best.se):.3f} bit/s/Hz"
+    ]
+    note_parts.extend(
+        f"UE{user} excluded: mcs={pairing_mcs[user]} < "
+        f"min_pairing_mcs={int(min_pairing_mcs)}"
+        for user in excluded)
+    note_parts.extend(
+        f"UE{user} excluded: weighted-rate ratio={ratio:.4f} < "
+        f"pf_gain_threshold={float(pf_gain_threshold):g}"
+        for user, ratio in pf_rejected)
+    note_parts.extend(
+        f"UE{user} excluded: correlation={correlation:.4f} > "
+        f"corr_threshold={float(corr_threshold):g}"
+        for user, correlation in corr_rejected)
     return CellDecision(
         mode=mode,
         cell_se=max(mu_best_se, su_best.se),
         su_se=su_best.se, mu_se=mu_best_se,
         su_user=su_user, su_rank=su_best.rank, su_mcs=su_best.mcs,
         mu_users=sel, mu_per_user=mu_best_detail,
-        note=(f"MU 配 {len(sel)} 个用户每人 rank{mu_rank}，"
-              f"SU 单用户 rank{su_best.rank}；"
-              f"{'MU' if mode == 'MU' else 'SU'} 高 "
-              f"{abs(mu_best_se - su_best.se):.3f} bit/s/Hz"),
+        note="；".join(note_parts),
     )
 
 
@@ -1294,6 +1498,10 @@ def mu_link_performance(
     max_users: int = 4,
     corr_threshold: float = 0.5,
     weights: np.ndarray | None = None,
+    min_pairing_mcs: int = 4,
+    pf_gain_threshold: float = 0.0,
+    orthogonalization_mode: OrthogonalizationMode = "select",
+    mcs_indices: np.ndarray | None = None,
     alpha: float | None = None,
     csi_error_variance: float = 0.0,
     total_power: float = 1.0,
@@ -1328,8 +1536,12 @@ def mu_link_performance(
         raise ValueError(
             f"noise_power 应为标量或逐用户 ({len(h_users)},)，收到 {noise_all.shape}")
     pr = pair_users(he_prec, criterion=criterion, max_users=max_users,
-                    corr_threshold=corr_threshold, weights=weights,
-                    noise_power=float(np.mean(noise_all)))
+                     corr_threshold=corr_threshold, weights=weights,
+                     noise_power=float(np.mean(noise_all)),
+                     min_pairing_mcs=min_pairing_mcs,
+                     pf_gain_threshold=pf_gain_threshold,
+                     orthogonalization_mode=orthogonalization_mode,
+                     mcs_indices=mcs_indices)
     if not pr.users:
         raise ValueError("配对结果为空")
 

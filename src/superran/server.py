@@ -1337,7 +1337,7 @@ def sr_mcs_info(
         out["eesm"] = {
             "sinr_db": [float(value) for value in eesm_sinr_db_list],
             "beta": _jsonable(eesm_beta),
-            "effective_sinr_db": _jsonable(compressed),
+            "effective_sinr_db": compressed.tolist(),
             "beta_contract": "must be calibrated for the same channel/receiver/BLER profile",
         }
     return _jsonable(out)
@@ -1981,6 +1981,9 @@ def sr_system_sim(
     mu_precoder: str = "zf",
     mu_csi_error_variance: float = 0.0,
     mu_corr_threshold: float = 0.7,
+    min_pairing_mcs: int = 4,
+    pf_gain_threshold: float = 0.0,
+    orthogonalization_mode: str = "select",
     mu_olla_step_up_db: float = 0.01,
     mu_olla_step_down_db: float | None = None,
     trim: str = "tail",
@@ -2180,6 +2183,11 @@ def sr_system_sim(
         报告 ``dl_ratio``、capacity RE 预算和 experience TBS 查表共用该值。
     mu_enabled : 是否允许 MU 配对。默认关，先看清 SU 基线。
     mu_corr_threshold : MU SUS 配对的归一化相关性上限，默认 0.7。
+    min_pairing_mcs : MU 候选的最低发送 MCS，默认 4；0 关闭并退化旧行为。
+    pf_gain_threshold : MU 相对 SU 的 PF 度量比否决门，默认 0（关闭）；1 要求
+        严格不降低 PF，值大于 1 时要求相应余量。
+    orthogonalization_mode : ``select`` 用相关性门限筛选，``none`` 不筛；
+        ``schmidt`` 尚未实现，会明确报错而不会静默回落。
     olla_step_up_db / olla_step_down_db : 历史参数名；值是连续 MCS 档位步长，
         在 SINR 反折 MCS 之后叠加。down 省略时按 target_bler 反解。
     mu_olla_step_up_db / mu_olla_step_down_db : MU 专属用户级 MCS-domain OLLA；
@@ -2557,6 +2565,9 @@ def sr_system_sim(
             mu_precoder=str(mu_precoder),
             mu_csi_error_variance=float(mu_csi_error_variance),
             mu_corr_threshold=float(mu_corr_threshold),
+            min_pairing_mcs=min_pairing_mcs,
+            pf_gain_threshold=float(pf_gain_threshold),
+            orthogonalization_mode=str(orthogonalization_mode),
             mu_olla_step_up_db=float(mu_olla_step_up_db),
             mu_olla_step_down_db=resolved_mu_down,
             olla_speedup=float(olla_speedup),
@@ -2639,7 +2650,11 @@ def sr_system_sim(
         load_jitter_rng=(mu_load_rng if float(neighbor_load_jitter) > 0 else None),
         csi=csi_cfg, snapshot_ms=snap_ms,
         power_constraint=str(power_constraint), mu_precoder=str(mu_precoder),
-        mu_csi_error_variance=float(mu_csi_error_variance))
+        mu_csi_error_variance=float(mu_csi_error_variance),
+        min_pairing_mcs=min_pairing_mcs,
+        pf_gain_threshold=float(pf_gain_threshold),
+        mu_corr_threshold=float(mu_corr_threshold),
+        orthogonalization_mode=str(orthogonalization_mode))
         if (_flag(mu_enabled) and mode == "capacity"
             and str(mu_accounting) == "se_ratio_legacy")
         else {"ratio": 1.0, "measured": False,

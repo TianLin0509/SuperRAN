@@ -74,6 +74,10 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             "64T 与 256T 统一采用 pol_h_v + top_to_bottom："
             "先极化块、再水平列、垂直行最快，v=0 对应物理顶部。"
             "水平间距 0.5λ、物理垂直阵子间距 0.67λ。")
+    min_pairing_mcs = int(cfg.get("min_pairing_mcs", 4))
+    pf_gain_threshold = float(cfg.get("pf_gain_threshold", 0.0))
+    orthogonalization_mode = str(
+        cfg.get("orthogonalization_mode", "select"))
 
     return [
         Algorithm(
@@ -196,13 +200,17 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="su_mu_adaptation",
             name="SU/MU 自适应",
             stage="多用户",
-            choice="PF排序后分别构造完整SU/MU计划，比较队列封顶的useful payload bytes",
-            formula="B_useful=Σmin(queue,TBS)；SU能清空全部队列时强制SU，否则MU≥SU才选MU",
+            choice=("PF排序后分别构造完整SU/MU计划；"
+                    f"MCS≥{min_pairing_mcs}，正交化={orthogonalization_mode}，"
+                    f"PF增益门={pf_gain_threshold:g}"),
+            formula=("B_useful=Σmin(queue,TBS)；G_PF=Σ(B_useful/R_avg)；"
+                     "SU能清空全部队列时强制SU，否则MU须同时过useful bytes与PF门"),
             why="SU赢在无MU干扰且可到rank4；MU赢在同一RBG并行两位rank2用户。"
                 "使用useful bytes可自动剔除超出业务包的padding，并保留实际队列收益。",
-            caveat="MU伙伴不是第一个相关性过门者：PF只固定anchor，全部伙伴仍需经过"
-                   "pair link、相关性、层数、预测BLER和useful bytes/RBG评分。"
-                   "当前仅支持两用户、每用户rank2。",
+            caveat=("MU伙伴不是第一个相关性过门者：PF只固定anchor，全部伙伴仍需经过"
+                    "最低MCS、pair link、相关性、层数、预测BLER和useful bytes/RBG评分。"
+                    "PF增益门为0时关闭；schmidt 尚未实现且不会静默回落。"
+                    "当前仅支持两用户、每用户rank2。"),
             source="当前 experience_v2 已确认调度合同",
         ),
         Algorithm(

@@ -505,6 +505,12 @@ class SchedulerConfig:
     max_mu_users: int = 2
     mu_rank_per_user: int = 2
     mu_corr_threshold: float = 0.7
+    # 低 MCS 用户只参与 SU；0 关闭并精确退化旧行为。
+    min_pairing_mcs: int = 4
+    # MU 方案的 PF 度量 / SU 方案 PF 度量至少达到该比值；0 关闭。
+    pf_gain_threshold: float = 0.0
+    # none=不做相关性筛选；select=当前门限筛选；schmidt 尚未实现并硬失败。
+    orthogonalization_mode: str = "select"
     mu_precoder: str = "zf"
     # RZF 的每个复信道系数 CSI 误差方差。它必须来自估计器协方差或离线标定，
     # 不能在运行时偷看 h_true 逐快照反推；0.0 精确保持历史 ZF/RZF 噪声加载口径。
@@ -603,6 +609,18 @@ class SchedulerConfig:
         if (not np.isfinite(self.mu_corr_threshold)
                 or not 0.0 <= float(self.mu_corr_threshold) <= 1.0):
             raise ValueError("mu_corr_threshold 必须是 [0,1] 内的有限数")
+        if (isinstance(self.min_pairing_mcs, (bool, np.bool_))
+                or not isinstance(self.min_pairing_mcs, (int, np.integer))
+                or int(self.min_pairing_mcs) < 0):
+            raise ValueError("min_pairing_mcs 必须是非负整数")
+        if (not np.isfinite(self.pf_gain_threshold)
+                or float(self.pf_gain_threshold) < 0.0):
+            raise ValueError("pf_gain_threshold 必须是有限非负数")
+        if self.orthogonalization_mode not in ("none", "select", "schmidt"):
+            raise ValueError(
+                "orthogonalization_mode 只支持 none / select / schmidt")
+        if self.orthogonalization_mode == "schmidt":
+            raise NotImplementedError("TODO: Schmidt 正交化未实现")
         if self.mu_accounting not in ("pair_table", "se_ratio_legacy"):
             raise ValueError(
                 "mu_accounting 只支持 pair_table / se_ratio_legacy，"
@@ -692,6 +710,9 @@ class SchedulerConfig:
             "mu_enabled": self.mu_enabled, "max_mu_users": self.max_mu_users,
             "mu_rank_per_user": self.mu_rank_per_user,
             "mu_corr_threshold": self.mu_corr_threshold,
+            "min_pairing_mcs": int(self.min_pairing_mcs),
+            "pf_gain_threshold": float(self.pf_gain_threshold),
+            "orthogonalization_mode": self.orthogonalization_mode,
             "mu_precoder": self.mu_precoder,
             "mu_csi_error_variance": self.mu_csi_error_variance,
             "mu_accounting": self.mu_accounting,
@@ -2376,6 +2397,10 @@ def measure_mu_gain(
     power_constraint: str = "nebf",
     mu_precoder: str = "zf",
     mu_csi_error_variance: float = 0.0,
+    min_pairing_mcs: int = 4,
+    pf_gain_threshold: float = 0.0,
+    mu_corr_threshold: float = 0.7,
+    orthogonalization_mode: str = "select",
 ) -> dict[str, Any]:
     """实测 MU 相对 SU 的小区谱效比，供 TTI 主循环使用。
 
@@ -2424,6 +2449,20 @@ def measure_mu_gain(
     if (not np.isfinite(mu_csi_error_variance)
             or float(mu_csi_error_variance) < 0):
         raise ValueError("mu_csi_error_variance 必须是有限非负数")
+    if (isinstance(min_pairing_mcs, (bool, np.bool_))
+            or not isinstance(min_pairing_mcs, (int, np.integer))
+            or int(min_pairing_mcs) < 0):
+        raise ValueError("min_pairing_mcs 必须是非负整数")
+    if (not np.isfinite(pf_gain_threshold)
+            or float(pf_gain_threshold) < 0.0):
+        raise ValueError("pf_gain_threshold 必须是有限非负数")
+    if (not np.isfinite(mu_corr_threshold)
+            or not 0.0 <= float(mu_corr_threshold) <= 1.0):
+        raise ValueError("mu_corr_threshold 必须是 [0,1] 内的有限数")
+    if orthogonalization_mode not in ("none", "select", "schmidt"):
+        raise ValueError("orthogonalization_mode 只支持 none / select / schmidt")
+    if orthogonalization_mode == "schmidt":
+        raise NotImplementedError("TODO: Schmidt 正交化未实现")
 
     h_eval_users = [
         _time_major(x, label="h_users", index=i) for i, x in enumerate(h_users)]
@@ -2566,7 +2605,11 @@ def measure_mu_gain(
                                       precoder=mu_precoder,
                                       csi_error_variance=float(mu_csi_error_variance),
                                       power_constraint=power_constraint,
-                                      rbg_boundaries=resolved_boundaries)
+                                      rbg_boundaries=resolved_boundaries,
+                                      min_pairing_mcs=int(min_pairing_mcs),
+                                      pf_gain_threshold=float(pf_gain_threshold),
+                                      corr_threshold=float(mu_corr_threshold),
+                                      orthogonalization_mode=orthogonalization_mode)
         except (ValueError, np.linalg.LinAlgError) as exc:
             errors.append({
                 "snapshot": int(t),
@@ -3112,6 +3155,9 @@ def simulate(
     su_fits_skip = 0
     mu_rbg = 0
     mu_pair_reject = 0
+    mu_pair_rejection_reasons: dict[str, int] = {}
+    mu_pf_gain_rejects = 0
+    mu_pf_gain_ratios: list[float] = []
     olla_db = np.zeros(n_ue)              # 历史变量名；实际单位为连续 MCS index
     # --- MU 记账口径：默认与 experience 同构地读 pair 表 -------------------
     # **MU 的代价必须同时进两侧**：进 MCS 决策（发得更保守）和进误块抽签
@@ -3331,9 +3377,25 @@ def simulate(
                 _partner = cand[_pos]
                 _link = getattr(tables[_anchor], "mu_links", {}).get(_partner)
                 if _link is None:
+                    mu_pair_rejection_reasons["missing_pair_link"] = (
+                        mu_pair_rejection_reasons.get("missing_pair_link", 0) + 1)
+                    continue
+                _orth_mode = str(getattr(
+                    sched, "orthogonalization_mode", "select"))
+                _corr = float(_link.correlation[snap])
+                if not np.isfinite(_corr):
+                    mu_pair_rejection_reasons["nonfinite_correlation"] = (
+                        mu_pair_rejection_reasons.get("nonfinite_correlation", 0) + 1)
+                    continue
+                if (_orth_mode == "select"
+                        and _corr > float(sched.mu_corr_threshold)):
+                    mu_pair_rejection_reasons["correlation_threshold"] = (
+                        mu_pair_rejection_reasons.get("correlation_threshold", 0) + 1)
                     continue
                 _mu_r = int(_link.rank_per_user)
                 _ok = True
+                _reject_reason = "predicted_bler_gt_0.5"
+                _pair_rows: list[tuple[int, int, float]] = []
                 for _cand_u in (_anchor, _partner):
                     _rows = tables[_cand_u].sinr_tx_db
                     if _rows is None or int(_rows.shape[1]) < _mu_r:
@@ -3351,6 +3413,10 @@ def simulate(
                     # admit a pair whose final MCS has predicted BLER > 0.5.
                     _pred_mcs = _planned_mcs(
                         _cand_u, snap, _mu_r, _link)
+                    if _pred_mcs < int(sched.min_pairing_mcs):
+                        _reject_reason = "mcs_below_min_pairing"
+                        _ok = False
+                        break
                     _pred_obj = _mcs_table[_pred_mcs]
                     _pred_tbs = la.transport_block_size(
                         re_per_tti, _pred_obj.rate, _pred_obj.q_m,
@@ -3366,13 +3432,29 @@ def simulate(
                     ) > 0.5:
                         _ok = False
                         break
+                    _pair_rows.append((
+                        int(_cand_u), int(_pred_mcs),
+                        float(_pred_obj.se) * float(_mu_r)))
                 if not _ok:
+                    mu_pair_rejection_reasons[_reject_reason] = (
+                        mu_pair_rejection_reasons.get(_reject_reason, 0) + 1)
+                    continue
+                _pair_se = float(sum(row[2] for row in _pair_rows))
+                _su_pf = _su_se / max(float(r_avg[_anchor]), _EPS)
+                _pair_pf = float(sum(
+                    row[2] / max(float(r_avg[row[0]]), _EPS)
+                    for row in _pair_rows))
+                _pf_ratio = _pair_pf / max(_su_pf, _EPS)
+                mu_pf_gain_ratios.append(float(_pf_ratio))
+                _pf_threshold = float(sched.pf_gain_threshold)
+                if (_pf_threshold > 0.0
+                        and _pf_ratio < _pf_threshold + 1e-9):
+                    mu_pf_gain_rejects += 1
+                    mu_pair_rejection_reasons["pf_gain_below_threshold"] = (
+                        mu_pair_rejection_reasons.get(
+                            "pf_gain_below_threshold", 0) + 1)
                     continue
                 _admitted += 1
-                _pair_se = sum(
-                    float(_mcs_table[
-                        _planned_mcs(_pu, snap, _mu_r, _link)].se) * float(_mu_r)
-                    for _pu in (_anchor, _partner))
                 if _pair_se > _best_se:
                     _best_se, _best_partner, _best_link = _pair_se, _partner, _link
             if _best_partner is not None:
@@ -3648,6 +3730,13 @@ def simulate(
                 "mu_disabled" if not _mu_on else "se_ratio_legacy")}),
         "mu_pair_rejects": int(mu_pair_reject),
         "mu_su_wins": int(mu_su_wins),
+        "mu_pair_rejection_reasons": mu_pair_rejection_reasons,
+        "mu_min_pairing_mcs": int(sched.min_pairing_mcs),
+        "mu_pf_gain_threshold": float(sched.pf_gain_threshold),
+        "mu_pf_gain_rejects": int(mu_pf_gain_rejects),
+        "mu_pf_gain_ratio_mean": (
+            float(np.mean(mu_pf_gain_ratios)) if mu_pf_gain_ratios else None),
+        "mu_orthogonalization_mode": str(sched.orthogonalization_mode),
         # MU 专用 OLLA：与 SU 分开收敛，只有 pair_table 口径下才会动。
         "mu_olla_mcs_mean": float(np.mean(mu_olla_db)),
         "mu_olla_mcs_p5": float(np.percentile(mu_olla_db, 5)),
@@ -3779,7 +3868,10 @@ def simulate(
             "TBS 按该 MCS 全带算，**误块抽签用 pair 的真实 SINR**（ZF 权打到"
             "双方 h_true、对方的流进干扰协方差）。配对准入沿用 experience 的"
             "判据（两侧叠加 SU+MU OLLA 后的实发 MCS，其预测 BLER 都不得超过 0.5），"
-            "通过准入后还要在聚合谱效上"
+            f"MCS 还须不低于 {int(sched.min_pairing_mcs)}；"
+            + (f"PF 增益比须严格达到 {float(sched.pf_gain_threshold):g}；"
+               if float(sched.pf_gain_threshold) > 0 else "PF 增益否决已关闭；")
+            + "通过准入后还要在聚合谱效上"
             "赢过锚点单发才真配对；本次 "
             f"{int(mu_pair_reject)} 个 TTI 没有任何可接受的配对、"
             f"{int(mu_su_wins)} 个 TTI 判定单发更划算，都退回 SU。"

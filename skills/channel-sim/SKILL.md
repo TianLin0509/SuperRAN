@@ -229,6 +229,9 @@ D/S 生效；图案没有 U 时自动退化成零时延并写进 notes）、`cqi
 `num_replications=8`（**别调到 6 以下**，见上）、
 `replication_workers="auto"`（短任务串行，长任务用进程；实际值看结果 `parallel`）、
 `neighbor_prb_util=0.3`、`csi_aging=True`、`olla_speedup=1.0`、`mu_enabled=False`。
+MU 显式开启时，`min_pairing_mcs=4` 会把低档用户留在 SU，
+`pf_gain_threshold=0.0` 默认不启用额外 PF 否决，
+`orthogonalization_mode="select"` 使用相关性筛选；`schmidt` 尚未实现并会硬失败。
 `experience_v2` 当前支持两用户、每用户 rank2 的数据受限 SU/MU 自适应；开 MU 时必须有
 完整 pair 链路表，缺失会硬报错，不再按 1.0 静默降级。队列积压就调低到达率，burst 太少
 就加长 `duration_s`。

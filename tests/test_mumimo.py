@@ -102,6 +102,36 @@ _w[4] = 100.0
 _pr_w = mu.pair_users(_hec, criterion="sus", max_users=1, weights=_w)
 check(_pr_w.users == [4] and _pr_w.weights_used, "权重能把弱用户顶进配对（比例公平的基础）")
 
+# 低 MCS 预筛、PF 增益否决与未实现正交化必须是显式合同。
+_mcs_gate = np.full(_hec.shape[0], 10, dtype=int)
+_mcs_gate[_pr.users[0]] = 3
+_pr_mcs = mu.pair_users(
+    _hec, criterion="sus", max_users=4, mcs_indices=_mcs_gate,
+    min_pairing_mcs=4)
+check(_pr.users[0] not in _pr_mcs.users
+      and _pr.users[0] in _pr_mcs.dropped_by_mcs,
+      "MCS<4 的用户不进入 MU 配对并留下排除证据")
+_pr_legacy = mu.pair_users(
+    _hec, criterion="sus", max_users=4, mcs_indices=_mcs_gate,
+    min_pairing_mcs=0)
+check(_pr_legacy.users == _pr.users,
+      "min_pairing_mcs=0 逐位退化到旧配对行为")
+_greedy_open = mu.pair_users(
+    _hec, criterion="greedy_sum_rate", max_users=4,
+    min_pairing_mcs=0, pf_gain_threshold=0.0, noise_power=0.1)
+_greedy_guarded = mu.pair_users(
+    _hec, criterion="greedy_sum_rate", max_users=4,
+    min_pairing_mcs=0, pf_gain_threshold=1.5, noise_power=0.1)
+check(len(_greedy_guarded.users) < len(_greedy_open.users)
+      and _greedy_guarded.pf_gain_threshold == 1.5,
+      "PF 加权速率增益比不足门限时停止加人；0 保持旧行为")
+try:
+    mu.pair_users(_hec, orthogonalization_mode="schmidt")
+    check(False, "schmidt 未实现时不应静默回落 select")
+except NotImplementedError as _exc:
+    check("Schmidt" in str(_exc) and "TODO" in str(_exc),
+          "schmidt 显式报 TODO，不冒充已实现主动正交化")
+
 # ---------------------------------------------------------------------------
 sect("3  预编码：方向与功率必须解耦")
 
@@ -311,6 +341,15 @@ check(all(d["rank"] <= mu.MU_MAX_RANK for d in _dec.mu_per_user),
       f"MU 每用户秩不超过 {mu.MU_MAX_RANK}（工程约束）")
 check(bool(_dec.mu_users), "MU 方案确实配了人")
 check(len(_dec.mu_per_user) == len(_dec.mu_users), "逐用户明细齐全")
+_dec_no_gate = mu.su_mu_adaptation(
+    _Hs, noise_power=_npow, min_pairing_mcs=0)
+_dec_all_excluded = mu.su_mu_adaptation(
+    _Hs, noise_power=_npow, min_pairing_mcs=28)
+check(_dec_no_gate.as_dict() == _dec.as_dict(),
+      "min_pairing_mcs=0 保持旧 SU/MU 判决逐字段一致")
+check(not _dec_all_excluded.mu_users
+      and "min_pairing_mcs=28" in _dec_all_excluded.note,
+      "门限排除用户后 CellDecision.note 记录原因与用户 ID")
 
 # SU/MU 比较的 CSI 信息集必须对称：估计权与真实信道正交时，SU 也必须吃到
 # 预编码失配，不能只让 MU 用 h_est、SU 偷看 h_true。
