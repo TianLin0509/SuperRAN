@@ -6,7 +6,7 @@ Agent 只写一份结构化 JSON，本脚本负责排版、写盘并刷新总索
 
     python scripts/make_agent_report.py <report.json>
 
-JSON 字段见 .agents/AUTHOR.md 与 .agents/REVIEWER.md，缺省字段自动跳过该节。
+JSON 字段见 .agents/AUTHOR.md 与 .agents/MERGER.md，缺省字段自动跳过该节。
 """
 from __future__ import annotations
 

@@ -47,7 +47,7 @@
   "risks": ["剩余风险，按严重度排序"],
   "decisions": ["需要维护者拍板的问题，没有就留空数组"],
 
-  "handoff": "读 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\REVIEWER.md 按它工作。\n任务：<一句话>\n分支：<branch>  完整 SHA：<40 位>\nAuthor 报告：<绝对路径>\n风险档：<绿/黄/红>  本次触碰的物理机制：<模块>\n棘轮测试：<测试函数名，或\"本次无\">",
+  "handoff": "读 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\MERGER.md 按它工作。\n任务：<一句话>\n分支：<branch>  完整 SHA：<40 位>\nAuthor 报告：<绝对路径>\n风险档：<绿/黄/红>  本次触碰的物理机制：<模块>\n棘轮测试：<测试函数名，或\"本次无\">",
 
   "details": [
     {"label": "运行的命令与结果", "content": "折叠区，放命令、日志摘要、文件清单"}
