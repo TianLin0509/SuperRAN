@@ -11,8 +11,11 @@
 from __future__ import annotations
 
 import math
+import pathlib
 import sys
+import types
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -22,7 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from superran import channelhub as ch  # noqa: E402
 from superran import hardware as hw  # noqa: E402
-from superran import native  # noqa: E402
+from superran import native, plan, scenes  # noqa: E402
 from superran import sionna_rt as srt  # noqa: E402
 
 _HAS_SIONNA = not srt.adapter_missing()
@@ -530,6 +533,148 @@ def test_cosited_sectors_share_one_ray_trace() -> None:
     assert len(diag) == 3
     assert len({row["num_paths"] for row in diag}) == 1
     assert len({round(row["rt_pathloss_db"], 9) for row in diag}) == 1
+
+
+# ---------------------------------------------------------------------------
+# 公开入口 → RT 适配层的端到端棘轮（2026-09-04 审核发现的四条）
+# ---------------------------------------------------------------------------
+# 这四条守的都是"配置从公开入口走到引擎时有没有被静默改掉"。它们**不需要
+# sionna**：全部只看配置路由与参数解析，所以在没装 RT 的机器上也必须跑。
+#
+# 反例来源：Codex 双席审核 2026-09-04（PR #12 BLOCKED）。
+
+
+def test_public_entry_carries_the_requested_scene_all_the_way_down():
+    """棘轮：非 munich 场景必须真的传到适配层。
+
+    把 plan.translate 里的 ``ch["scene"] = str(scene)`` 删掉就会变红。
+    原来的行为是 scene 停在 SuperRAN-only 配置里，适配层拿不到就默认
+    munich —— etoile / florence / san_francisco 与本地城市统统跑成慕尼黑，
+    而结果仍标 sionna_rt，覆盖、径数、秩、PDP、波束全被污染。
+    """
+    for scene in ("etoile", "florence", "san_francisco", "munich"):
+        ch_cfg, _own = plan.translate({"scene": scene, "num_ues": 2})
+        assert ch_cfg.get("scene") == scene, (scene, ch_cfg.get("scene"))
+        src = srt.SionnaRTSource(ch_cfg)
+        assert src._scene_name == scene, (
+            f"requested={scene} effective={src._scene_name}")
+
+
+def test_unknown_scene_is_a_hard_error_not_a_silent_munich_fallback():
+    """拼错的场景名当场报错。用错几何比直接失败危险得多。"""
+    with pytest.raises(ValueError, match="未知的射线追踪场景"):
+        srt.SionnaRTSource({"scene": "munchen"})
+    with pytest.raises(ValueError, match="未知的射线追踪场景"):
+        srt.SionnaRTSource({"scene": "shanghai_lujiazui_typo"})
+    # 不给 scene 时才用默认 munich，这是有文档的默认值
+    assert srt.SionnaRTSource({}).__dict__["_scene_name"] == "munich"
+
+
+def test_local_city_asset_is_read_from_osm_path_not_scene_file():
+    """棘轮：本地城市资产的键是 osm_path。
+
+    ``scenes.prepare_scene()`` 从来没返回过 ``scene_file``；读那个键的结果是
+    所有本地城市场景（rt_shanghai_lujiazui、rt_shenzhen_futian …）恒被判成
+    资产缺失。这里用 mock 返回合法 osm_path，适配层必须认。
+    """
+    scene_id = "rt_shanghai_lujiazui"
+    fake = "C:/nonexistent/scene.xml"
+    known = types.SimpleNamespace(scene_id=scene_id, builtin=False)
+    # 不依赖本机是否真的装了这套资产：把「名字是已知本地场景」一并 mock 掉，
+    # 这条棘轮在任何机器上都要跑得动。
+    patch_known = mock.patch.object(scenes, "get_scene", return_value=known)
+
+    with patch_known:
+        src = srt.SionnaRTSource({"scene": scene_id})
+    with mock.patch.object(srt, "_ensure_sionna", return_value=object()), \
+            mock.patch.object(scenes, "prepare_scene",
+                              return_value={"scene_id": scene_id,
+                                            "builtin": False,
+                                            "osm_path": fake}):
+        assert src._scene_file() == fake
+
+    # 上层已经解析好 osm_path 时直接用它，不再准备第二遍
+    with patch_known:
+        src2 = srt.SionnaRTSource({"scene": scene_id, "osm_path": fake})
+    with mock.patch.object(srt, "_ensure_sionna", return_value=object()), \
+            mock.patch.object(scenes, "prepare_scene",
+                              side_effect=AssertionError("不该再准备一次")):
+        assert src2._scene_file() == fake
+
+
+def test_zero_is_a_legal_config_value_and_survives_to_the_solver():
+    """棘轮：``cfg.get(k, d) or d`` 会把合法的 0 一起吃掉。
+
+    ``rt_max_depth=0`` 是"只要 LOS"的负向对照。被悄悄换成 3 之后对照里含
+    三阶反射，时延扩展、秩、频选性和波束结果全都变了，而 meta 还写着 3。
+    """
+    assert srt._cfg_num({"rt_max_depth": 0}, "rt_max_depth", 3) == 0
+    assert srt._cfg_num({}, "rt_max_depth", 3) == 3
+    assert srt._cfg_num({"rt_max_depth": None}, "rt_max_depth", 3) == 3
+    assert srt._cfg_num({"rt_samples_per_src": 0}, "rt_samples_per_src", 10) == 0
+    # 源码里不许再出现 `or` 兜底的写法
+    text = pathlib.Path(srt.__file__).read_text(encoding="utf-8")
+    for key in ("rt_max_depth", "rt_samples_per_src", "carrier_freq_hz",
+                "sample_interval_s"):
+        assert f'self.cfg.get("{key}"' not in text or f'_cfg_num(self.cfg, "{key}"' in text, (
+            f"{key} 仍在用 cfg.get(...) or default 的写法")
+
+
+def test_deterministic_duplicate_samples_are_refused_at_the_entry():
+    """棘轮：静止 + 零多普勒时多要的样本必然逐位重复，入口就要拒。
+
+    射线追踪是确定性的。把这批重复矩阵当成 N 个独立实现，会给样本量和
+    时间相关性证据造假。
+    """
+    cfg = {"scene": "munich", "num_ues": 2, "num_samples": 4,
+           "mobility_mode": "static", "ue_speed_kmh": 0.0}
+    with pytest.raises(ValueError, match="逐位相同"):
+        list(srt.SionnaRTSource(cfg).iter_samples())
+    # 三条出路各自都能解开：给多普勒 / 让它动 / 降样本数
+    for relief in ({"ue_speed_kmh": 3.0},
+                   {"mobility_mode": "linear"},
+                   {"num_samples": 2}):
+        src = srt.SionnaRTSource({**cfg, **relief})
+        src._assert_samples_are_distinct()   # 不抛就算过
+
+
+def test_sample_round_advances_before_the_parent_builds_the_sample():
+    """棘轮：轮次必须在父类算这个样本**之前**设好。
+
+    写成 ``for i, s in enumerate(super().iter_samples())`` 时，生成器在循环体
+    执行前就已经把样本算完了：信道用的是上一轮的时间原点，meta 里却记着
+    这一轮。数字自洽，物理不对——实测样本 0 与样本 2 逐位相同而 meta 显示
+    round 0 / 1。这里用一个假父类把顺序钉死。
+    """
+    seen: list[int] = []
+
+    class _Probe(srt.SionnaRTSource):
+        def __init__(self):            # noqa: D107 - 只为拿到最小状态
+            self.cfg = {"scene": "munich"}
+            self._scene_name = "munich"
+            self._sample_round = 0
+            self._offset = 0
+            self.num_ues = 2
+            self.num_samples = 6
+            self._sample_diag = []
+            self._scene_offset_m = np.zeros(3)
+
+        def _assert_samples_are_distinct(self):
+            return None
+
+        def _parent_samples(self):
+            for _ in range(6):
+                # 父类"算样本"的时刻：记下它看到的轮次
+                seen.append(self._sample_round)
+                yield types.SimpleNamespace(source=None, meta={})
+
+    probe = _Probe()
+    with mock.patch.object(srt.SionnaRTSource, "iter_samples",
+                           srt.SionnaRTSource.iter_samples), \
+            mock.patch("superran.native.InternalSimSource.iter_samples",
+                       lambda self: self._parent_samples()):
+        list(srt.SionnaRTSource.iter_samples(probe))
+    assert seen == [0, 0, 1, 1, 2, 2], seen
 
 
 if __name__ == "__main__":

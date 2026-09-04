@@ -2782,6 +2782,40 @@ KPI 差异可归因到信道矩阵本身。RT 自己算出的路损与时延扩�
 站点必须平移到包围盒中心，否则随机撒点会大面积落进全遮挡区。服务链路一条径都追不到时
 适配层直接抛"覆盖空洞"并打印坐标，绝不退回 TDL/CDL；干扰小区零径则返回零信道，因为那是
 真实的"该小区没有干扰"。</p>
+<h2>配置从公开入口走到引擎，中途不许被静默改掉</h2>
+<p>2026-09-04 的双席审核在这条链上抓到四个"静默"缺陷，四个都已修掉并各配一条棘轮。
+它们的共同点是<b>失败时看起来完全正常</b>：跑得通、有结果、meta 也自洽，只有物理是错的。</p>
+"""
+    body += table(
+        ["环节", "曾经的静默行为", "现在的合同"],
+        [
+            ("场景名传递",
+             "<code>scene</code> 只展开成 scenario/osm_path，名字本身停在 SuperRAN-only 配置里，"
+             "适配层拿不到就默认 munich —— etoile / florence / san_francisco 与本地城市全跑成慕尼黑，结果仍标 sionna_rt",
+             "<code>plan.translate()</code> 把名字一并写进引擎配置；认不出的场景名<b>当场报错</b>，不退回默认场景"),
+            ("本地城市资产",
+             "适配层读 <code>scene_file</code>，而 <code>prepare_scene()</code> 返回的键一直是 <code>osm_path</code>，"
+             "于是所有本地城市场景恒被判成「资产缺失」",
+             "优先用上层已解析好的 <code>cfg['osm_path']</code>，没有才自己准备一次，读的也是 <code>osm_path</code>"),
+            ("样本时间轴",
+             "每个样本都从 <code>t=0</code> 重来。射线追踪是确定性的，静止 UE 的第 2、3、4… 个样本与第 1 个<b>逐位相同</b>——"
+             "样本数涨了、信道实现数没涨",
+             "第 k 轮从 <code>k × sample_interval_s</code> 起算（与父类挪 UE 位置同一个时钟）；"
+             "静止且零多普勒的配置在 <code>iter_samples</code> 入口<b>硬失败</b>，并给出三条出路"),
+            ("合法零值",
+             "<code>cfg.get(k, d) or d</code> 把 <code>rt_max_depth=0</code>（LOS-only 负向对照）悄悄换成 3，"
+             "对照里含三阶反射而 meta 还写着 3",
+             "统一走 <code>_cfg_num()</code>，<b>只有缺省或 None 才用默认值</b>"),
+        ],
+    )
+    body += callout(
+        "warn", "轮次必须在父类算样本之前设好",
+        "<p>写成 <code>for i, s in enumerate(super().iter_samples())</code> 是错的：生成器在循环体执行前"
+        "就已经把样本算完了，于是信道用的是上一轮的时间原点，而 meta 里记着这一轮。"
+        "<b>数字自洽，物理不对</b>——实测样本 0 与样本 2 逐位相同，meta 却显示 round 0 / 1。"
+        "修好之后同一 UE 相邻两轮实测 NMSE 约 −18 dB，是正确的时间相关差异而不是独立重画。</p>",
+    )
+    body += """
 <h2>InternalSim 的快速 probe 为什么能快、又为什么不能多算</h2>
 """ + F_PROBE_SNR + F_SINR_COMBINE
     body += """

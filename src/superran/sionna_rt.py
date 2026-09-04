@@ -58,6 +58,18 @@ _C = 299_792_458.0
 _EPS = 1e-30
 
 
+def _cfg_num(cfg: dict[str, Any], key: str, default: Any) -> Any:
+    """取配置项，**只有缺省或 None 才用默认值**。
+
+    不能写成 ``cfg.get(key, default) or default``：那个惯用法会把合法的 0
+    一起吃掉。``rt_max_depth=0`` 是"只要 LOS"的负向对照，被悄悄换成 3 之后
+    对照里含三阶反射，时延扩展、秩、频选性和波束结果全都变了，而 meta 里
+    还写着 3——使用者根本看不出自己要的 0 没生效。
+    """
+    value = cfg.get(key, default)
+    return default if value is None else value
+
+
 # ---------------------------------------------------------------------------
 # 可用性探测：只探顶层包名，绝不 import sionna
 # ---------------------------------------------------------------------------
@@ -194,6 +206,7 @@ def synthesize_channel(
     n_rb: int,
     subcarrier_spacing_hz: float,
     sample_interval_s: float,
+    time_offset_s: float = 0.0,
     normalize: bool = True,
 ) -> np.ndarray:
     """把射线集合合成为 ``[time, rb, bs_port, ue_port]`` 信道张量。
@@ -226,7 +239,12 @@ def synthesize_channel(
     freq = (np.arange(int(n_rb), dtype=np.float64) - (int(n_rb) - 1.0) / 2.0) * 12.0 * float(
         subcarrier_spacing_hz
     )
-    times = np.arange(int(n_time), dtype=np.float64) * float(sample_interval_s)
+    # **时间轴要接着上一个样本往下走，不能每个样本都从 t=0 重来。**
+    # 从 0 重来时，静止 UE 的第 2、3、4… 个样本与第 1 个逐位相同：样本数涨了，
+    # 信道实现数没涨。跨快照变化、多用户分集、CSI 老化、协方差、rank/MCS
+    # 分布全都会被这批重复矩阵做假。
+    times = (float(time_offset_s)
+             + np.arange(int(n_time), dtype=np.float64) * float(sample_interval_s))
     absolute_freq = float(carrier_freq_hz) + freq
 
     h = np.zeros((int(n_time), int(n_rb), n_bs, n_ue), dtype=np.complex128)
@@ -312,8 +330,19 @@ class SionnaRTSource(InternalSimSource):
 
     def __init__(self, cfg: dict[str, Any]):
         super().__init__(cfg)
-        self._scene_name = str(self.cfg.get("scene", "munich"))
+        # 没给 scene 时用 munich（有文档的默认）；**给了就必须认得**。
+        # 以前这里只写 cfg.get("scene", "munich")，而上层把 scene 留在了
+        # SuperRAN-only 配置里没传下来，于是 etoile / florence /
+        # san_francisco / 本地城市统统被静默跑成 munich，结果还标 sionna_rt。
+        raw_scene = self.cfg.get("scene")
+        self._scene_name = "munich" if raw_scene in (None, "") else str(raw_scene)
+        self._assert_scene_known(self._scene_name)
+        # 逐位置缓存射线解。**要限长**：移动 UE 每个样本都是新位置，
+        # 不封顶就是一路吃内存。
         self._rt_cache: dict[tuple[int, ...], list[RayPaths | None]] = {}
+        self._rt_cache_limit = 512
+        #: 当前样本的轮次，用来把时间轴接着往前走（见 _small_scale_channel）。
+        self._sample_round = 0
         self._scene = None
         self._sites_in_scene: list[Cell] | None = None
         self._pending_diag: list[dict[str, Any]] = []
@@ -325,6 +354,27 @@ class SionnaRTSource(InternalSimSource):
 
     # -- 场景 ---------------------------------------------------------------
 
+    @staticmethod
+    def _assert_scene_known(name: str) -> None:
+        """场景名认不出来就当场报错，不许悄悄退回默认场景。
+
+        用错几何比直接失败危险得多：覆盖、径数、秩、PDP、波束和所有下游 KPI
+        都会被污染，而结果看起来完全正常。
+        """
+        if name in BUILTIN_SCENE_NAMES:
+            return
+        from .scenes import get_scene, list_scenes  # noqa: PLC0415
+
+        if get_scene(name) is not None:
+            return
+        known_local = [s.scene_id for s in list_scenes() if not s.builtin]
+        raise ValueError(
+            f"未知的射线追踪场景 {name!r}。"
+            f"Sionna 自带：{', '.join(BUILTIN_SCENE_NAMES)}；"
+            f"本地资产：{', '.join(known_local) if known_local else '（无）'}。"
+            "拼错的场景名不会退回 munich——那会用错误的建筑几何产出看似正常的 KPI。"
+        )
+
     def _scene_file(self) -> Any:
         rt = _ensure_sionna()
         from sionna.rt import scene as builtin  # noqa: PLC0415
@@ -332,10 +382,19 @@ class SionnaRTSource(InternalSimSource):
         name = self._scene_name
         if name in BUILTIN_SCENE_NAMES:
             return getattr(builtin, name)
+        # 上层 plan.translate 已经把场景展开过一遍，解析好的绝对路径就在
+        # cfg["osm_path"] 里；优先用它，省掉第二次资产准备。
+        resolved = self.cfg.get("osm_path")
+        if resolved:
+            del rt
+            return str(resolved)
         from .scenes import prepare_scene  # noqa: PLC0415
 
         prepared = prepare_scene(name)
-        path = prepared.get("scene_file") if isinstance(prepared, dict) else None
+        # **键名是 osm_path。** scenes.prepare_scene 从来没有返回过 scene_file，
+        # 以前读那个键的结果是：所有本地城市场景（rt_shanghai_lujiazui、
+        # rt_shenzhen_futian …）永远拿到 None，然后被当成"资产缺失"硬失败。
+        path = prepared.get("osm_path") if isinstance(prepared, dict) else None
         if not path:
             raise RuntimeError(
                 f"场景 {name!r} 不是 Sionna 自带场景，且本地资产里没有可用的 scene 文件。"
@@ -472,17 +531,20 @@ class SionnaRTSource(InternalSimSource):
         solver = rt.PathSolver()
         solved = solver(
             scene,
-            max_depth=int(self.cfg.get("rt_max_depth", 3) or 3),
-            samples_per_src=int(self.cfg.get("rt_samples_per_src", 1_000_000) or 1_000_000),
+            max_depth=int(_cfg_num(self.cfg, "rt_max_depth", 3)),
+            samples_per_src=int(_cfg_num(self.cfg, "rt_samples_per_src", 1_000_000)),
             synthetic_array=True,
             los=True,
             specular_reflection=bool(self.cfg.get("rt_specular_reflection", True)),
             diffuse_reflection=bool(self.cfg.get("rt_diffuse_reflection", False)),
             refraction=bool(self.cfg.get("rt_refraction", True)),
             edge_diffraction=bool(self.cfg.get("rt_edge_diffraction", False)),
-            seed=int(self.cfg.get("rt_seed", self._seed) or 0),
+            seed=int(_cfg_num(self.cfg, "rt_seed", self._seed)),
         )
         out = self._split_paths(solved, len(set(self._cell_to_source)))
+        if len(self._rt_cache) >= self._rt_cache_limit:
+            # 移动 UE 每个样本都是新位置，不封顶就是一路吃内存。
+            self._rt_cache.pop(next(iter(self._rt_cache)))
         self._rt_cache[key] = out
         return out
 
@@ -605,13 +667,16 @@ class SionnaRTSource(InternalSimSource):
             rays,
             spec,
             sector_azimuth_deg=float(cell.azimuth_deg),
-            carrier_freq_hz=float(self.cfg.get("carrier_freq_hz", 3.5e9) or 3.5e9),
+            carrier_freq_hz=float(_cfg_num(self.cfg, "carrier_freq_hz", 3.5e9)),
             n_time=int(n_time),
             n_rb=int(n_rb),
             subcarrier_spacing_hz=float(
-                self.cfg.get("subcarrier_spacing", 30_000.0) or 30_000.0
+                _cfg_num(self.cfg, "subcarrier_spacing", 30_000.0)
             ),
-            sample_interval_s=float(self.cfg.get("sample_interval_s", 5e-3) or 5e-3),
+            sample_interval_s=float(
+                _cfg_num(self.cfg, "sample_interval_s", 5e-3)),
+            time_offset_s=float(self._sample_round) * float(
+                _cfg_num(self.cfg, "sample_interval_s", 5e-3)),
         )
         gain_sum = float(np.sum(np.abs(rays.gains) ** 2))
         self._sample_diag.append(
@@ -645,8 +710,48 @@ class SionnaRTSource(InternalSimSource):
         )
         return info
 
+    def _assert_samples_are_distinct(self) -> None:
+        """配置注定产出逐位重复的样本时，当场报错。
+
+        射线追踪是确定性的：UE 不动、又没有多普勒，那么第 2 个样本与第 1 个
+        **必然逐位相同**。这不是 bug，是物理——但把这批重复矩阵当成 N 个独立
+        实现就是在给样本量和时间相关性证据造假。所以这里硬拦：要么让它动
+        （``mobility_mode`` 或 ``ue_speed_kmh``），要么别要多余的样本。
+        """
+        rounds = int(self.num_samples) // max(int(self.num_ues), 1)
+        if rounds <= 1:
+            return
+        moves = (str(_cfg_num(self.cfg, "mobility_mode", "static")).strip().lower()
+                 != "static")
+        speed_kmh = float(_cfg_num(self.cfg, "ue_speed_kmh", 3.0))
+        if moves or speed_kmh > 0.0:
+            return
+        raise ValueError(
+            "Sionna RT 是确定性的：UE 位置不变（mobility_mode='static'）且没有"
+            f"多普勒（ue_speed_kmh=0）时，每个 UE 的 {rounds} 轮样本会逐位相同，"
+            "它们不是 %d 个独立信道实现。"
+            "要么给 ue_speed_kmh 一个正值（静止落点 + 多普勒谱，38.901 的常规口径），"
+            "要么设 mobility_mode 让 UE 真的走，要么把 num_samples 降到 "
+            "num_ues 以内。**不会静默产出重复矩阵。**"
+            % int(self.num_samples)
+        )
+
     def iter_samples(self) -> Iterator[ChannelSample]:
-        for sample in super().iter_samples():
+        self._assert_samples_are_distinct()
+        inner = super().iter_samples()
+        local_index = 0
+        while True:
+            # **必须在父类算这个样本之前设好轮次。** 写成
+            # ``for i, sample in enumerate(super().iter_samples())`` 是错的：
+            # 生成器在循环体执行前就已经把样本算完了，于是信道用的是上一轮的
+            # 时间原点，而 meta 里写的是这一轮——数字自洽，物理不对。
+            self._sample_round = (
+                int(self._offset) + local_index) // max(int(self.num_ues), 1)
+            try:
+                sample = next(inner)
+            except StopIteration:
+                return
+            local_index += 1
             sample.source = "sionna_rt"
             diag = list(self._sample_diag)
             serving = next(
@@ -660,7 +765,10 @@ class SionnaRTSource(InternalSimSource):
                     "rt_scene": self._scene_name,
                     "rt_scene_offset_m": [float(v) for v in self._scene_offset_m],
                     "rt_engine": _engine_version(),
-                    "rt_max_depth": int(self.cfg.get("rt_max_depth", 3) or 3),
+                    "rt_max_depth": int(_cfg_num(self.cfg, "rt_max_depth", 3)),
+                    "rt_sample_round": int(self._sample_round),
+                    "rt_time_offset_s": float(self._sample_round) * float(
+                        _cfg_num(self.cfg, "sample_interval_s", 5e-3)),
                     "rt_diffuse_reflection": bool(
                         self.cfg.get("rt_diffuse_reflection", False)
                     ),
