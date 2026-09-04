@@ -2047,7 +2047,7 @@ def phases_svg() -> str:
         body += svg_box(35 + i * 270, 180, 235, 66, title, sub, "b")
         if i:
             body += arrow(35 + (i - 1) * 270 + 235, 213, 35 + i * 270, 213)
-    body += '<text class="ds" x="570" y="286">主循环禁止重复矩阵分解；legacy_v1 标量 MU 与 experience_v2 pair 表必须分开解释</text>'
+    body += '<text class="ds" x="570" y="286">主循环禁止重复矩阵分解；MU 一律读 pair 表，标量近似已下线</text>'
     return svg_wrap(body, 1140, 315, "系统仿真的两相架构")
 
 
@@ -2202,9 +2202,11 @@ Sionna RT / QuaDRiGa 只允许作为显式可选 direct adapter。
 """
     body += callout(
         "warn", "最重要的边界",
-        "<p><code>capacity / legacy_v1</code> 与 <code>experience / experience_v2</code> "
-        "是两种评估模式，不是同一算法的精度开关。前者复现全带调度历史行为；后者实现 FIFO、"
-        "按需 RBG、真实 MU pair、PF 实际 TBS 记账和体验 KPI。跨模式比较必须把语义差异写出来。</p>",
+        "<p>系统级<strong>只有一条评估路径</strong>（<code>experience_v2</code>）："
+        "FIFO、按需 RBG、真实 MU pair、PF 实际 TBS 记账和 Rel-19 体验 KPI。"
+        "所谓“容量仿真”是它的一个话务配置 <code>traffic_model=\"full_buffer\"</code>："
+        "队列无限使按需 RBG 退化成全带宽。**不许为它开特例分支**；"
+        "代价是 busy period 永不结束，体验速率按定义无定义、报 None。</p>",
     )
     body += """
 <h2>推荐阅读路径</h2>
@@ -4780,34 +4782,46 @@ rank2 下成立</strong>；扩到 3/4 用户或不等流数时，这个常数标
 def modes_page() -> Page:
     body = phases_svg()
     body += """
-<h2>两种模式，不是两档精度</h2>
+<h2>只有一条评估路径；容量是它的一个话务配置</h2>
+<p><code>evaluation_mode</code> 已删除。系统级仿真恒走 <code>experience_v2</code>：
+一次 PF 排序后可服务多个 UE、按 TBS 反查最小够用 RBG、KPI 用 TS 28.552 Rel-19 的
+DRB busy-period 与 FIFO 到达对象。文档和对话里说的<strong>“容量仿真”指的是
+<code>traffic_model="full_buffer"</code></strong>，不是另一套调度或 KPI 语义。</p>
 """
     body += table(
-        ["维度", "capacity / legacy_v1", "experience / experience_v2"],
+        ["维度", "容量口径（traffic_model=full_buffer）", "体验口径（mixed / ftp3 / cdf）"],
         [
-            ("问题", "满带调度下的容量/历史 KPI 复现", "有限业务包下的排队、资源与用户体验"),
-            ("每 TTI 调度", "SU 或 legacy 标量 MU；用户通常拿全带", "一次 PF 排序后可服务多个 UE，按需 RBG"),
-            ("MU", "预计算聚合 ratio 后主循环标量折算", "候选 pair 的真实链路表与完整 SU/MU plan"),
-            ("PF numerator", "gNB best_se", "假设全带 TBS(17)"),
-            ("PF credit", "best_se/受 MU rank 修正的 SE", "默认实际 scheduled TBS；可选 ACK goodput"),
-            ("队列", "历史 traffic/burst 抽象", "arrival-object FIFO、NACK 留队、warmup 切窗"),
-            ("体验速率", "legacy trim", "DRB busy-period + fractional small burst + 含头速率"),
-            ("资源 KPI", "整带占用为主", "PRB utilization、0..17 占用、MU/used、用户归因"),
-            ("HARQ", "一次 IR/CC；同 MCS/RBG 数/rank/TBS", "一次 IR/CC；按需 RBG 身份冻结并有 allocation 证据"),
+            ("问题", "满业务下的小区吞吐上界与调度公平性", "有限业务包下的排队、资源与用户体验"),
+            ("每 TTI 调度", "队列无限 ⇒ 按需 RBG 反查恒等于全带宽，一个 SU 或一对 MU",
+             "一次 PF 排序后可服务多个 UE，按需 RBG，尾料可留空"),
+            ("解调 SINR", "按本次实际授予的 RBG 聚合——满缓冲下“那几个”天然是全部",
+             "按本次实际授予的 RBG 聚合"),
+            ("MU", "候选 pair 的真实链路表与完整 SU/MU plan", "同左（同一份实现）"),
+            ("PF credit", "实际 scheduled TBS", "实际 scheduled TBS；可选 ACK goodput"),
+            ("队列", "每 UE 一个永不排空的 DRB", "arrival-object FIFO、NACK 留队、warmup 切窗"),
+            ("体验速率", "<strong>按定义无定义，报 None（不是 0）</strong>",
+             "DRB busy-period + fractional small burst + 含头速率"),
+            ("该看什么", "cell_served_mbps、serving_cell_prb_utilization、Jain、avg_mcs_first_tx",
+             "drb_throughput_rel19_mbps、queue wait、completion delay、PDB miss"),
+            ("HARQ", "一次 IR/CC；身份冻结并有 allocation 证据", "同左（同一份实现）"),
         ],
     )
     body += callout(
         "danger", "禁止横向偷换",
-        "<p>不能把 experience 的按需 RBG 结果与 capacity 的全带 legacy 结果直接相减后称为“算法提升”；"
-        "两边必须共享 evaluation profile、话务、CSI、功率、warmup 和 KPI 定义。"
-        "同名字段若语义不同，结果 JSON 会带 profile/version/notes。</p>",
+        "<p>不能把 full_buffer 的容量数字与有限话务的体验数字直接相减后称为“算法提升”——"
+        "它们是同一条路径在两个负载工作点上的结果，回答的问题不同。"
+        "两边对比必须共享话务、CSI、功率、warmup 和 KPI 定义。</p>"
+        "<p><strong>也不要为 full_buffer 开特例。</strong>“满缓冲下频选搜索反正挑不出东西，"
+        "跳过它能快 2.5 倍”这类优化明确否决：那会重新造出一条只在特定话务下成立的路径，"
+        "正是这次合并要消灭的东西。</p>",
     )
     body += """
-<section class="toy-example"><h2>Toy example：同一个1,500 B小包，两种模式回答不同问题</h2>
-<p>capacity模式把当前用户当作持续有数据，问题是“独占全带能达到多少”；它不会因为队列只有
-1,500 B就把剩余RBG让给别人。experience模式先看真实队列，可能只给小包1个RBG，再把其余16个
-分给第二位用户，并记录小包从到达到首次调度的等待。前者适合链路容量基线，后者才回答小包是否
-偷走整个TTI。两者数字不同不是精度差异，也不能直接相减成算法收益。</p></section>
+<section class="toy-example"><h2>Toy example：同一个 1,500 B 小包，两个负载工作点</h2>
+<p>full_buffer 下这个用户的队列是无限的，反查出来的“最小够用 RBG”就是全部 17 个，
+于是它独占整个 TTI——这不是模式在做别的事，是同一套按需分配逻辑在无限队列上的取值。
+换成 mixed 话务，同一套逻辑看到真实队列只有 1,500 B，就只给 1 个 RBG，其余 16 个分给
+第二位用户，并记录小包从到达到首次调度的等待。两者数字不同不是精度差异，
+也不能直接相减成算法收益。</p></section>
 """
     body += """
 <h2>为什么要预热</h2>
@@ -4817,9 +4831,9 @@ def modes_page() -> Page:
 """
     body += "<p class=source-row>仿真入口：" + source_ref("src/superran/system.py", "def simulate") + " · TTI 主循环：" + source_ref("src/superran/experience.py", "def simulate_experience") + "</p>"
     return Page(
-        "modes", "容量评估与体验评估", "系统仿真", "EVALUATION PROFILES",
-        "capacity/legacy_v1 与 experience/experience_v2 的语义、实现和 KPI 边界。", body,
-        ("capacity", "experience", "legacy_v1", "experience_v2", "warmup"),
+        "modes", "容量口径与体验口径", "系统仿真", "LOAD OPERATING POINTS",
+        "唯一评估路径 experience_v2，以及容量口径（full_buffer）与体验口径的边界。", body,
+        ("capacity", "experience", "full_buffer", "experience_v2", "warmup"),
     )
 
 
@@ -5711,7 +5725,7 @@ OLLA、MU 与 KPI 口径。最终写入数据集的是解析后的配置，不�
         "warn", "label 是意图，不是实测保证",
         "<p>预设名写“高干扰”不代表结果一定高 IoT。只有 <code>expect.measured=true</code> "
         "且带数据集、重复次数、模型版本和区间的锚点才能当证据；旧的 "
-        "<code>legacy_v1_pre_physics_audit</code> 只用于历史回归。</p>",
+        "历史的 <code>legacy_v1_pre_physics_audit</code> 结果不可与当前结果拼图。</p>",
     )
 
     def preset_cards(items: dict[str, Any], *, system_mode: bool) -> str:

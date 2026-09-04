@@ -56,13 +56,6 @@ sys_dense_urban_loaded:
     n_replications: 8
     # 格式一律是 [均值, 95% 区间半宽占均值的百分比]。**半宽和数值不可分割**——
     # 单独引用均值就是在假装这次实验的分辨率无限高。
-    avg_mcs: [6.44, 4.1]
-    bler_first_tx: [0.214, 3.1]
-    cell_served_mbps: [87.12, 7.3]
-    occupancy: [0.922, 2.9]
-    olla_db_mean: [-3.82, 5.2]
-    cell_experienced_mbps: [32.72, 23.3]      # 半宽 23%，只能看量级
-    ue_experienced_p5_mbps: [11.53, 22.4]     # 同上
     note: >-
       2026-08-07 实测，8 次重复。**IoT 故意不记**：这个数据集
       num_slots_per_sample=8，而多时隙下 sinr_dB 是各 slot 的 dB 均值、
@@ -107,12 +100,6 @@ sys_dense_urban_light:
     model_version: experience_v2
     dataset: ds_9625340c
     n_replications: 8
-    avg_mcs: [7.84, 7.8]
-    bler_first_tx: [0.289, 5.0]
-    cell_experienced_mbps: [106.26, 12.1]
-    cell_served_mbps: [32.80, 17.0]
-    occupancy: [0.351, 18.1]
-    ue_experienced_p5_mbps: [40.95, 37.6]     # 半宽 38%，这一项分辨不出来
     note: >-
       2026-08-07 实测，8 次重复。与 sys_dense_urban_loaded 同一批信道。
       **注意方向**：轻载的体验速率(106) 高于满载(33)，而承载吞吐(33) 低于满载(87)
@@ -158,14 +145,6 @@ sys_urban_macro_field_csi:
     model_version: experience_v2
     dataset: ds_984082de
     n_replications: 8
-    avg_mcs: [7.99, 5.4]
-    avg_rank: [1.759, 2.2]
-    bler_first_tx: [0.358, 8.0]
-    cell_experienced_mbps: [119.62, 8.9]
-    cell_served_mbps: [61.15, 10.9]
-    ue_experienced_p5_mbps: [37.05, 10.5]
-    olla_db_mean: [-4.21, 8.2]
-    occupancy: [0.534, 8.5]
     note: >-
       2026-08-07 实测，8 次重复。**替换了 2026-08-04 的单次运行值，
       而且替换本身就是这项工作的价值证明**：旧的单次值 5% 边缘是 123.5，
@@ -206,14 +185,6 @@ sys_urban_macro_ideal_csi:
     model_version: experience_v2
     dataset: ds_984082de
     n_replications: 8
-    avg_mcs: [10.36, 2.2]
-    avg_rank: [1.743, 2.5]
-    bler_first_tx: [0.122, 9.9]
-    cell_experienced_mbps: [252.78, 6.1]
-    cell_served_mbps: [61.67, 10.9]
-    ue_experienced_p5_mbps: [101.35, 11.0]
-    occupancy: [0.282, 10.2]
-    olla_db_mean: [-0.27, 58.9]   # 均值贴近 0，相对半宽必然爆掉，看绝对值
     note: >-
       2026-08-07 实测，8 次重复。**olla_db_mean 那 58.9% 不是这一项不可信**——
       均值只有 -0.27，相对半宽的分母太小，绝对半宽其实只有 0.16 dB。
@@ -259,11 +230,6 @@ sys_field_bimodal_traffic:
     model_version: experience_v2
     dataset: ds_6e9715bc
     n_replications: 8
-    avg_mcs: [9.46, 4.8]
-    bler_first_tx: [0.883, 2.4]               # **不是笔误，见下**
-    cell_served_mbps: [0.94, 11.2]
-    occupancy: [0.107, 7.8]
-    olla_db_mean: [-2.05, 8.7]
     note: >-
       2026-08-07 实测，8 次重复。**首传 BLER 0.883 不是笔误，是这个场景的真实
       失效模式**：小包 burst 太小，占用率只有 10.7%，5 秒里 OLLA 拿不到足够的
@@ -309,10 +275,6 @@ sys_mobility_60kmh:
       legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
     model_version: experience_v2
     dataset: ds_0ef213d2
-    cell_experienced_mbps: 138.3
-    ue_experienced_p5_mbps: 49.7
-    avg_mcs: 5.15
-    olla_db_mean: -4.92
     note: >-
       2026-08-04 实测（olla_speedup=20 以便 3 秒内收敛）。
       同配置零时延是 320.0 Mbps。
@@ -352,11 +314,6 @@ sys_capacity_full_buffer:
     model_version: experience_v2
     dataset: ds_6e9715bc
     n_replications: 8
-    cell_served_mbps: [169.96, 0.2]
-    avg_mcs: [7.99, 0.1]
-    avg_rank: [2.005, 0.0]
-    occupancy: [1.0, 0.0]
-    cell_experienced_mbps: null               # **是 None 不是 0，设计意图不是 bug**
     note: >-
       2026-08-07 实测，8 次重复（数值已因口径变更作废，见 invalidated_by）。
       **体验速率是 None**：full buffer 下缓冲区永不清空，28.552 的 DRB
@@ -422,12 +379,8 @@ sys_experience_mixed_pf:
     dataset: ds_329edafb
     result: artifacts/results/experience_pf_accounting_crn_n16.json
     n_replications: 16
-    small_queue_wait_ms_p95: [0.5625, 16.18]
-    small_completion_delay_ms_p95: [6.6422, 8.48]
-    small_pdb_miss_ratio: [0.0018, 66.95]
     large_burst_drb_throughput_mbps: [169.7562, 8.55]
     resource_utilization: [0.7741, 9.46]
-    cell_served_mbps: [98.1332, 4.93]
     accounting_error_pct: 0.0
     note: >-
       2026-08-09 原理修复后正式 n=16 CRN。主指标 small FIFO 排队 P95：本臂
@@ -490,12 +443,8 @@ sys_experience_mixed_pf_wrong_accounting:
     dataset: ds_329edafb
     result: artifacts/results/experience_pf_accounting_crn_n16.json
     n_replications: 16
-    small_queue_wait_ms_p95: [1.2109, 26.34]
-    small_completion_delay_ms_p95: [8.1359, 10.52]
-    small_pdb_miss_ratio: [0.0091, 40.28]
     large_burst_drb_throughput_mbps: [167.0458, 8.09]
     resource_utilization: [0.7738, 9.44]
-    cell_served_mbps: [98.1410, 4.91]
     accounting_error_pct: 0.0
     note: >-
       2026-08-09 正式 n=16 CRN 的反向控制。它故意给部分 RBG 用户按全带记 PF，

@@ -122,7 +122,7 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
         checks=(
             ("角色可追溯", "每个结果能反查设计 CSI、评估真值、场景、配置哈希与随机流。"),
             ("比较只改一件事", "A/B 使用相同 drop、traffic、BLER 和 scheduler 随机流，差异项在 manifest 中可见。"),
-            ("模式口径明确", "报告显式标注 capacity/legacy_v1 或 experience/experience_v2，KPI 不跨模式偷换。"),
+            ("负载工作点明确", "报告显式标注 traffic_model；容量口径（full_buffer）与体验口径的 KPI 不互相顶替。"),
             ("结论受 Gate 约束", "任何提升数字都能对应通过的 Gate 2/3 记录、样本量与适用边界。"),
             ("界面身份一致", "说明书关键字段与 manifest 一致；KPI 工作台数值与 Result JSON 一致，排序前后只改变位置。"),
         ),
@@ -680,7 +680,7 @@ DETAIL_SPECS.update({
     "modes": DetailSpec(
         promise="用问题、状态机和 KPI 三个维度区分容量评估与体验评估，并解释预启动窗口为何属于统计合同而不是删除不利数据。",
         principles=(
-            "容量评估假设业务持续存在，关注给定传播、干扰和调度下的饱和吞吐/谱效。历史 <code>legacy_v1</code> 每次被调度用户可以拿全带，PF 平均量也按历史全带口径更新。它适合回归旧结果和比较满业务链路算法，但无法回答空闲比例、首包等待、小包抢占或按需资源利用。",
+            "容量口径假设业务持续存在（<code>traffic_model=\"full_buffer\"</code>），关注给定传播、干扰和调度下的饱和吞吐/谱效。队列无限使得按需 RBG 反查恒等于全带宽，于是每个 TTI 就是一个 SU（或一对 MU）拿全带——这是同一套分配逻辑的退化解，不是另一条路径。它适合比较满业务链路算法，但无法回答空闲比例、首包等待、小包抢占或按需资源利用，体验速率在它下面按定义无定义。",
             "体验评估把业务到达、FIFO 包对象、按需 RBG、ACK/NACK、OLLA、SU/MU 方案和用户 KPI 放进连续 TTI 状态机。它必须区分 scheduled TBS、attempted payload、ACK goodput 与 padding；PF 默认按实际 scheduled TBS 记账。两种模式不是“快/慢”或“粗/精”开关，不能把 experience_v2 的某个参数关掉后称为 capacity 等价。",
             "预启动时间让有状态环节先进入稳定区：OLLA 从初值收敛、SRS/PMI/CQI 报告收齐、PF 历史量形成、队列进入代表性负载。仿真仍从 t=0 正常运行，只是正式 KPI 的统计窗口从例如 1 s 开始；预热期间形成的状态继续带入测量期。若重置队列或 OLLA，就不再是预热而是另一次实验。",
             "预热长度应由收敛诊断支撑，而不是永远固定 1 s。可以比较测量期前半/后半 BLER、OLLA、PRB 利用率和队列量；若仍漂移，延长仿真或预热。报告同时给总仿真时长、warmup、有效测量时长与覆盖率。",

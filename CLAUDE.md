@@ -62,7 +62,7 @@ python tests/test_gates.py                  # 校准、标准表、三道门、�
 python tests/test_results.py                # 外部算法结果契约、预注册
 python tests/test_linkadapt.py              # 链路自适应、吞吐、并行生成
 python tests/test_mumimo.py                 # MU-MIMO、单码字、RBG 粒度
-python tests/test_system.py                 # 系统级 capacity / experience
+python tests/test_system.py                 # 系统级仿真（单路径；容量=full_buffer 话务）
 python tests/test_scheduler_p0.py           # 调度资源账本、频选、MU 评分与 Finalizer
 python tests/test_srs_resource.py           # PCI 模3、4 CS、2T4R 双腿与全局周期容量
 python tests/test_srs_waveform.py           # RE级波形、解扩、CFO/时偏与UL IoT证据
@@ -844,11 +844,12 @@ MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、**误�
 OLLA 前基准 MCS 即使不过 0.5，也不能替实际发送档放行配对。
 
 **MU 的代价有两半，必须同时记账**：一半是「发得更保守」（MCS 往下走），
-一半是「更容易错」（同一档 MCS 的误块概率更高）。历史的 capacity 只把 TBS 乘一个
+一半是「更容易错」（同一档 MCS 的误块概率更高）。历史的容量分支只把 TBS 乘一个
 `measure_mu_gain()` 测出的标量 `mu_se_ratio`，等于「包变小但一点也不更容易错」，
-物理上说不通、且配对越激进越乐观。它保留为 `mu_accounting="se_ratio_legacy"`，
-**只用于复现旧结果**，会写进 `notes`。实测同一组配置：pair 表口径下开 MU 把首传
-平均 MCS 从 23.48 压到 19.93，历史口径是 22.68 → 22.69（一档都没降）。
+物理上说不通、且配对越激进越乐观。**`mu_accounting="se_ratio_legacy"` 已随容量
+分支一起删除**，给了就在 `SchedulerConfig` 构造处硬失败。实测同一组配置：
+pair 表口径下开 MU 把首传平均 MCS 从 23.48 压到 19.93，历史口径是 22.68 → 22.69
+（一档都没降）——这就是删掉它的理由。`measure_mu_gain()` 本身保留为独立测量原语。
 
 **−3.01 dB 只是记账标签，不是近似。** 按定义 `CorrLoss = pred_MU − pred_SU −
 PowerLoss`，所以决策里真正用的平移量 `CorrLoss + PowerLoss` 恒等于
@@ -1392,6 +1393,31 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 所有链路一律走 LOS 路损公式（不看逐链路的 `is_los`），但数据里的 `is_los`
 仍按几何视距概率抽样——`umi_los_canyon` 实测 `los_ratio` 是 **0.46** 而不是 1。
 判断一批数据是不是视距的看 `scenario` 字段，不看 `los_ratio`。
+
+### 系统级只有一条评估路径
+
+**没有"容量模式"这个分支了。** `evaluation_mode` 已删除，`system.simulate()` 恒走
+`experience.simulate_experience()`。文档和对话里说的"容量仿真"指的是
+**`traffic_model="full_buffer"` 这个话务配置**：缓冲区永不空 ⇒ 按需 RBG 反查恒等于
+全带宽、每 TTI 一个 SU（或一对 MU），这正是容量口径。
+
+**不许为 full_buffer 开任何特例分支。** 调度、AMC、HARQ、解调 SINR 聚合（按本次
+实际授予的那几个 RBG 算，满缓冲下"那几个"天然就是全部）一律照体验模式的定义走。
+想让容量工况跑快一点的诱惑（比如满缓冲时跳过频选搜索）**明确否决**——那会重新造出
+一条只在特定话务下成立的路径，也就是这次合并要消灭的东西。
+
+代价必须说清楚：busy period 永不结束 ⇒ **28.552 的体验速率在 full_buffer 下按定义
+无定义**，`cell_experienced_mbps` / `drb_throughput_rel19_mbps` / `pdb_miss_ratio`
+一律报 `None`（不是 0），`notes` 里明说。容量口径看 `cell_served_mbps`、
+`serving_cell_prb_utilization`、`avg_mcs_first_tx`、`bler_first_tx`。
+
+随容量分支一起下线的配置，给了都硬失败、不静默降级：
+`evaluation_mode`、`traffic_model="bimodal"`（连同 `p_small_rbg`/`p_full_rbg`/
+`p_idle_tti`/`expected_prb_util`）、`KpiConfig.trim`/`min_burst_tti`、
+`mu_accounting="se_ratio_legacy"`、`pf_accounting="legacy_best_se"`、
+`max_mu_users`/`mu_rank_per_user` 的非 2 取值、`simulate(mu_se_ratio=...)`。
+现网两头高中间低的话务画像迁到 `traffic_model="cdf"`，CDF 文件在
+`presets/traffic_cdf/`，由 `scripts/make_field_bimodal_cdf.py` 生成。
 
 ## 加东西的地方
 

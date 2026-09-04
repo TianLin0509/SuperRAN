@@ -156,16 +156,16 @@ HARQ 最多一次，默认 IR、可选 CC，空口 MCS/RBG 数/rank/TBS 保持�
 `rbg_size_config` 或 BWP 起点。通用 Type-0 边界只供链路级和导入诊断，不能冒充
 当前系统仿真已支持其他带宽。
 
-**先选评估 profile；它们是两种模式，不是同一模式的两个精度参数：**
+**只有一条评估路径（`experience_v2`），没有模式开关。** 按 TS 28.552 Rel-19 的 DRB
+busy-period 记录事件；用 TBS 单调反查表求“恰够”的 RBG 数，同一 TTI 可服务多个 UE，
+没有需求的尾料留空；PF 平均速率按**实际 scheduled TBS**更新。NACK 后冻结 MCS、
+RBG 数、rank 与 TBS，最多一次 IR/CC 重传；失败字节留在 FIFO，之后成为新 TB。
 
-- `evaluation_mode="capacity"` → `legacy_v1`：保留历史的全带调度与 `trim` 口径，
-  HARQ 也已统一为一次 IR/CC、只从 NewTx 曲线推导，用于复现容量和调度公平性。它一次调度按全带
-  记账，不可拿来验证“按需 RBG 后小包是否受益”。
-- `evaluation_mode="experience"` → `experience_v2`：按 TS 28.552 Rel-19 的 DRB
-  busy-period 记录事件；用 TBS 单调反查表求“恰够”的 RBG 数，同一 TTI 可服务多个 UE，
-  没有需求的尾料留空；PF 平均速率按**实际 scheduled TBS**更新。NACK 后冻结 MCS、
-  RBG 数、rank 与 TBS，最多一次 IR/CC 重传；失败字节留在 FIFO，之后成为新 TB。推荐 `traffic_model="mixed"`
-  让大小文件 UE 同场竞争；全大包会退化成全带，全小包没有大包体验可比较。
+**"容量仿真"= `traffic_model="full_buffer"`，是这条路径上的一个话务配置，不是另一
+条分支。** 缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU）。
+代价是 busy period 永不结束，**体验速率按定义无定义、报 `None`（不是 0）**；容量口径
+看 `cell_served_mbps` 与 `serving_cell_prb_utilization`。要体验速率就用
+`traffic_model="mixed"`（推荐，大小文件 UE 同场竞争）/ `ftp3` / `cdf`。
 
 `experience_v2` 当前只接受 `preset_20b_256qam / MCS table 3` 预置表。Table 1/2
 即使存在于链路级工具，也不能混入体验路径，因为它们没有同一套 TBLER/TBS profile；
@@ -198,8 +198,8 @@ OLLA 通常只配置 `target_bler`。SU/MU 各自的 ACK 步长默认 +0.01 MCS�
 `cell_experienced_mbps` 是**各用户体验速率的平均，不是求和**（求和实测出现过
 8.2 Gbps 落在 100 MHz 小区上）；`ue_experienced_p5_mbps` 是 5% 边缘体验速率；
 `users[i]` 里 `experienced_mbps` / `avg_mcs` / `bler_first_tx` 带区间，
-`geo_sinr_db` / `iot_db` 取第 1 次重复的值。`legacy_v1` 才使用 `trim`；
-`experience_v2` 的大 burst 吞吐从首次传输计到倒数第二个 ACK piece，并把排队等待另报。
+`geo_sinr_db` / `iot_db` 取第 1 次重复的值。大 burst 吞吐从首次传输计到倒数第二个
+ACK piece，并把排队等待另报（历史的 `trim` 口径已下线）。
 单初传 TB 发完的小 burst 用 `(TBVol-PaddingVol)/TBVol × slot` 折算时长。
 `small_queue_wait_ms_p95`、`small_completion_delay_ms_p95`、`small_pdb_miss_ratio` 是
 每个 FIFO 到达对象的体验指标；DRB busy-period 吞吐与到达对象时延不能混成一个 KPI。
@@ -219,8 +219,8 @@ OLLA 通常只配置 `target_bler`。SU/MU 各自的 ACK 步长默认 +0.01 MCS�
 不许压缩成"有些统计上的小问题"。** 用户说"就要一个数"时，数照给、notes 照转——
 他能豁免的是自己要不要看，不是你要不要说；他懂概念不等于他知道**这批数据**踩了。
 
-**最容易出错的默认值**：`evaluation_mode="capacity"`（要研究按需 RBG 必须显式改成
-`experience`）、`rank_mode="fixed"` / `fixed_rank=2`（**rank 默认固定**，链路表的
+**最容易出错的默认值**：`traffic_model="ftp3"`（要测容量上界得显式改成
+`full_buffer`；要研究大小包竞争用 `mixed`）、`rank_mode="fixed"` / `fixed_rank=2`（**rank 默认固定**，链路表的
 逐快照 `best_rank` 不再是发送 rank；`link_table` 模式是历史行为、只作反向对照）、
 `harq_feedback_delay=True`（ACK/NACK 搭下一个 U 时隙，OLLA 与重传从其后第一个
 D/S 生效；图案没有 U 时自动退化成零时延并写进 notes）、`cqi_filter_lambda=0.25`

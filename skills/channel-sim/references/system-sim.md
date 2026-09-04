@@ -11,7 +11,7 @@
 ```python
 sr_system_sim(
     dataset_id,
-    evaluation_mode="capacity", duration_s=5.0,
+    duration_s=5.0,
     traffic_model="ftp3", file_bytes=500_000, arrival_rate_hz=2.0,
     small_ue_share=0.5, small_file_bytes=1_500, small_arrival_rate_hz=20.0,
     small_pdb_ms=20.0, large_pdb_ms=300.0,
@@ -39,17 +39,31 @@ sr_system_sim(
 )
 ```
 
-## 先选模式：`capacity` 与 `experience`
+## 只有一条评估路径；"容量仿真"是它的一个话务配置
 
-| `evaluation_mode` | 版本 | 调度/资源 | 失败包 | KPI 边界 | 用途 |
-|---|---|---|---|---|---|
-| `capacity` | `legacy_v1` | 历史全带口径，单次选择一个 SU 或一对 MU（MU 读 pair 表，默认） | 每 TB 最多一次 IR/CC；同 MCS/RBG 数/rank/TBS；重传恒为 SU | `trim=none/tail/head_tail` | 复现旧结果、满缓冲容量、公平性 |
-| `experience` | `experience_v2` | TBS 反查最小 RBG，同 TTI 可排多个 UE，尾料可留空 | 每 TB 最多一次 IR/CC；失败字节留 FIFO，后续成为新 TB | DRB busy-period + FIFO 到达对象；小 burst 可按 fractional slot | 大小包混跑、等待/PDB、按需分配 |
+**`evaluation_mode` 已经删除。** 系统级仿真只有 `experience_v2` 一条路径：
+TBS 反查最小够用 RBG、同一 TTI 可排多个 UE、尾料可留空；每 TB 最多一次 IR/CC，
+失败字节留 FIFO 后续成为新 TB；KPI 走 TS 28.552 Rel-19 的 DRB busy-period 与
+FIFO 到达对象，小 burst 按 fractional slot 折算。
 
-两者是**两个评估 profile**，不是一个算法的快慢档。当前 `experience_v2` 支持
-两用户、每用户 rank2 的数据受限 SU/MU 自适应；矩阵运算集中在
-`build_link_tables` 建表相，TTI 主循环只查 pair 表。体验模式多了逐 TTI 的 FIFO 与 RBG 分配，因此旧版的
-“40000 TTI 只要 0.2 秒”不能当成它的性能承诺。
+**过去说的"容量模式"现在是 `traffic_model="full_buffer"`**——话务开到最大：
+
+| 想问什么 | 怎么配 | 看哪些 KPI |
+|---|---|---|
+| 小区吞吐上界、调度器公平性 | `traffic_model="full_buffer"` | `cell_served_mbps`、`serving_cell_prb_utilization`、`avg_mcs_first_tx`、`bler_first_tx`、Jain |
+| 用户体验速率、等待与 PDB | `traffic_model="mixed"`（推荐）/ `ftp3` / `cdf` | `drb_throughput_rel19_mbps`、`arrival_queue_wait_ms_*`、`pdb_miss_ratio` |
+
+为什么 full_buffer 天然退化成容量口径：缓冲区永不空 ⇒ 按需 RBG 的反查结果恒等于
+"全部可用 RBG"，于是每 TTI 就是一个 SU（或一对 MU）拿全带宽。调度、AMC、HARQ、
+解调 SINR 聚合（按本次实际授予的那几个 RBG 算）**没有任何为它开的特例分支**。
+
+**代价要说清楚：`full_buffer` 下 busy period 永不结束，28.552 的体验速率按定义
+无定义。** `cell_experienced_mbps` / `drb_throughput_rel19_mbps` / `pdb_miss_ratio`
+一律返回 `None`（不是 0），`notes` 里明说。要体验速率就别用 full_buffer。
+
+当前支持两用户、每用户 rank2 的数据受限 SU/MU 自适应；矩阵运算集中在
+`build_link_tables` 建表相，TTI 主循环只查 pair 表。逐 TTI 的 FIFO 与 RBG 分配是
+主要开销，历史上 legacy 全带路径那句"40000 TTI 只要 0.2 秒"**不适用**。
 
 ## 重复实验与置信区间 `num_replications` / `seed`
 
@@ -212,8 +226,7 @@ SCS、BWP 起点与 RBG configuration 若存在也必须匹配；任何错配立
 | `ftp3` | 3GPP FTP Model 3，泊松到达的固定大小文件 | **默认**，评价体验速率的标准话务 |
 | `mixed` | 一部分 UE 发 1500 B 小文件，另一部分 UE 发大文件；包长和到达率都是外生量 | **experience_v2 推荐**，验证“小包不再偷走整个 TTI” |
 | `cdf` | 两份 `value,cdf` 文件分别驱动包大小与逐 UE renewal 包间隔 | 接现场话务 CDF；外部曲线未接入前只能用明确标注的 synthetic 输入 |
-| `bimodal` | legacy_v1 按目标 RBG 数反推包长的历史模型 | 只复现旧结果；experience_v2 因因果倒置会拒绝 |
-| `full_buffer` | 缓冲区永不空 | 只看容量上限。**体验速率在这个模型下没有意义** |
+| `full_buffer` | **这就是「容量仿真」**：话务开到最大、缓冲区永不空，按需 RBG 退化成全带宽 | 只看容量上限与调度公平性。**体验速率按定义无定义、报 `None`** |
 | `cbr` | 恒定比特率 | 固定码率业务 |
 
 `ftp3` 的负载由 `file_bytes × 8 × arrival_rate_hz` 决定，
@@ -264,12 +277,10 @@ RngRun，保证每次只比较负载倍率。
 均值仍偏离，默认最多做两轮正式样本反馈校正，最后选择正式轮中离目标最近的一轮；完整轨迹
 保存在 `formal_history`，不会只留下“成功”的最后一点。
 
-## KPI 口径：legacy `trim` 与 experience busy-period
+## KPI 口径：DRB busy-period 事件记录器
 
-`legacy_v1` 才读取 `trim`：`tail` 扣清空缓冲区的末 slice，`head_tail` 还把起点挪到
-首次调度，`none` 不扣。这是历史实现，用于复现，不再冒充 Rel-19 的唯一口径。
-
-`experience_v2` 忽略 `trim` 的数值作用，改用事件记录器：
+历史的 `trim`（`tail` / `head_tail` / `none`）随 legacy 容量路径一起下线，
+`KpiConfig(trim=...)` 现在直接 `TypeError`。唯一口径是事件记录器：
 
 1. buffer 从空变非空创建 DRB busy period，之后到达的数据合并，直到 ACK 后重新为空。
 2. 大 burst 的标准吞吐时间从**第一次传输**开始，末端排除最终让 buffer 变空的 ACK piece；
@@ -425,8 +436,8 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 ## 调度与 OLLA
 
 `scheduler="pf"` 比例公平，度量 `R_inst / R_avg`，`R_avg` 按 `pf_window_tti=100`
-的指数窗更新。`legacy_v1` 的 `R_inst` 是历史全带 `best_se`；`experience_v2` 的默认
-`pf_accounting="scheduled_tbs"` 是这次实际分配的 TBS/TTI。**部分带宽 UE 若仍按全带
+的指数窗更新。默认 `pf_accounting="scheduled_tbs"`，是这次实际分配的 TBS/TTI
+（历史的全带 `best_se` 记账随容量路径下线）。**部分带宽 UE 若仍按全带
 记账，会让它的 PF 平均速率虚高最多约 17 倍，随后被错误饿死。**
 
 `scheduler="qos_pf"` 使用显式参数
@@ -436,7 +447,7 @@ EESM/MIESM。邻区是否占用该 RB 也仍由统一 `neighbor_prb_util` 概率
 
 `scheduler="edf"` 是**包长感知**：度量 `TBS_fullband / Buffer × w(priority)`，即"还需
 几个调度机会才能排空缓冲区"的倒数。缓冲区小 + 信道好的用户先走。它**需要有限队列**，
-`full_buffer` 与 `evaluation_mode="capacity"` 都硬失败。
+搭 `traffic_model="full_buffer"` 硬失败——容量口径请用 `pf` / `max_ci`。
 
 **EDF 用长期公平性换小包时延，而且这笔交易在本仿真里并不划算。** 24 UE 饱和实测：
 Jain 从 PF 的 0.4764 掉到 0.2708，1 个 UE 被完全饿死（全小区最差的那条链路，−3.00 dB），
@@ -531,15 +542,15 @@ bitmap TBS、payload/padding/useful bytes，并与 planner 估值逐值硬比较
 
 ## MU `mu_enabled`
 
-默认 **False**，先看清 SU 基线。**两种模式现在都读同一张 pair 表**
-（`mu_accounting="pair_table"`，默认）：在建表阶段预计算所有两用户、每用户 rank2
-的 pair 链路，MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、
-误块抽签用 pair 的 `true_sinr_db`。`legacy_v1` 的历史聚合 `mu_gain` 标量近似降级为
-`mu_accounting="se_ratio_legacy"`，**只用于复现旧结果**——它只缩 TBS、不进误块抽签，
-结果系统性乐观，选用时会写进 `notes`。capacity 的 SU/MU 判决是逐 TTI 比聚合谱效
-（还要过 predicted BLER ≤ 0.5 的准入；这里查询的是叠加 SU+MU OLLA 后的实际发送
-MCS，不是 OLLA 前的基准档），拒配对的两种原因分别计入
-`mu_pair_rejects` 与 `mu_su_wins`；重传恒按 SU 重发（冻结身份不许改 SINR/TBS）。TTI 主循环先固定 PF anchor，再枚举全部伙伴；缺 pair、相关性超门限、
+默认 **False**，先看清 SU 基线。`mu_accounting="pair_table"` 是**唯一**口径：
+在建表阶段预计算所有两用户、每用户 rank2 的 pair 链路，MCS 输入按
+`CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、误块抽签用 pair 的 `true_sinr_db`。
+历史的聚合 `mu_gain` 标量近似（`se_ratio_legacy`）随容量路径一起删除——它只缩 TBS、
+不进误块抽签，等于「包变小但一点也不更容易错」，结果系统性乐观。
+MU 准入要过 predicted BLER ≤ 0.5，查询的是叠加 SU+MU OLLA 后的**实际发送 MCS**，
+不是 OLLA 前的基准档；拒配原因计入 `mu_candidate_scoring.rejection_reasons`，
+判 SU 更划算的 TTI 数在 `su_mu_plan.su_selected`；重传恒按 SU 重发
+（冻结身份不许改 SINR/TBS）。TTI 主循环先固定 PF anchor，再枚举全部伙伴；缺 pair、相关性超门限、
 总层数超限或 predicted BLER > 0.5 都留下明确 rejection reason。可行伙伴按
 `sum(min(queue,TBS))/shared_RBG` 评分，不再取 PF 顺序里的第一个可行者。
 
