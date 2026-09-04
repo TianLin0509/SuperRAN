@@ -322,7 +322,7 @@ publishable winner；否则即使统计显著也必须保持 `exploratory_unregi
 `summary.provenance`；代码/依赖/曲线哈希 mismatch 时重新生成后再做正式结论。
 
 **预置 64T/256T 都走已确认的真实子阵，并统一 `pol_h_v + top_to_bottom`**；旧 64T 布局只作显式历史兼容，历史性能差值不能当当前通用结论 → `references/default-hardware.md`。
-**CDL 剖面表已被替换为逐字核对过的 38.901 标准值**（`SUPERRAN_CDL_SPEC=0` 可复现未修正前的结果；CDL-D/E 未覆盖）。**引擎不可用时如实说缺什么，不要假装能跑**（`sr_capabilities` 查；`quadriga_real` 需要 MATLAB/Octave）。
+**CDL 剖面表已被替换为逐字核对过的 38.901 标准值**（`SUPERRAN_CDL_SPEC=0` 可复现未修正前的结果；CDL-D/E 未覆盖）。**引擎不可用时如实说缺什么，不要假装能跑**（`sr_capabilities` 查；引擎只有 `internal_sim` 与 `sionna_rt` 两条）。
 
 ## 工具地图与参考文件
 

@@ -188,9 +188,18 @@ async def main() -> None:
                 "sionna_rt 可用性报告与事实一致"
                 + ("（已装）" if rt_e.get("available") else "（未装，已列出缺失项）"),
             )
-            # 引擎不可用时必须如实说明缺什么，不能假装能跑
-            qr = engines.get("quadriga_real", {})
-            check(qr.get("available") is False and bool(qr.get("missing")), "不可用引擎列出缺失项")
+            # 引擎不可用时必须如实说明缺什么，不能假装能跑。
+            # 对**每个**引擎都查，而不是挑一个恒不可用的当样板——
+            # QuaDRiGa 路线已删除，样板引擎不复存在。
+            check(
+                all(
+                    e.get("available") is True
+                    or (e.get("available") is False and bool(e.get("missing")))
+                    for e in engines.values()
+                ),
+                "不可用引擎都列出了缺失项",
+            )
+            check(all(e.get("detail") for e in engines.values()), "每个引擎都有可读说明")
 
             scenes = _payload(await session.call_tool("sr_list_scenes", {}))
             print(f"\n  射线追踪场景 {len(scenes['scenes'])} 个 "

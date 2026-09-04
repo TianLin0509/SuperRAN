@@ -50,6 +50,7 @@ PHYSICS = (
     "test_physics_contract_extensions.py",
     "test_physics_invariants.py",
     "test_raytracing.py",
+    "test_sionna_rt_source.py",
     "test_srs_waveform.py",
 )
 

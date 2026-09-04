@@ -233,7 +233,8 @@ cd <仓库>
 没装 sionna-rt 时 `test_raytracing.py` 的射线追踪实跑段会自动跳过并说明原因，
 **这不算失败**。
 
-first-party `internal_sim` 必须始终可用；Sionna RT / QuaDRiGa 是独立的可选直接适配器：
+first-party `internal_sim` 必须始终可用；Sionna RT 是唯一的可选直接适配器
+（QuaDRiGa 路线已明确不做）：
 
 ```bash
 <PYTHON> -c "

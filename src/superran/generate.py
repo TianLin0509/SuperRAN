@@ -841,6 +841,11 @@ def generate(
     # 只用于读旧配置，所有新产物都落 canonical 名称。
     if cfg.get("channel_est_mode") == "ls_lmmse":
         cfg["channel_est_mode"] = "ls_mmse"
+    if "channel_source" in cfg:
+        raise ValueError(
+            "未知配置键 'channel_source'。信道源的唯一配置键是 'source'；"
+            "请写 source='sionna_rt'。不能忽略这个键后静默运行 internal_sim。"
+        )
     source_name = str(cfg.pop("source", "internal_sim"))
     # 外部源的隐式默认曾从5 ms改成0.5 ms。系统层不能再从SRS/CSI-RS周期
     # 猜快照间隔；新数据一律把SuperRAN的5-ms默认显式写进配置，用户显式值优先。

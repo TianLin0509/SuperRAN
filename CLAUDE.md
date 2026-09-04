@@ -42,14 +42,20 @@ SuperRAN 本仓的合同为准。统计信道生成、CDL/TDL 表、NR 载波/TD
 
 ``channelhub.py`` 只保留为历史 Python API 的兼容门面，实际实现固定指向
 ``native.py``。历史环境变量 ``SUPERRAN_CHANNELHUB`` 被有意忽略，不能改变生成字节。
-Sionna RT / QuaDRiGa 只能作为显式 direct optional adapter 接入；不可用时硬报告，
-不得退回另一个仓库。
+Sionna RT 只能作为显式 direct optional adapter 接入；不可用时硬报告，
+不得退回另一个仓库。**QuaDRiGa 路线已于 2026-09-04 明确不做并从代码与文档中删除**
+（需要 MATLAB/Octave 运行时，成本与收益不成比例）；要空间一致性就按 38.901 §7.6.3
+自己实现一个子集。
+
+**默认信道是 CDL**（``internal_sim``）。``sionna_rt`` 是本仓自己的直连适配层
+（``src/superran/sionna_rt.py``），装了 sionna-rt 才可用，必须在配置里显式写
+``source: sionna_rt`` 才会走。引擎清单恒为这两条。
 
 ## 环境
 
 - Python ≥ 3.10，需要 numpy / scipy / pydantic v2 / pyyaml / structlog / mcp
 - 射线追踪需 `pip install sionna-rt`（连带 mitsuba + drjit，约 300 MB）；
-  当前 direct adapter 尚未实现，所以装包不等于能力可用
+  direct adapter 已实现，但本地 OSM 资产、材料标定与多端口垂直相位仍须按报告边界验证
 
 ## 测试
 
@@ -82,7 +88,7 @@ python tests/test_system_sim_tool.py          # sr_system_sim 行为级（硬失
 python tests/test_benchmarks.py               # 预注册经典通信基准与 provenance
 ```
 
-当前共 **28 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
+当前共 **29 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
 pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` 不再是
 0 检查假绿）；脚本式文件必须在 pytest 收集/薄壳路径中同样以异常或非零退出
 传播失败，不能只在 `if __name__ == '__main__'` 里检查全局 FAILED。
@@ -107,6 +113,8 @@ test_physics_contract_extensions + test_channel_generation_contract + test_resul
 改动 `amc_policy.py` 要跑 test_system + test_scheduler_p0 + test_csi_aging；
 改动 `native.py` / `channelhub.py` / `physical.py` 要跑 test_native_independence +
 test_channel_generation_contract + test_physics_invariants + test_linklevel + test_gates；
+改动 `sionna_rt.py` 或 `native.py` 里的 `_small_scale_channel` / `_spatial_panel_response` /
+`fixed_subarray_response` 要额外跑 test_sionna_rt_source + test_raytracing；
 改动 `rng.py` 要跑 test_rng + test_system；
 改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）；
 改动开发者文档生成器要跑 `tests/test_developer_guide.py`。
@@ -151,9 +159,10 @@ KaTeX 未必收，光看 Python 源码看不出来。
 |---|---|
 | 部分 | 怎么对待 |
 |---|---|
-| `src/superran/native.py` | first-party 统计信道和 PHY 窄腰；本仓真相源 |
+| `src/superran/native.py` | first-party 统计信道和 PHY 窄腰；本仓真相源，**默认引擎** |
 | `channelhub.py` | 只作旧 API 名兼容，不发现外部源码 |
-| Sionna RT / QuaDRiGa | 显式可选 direct adapter；缺失时硬报告 |
+| `src/superran/sionna_rt.py` | 本仓自己的 Sionna RT 直连适配层；只换信道矩阵，阵列/大尺度/KPI 口径全部共用 |
+| QuaDRiGa | **不做**。已从代码与文档删除，不要再当作待办 |
 | 平台后端、训练、数据库、任务队列 | 不纳入；数据直接按 SuperRAN 合同落盘 |
 | 特征桥 / MAE token | 不纳入；只输出未归一化、未截断、未门控的物理量 |
 | source `w_dl` | 不接受；只从本地 `h_est` 重算 EBF/PEBF/NEBF |
@@ -504,7 +513,7 @@ errors="replace"` 是不够的：Windows 默认 GBK 时子进程按 GBK 输出�
 
 `probe_capabilities()` 早先在找不到 ChannelHub 时只返回 `internal_sim` 一条，
 于是调用方写 `engines["sionna_rt"]` 会 KeyError，看起来像工具坏了。
-清单必须恒为三条，变的只是 `available` 与 `missing`。
+清单必须恒为两条（`internal_sim` / `sionna_rt`），变的只是 `available` 与 `missing`。
 
 ### 离线包默认必须是完整包
 
@@ -584,6 +593,70 @@ first-party source 的 `measurements.interferer_channels` 默认 `False`——�
 Mitsuba 3.8 的解析器直接报错。`scenes.prepare_scene()` 会复制到 artifacts
 缓存再清理，**不动源资产**。加新城市场景时如果报
 "invalid PLY header"，就是这个原因。
+
+### 射线追踪信道：换的是矩阵，不是口径
+
+`sionna_rt` 只覆写 `InternalSimSource._small_scale_channel` 这一个接缝。接缝以上
+（站点布局、撒点、LOS、路损、阴影衰落、服务小区选择、预波束 S/N/I 预算）与以下
+（估计噪声、SSB、TDD 成对、元数据）全部共用，所以 CDL↔RT 的 KPI 差异**可归因**。
+RT 自己算的路损与时延扩展只写进 `meta.rt_pathloss_db` / `meta.rt_delay_spread_ns`
+作旁证，不驱动链路预算——想让 RT 接管大尺度必须是另一次显式改动。
+
+**载波相位项不能省。** 合成用
+`H += g · exp(j2π f_d t) · exp(-j2π (f_c + f) τ) · a_BS · conj(a_UE)`。
+CDL 的时延是合成的、每簇另有随机相位，载波项被吸收了；RT 的径长差是真实的，
+径间相对相位就来自这一项。锚点是与 Sionna 自己的 `Paths.cfr()` 对拍，
+单端口单极化下相对误差 < 2e-3（就是 Sionna 内部 float32 的相位精度）。
+
+**极化槽顺序是反的。** Sionna 自带的 `"cross"` 是 `[-45°, +45°]`，SuperRAN 的
+`polarization_slant_angles_deg` 默认是 `[+45°, -45°]`。直接用 `"cross"` 会把两个
+极化端口块整体对调，所以适配层按配置 `register_polarization` 一个同序的极化。
+
+**站点要平移到场景中心。** Sionna 内置场景的坐标原点未必在城区里——munich 的
+包围盒中心是 `(-68, -86)`，把站点摆在 `(0,0)` 实测 40 个随机 UE 只有 6 个能追到径；
+按包围盒中心平移后四个内置场景覆盖率回到 10~12/12。平移只作用于送进 RT 的坐标，
+SuperRAN 自己的几何与路损仍在原坐标系（距离是平移不变量）。可用
+`rt_scene_offset_m` 覆盖。
+
+**覆盖空洞是硬错误，不是回退。** 服务链路一条径都追不到时直接抛错并打印 BS/UE
+坐标与修复建议，绝不退回 TDL/CDL。干扰小区零径则返回零信道——那是真实的
+"该小区没有干扰"。慕尼黑老城随机撒点会有相当比例落在全遮挡处，所以 `rt_munich`
+预设写死了 6 个实测有覆盖的 UE 位置；**换站高、换场景、换平移量都要重新扫**。
+
+**射线追踪数据不是逐位可复现的。** `internal_sim` 是；Sionna 的 `PathSolver`
+不是——固定 seed、单线程、同一进程内连跑三次，返回的时延与复幅度仍有末位差异
+（实测 `max|Δa|/|a| ≈ 1.5e-5`）。传到信道矩阵上实测重跑 NMSE **−65 ~ −122 dB**，
+奇异值一致到 5 位有效数字，物理上可忽略，但**字节不同**：RT 数据集不能靠重跑
+逐位复算，worker 切片也只在这个量级上一致而不是 bit 相等。样本 meta 里
+`rt_bit_reproducible=False` 显式声明这件事，测试守的是上界（NMSE < −40 dB）
+而不是 bit 相等。**接缝以上的 pathloss/SNR/SIR/SINR 仍然逐位相同**，因为它们
+根本不经过射线追踪。
+
+**「服务小区被挡」不等于「UE 没覆盖」。** 服务小区是按 38.901 路损+扇区增益选的，
+它不知道建筑遮挡；射线追踪可能恰好在这个小区上追不到径，而别的小区是通的。
+实测 7 站 munich 场景里 **1/6 的 UE 属于这种情况**（还有 12 个小区可达，最强的
+只低 2.8 dB）。适配层现在会分开报这两种情况——报错文案要是把前者说成「真实的
+覆盖空洞」，会把人引到"换 UE 位置"这条错误的修法上。这是混合口径的固有后果，
+不是 bug；要根治只能让 RT 参与服务小区选择，那是另一次显式的物理改动。
+
+**阵元方向图没有逐径加权，阵列响应也没有 beam squint。** 阵元方向图（水平 110°/
+垂直 65° 抛物线、30 dB 前后比）只作为**按链路方位算的标量**进链路预算，不逐径加权；
+阵列响应在整个 100 MHz 上是常数。两条与 CDL 路径一致，但 RT 的径角度散得更开，
+误差更值得注意：实测服务向扇区上径间相对权重被高估 **0.2~2.6 dB（中位 1.1 dB）**，
+采样到的链路里没有功率落在 ±65° 之外。归一化之后影响的是**空间结构与秩**，
+不是链路预算。干扰扇区的角度散布更大，未测量。
+
+**不要用 `Paths.cfr()` 做频域展开。** ChannelHub 的适配层走这条路，于是撞上两个
+问题：Dr.Jit 会把 路径×频点×天线对 全展开，21 小区 64x4 273 RB 能超过 2^32 元素
+上限（他们靠按频率分块绕开），而且 JIT 状态会累积到 OOM（他们每 10 次 RT 调用就
+重建一次场景与 solver）。本仓把 `a/tau/角度` 立刻取回 numpy、自己做频域合成，
+两个问题都不存在：实测连续 60 次求解（7 站 21 小区）RSS 只涨 6 MB、每次 0.06 s。
+
+**两份阵列响应实现的垂直相位符号相反。** `EffectiveArray.effective_tx_steering`
+用 `z0 - v·d_v`（物理 top_to_bottom），`_spatial_panel_response` 用 `+v·d_v`，
+幅度完全一致、相位差一个符号。这是**收编前就存在**的不一致，当前无实际影响
+（`effective_tx_steering` 全仓只被一个审计脚本用来取模方），但两者都号称是同一个
+阵列的响应，谁要拿它做波束赋形之前必须先把这件事定下来。
 
 ### CDL-A~E 表、20-ray 展开与 K 因子都有硬门
 

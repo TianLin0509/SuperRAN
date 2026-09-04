@@ -496,11 +496,12 @@ sect("14  引擎清单的稳定性")
 # 清单长度不该随环境变化，变的只是 available 与 missing。
 # 早先没装 ChannelHub 时只返回 internal_sim 一条，调用方写
 # engines["sionna_rt"] 会 KeyError，看起来像工具坏了。
+# QuaDRiGa 路线已在 2026-09-04 明确不做，从清单里删除。
 caps = {x.name: x for x in ch.probe_capabilities()}
 print(f"  引擎 {len(caps)} 个：" + "  ".join(
     f"{k}={'可用' if v.available else '不可用'}" for k, v in caps.items()))
-check(set(caps) == {"internal_sim", "sionna_rt", "quadriga_real"},
-      "三个引擎恒在清单中（不随 ChannelHub / sionna-rt 是否存在而消失）")
+check(set(caps) == {"internal_sim", "sionna_rt"},
+      "两个引擎恒在清单中（不随 sionna-rt 是否存在而消失）")
 check(all(v.available or v.missing for v in caps.values()),
       "不可用的引擎必须列出缺失项，不能只说不可用")
 check(all(v.detail for v in caps.values()), "每个引擎都有可读说明")

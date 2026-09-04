@@ -52,6 +52,7 @@ all_scenes = sc.list_scenes()
 for s in all_scenes:
     tag = "内置" if s.builtin else "真实OSM"
     print(f"  {s.scene_id:<22} {tag:<8} {s.display_name[:26]:<28} presets={list(s.presets)}")
+HAS_LOCAL_OSM_SCENE = any(not s.builtin for s in all_scenes)
 check(len(all_scenes) >= 4, f"至少 4 个 direct Sionna 内置场景（实际 {len(all_scenes)}）")
 check(sum(1 for s in all_scenes if s.builtin) == 4, "4 个 Sionna 内置场景")
 check(
@@ -107,49 +108,58 @@ else:
     check(mode == "sionna_rt", "确认走的是真射线追踪，不是 TDL 回退")
 
 # ---------------------------------------------------------------------------
-    sect("5  真实城市射线追踪（深圳福田）")
-    d2, p2 = pl.create_draft(
-        "深圳福田密集城区覆盖分析",
-        overrides={"num_ues": 1, "num_samples": 1, "bs_antenna": "4T4R", "bandwidth_hz": 20000000.0},
-    )
-    print(f"  预设 {d2.preset}")
-    cfg2, own2 = pl.resolved_config(d2)
-    cfg2.pop("num_samples", None)
-    print(f"  scenario={cfg2.get('scenario')}  站点={cfg2.get('num_sites')}x{cfg2.get('sectors_per_site')}")
-    print(f"  osm_path={str(cfg2.get('osm_path'))[-46:]}")
-    check(cfg2.get("scenario") == "custom_osm", "真实城市走 custom_osm")
-    check("artifacts" in str(cfg2.get("osm_path", "")), "osm_path 指向准备好的缓存副本")
+    # 这一节要的是本地 OSM 城市资产（SUPERRAN_SCENES 指向的目录）。
+    # 内置的 4 个 Sionna 场景不含中国城市，没配资产时这一节没有输入，
+    # 跳过并说清楚，而不是让它以 KeyError 的形式失败。
+    if not HAS_LOCAL_OSM_SCENE:
+        sect("5  真实城市射线追踪 —— 跳过")
+        print("  未配置 SUPERRAN_SCENES：本机只有 4 个 Sionna 内置场景，")
+        print("  没有 shenzhen_futian 这类真实 OSM 城市资产，本节无输入可测。")
+        print("  需要时：准备好城市资产目录并用 SUPERRAN_SCENES 指向它。")
+    else:
+        sect("5  真实城市射线追踪（深圳福田）")
+        d2, p2 = pl.create_draft(
+            "深圳福田密集城区覆盖分析",
+            overrides={"num_ues": 1, "num_samples": 1, "bs_antenna": "4T4R", "bandwidth_hz": 20000000.0},
+        )
+        print(f"  预设 {d2.preset}")
+        cfg2, own2 = pl.resolved_config(d2)
+        cfg2.pop("num_samples", None)
+        print(f"  scenario={cfg2.get('scenario')}  站点={cfg2.get('num_sites')}x{cfg2.get('sectors_per_site')}")
+        print(f"  osm_path={str(cfg2.get('osm_path'))[-46:]}")
+        check(cfg2.get("scenario") == "custom_osm", "真实城市走 custom_osm")
+        check("artifacts" in str(cfg2.get("osm_path", "")), "osm_path 指向准备好的缓存副本")
 
-    t0 = time.perf_counter()
-    s2 = gen.generate(cfg2, num_samples=1)
-    print(f"  生成 {time.perf_counter()-t0:.1f}s  形状 {s2['shape']}")
-    print(f"  SINR {s2['sinr_dB']['median']} dB  视距比例 {s2.get('los_ratio')}")
-    ds2 = load(s2["dataset_id"])
-    mode2 = ds2.summary.get("sample_meta", {}).get("channel_generation_mode")
-    print(f"  channel_generation_mode = {mode2}  小区数 {ds2.summary['sample_meta'].get('num_cells')}")
-    check(mode2 == "sionna_rt", "深圳福田走真射线追踪")
-    check(bool(ds2.ssb), "多小区 SSB 测量可用")
+        t0 = time.perf_counter()
+        s2 = gen.generate(cfg2, num_samples=1)
+        print(f"  生成 {time.perf_counter()-t0:.1f}s  形状 {s2['shape']}")
+        print(f"  SINR {s2['sinr_dB']['median']} dB  视距比例 {s2.get('los_ratio')}")
+        ds2 = load(s2["dataset_id"])
+        mode2 = ds2.summary.get("sample_meta", {}).get("channel_generation_mode")
+        print(f"  channel_generation_mode = {mode2}  小区数 {ds2.summary['sample_meta'].get('num_cells')}")
+        check(mode2 == "sionna_rt", "深圳福田走真射线追踪")
+        check(bool(ds2.ssb), "多小区 SSB 测量可用")
 
-    print("\n  正确性护栏：射线追踪数据不得套用 CDL 剖面的假角度")
-    check(ds2.is_ray_traced, "数据集自报为射线追踪")
-    try:
-        ds2.paths()
-        check(False, "paths() 在射线追踪数据上应当报错")
-    except NotImplementedError as e:
-        print(f"    已拦截：{str(e).splitlines()[0][:70]}…")
-        check(True, "paths() 在射线追踪数据上正确报错")
+        print("\n  正确性护栏：射线追踪数据不得套用 CDL 剖面的假角度")
+        check(ds2.is_ray_traced, "数据集自报为射线追踪")
+        try:
+            ds2.paths()
+            check(False, "paths() 在射线追踪数据上应当报错")
+        except NotImplementedError as e:
+            print(f"    已拦截：{str(e).splitlines()[0][:70]}…")
+            check(True, "paths() 在射线追踪数据上正确报错")
 
-    from superran import deliver as dlv  # noqa: E402
+        from superran import deliver as dlv  # noqa: E402
 
-    res_rt = dlv.build_code(s2["dataset_id"], "信道 + 角度")
-    print(f"    取货提示 {len(res_rt['notes'])} 条")
-    check(any("射线追踪" in n for n in res_rt["notes"]), "取货代码给出射线追踪说明")
+        res_rt = dlv.build_code(s2["dataset_id"], "信道 + 角度")
+        print(f"    取货提示 {len(res_rt['notes'])} 条")
+        check(any("射线追踪" in n for n in res_rt["notes"]), "取货代码给出射线追踪说明")
 
-    # 常规量在射线追踪数据上照常可用
-    p_rt = ds2.pdp(0)
-    srs_rt = ds2.srs(0)
-    print(f"    PDP RMS 时延扩展 {p_rt.rms_delay_spread_s*1e9:.1f} ns | 主导秩 {srs_rt.dominant_rank}")
-    check(p_rt.rms_delay_spread_s > 0, "射线追踪数据的 PDP 仍可用")
+        # 常规量在射线追踪数据上照常可用
+        p_rt = ds2.pdp(0)
+        srs_rt = ds2.srs(0)
+        print(f"    PDP RMS 时延扩展 {p_rt.rms_delay_spread_s*1e9:.1f} ns | 主导秩 {srs_rt.dominant_rank}")
+        check(p_rt.rms_delay_spread_s > 0, "射线追踪数据的 PDP 仍可用")
 
 # ---------------------------------------------------------------------------
 sect("6  实验设计层（superpowers 式头脑风暴）")

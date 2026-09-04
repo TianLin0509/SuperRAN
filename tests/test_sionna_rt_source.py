@@ -1,0 +1,928 @@
+"""Sionna RT 可选信道源的合同测试。
+
+分两类：
+
+* **合成层**（不需要装 sionna）——射线几何到 ``[time, rb, bs, ue]`` 的那一段。
+  用构造好的 :class:`RayPaths` 直接驱动，所以每条断言都是确定性的，
+  也能在没有 sionna-rt 的机器上跑。
+* **端到端**（需要 sionna-rt）——真的追一次 munich，验证阵列合同、
+  元数据口径和「不静默回退」。装不上时 skip，不会假装通过。
+"""
+from __future__ import annotations
+
+import inspect
+import math
+import pathlib
+import sys
+import types
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from superran import channelhub as ch  # noqa: E402
+from superran import hardware as hw  # noqa: E402
+from superran import native, plan, scenes  # noqa: E402
+from superran import sionna_rt as srt  # noqa: E402
+
+_HAS_SIONNA = not srt.adapter_missing()
+requires_sionna = pytest.mark.skipif(
+    not _HAS_SIONNA, reason=f"缺少 {srt.adapter_missing()}；不做替代实现"
+)
+
+CARRIER_HZ = 2.6e9
+SCS_HZ = 30_000.0
+
+_THETA_T = math.radians(95.0)
+_PHI_T = math.radians(20.0)
+_THETA_R = math.radians(85.0)
+_PHI_R = math.radians(-150.0)
+
+
+def _company_cfg(**overrides):
+    cfg = {
+        "bs_panel": [8, 4, 2],
+        "ue_panel": [2, 1, 2],
+        "carrier_freq_hz": CARRIER_HZ,
+        "subcarrier_spacing": SCS_HZ,
+    }
+    hw.apply_array_defaults(cfg)
+    hw.strip_markers(cfg)
+    cfg.update(overrides)
+    return cfg
+
+
+def _scalar_cfg():
+    """单 RF 端口、单极化、无馈电网络——把阵列因子约掉，只留时频相位。"""
+    cfg = _company_cfg(bs_panel=[1, 1, 1], ue_panel=[1, 1, 1])
+    cfg["bs_antenna"]["element_pattern"]["polarization_slant_angles_deg"] = [0.0]
+    cfg["bs_antenna"]["fixed_vertical_subarray"]["elements_per_rf_port"] = 1
+    return cfg
+
+
+def _one_ray(
+    *,
+    n_pol_ue=2,
+    n_pol_bs=2,
+    tau_s=1e-7,
+    theta_t=_THETA_T,
+    phi_t=_PHI_T,
+    theta_r=_THETA_R,
+    phi_r=_PHI_R,
+    doppler_hz=0.0,
+    gain=1.0 + 0.0j,
+):
+    gains = np.zeros((n_pol_ue, n_pol_bs, 1), dtype=np.complex128)
+    gains[:, :, 0] = gain
+    return srt.RayPaths(
+        gains=gains,
+        tau_s=np.asarray([tau_s], dtype=np.float64),
+        theta_t_rad=np.asarray([theta_t], dtype=np.float64),
+        phi_t_rad=np.asarray([phi_t], dtype=np.float64),
+        theta_r_rad=np.asarray([theta_r], dtype=np.float64),
+        phi_r_rad=np.asarray([phi_r], dtype=np.float64),
+        doppler_hz=np.asarray([doppler_hz], dtype=np.float64),
+    )
+
+
+def _synth(paths, spec, **kw):
+    params = {
+        "sector_azimuth_deg": 0.0,
+        "carrier_freq_hz": CARRIER_HZ,
+        "n_time": 1,
+        "n_rb": 4,
+        "subcarrier_spacing_hz": SCS_HZ,
+        "sample_interval_s": 5e-3,
+        "normalize": False,
+    }
+    params.update(kw)
+    return srt.synthesize_channel(paths, spec, **params)
+
+
+# ---------------------------------------------------------------------------
+# 合成层：阵列合同
+# ---------------------------------------------------------------------------
+
+
+def test_bs_port_response_is_the_same_array_model_as_the_cdl_path() -> None:
+    """RT 必须复用 CDL 那套 1 驱 M 有效子阵，而不是另写一份。
+
+    把修复 revert 成「RT 自己算一个 0.5λ 独立阵元阵」这条断言就会红：
+    端口相位中心间距 3x0.67λ 与固定下倾子阵方向图都会消失。
+    """
+    cfg = _company_cfg()
+    spec = srt.array_spec_from_config(cfg, 64, 4)
+    assert spec.elements_per_rf_port == 3
+    assert spec.bs_port_vertical_spacing_lambda == pytest.approx(3 * 0.67)
+
+    zod = math.radians(95.0)
+    aod = math.radians(20.0)
+    rays = _one_ray(theta_t=zod, phi_t=aod)
+    h = _synth(rays, spec)
+
+    expected_space = native._spatial_panel_response(  # noqa: SLF001
+        8, 4, aod, zod,
+        horizontal_spacing=spec.bs_horizontal_spacing_lambda,
+        vertical_spacing=spec.bs_port_vertical_spacing_lambda,
+    ) * native.fixed_subarray_response(
+        zod,
+        elements_per_rf_port=3,
+        ae_vertical_spacing_lambda=0.67,
+        fixed_downtilt_deg=spec.fixed_downtilt_deg,
+    )
+    # 沿 BS 端口轴取一列（固定一个 UE 端口），除掉与 BS 无关的公共因子
+    column = h[0, 0, :, 0]
+    reference = np.zeros(64, dtype=np.complex128)
+    for h_bs in range(8):
+        for v_bs in range(4):
+            for p_bs in range(2):
+                reference[spec.bs_layout.flat(h_bs, v_bs, p_bs)] = expected_space[
+                    h_bs * 4 + v_bs
+                ]
+    ratio = column / reference
+    # 合成结果是 complex64，比值的残差量级就是 float32 精度
+    assert np.allclose(ratio, ratio[0], rtol=1e-6, atol=1e-7)
+    assert np.abs(ratio[0]) > 0
+
+
+def test_fixed_downtilt_actually_changes_the_ray_weighting() -> None:
+    """1 驱 3 的固定下倾必须影响 RT 信道，否则馈电网络等于没接上。"""
+    base = _company_cfg()
+    tilted = _company_cfg()
+    tilted["bs_antenna"]["fixed_vertical_subarray"]["fixed_downtilt_deg"] = 0.0
+    spec_a = srt.array_spec_from_config(base, 64, 4)
+    spec_b = srt.array_spec_from_config(tilted, 64, 4)
+    assert spec_a.fixed_downtilt_deg == 6.0
+    assert spec_b.fixed_downtilt_deg == 0.0
+    rays = _one_ray(theta_t=math.radians(75.0))
+    h_a = _synth(rays, spec_a)
+    h_b = _synth(rays, spec_b)
+    assert not np.allclose(h_a, h_b)
+
+
+def test_delay_becomes_a_linear_phase_slope_across_rb() -> None:
+    """时延必须变成频域线性相位；斜率就是 -2 pi tau。"""
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    tau = 3.7e-7
+    rays = _one_ray(n_pol_ue=1, n_pol_bs=1, tau_s=tau)
+    h = _synth(rays, spec, n_rb=8)[0, :, 0, 0]
+    df = 12.0 * SCS_HZ
+    measured = np.angle(h[1:] * np.conj(h[:-1]))
+    expected = ((-2.0 * np.pi * tau * df) + np.pi) % (2.0 * np.pi) - np.pi
+    assert np.allclose(measured, expected, atol=1e-5)
+
+
+def test_carrier_phase_term_is_present() -> None:
+    """径间相对相位来自载波项；漏了它 RT 的多径叠加就是错的。"""
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    tau = 1.0 / CARRIER_HZ / 4.0  # 恰好四分之一个载波周期
+    rays = _one_ray(n_pol_ue=1, n_pol_bs=1, tau_s=tau)
+    h = _synth(rays, spec, n_rb=1)[0, 0, 0, 0]
+    baseband_only = np.exp(-2j * np.pi * 0.0 * tau)
+    assert not np.isclose(h, baseband_only)
+    assert np.isclose(h, np.exp(-2j * np.pi * CARRIER_HZ * tau), atol=1e-6)
+
+
+def test_doppler_becomes_a_time_phase_ramp() -> None:
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    fd, dt = 37.0, 5e-3
+    rays = _one_ray(n_pol_ue=1, n_pol_bs=1, tau_s=0.0, doppler_hz=fd)
+    h = _synth(rays, spec, n_rb=1, n_time=3, sample_interval_s=dt)[:, 0, 0, 0]
+    step = np.angle(h[1] * np.conj(h[0]))
+    assert step == pytest.approx(((2 * np.pi * fd * dt) + np.pi) % (2 * np.pi) - np.pi, abs=1e-6)
+
+
+@requires_sionna
+def test_registered_polarization_keeps_the_configured_slant_order() -> None:
+    """注册给 Sionna 的极化必须与配置同序。
+
+    Sionna 自带的 "cross" 是 [-45°, +45°]，SuperRAN 配置是 [+45°, -45°]。
+    把 _polarization_name() 换回返回 "cross" 这条断言就会红。
+    """
+    from sionna.rt.antenna_pattern import polarization_registry
+
+    source = srt.SionnaRTSource(_company_cfg())
+    name = source._polarization_name()  # noqa: SLF001
+    assert name != "cross"
+    registered = polarization_registry.get(name)
+    assert [round(math.degrees(v), 6) for v in registered] == [45.0, -45.0]
+    assert [round(math.degrees(v), 6) for v in polarization_registry.get("cross")] == [
+        -45.0,
+        45.0,
+    ]
+
+
+def test_polarization_slot_order_follows_the_superran_contract() -> None:
+    """gains 的第 0 个极化下标必须落在 bs_layout/ue_layout 的第 0 个极化块上。
+
+    这条只管合成层的下标映射；「注册给 Sionna 的倾角顺序对不对」由
+    test_registered_polarization_keeps_the_configured_slant_order 守。
+    """
+    cfg = _company_cfg()
+    spec = srt.array_spec_from_config(cfg, 64, 4)
+    gains = np.zeros((2, 2, 1), dtype=np.complex128)
+    gains[0, 0, 0] = 1.0  # 只有 (UE 极化 0, BS 极化 0) 有能量
+    rays = srt.RayPaths(
+        gains=gains,
+        tau_s=np.asarray([0.0]),
+        theta_t_rad=np.asarray([math.radians(95.0)]),
+        phi_t_rad=np.asarray([0.0]),
+        theta_r_rad=np.asarray([math.radians(85.0)]),
+        phi_r_rad=np.asarray([0.0]),
+        doppler_hz=np.asarray([0.0]),
+    )
+    h = _synth(rays, spec)[0, 0]
+    pol0_bs = [spec.bs_layout.flat(i, j, 0) for i in range(8) for j in range(4)]
+    pol1_bs = [spec.bs_layout.flat(i, j, 1) for i in range(8) for j in range(4)]
+    pol0_ue = [spec.ue_layout.flat(i, 0, 0) for i in range(2)]
+    pol1_ue = [spec.ue_layout.flat(i, 0, 1) for i in range(2)]
+    assert np.abs(h[np.ix_(pol0_bs, pol0_ue)]).max() > 0
+    assert np.abs(h[np.ix_(pol1_bs, pol1_ue)]).max() == 0
+    assert np.abs(h[np.ix_(pol0_bs, pol1_ue)]).max() == 0
+
+
+def test_sector_azimuth_rotates_only_the_bs_array() -> None:
+    cfg = _company_cfg()
+    spec = srt.array_spec_from_config(cfg, 64, 4)
+    rays = _one_ray(phi_t=math.radians(30.0))
+    a = _synth(rays, spec, sector_azimuth_deg=0.0)
+    b = _synth(rays, spec, sector_azimuth_deg=30.0)
+    c = _synth(
+        _one_ray(phi_t=0.0), spec, sector_azimuth_deg=0.0
+    )
+    assert not np.allclose(a, b)
+    # 把扇区法向转到与径方位角一致，等价于径本来就在法向上
+    assert np.allclose(b, c, atol=1e-9)
+
+
+def test_gain_shape_mismatch_is_rejected_not_broadcast() -> None:
+    cfg = _company_cfg()
+    spec = srt.array_spec_from_config(cfg, 64, 4)
+    rays = _one_ray(n_pol_ue=1, n_pol_bs=1)
+    with pytest.raises(ValueError, match="极化维"):
+        _synth(rays, spec)
+
+
+def test_all_zero_channel_is_reported_not_silently_normalized() -> None:
+    cfg = _company_cfg()
+    spec = srt.array_spec_from_config(cfg, 64, 4)
+    rays = _one_ray(gain=0.0 + 0.0j)
+    with pytest.raises(ValueError, match="全为零"):
+        _synth(rays, spec, normalize=True)
+
+
+# ---------------------------------------------------------------------------
+# 不静默回退
+# ---------------------------------------------------------------------------
+
+
+def test_missing_sionna_raises_and_never_returns_a_statistical_source(monkeypatch) -> None:
+    monkeypatch.setattr(srt, "adapter_missing", lambda: ["sionna", "mitsuba"])
+    ch.probe_capabilities.cache_clear()
+    try:
+        caps = {c.name: c for c in ch.probe_capabilities()}
+        assert caps["sionna_rt"].available is False
+        assert caps["sionna_rt"].missing == ["sionna", "mitsuba"]
+        assert caps["internal_sim"].available is True
+        with pytest.raises(RuntimeError, match="sionna_rt"):
+            ch.require_source("sionna_rt")
+        with pytest.raises(RuntimeError, match="sionna"):
+            srt._ensure_sionna()  # noqa: SLF001
+    finally:
+        ch.probe_capabilities.cache_clear()
+
+
+def test_engine_list_is_stable_and_every_entry_is_self_describing() -> None:
+    """清单长度不随环境变化，且不可用的引擎必须说清缺什么。
+
+    调用方是按名字取的（``engines["sionna_rt"]``）。引擎在运行时缺依赖时从清单里
+    消失，会把「可选依赖没装」变成一个看起来像工具坏了的 KeyError。
+    """
+    ch.probe_capabilities.cache_clear()
+    caps = ch.probe_capabilities()
+    assert [c.name for c in caps] == ["internal_sim", "sionna_rt"]
+    for cap in caps:
+        assert cap.detail
+        assert cap.available or cap.missing
+
+
+def test_default_source_is_still_the_statistical_channel() -> None:
+    """默认信道必须还是 CDL；RT 装上了也不能改变默认档。"""
+    assert "internal_sim" in native.SOURCE_REGISTRY
+    assert "sionna_rt" not in native.SOURCE_REGISTRY
+    assert native.InternalSimSource({}).describe()["source"] == "internal_sim"
+
+
+def test_serving_outage_raises_while_interferer_outage_is_a_zero_channel(monkeypatch) -> None:
+    """服务链路全遮挡是必须报出来的覆盖空洞，干扰小区全遮挡只是没有干扰。"""
+    cfg = _company_cfg(
+        num_ues=1, num_samples=1, num_sites=1, sectors_per_site=3, scene="munich",
+        num_bs_tx_ant=64, num_bs_rx_ant=64, num_ue_tx_ant=4, num_ue_rx_ant=4,
+    )
+    source = srt.SionnaRTSource(cfg)
+    monkeypatch.setattr(source, "_solve", lambda sites, position: [None])
+    monkeypatch.setattr(source, "_cell_to_source", [0, 0, 0])
+    cell = native.Cell(np.asarray([0.0, 0.0, 25.0]), 0.0, 0, 0)
+    kwargs = dict(
+        n_time=1, n_rb=4, n_bs=64, n_ue=4, doppler_hz=0.0, realization_index=0,
+        link_aod_rad=0.0, link_aoa_rad=0.0, link_zod_rad=1.5, link_zoa_rad=1.5,
+        cell=cell, ue_position=np.asarray([10.0, 0.0, 1.5]), is_los=False,
+    )
+    with pytest.raises(RuntimeError, match="没有追到任何径"):
+        source._small_scale_channel(None, None, role="serving", **kwargs)  # noqa: SLF001
+    zeros = source._small_scale_channel(None, None, role="interferer", **kwargs)  # noqa: SLF001
+    assert zeros.shape == (1, 4, 64, 4)
+    assert not zeros.any()
+
+
+# ---------------------------------------------------------------------------
+# 端到端（需要 sionna-rt）
+# ---------------------------------------------------------------------------
+
+# munich 场景里实测有覆盖的三个位置（SuperRAN 局部坐标，场景平移由适配层加）。
+# 这三个点是扫描出来的，不是猜的；换场景要重新扫。
+MUNICH_COVERED_UES = [
+    [44.29, 53.47, 1.5],
+    [-58.96, -120.07, 1.5],
+    [-1.96, 114.2, 1.5],
+]
+
+
+def _rt_cfg(**overrides):
+    cfg = _company_cfg(
+        source="sionna_rt", scene="munich",
+        num_samples=2, num_ues=2, num_rb=8, num_slots_per_sample=2,
+        num_bs_tx_ant=64, num_bs_rx_ant=64, num_ue_tx_ant=4, num_ue_rx_ant=4,
+        scenario="UMa_NLOS", channel_est_mode="ls_linear", link="BOTH",
+        seed=903, ue_seed=904, num_sites=1, sectors_per_site=3,
+        isd_m=200.0, tx_height_m=45.0, ue_height_m=1.5,
+        custom_ue_positions=MUNICH_COVERED_UES[:2],
+        rt_max_depth=4, rt_samples_per_src=1_000_000,
+        measurements={"ssb_rsrp": True, "interferer_channels": True},
+    )
+    cfg.update(overrides)
+    return cfg
+
+
+@requires_sionna
+def test_real_ray_tracing_produces_a_contract_conformant_sample() -> None:
+    samples = list(ch.iter_samples("sionna_rt", _rt_cfg()))
+    assert len(samples) == 2
+    for s in samples:
+        assert s.source == "sionna_rt"
+        assert s.meta["channel_generation_mode"] == "sionna_rt"
+        assert s.meta["implementation"] == "superran-first-party-adapter+sionna-rt"
+        assert s.meta["rt_num_paths_serving"] >= 1
+        assert s.meta["rt_array_model"] == "superran-effective-subarray-shared-with-cdl"
+        assert s.meta["antenna_profile"] == "fixed_1to3_vertical_subarray_64T"
+        # 统计信道的簇口径在 RT 下没有意义，必须被摘掉而不是留个假值
+        for key in ("num_taps", "rician_k_db", "tau_rms_ns"):
+            assert key not in s.meta
+        h = s.h_dl_true
+        assert h.shape == (2, 8, 64, 4)
+        assert np.isfinite(h).all()
+        assert float(np.mean(np.abs(h) ** 2)) == pytest.approx(1.0, rel=1e-5)
+        assert not np.array_equal(h[0], h[1])  # 多普勒让时隙之间不一样
+        assert not np.array_equal(s.h_dl_true, s.h_dl_est)
+
+
+@requires_sionna
+def test_ray_traced_channel_differs_from_the_cdl_channel_on_the_same_geometry() -> None:
+    """同一套几何、同一套阵列，只换生成引擎——信道必须不同，其余口径必须相同。"""
+    rt_cfg = _rt_cfg()
+    cdl_cfg = dict(rt_cfg)
+    cdl_cfg.pop("source", None)
+    cdl_cfg.pop("scene", None)
+    cdl_cfg["channel_model"] = "CDL-C"
+    rt_samples = list(ch.iter_samples("sionna_rt", rt_cfg))
+    cdl_samples = list(ch.iter_samples("internal_sim", cdl_cfg))
+    for a, b in zip(rt_samples, cdl_samples, strict=True):
+        assert a.h_dl_true.shape == b.h_dl_true.shape
+        assert not np.allclose(a.h_dl_true, b.h_dl_true)
+        # 接缝以上的量必须逐位相同，否则 CDL 与 RT 的对比不可归因
+        assert a.meta["pathloss_dB"] == b.meta["pathloss_dB"]
+        assert a.snr_dB == b.snr_dB
+        assert a.sir_dB == b.sir_dB
+        assert a.sinr_dB == b.sinr_dB
+        assert a.serving_cell_id == b.serving_cell_id
+        np.testing.assert_array_equal(a.ue_position, b.ue_position)
+
+
+@requires_sionna
+def test_synthesis_matches_sionna_own_frequency_response() -> None:
+    """单端口单极化下，我们的合成必须等于 Sionna 自己的 ``Paths.cfr()``。
+
+    这是整条链路的物理锚点：时延、载波相位、多普勒三个约定只要有一个错，
+    误差就会跳到 O(1)。容差取 2e-3 是 Sionna 内部 float32 相位精度的量级
+    （载波项 2 pi f_c tau 在 f_c=2.6 GHz、tau~1 us 时是 1e4 量级的角度）。
+    """
+    import sionna.rt as rt
+    from sionna.rt import scene as builtin
+
+    scene = rt.load_scene(builtin.munich, merge_shapes=True)
+    scene.frequency = CARRIER_HZ
+    probe = rt.PlanarArray(num_rows=1, num_cols=1, pattern="iso", polarization="V")
+    scene.tx_array = probe
+    scene.rx_array = probe
+    bbox = scene.mi_scene.bbox()
+    off = np.asarray(
+        [(bbox.min[0] + bbox.max[0]) / 2.0, (bbox.min[1] + bbox.max[1]) / 2.0, 0.0]
+    )
+    scene.add(rt.Transmitter(name="bs", position=[float(off[0]), float(off[1]), 45.0]))
+    ue = off + np.asarray(MUNICH_COVERED_UES[0])
+    scene.add(
+        rt.Receiver(name="ue", position=[float(ue[0]), float(ue[1]), 1.5],
+                    velocity=[8.0, 0.0, 0.0])
+    )
+    solved = rt.PathSolver()(
+        scene, max_depth=4, samples_per_src=1_000_000, synthetic_array=True,
+        los=True, specular_reflection=True, diffuse_reflection=False,
+        refraction=True, seed=41,
+    )
+    per_cell = srt.SionnaRTSource._split_paths(solved, 1)  # noqa: SLF001
+    rays = per_cell[0]
+    assert rays is not None and rays.num_paths >= 1
+
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+
+    n_rb, n_time, dt = 8, 3, 5e-3
+    mine = srt.synthesize_channel(
+        rays, spec, sector_azimuth_deg=0.0, carrier_freq_hz=CARRIER_HZ,
+        n_time=n_time, n_rb=n_rb, subcarrier_spacing_hz=SCS_HZ,
+        sample_interval_s=dt, normalize=False,
+    )[:, :, 0, 0]
+    freqs = (np.arange(n_rb) - (n_rb - 1.0) / 2.0) * 12.0 * SCS_HZ
+    reference = np.asarray(
+        solved.cfr(frequencies=freqs, sampling_frequency=1.0 / dt,
+                   num_time_steps=n_time, normalize_delays=False,
+                   normalize=False, out_type="numpy")
+    )[0, 0, 0, 0]
+    scale = np.abs(reference).max()
+    assert scale > 0
+    assert np.abs(mine - reference).max() / scale < 2e-3
+
+
+@requires_sionna
+def test_ray_traced_channel_is_reproducible_in_physics_but_not_in_bytes() -> None:
+    """射线追踪**不是**逐位可复现的，但抖动必须小到物理上可忽略。
+
+    Sionna 的 PathSolver 即使固定 seed、单线程、同一进程内连跑，返回的时延与
+    复幅度仍有末位差异——这是 Sionna/Dr.Jit 的性质，不是本仓能修的。所以这里
+    守的是**上界**而不是 bit 相等：一旦缓存失效、seed 没传进去或者场景被重建，
+    偏差会从 1e-4 量级跳到 O(1)，这条就会红。
+
+    同时断言 meta 明确声明了「不逐位可复现」，免得有人拿 CDL 的复算习惯套上来。
+    """
+    first = list(ch.iter_samples("sionna_rt", _rt_cfg()))
+    second = list(ch.iter_samples("sionna_rt", _rt_cfg()))
+    assert first[0].meta["rt_bit_reproducible"] is False
+    assert first[0].meta["rt_element_pattern_per_ray"] is False
+    assert first[0].meta["rt_beam_squint_modeled"] is False
+    for a, b in zip(first, second, strict=True):
+        num = float(np.sum(np.abs(a.h_dl_true - b.h_dl_true) ** 2))
+        den = float(np.sum(np.abs(a.h_dl_true) ** 2))
+        nmse_db = 10.0 * math.log10(max(num / den, 1e-300))
+        assert nmse_db < -40.0, f"重跑偏差过大：NMSE {nmse_db:.1f} dB"
+        # 大尺度那半边仍然必须逐位相同——它根本不经过射线追踪
+        assert a.meta["pathloss_dB"] == b.meta["pathloss_dB"]
+        assert a.snr_dB == b.snr_dB and a.sir_dB == b.sir_dB
+
+
+def test_serving_outage_message_separates_blocked_cell_from_real_coverage_hole(
+    monkeypatch,
+) -> None:
+    """服务小区被挡 ≠ UE 没覆盖。两种情况必须给出不同的诊断。
+
+    实测 7 站场景里 1/6 的 UE 属于前者（还有 12 个小区可达，最强的只低 2.8 dB），
+    把它报成「真实的覆盖空洞」会把人引到错误的修法上。
+    """
+    cfg = _company_cfg(
+        num_ues=1, num_samples=1, num_sites=1, sectors_per_site=3, scene="munich",
+        num_bs_tx_ant=64, num_bs_rx_ant=64, num_ue_tx_ant=4, num_ue_rx_ant=4,
+    )
+    cell = native.Cell(np.asarray([0.0, 0.0, 25.0]), 0.0, 0, 0)
+    kwargs = dict(
+        n_time=1, n_rb=4, n_bs=64, n_ue=4, doppler_hz=0.0, realization_index=0,
+        link_aod_rad=0.0, link_aoa_rad=0.0, link_zod_rad=1.5, link_zoa_rad=1.5,
+        cell=cell, ue_position=np.asarray([10.0, 0.0, 1.5]), is_los=False,
+        role="serving",
+    )
+    fake = _one_ray()
+
+    blocked = srt.SionnaRTSource(cfg)
+    monkeypatch.setattr(blocked, "_cell_to_source", [0, 1, 2])
+    monkeypatch.setattr(blocked, "_solve", lambda sites, position: [None, fake, fake])
+    with pytest.raises(RuntimeError, match="2 个物理站可达"):
+        blocked._small_scale_channel(None, None, **kwargs)  # noqa: SLF001
+
+    isolated = srt.SionnaRTSource(cfg)
+    monkeypatch.setattr(isolated, "_cell_to_source", [0, 1, 2])
+    monkeypatch.setattr(isolated, "_solve", lambda sites, position: [None, None, None])
+    with pytest.raises(RuntimeError, match="真实的覆盖空洞"):
+        isolated._small_scale_channel(None, None, **kwargs)  # noqa: SLF001
+
+
+@requires_sionna
+def test_cosited_sectors_share_one_ray_trace() -> None:
+    """同站三扇区共用一次追踪：传播环境相同，差别只在天线朝向。"""
+    samples = list(ch.iter_samples("sionna_rt", _rt_cfg(num_samples=1, num_ues=1)))
+    diag = samples[0].meta["rt_link_diagnostics"]
+    assert len(diag) == 3
+    assert len({row["num_paths"] for row in diag}) == 1
+    assert len({round(row["rt_pathloss_db"], 9) for row in diag}) == 1
+
+
+# ---------------------------------------------------------------------------
+# 公开入口 → RT 适配层的端到端棘轮（2026-09-04 审核发现的四条）
+# ---------------------------------------------------------------------------
+# 这四条守的都是"配置从公开入口走到引擎时有没有被静默改掉"。它们**不需要
+# sionna**：全部只看配置路由与参数解析，所以在没装 RT 的机器上也必须跑。
+#
+# 反例来源：Codex 双席审核 2026-09-04（PR #12 BLOCKED）。
+
+
+def test_public_entry_carries_the_requested_scene_all_the_way_down():
+    """棘轮：非 munich 场景必须真的传到适配层。
+
+    把 plan.translate 里的 ``ch["scene"] = str(scene)`` 删掉就会变红。
+    原来的行为是 scene 停在 SuperRAN-only 配置里，适配层拿不到就默认
+    munich —— etoile / florence / san_francisco 与本地城市统统跑成慕尼黑，
+    而结果仍标 sionna_rt，覆盖、径数、秩、PDP、波束全被污染。
+    """
+    for scene in ("etoile", "florence", "san_francisco", "munich"):
+        ch_cfg, _own = plan.translate({"scene": scene, "num_ues": 2})
+        assert ch_cfg.get("scene") == scene, (scene, ch_cfg.get("scene"))
+        src = srt.SionnaRTSource(ch_cfg)
+        assert src._scene_name == scene, (
+            f"requested={scene} effective={src._scene_name}")
+
+
+def test_unknown_scene_is_a_hard_error_not_a_silent_munich_fallback():
+    """拼错的场景名当场报错。用错几何比直接失败危险得多。"""
+    with pytest.raises(ValueError, match="未知的射线追踪场景"):
+        srt.SionnaRTSource({"scene": "munchen"})
+    with pytest.raises(ValueError, match="未知的射线追踪场景"):
+        srt.SionnaRTSource({"scene": "shanghai_lujiazui_typo"})
+    # 不给 scene 时才用默认 munich，这是有文档的默认值
+    assert srt.SionnaRTSource({}).__dict__["_scene_name"] == "munich"
+
+
+def test_local_city_asset_is_read_from_osm_path_not_scene_file():
+    """棘轮：本地城市资产的键是 osm_path。
+
+    ``scenes.prepare_scene()`` 从来没返回过 ``scene_file``；读那个键的结果是
+    所有本地城市场景（rt_shanghai_lujiazui、rt_shenzhen_futian …）恒被判成
+    资产缺失。这里用 mock 返回合法 osm_path，适配层必须认。
+    """
+    scene_id = "rt_shanghai_lujiazui"
+    fake = "C:/nonexistent/scene.xml"
+    known = types.SimpleNamespace(scene_id=scene_id, builtin=False)
+    # 不依赖本机是否真的装了这套资产：把「名字是已知本地场景」一并 mock 掉，
+    # 这条棘轮在任何机器上都要跑得动。
+    patch_known = mock.patch.object(scenes, "get_scene", return_value=known)
+
+    with patch_known:
+        src = srt.SionnaRTSource({"scene": scene_id})
+    with mock.patch.object(srt, "_ensure_sionna", return_value=object()), \
+            mock.patch.object(scenes, "prepare_scene",
+                              return_value={"scene_id": scene_id,
+                                            "builtin": False,
+                                            "osm_path": fake}):
+        assert src._scene_file() == fake
+
+    # 上层已经解析好 osm_path 时直接用它，不再准备第二遍
+    with patch_known:
+        src2 = srt.SionnaRTSource({"scene": scene_id, "osm_path": fake})
+    with mock.patch.object(srt, "_ensure_sionna", return_value=object()), \
+            mock.patch.object(scenes, "prepare_scene",
+                              side_effect=AssertionError("不该再准备一次")):
+        assert src2._scene_file() == fake
+
+
+def test_zero_is_a_legal_config_value_and_survives_to_the_solver():
+    """棘轮：``cfg.get(k, d) or d`` 会把合法的 0 一起吃掉。
+
+    ``rt_max_depth=0`` 是"只要 LOS"的负向对照。被悄悄换成 3 之后对照里含
+    三阶反射，时延扩展、秩、频选性和波束结果全都变了，而 meta 还写着 3。
+    """
+    assert srt._cfg_num({"rt_max_depth": 0}, "rt_max_depth", 3) == 0
+    assert srt._cfg_num({}, "rt_max_depth", 3) == 3
+    assert srt._cfg_num({"rt_max_depth": None}, "rt_max_depth", 3) == 3
+    assert srt._cfg_num({"rt_samples_per_src": 0}, "rt_samples_per_src", 10) == 0
+    # 源码里不许再出现 `or` 兜底的写法
+    text = pathlib.Path(srt.__file__).read_text(encoding="utf-8")
+    for key in ("rt_max_depth", "rt_samples_per_src", "carrier_freq_hz",
+                "sample_interval_s"):
+        assert f'self.cfg.get("{key}"' not in text or f'_cfg_num(self.cfg, "{key}"' in text, (
+            f"{key} 仍在用 cfg.get(...) or default 的写法")
+
+
+def test_sample_internal_time_axis_starts_at_zero_like_the_cdl_path():
+    """棘轮：样本内部时间轴必须从 0 起算，不许再有"轮次时间原点"。
+
+    这条直接钉合成输出，不看配置。曾经的写法让第 k 个样本从
+    ``k x sample_interval_s`` 起算，于是**移动 UE 的相位被算了两遍**：父类已经
+    把 UE 位置推进了 ``round x dt``，RT 在新位置重追的径里已经含这段几何相位，
+    再叠加同样时长的 Doppler 相位，等效 Doppler 接近翻倍。
+
+    可判定的不变量：``t=0`` 时 Doppler 项恒为 ``exp(0)=1``，所以**第 0 个 slot
+    的值不能依赖 doppler_hz**。任何非零时间原点都会立刻破坏它。
+    """
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    quiet = _synth(_one_ray(n_pol_ue=1, n_pol_bs=1, doppler_hz=0.0), spec, n_time=3)
+    fast = _synth(_one_ray(n_pol_ue=1, n_pol_bs=1, doppler_hz=137.0), spec, n_time=3)
+    np.testing.assert_allclose(fast[0], quiet[0], rtol=0, atol=1e-12)
+    # 后续 slot 必须真的因 Doppler 而不同，否则上面那条是空断言
+    assert not np.allclose(fast[2], quiet[2], atol=1e-9)
+
+    # 结构上也不许把轮次再接回合成：签名里没有时间原点参数，
+    # 合成调用点也不许再引用 _sample_round。
+    import inspect
+    assert "time_offset" not in inspect.signature(srt.synthesize_channel).parameters
+    body = inspect.getsource(srt.SionnaRTSource._small_scale_channel)
+    assert "_sample_round" not in body, "合成调用点又把轮次接回时间轴了"
+
+
+def test_doppler_phase_advances_exactly_once_per_slot():
+    """棘轮：时间相位每个 slot 只推进 ``2 pi f_d dt``，一次。
+
+    相位双算的直接判据。单径、标量阵列，相位差可以解析算出来。
+    """
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    f_d, dt = 211.0, 5e-3
+    h = _synth(_one_ray(n_pol_ue=1, n_pol_bs=1, doppler_hz=f_d), spec,
+               n_time=4, sample_interval_s=dt)
+    for k in range(1, 4):
+        step = np.angle(h[k, 0, 0, 0] / h[0, 0, 0, 0])
+        want = (2.0 * np.pi * f_d * k * dt + np.pi) % (2.0 * np.pi) - np.pi
+        assert abs(step - want) < 1e-9, (k, step, want)
+
+
+def test_static_multi_round_is_refused_even_with_doppler():
+    """棘轮：static + 多轮**必然**逐位重复，给多普勒也救不回来。
+
+    上一版守卫只在 ``ue_speed_kmh=0`` 时才拦，漏掉了 static + 速度>0：两轮
+    走的是同一段时间轴 ``[0, n_time x dt)``、同一份几何，输出逐位相同。
+    CDL 靠 ``rng_small`` 每轮重画小尺度实现，RT 没有这个随机源——
+    CLAUDE.md 要求 static 各样本独立，RT 就该承认自己做不到，而不是伪造。
+    """
+    base = {"scene": "munich", "num_ues": 2, "num_samples": 4,
+            "mobility_mode": "static"}
+    for speed in (0.0, 3.0, 120.0):
+        with pytest.raises(ValueError, match="逐位相同"):
+            srt.SionnaRTSource({**base, "ue_speed_kmh": speed})._assert_samples_are_distinct()
+
+    # 先证明"逐位相同"这句话是真的：同几何同时间轴，合成输出确实一样
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    rays = _one_ray(n_pol_ue=1, n_pol_bs=1, doppler_hz=88.0)
+    a = _synth(rays, spec, n_time=2)
+    b = _synth(rays, spec, n_time=2)
+    assert a.tobytes() == b.tobytes()
+
+    # 出路：让它真的走，或者别要多余的轮次
+    for relief in ({"mobility_mode": "linear", "ue_speed_kmh": 3.0},
+                   {"num_samples": 2, "ue_speed_kmh": 3.0}):
+        srt.SionnaRTSource({**base, **relief})._assert_samples_are_distinct()
+
+
+def test_multislot_duplicates_and_window_overlap_are_refused():
+    """棘轮：单轮内部的多时隙重复与跨轮窗口重叠，都要在入口拒。
+
+    两条互相独立的反例：
+
+    * ``num_slots_per_sample>1`` + ``ue_speed_kmh=0`` —— Doppler 全为 0，
+      时间相位恒为 1，一个样本里的 N 个 slot 逐位相同。旧守卫在
+      ``rounds<=1`` 时直接 return，完全漏掉这条。
+    * 真正移动 + 每 UE 多轮 + ``num_slots_per_sample>1`` ——
+      父类每轮只把位置前移**一个** ``sample_interval_s``，样本内部却横跨
+      ``n_time`` 个间隔，相邻两轮窗口重叠（n_time=8 时重叠 7/8），而
+      system.py 会直接展平当独立快照。单窗口移动多时隙不在此拒绝范围。
+    """
+    dup = {"scene": "munich", "num_ues": 2, "num_samples": 2,
+           "mobility_mode": "static", "ue_speed_kmh": 0.0,
+           "num_slots_per_sample": 8}
+    with pytest.raises(ValueError, match="逐位相同"):
+        srt.SionnaRTSource(dup)._assert_samples_are_distinct()
+
+    overlap = {"scene": "munich", "num_ues": 2, "num_samples": 6,
+               "mobility_mode": "linear", "ue_speed_kmh": 30.0,
+               "num_slots_per_sample": 8}
+    with pytest.raises(ValueError, match="窗口会重叠"):
+        srt.SionnaRTSource(overlap)._assert_samples_are_distinct()
+
+    # 证明"零多普勒时 slot 逐位相同"不是猜的
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    h = _synth(_one_ray(n_pol_ue=1, n_pol_bs=1, doppler_hz=0.0), spec, n_time=8)
+    assert all(h[k].tobytes() == h[0].tobytes() for k in range(8))
+
+    # 合法组合不许误伤
+    for ok in ({"num_slots_per_sample": 1, "mobility_mode": "linear",
+                "ue_speed_kmh": 30.0, "num_samples": 6},
+               {"num_slots_per_sample": 8, "mobility_mode": "static",
+                "ue_speed_kmh": 3.0, "num_samples": 2}):
+        srt.SionnaRTSource({"scene": "munich", "num_ues": 2, **ok})._assert_samples_are_distinct()
+
+
+def test_sample_round_is_labelled_before_the_parent_builds_the_sample():
+    """轮次标签必须在父类算这个样本**之前**设好。
+
+    时间原点撤掉之后 ``_sample_round`` 只进 meta，不再影响信道；但标签错位
+    一样会让人把第 k 轮的诊断读成第 k-1 轮的。用假父类把顺序钉死。
+    """
+    seen: list[int] = []
+
+    class _Probe(srt.SionnaRTSource):
+        def __init__(self):            # noqa: D107 - 只为拿到最小状态
+            self.cfg = {"scene": "munich"}
+            self._scene_name = "munich"
+            self._sample_round = 0
+            self._offset = 0
+            self.num_ues = 2
+            self.num_samples = 6
+            self._sample_diag = []
+            self._scene_offset_m = np.zeros(3)
+
+        def _assert_samples_are_distinct(self):
+            return None
+
+        def _parent_samples(self):
+            for _ in range(6):
+                # 父类"算样本"的时刻：记下它看到的轮次
+                seen.append(self._sample_round)
+                yield types.SimpleNamespace(source=None, meta={})
+
+    probe = _Probe()
+    with mock.patch.object(srt.SionnaRTSource, "iter_samples",
+                           srt.SionnaRTSource.iter_samples), \
+            mock.patch("superran.native.InternalSimSource.iter_samples",
+                       lambda self: self._parent_samples()):
+        list(srt.SionnaRTSource.iter_samples(probe))
+    assert seen == [0, 0, 1, 1, 2, 2], seen
+
+
+# ---------------------------------------------------------------------------
+# 第三轮审核（2026-09-04）：守卫两处漏网 + 文档与实现对不上
+# ---------------------------------------------------------------------------
+
+
+def test_moving_by_name_only_is_still_refused():
+    """棘轮：``linear + ue_speed_kmh=0`` 名字像在动、实际不动，一样要拒。
+
+    守卫的判据必须和**父类真正挪不挪位置**一致。``native.py:1505`` 的条件是
+    ``mobility_mode != "static" and speed_mps > 0.0``——两个条件都要满足才移动。
+    只看 ``mobility_mode`` 的话，``linear + speed=0`` 会从守卫底下溜过去：
+    位置不变、Doppler 为零，多轮 H 逐位重复却被当成多个独立样本。
+    """
+    base = {"scene": "munich", "num_ues": 2, "num_samples": 4}
+    for mode in ("linear", "random_walk", "STATIC", "static"):
+        with pytest.raises(ValueError, match="逐位相同"):
+            srt.SionnaRTSource(
+                {**base, "mobility_mode": mode, "ue_speed_kmh": 0.0}
+            )._assert_samples_are_distinct()
+
+    # 判据必须和父类源码里的条件同源，不能各写各的
+    parent = inspect.getsource(native.InternalSimSource.iter_samples)
+    assert 'mobility_mode != "static" and speed_mps > 0.0' in parent, (
+        "父类的移动判据变了，守卫要跟着改")
+
+    # 真的在动才放行
+    srt.SionnaRTSource(
+        {**base, "mobility_mode": "linear", "ue_speed_kmh": 3.0}
+    )._assert_samples_are_distinct()
+
+
+def test_non_divisible_tail_sample_counts_as_a_second_round():
+    """棘轮：轮数要**向上取整**，尾巴上多出来的那一个样本也是第二轮。
+
+    ``num_samples=3, num_ues=2`` 的轮转分配是 UE ``[0, 1, 0]``——UE0 已经出现
+    第二次了。floor 除法算出来是「1 轮」，守卫整个失效，样本 0 与样本 2 逐位
+    相同却照样进数据集。
+    """
+    base = {"scene": "munich", "num_ues": 2, "mobility_mode": "static",
+            "ue_speed_kmh": 3.0}
+    with pytest.raises(ValueError, match="逐位相同"):
+        srt.SionnaRTSource({**base, "num_samples": 3})._assert_samples_are_distinct()
+    # 5 个样本 / 4 个 UE 同理
+    with pytest.raises(ValueError, match="逐位相同"):
+        srt.SionnaRTSource(
+            {**base, "num_ues": 4, "num_samples": 5}
+        )._assert_samples_are_distinct()
+    # 正好一轮或更少才放行
+    for n in (1, 2):
+        srt.SionnaRTSource({**base, "num_samples": n})._assert_samples_are_distinct()
+
+
+def test_documented_config_key_is_the_one_the_real_entry_point_reads():
+    """棘轮：文档里写的配置键，必须是 ``generate.py`` 真正读的那个。
+
+    这条守的是**文档级的静默失败**：写错键不会报错，``generate`` 直接用
+    默认值 ``internal_sim`` 跑完，summary 里 source=internal_sim，
+    而用户以为自己跑的是射线追踪——场景几何、径、空间结构和全部 KPI
+    都来自错误引擎。
+    """
+    from superran import generate as _gen
+    entry = inspect.getsource(_gen)
+    assert 'cfg.pop("source"' in entry, "真实入口读的键变了，文档要跟着改"
+
+    for doc in (ROOT / "README.md",
+                ROOT / "scripts" / "make_developer_guide.py",
+                ROOT / "scripts" / "developer_guide_details.py"):
+        text = doc.read_text(encoding="utf-8")
+        assert "channel_source=sionna_rt" not in text, (
+            f"{doc.name} 在教用户用一个不存在的配置键")
+
+    # 正面证明：这个键真的能选到 RT，写错的键选不到
+    assert srt.SionnaRTSource is ch.require_source("sionna_rt")
+
+
+def test_docs_do_not_promise_per_path_geometry_that_rt_never_persists():
+    """棘轮：文档不许承诺 RT 数据集能调 ``ds.paths()``。
+
+    适配层把逐径几何合成成 CFR 之后就丢掉了，逐径角度/时延没有落盘合同。
+    ``loader.py`` 对射线追踪数据集的 ``paths()`` 抛 NotImplementedError——
+    这是对的（返回 CDL 假角度更糟）。但文档若声称它可用，用户会照着设计依赖
+    真实逐径角度的算法，跑到一半才撞上。
+    """
+    from superran import loader
+
+    src = inspect.getsource(loader.Dataset.paths)
+    assert "NotImplementedError" in src and "is_ray_traced" in src
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "`ds.paths()` 返回真实角度/时延" not in readme
+    assert "RT 数据集不支持 `ds.paths()`" in readme
+
+
+def test_legacy_channel_source_key_is_a_hard_error():
+    """旧错误文档留下的键不能继续静默选择 internal_sim。"""
+    from superran import generate as _gen
+
+    with pytest.raises(ValueError, match="channel_source.*source.*internal_sim"):
+        _gen.generate({"channel_source": "sionna_rt"}, num_samples=1)
+
+
+def test_single_moving_multislot_window_is_not_rejected():
+    """只有一轮时没有跨轮窗口重叠，移动多时隙必须放行。"""
+    src = srt.SionnaRTSource({
+        "scene": "munich",
+        "num_ues": 1,
+        "num_samples": 1,
+        "num_slots_per_sample": 2,
+        "mobility_mode": "linear",
+        "ue_speed_kmh": 30.0,
+    })
+    src._assert_samples_are_distinct()
+
+
+def test_primary_docs_use_the_current_rt_time_and_capability_contract():
+    """主手册和 CLAUDE 不能继续发布已删除的轮次时间原点。"""
+    claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    compact = (ROOT / "scripts" / "make_developer_guide.py").read_text(
+        encoding="utf-8")
+    assert "当前 direct adapter 尚未实现" not in claude
+    assert "清单必须恒为三条" not in claude
+    assert "第 k 轮从 <code>k × sample_interval_s</code> 起算" not in compact
+    assert "修好之后同一 UE 相邻两轮实测 NMSE 约 −18 dB" not in compact
+    assert "每个样本内部恒从 <code>t=0</code> 起算" in compact
+
+
+def test_primary_docs_say_legacy_channel_source_is_a_hard_error():
+    """用户手册不能再说旧错键会被静默忽略。"""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    compact = (ROOT / "scripts" / "make_developer_guide.py").read_text(
+        encoding="utf-8")
+    for doc in (readme, compact):
+        assert "写错的键会被忽略" not in doc
+        assert "channel_source</code> 会被静默忽略" not in doc
+        assert "channel_source" in doc and "硬失败" in doc
+
+
+def test_primary_docs_allow_single_window_moving_multislot():
+    """文档不能把只有一轮的移动多时隙误报成跨轮重叠。"""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    compact = (ROOT / "scripts" / "make_developer_guide.py").read_text(
+        encoding="utf-8")
+    details = (ROOT / "scripts" / "developer_guide_details.py").read_text(
+        encoding="utf-8")
+    stale_overbroad_contracts = (
+        "非 static 不许多时隙",
+        "非 static + <code>num_slots_per_sample&gt;1</code>",
+        "非 static+多时隙",
+        "真在移动时不允许 `num_slots_per_sample>1`",
+    )
+    for doc in (readme, compact, details):
+        for stale in stale_overbroad_contracts:
+            assert stale not in doc
+        assert "num_samples&lt;=num_ues" in doc or "num_samples<=num_ues" in doc
+        assert "单窗口" in doc and "合法配置" in doc
+
+
+if __name__ == "__main__":
+    # run_test_matrix.py 是用 `python tests/<file>.py` 跑每个文件的。
+    # 没有这个入口，pytest 式的文件会「什么都不做地退出 0」——在矩阵里
+    # 表现为一个假通过。见 .agents/TESTING.md 的坑 2。
+    raise SystemExit(pytest.main([__file__, "-q"]))
