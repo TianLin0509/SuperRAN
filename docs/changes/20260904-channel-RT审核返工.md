@@ -3,6 +3,7 @@
 **分支 / SHA**：`feat/sionna-rt-source` / `<提交后回填>`　**风险档**：红
 **第一轮审核**：`20260904-0537-reviewer-pr12-sionna-rt-review-codex.html`（BLOCKED）
 **第二轮审核**：`20260904-0651-reviewer-pr12-r2-sionna-rt-review-codex.html`（REVISE）
+**第三轮审核**：`20260904-0941-reviewer-pr12-cb2-final-review-codex.html`（REVISE，见文末）
 
 ## 改了什么物理机制
 
@@ -160,6 +161,60 @@ ruff 回到 develop 基线的 1 处（`scripts/superran_board.py:13` F401）。
 - **没有验证多端口阵列相位与 Sionna 全阵列逐项等价**（两轮审核都列在这里，
   本次仍未新增证据——见上面那条，先要定 develop 的符号）。
 - **没有做逐径阵元方向图**：阵元方向图只进链路预算的标量，没有逐径加权。
+
+## 第三轮审核：守卫两处漏网 + 文档三处与实现相反
+
+第三轮把移动相位、时间窗口和时间棘轮判为已修好，垂直相位符号也接受了
+「develop 既有、不单独阻断本 PR」的定性。剩下的两类问题都是**边界没收干净**。
+
+### 守卫漏网两处
+
+| 反例 | 为什么溜过去 | 现在 |
+|---|---|---|
+| `linear` + `ue_speed_kmh=0`，两轮 | 守卫的 `moves` 只看 `mobility_mode`，而父类 `native.py:1505` 的真实条件是 `mobility_mode != "static"` **且** `speed_mps > 0.0`。名字像在动、实际位置不动，Doppler 也为零 | `moves` 改成与父类同源的两条件；棘轮直接断言父类源码里的那行条件字符串，父类改了守卫必须跟着改 |
+| `static`，`num_samples=3` / `num_ues=2` | 轮数用 floor 除法算成「1 轮」，但轮转分配是 UE `[0, 1, 0]`——UE0 已经是第二轮 | 改成向上取整 `-(-n // m)` |
+
+公开入口实跑复核（不是只调守卫方法）：
+
+```
+[OK] 反例1  linear + ue_speed_kmh=0，两轮        -> 被拒
+[OK] 反例2  static，num_samples=3 / num_ues=2    -> 被拒
+[OK] 合法1  static，num_samples=2，多时隙        -> 跑通，2 个样本
+[OK] 合法2  linear + 30km/h，两轮，单时隙        -> 跑通，4 个样本
+```
+
+### 文档三处与实现相反——都是我上一轮写进去的
+
+1. **README 与主手册写 `channel_source=sionna_rt`，而真实入口读的是 `source`**
+   （`generate.py:844` 的 `cfg.pop("source", "internal_sim")`）。写错的键被
+   静默忽略，直接跑成 `internal_sim`——用户明确要求 RT，拿到的却是统计信道，
+   场景几何、径、空间结构和全部 KPI 都来自错误引擎。**这正是本 PR 一直在修的
+   那类静默失败，却出现在我自己的文档里。**
+2. **README 声称 `ds.paths()` 返回真实角度/时延**，而 `loader.py` 对射线追踪
+   数据集抛 `NotImplementedError`。适配层把逐径几何合成成 CFR 之后就丢掉了，
+   逐径角度/时延**没有落盘合同**。改成如实说明。
+3. **`developer_guide_details.py` 仍留着已删除的 `time_offset_s = 轮次 × dt`
+   时间语义与「未来 direct adapter」说法**，与同文件其它段自相矛盾。
+
+### 后两条棘轮把文档钉在实现上
+
+| 棘轮 | 撤销哪个修复会红 |
+|---|---|
+| `test_moving_by_name_only_is_still_refused` | `moves` 退回只看 `mobility_mode` |
+| `test_non_divisible_tail_sample_counts_as_a_second_round` | 轮数退回 floor 除法 |
+| `test_documented_config_key_is_the_one_the_real_entry_point_reads` | README **或**手册任一处写回 `channel_source` |
+| `test_docs_do_not_promise_per_path_geometry_that_rt_never_persists` | README 又承诺 `ds.paths()` 可用 |
+
+红态实测：五次变异各自只红对应项，恢复后 33 passed。
+
+### 第三轮回归
+
+已 rebase 到 `origin/develop`（**7d3dad1**，比审核报告里的 fd70f49 又前进了
+一个 #22），**无冲突**。pytest **252 passed**；7 个 `__main__` 入口退出码 0；
+`validate_team_contract` pass。
+
+ruff 4 处，**全部在本 PR 没碰过的文件里**（`scripts/superran_board.py`、
+`superran_task.py`、`superran_tasks.py`），后两个是随 develop 新提交进来的。
 
 ## 影响哪些 KPI
 
