@@ -1115,6 +1115,30 @@ API的表行0映射MCS0、对应上报CQI1；真实上报**CQI=0是out-of-range*
 `cqi_index`（现场口径：在量化后的 CQI 档上滤波），`sinr_db` 只用于量化前后的
 口径消融，两个域的结果不能混着比。
 
+**CQI 上报从 2026-09-04 起是运行时事件驱动的**（`SystemConfig.cqi_report`，
+默认 `CqiReportConfig(srs_period_tti=4, srs_delay_tti=3,
+ue_implementation_loss_db=1.5)`）。两条主循环都改成：每 `srs_period_tti` 个 TTI
+让 UE 上报一次，测的是 `tti − srs_period_tti − srs_delay_tti` 时刻的信道，
+IIR 在线更新，基站读的时候再按**当前快照**把瞬时 BF Gain 加回去。
+`CqiReportConfig(enabled=False)` 退回建表阶段一次性算好的 `sinr_tx_db`，
+**逐位一致**（4 组场景指纹已验）。
+
+**它和 `csi_aging` 是两个维度，不要合并**：`csi_aging` 管预编码权用的 `h_prec`
+有多陈旧；`cqi_report` 管 MCS 决策输入 `sinr_tx_db` 多久更新一次；误块抽签用的
+`h_eval` 真实 SINR 两者都不碰。
+
+三件必须知道的事：
+
+1. **离线那份 AMC 坐标系统性乐观**。同一夹具 OLLA 关掉时，离线预计算的首传
+   BLER 是 0.44（目标 0.1），理想 CQI（周期 1/时延 0/无损失）是 0.04。
+2. **IIR 的 λ 是"每次上报"作用一次，不是"每毫秒"**。所以拉长 SRS 周期会同时
+   拉长滤波器在时间上的记忆——周期 40 TTI 时实测 AMC 反而**更保守**
+   （BLER 0.028），与"CQI 陈旧 → 更激进"的直觉相反。要让 λ 表示固定的时间
+   常数，得按周期比例换算，当前**没有**这么做。
+3. **1.5 dB 的 UE 实现损失只保证方向，不保证落点**。它一定让 AMC 更保守；
+   是否"正好把陈旧带来的激进补回目标"依赖场景落在 MCS 量化台阶的哪一侧
+   （一个夹具上落回 0.096，另一个过冲到 0.027）。**未经现场设备数据标定。**
+
 `Dataset.tdd_mcs` / `sr_tdd_mcs` 也必须遵守同一因果边界：进入 MCS 的
 `bf_gain_user_db` 只能在 gNB 可见的 `h_prec` 上计算。同一权打到
 `h_true` 得到的 `bf_gain_true_user_db` 与 prediction error 只作事后审计，

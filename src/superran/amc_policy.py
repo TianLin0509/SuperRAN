@@ -36,12 +36,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
 
 __all__ = [
     "RANK_MODES",
+    "CqiReportConfig",
+    "CqiReporter",
+    "attach_runtime_cqi",
     "FirstTxFeedback",
     "RankConfig",
     "RankController",
@@ -840,3 +844,342 @@ class RankController:
             out["events"] = list(self.events)
             out["events_truncated"] = bool(len(self.events) >= 512)
         return out
+
+
+# ---------------------------------------------------------------------------
+# 三、CQI 上报：运行时按 SRS 周期事件触发
+# ---------------------------------------------------------------------------
+#: 参照实现的 SRS 周期与处理时延（30 kHz、0.5 ms TTI）。
+SRS_PERIOD_TTI_DEFAULT = 4
+SRS_DELAY_TTI_DEFAULT = 3
+
+
+@lru_cache(maxsize=64)
+def _cqi_quantiser(target_bler: float, mcs_table: int) -> tuple[Any, Any]:
+    """(上报量化门限数组, 每个内部 CQI 行对应的发送门限数组)。
+
+    两个都是 ``(target_bler, mcs_table)`` 的纯函数，取值集合很小。运行时上报
+    每个周期、每个 UE、每个 rank 都要用，所以整表算一次缓存起来：量化用
+    ``searchsorted``、反查门限用数组下标，都不再走 Python 循环。
+    """
+    from . import bler_curves as bc  # noqa: PLC0415
+    from . import linkadapt as la  # noqa: PLC0415
+
+    # 与 la.select_reported_cqi 逐值等价：codepoint = 有多少个门限 <= 观测值。
+    edges = np.asarray(
+        la._internal_cqi_thresholds(float(target_bler), int(mcs_table)),
+        dtype=float)
+    rows = np.array([
+        float(bc.get_curve(
+            int(la.internal_cqi_to_mcs(r, mcs_table=int(mcs_table))["mcs"]),
+            "newtx").required_sinr_db(float(target_bler)))
+        for r in range(len(la.INTERNAL_CQI_TO_MCS))], dtype=float)
+    return edges, rows
+
+
+@dataclass(frozen=True)
+class CqiReportConfig:
+    """UE 侧 CQI 上报的时间行为。
+
+    这一层管的是 **MCS 决策输入的新鲜度**，不是预编码权的老化——后者是
+    :mod:`csi_aging` 的事（``h_prec`` 相对 ``h_eval`` 有多陈旧）。两者是两个
+    独立维度，**不要合并**：预编码用 ``h_prec``、MCS 用本类给出的
+    ``sinr_tx_db``、误块抽签用 ``h_eval`` 上的真实 SINR，三条互不覆盖。
+
+    ``enabled=False`` 退回建表阶段一次性算好的 ``sinr_tx_db``——也就是本类
+    出现之前的行为，逐位一致，用于 A/B 对照。
+    """
+
+    enabled: bool = True
+    #: 两次 CQI 上报之间隔多少个 TTI。1 = 每个 TTI 都有新 CQI（理想上界）。
+    srs_period_tti: int = SRS_PERIOD_TTI_DEFAULT
+    #: SRS 发出到基站能用上之间的处理时延（TTI）。UE 测的是
+    #: ``tti - srs_period_tti - srs_delay_tti`` 时刻的信道，不是当前信道。
+    srs_delay_tti: int = SRS_DELAY_TTI_DEFAULT
+    #: UE 端实现损失（dB），在 UE 测出 PMI-SINR 之后、量化成 CQI 之前扣掉。
+    #: 这是 **UE 本振噪声 + 解调实现损失的等效惩罚**，不是信道的一部分；
+    #: 1.5 dB 是工程默认，**未经现场设备数据标定**。
+    ue_implementation_loss_db: float = 1.5
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, (bool, np.bool_)):
+            raise ValueError("enabled 必须是布尔值")
+        for name in ("srs_period_tti", "srs_delay_tti"):
+            value = getattr(self, name)
+            if (isinstance(value, (bool, np.bool_))
+                    or not isinstance(value, (int, np.integer))):
+                raise ValueError(f"{name} 必须是整数")
+        if int(self.srs_period_tti) < 1:
+            raise ValueError("srs_period_tti 必须至少为 1")
+        if int(self.srs_delay_tti) < 0:
+            raise ValueError("srs_delay_tti 必须非负")
+        if (isinstance(self.ue_implementation_loss_db, (bool, np.bool_))
+                or not math.isfinite(float(self.ue_implementation_loss_db))
+                or float(self.ue_implementation_loss_db) < 0.0):
+            raise ValueError("ue_implementation_loss_db 必须是有限非负数")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"enabled": bool(self.enabled),
+                "srs_period_tti": int(self.srs_period_tti),
+                "srs_delay_tti": int(self.srs_delay_tti),
+                "measurement_lag_tti": (
+                    int(self.srs_period_tti) + int(self.srs_delay_tti)),
+                "ue_implementation_loss_db": float(
+                    self.ue_implementation_loss_db),
+                "contract": (
+                    "UE reports CQI every srs_period_tti TTIs from the channel "
+                    "seen srs_period_tti+srs_delay_tti TTIs earlier, minus a UE "
+                    "implementation penalty; the IIR filter runs online at each "
+                    "report; the gNB adds its instantaneous BF gain at read time"
+                    if self.enabled
+                    else "CQI chain precomputed per snapshot in build_link_tables")}
+
+
+def attach_runtime_cqi(tables: list[Any], config: CqiReportConfig | None, *,
+                       snap_every: int) -> tuple[list[Any], CqiReporter | None]:
+    """为一次仿真准备运行时 CQI：返回（可写的链路表副本, reporter）。
+
+    ``config`` 为 None / ``enabled=False`` / 链路表缺 ``pmi_sinr_db`` 时原样返回
+    调用方的表和 ``None``，主循环行为与本机制出现之前逐位一致。
+
+    启用时只复制 ``sinr_tx_db`` 与 ``sinr_tx_rbg_db`` 两个数组（都很小），
+    其余字段共享。**不能原地改调用方的表**：同一份表会被多次 replication 复用，
+    改了就会让第 2 次开始的重复实验带着第 1 次的 CQI 状态跑。
+    """
+    from dataclasses import replace as _replace  # noqa: PLC0415
+
+    if config is None or not bool(config.enabled):
+        return list(tables), None
+    if any(getattr(t, "pmi_sinr_db", None) is None for t in tables):
+        return list(tables), None
+    private: list[Any] = []
+    for table in tables:
+        rows = getattr(table, "sinr_tx_db", None)
+        rbg = getattr(table, "sinr_tx_rbg_db", None)
+        private.append(_replace(
+            table,
+            sinr_tx_db=None if rows is None else np.array(rows, dtype=float),
+            sinr_tx_rbg_db=None if rbg is None else np.array(rbg, dtype=float)))
+    reporter = CqiReporter(
+        private, config, snap_every=snap_every,
+        cqi_filter_lambda=float(getattr(private[0], "cqi_filter_lambda", 1.0)),
+        cqi_filter_domain=str(
+            getattr(private[0], "cqi_filter_domain", "cqi_index")))
+    reporter.cold_start()
+    return private, reporter
+
+
+class CqiReporter:
+    """运行时的逐 UE CQI 状态机。
+
+    调度器读到的是"**最近一次 UE 上报并滤波后**的值"，而不是当前时刻的真值。
+    上报之间 CQI 保持不变，新鲜度由 ``srs_period_tti`` 决定。
+
+    与建表阶段那份离线实现相比，物理链完全一样（PMI-SINR → 4-bit CQI 量化 →
+    一阶 IIR → 反查目标 BLER 的 SINR 门限 → 加 BF Gain），差别有三处：
+
+    1. **时间栅格**。离线版落在信道快照上（默认 5 ms），最细只能到一个快照；
+       本类落在 TTI 上（30 kHz 下 0.5 ms），``srs_period_tti=4`` 就是 2 ms。
+    2. **测量时刻**。离线版用报告所在快照本身；本类显式退
+       ``srs_period_tti + srs_delay_tti`` 个 TTI，体现 SRS 往返。
+    3. **UE 实现损失**。离线版没有这一项。
+
+    **BF Gain 不进状态**。它是瞬时量：基站每次调度都能从自己当前的 CSI 算出来。
+    所以本类只持有 CQI 反查出的 **SINR 门限**，读的时候再按**当前快照**
+    加 BF Gain。把 BF Gain 一起冻进上报时刻，等于假设基站也不知道自己的波束
+    这一刻打得准不准。
+    """
+
+    def __init__(self, tables: list[Any], config: CqiReportConfig, *,
+                 snap_every: int, cqi_filter_lambda: float,
+                 cqi_filter_domain: str) -> None:
+        from . import linkadapt as la  # noqa: PLC0415
+
+        self.config = config
+        self._tables = list(tables)
+        self._snap_every = max(1, int(snap_every))
+        self._lam = float(cqi_filter_lambda)
+        self._domain = str(cqi_filter_domain)
+        self._max_codepoint = len(la.INTERNAL_CQI_TO_MCS)
+        n_ue = len(self._tables)
+        self._n_snap = int(np.asarray(self._tables[0].sinr_db).shape[0])
+        self._max_rank = int(np.asarray(self._tables[0].sinr_db).shape[1])
+        # [ue][rank] 的连续滤波状态与最近一次有限观测
+        self._filter: list[list[float | None]] = [
+            [None] * self._max_rank for _ in range(n_ue)]
+        self._last_obs_db: list[list[float]] = [
+            [float("nan")] * self._max_rank for _ in range(n_ue)]
+        # 持有的 CQI 门限（**不含 BF Gain**）
+        self._threshold_db = np.full((n_ue, self._max_rank), float("nan"))
+        self._reported_cqi = np.zeros((n_ue, self._max_rank), dtype=int)
+        # 预取：主循环每次上报/回写都要碰它们，不要每次 getattr + asarray
+        self._pmi: list[np.ndarray] = []
+        for _ue, _table in enumerate(self._tables):
+            _rows = getattr(_table, "pmi_sinr_db", None)
+            if _rows is None:
+                raise ValueError(
+                    f"UE {_ue} 的链路表没有 pmi_sinr_db，运行时 CQI 上报无从测起；"
+                    "请用当前版本的 build_link_tables 重新预计算，或把 "
+                    "cqi_report 设为 CqiReportConfig(enabled=False)")
+            self._pmi.append(np.asarray(_rows, dtype=float))
+        self._bf_gain: list[np.ndarray | None] = [
+            (None if getattr(t, "bf_gain_db", None) is None
+             else np.nan_to_num(np.asarray(t.bf_gain_db, dtype=float),
+                                nan=0.0, posinf=0.0, neginf=0.0))
+            for t in self._tables]
+        self._bf_gain_rbg: list[np.ndarray | None] = [
+            (None if getattr(t, "bf_gain_rbg_db", None) is None
+             else np.nan_to_num(np.asarray(t.bf_gain_rbg_db, dtype=float),
+                                nan=0.0, posinf=0.0, neginf=0.0))
+            for t in self._tables]
+        self._next_tti = np.zeros(n_ue, dtype=np.int64)
+        self._last_update_tti = np.full(n_ue, -1, dtype=np.int64)
+        self._update_count = np.zeros(n_ue, dtype=np.int64)
+
+    # -- 内部：一次上报 ----------------------------------------------------
+    def _measure_snapshot(self, tti: int) -> int:
+        lag = int(self.config.srs_period_tti) + int(self.config.srs_delay_tti)
+        meas_tti = max(0, int(tti) - lag)
+        return int((meas_tti // self._snap_every) % self._n_snap)
+
+    def _quantise(self, value: float, edges: Any) -> int:
+        """SINR → 上报 4-bit CQI codepoint，与 ``la.select_reported_cqi`` 等价。"""
+        if not np.isfinite(value):
+            return int(len(edges)) if value > 0 else 0
+        return int(np.searchsorted(edges, float(value), side="right"))
+
+    def _report(self, ue: int, tti: int) -> None:
+        table = self._tables[ue]
+        snap = self._measure_snapshot(tti)
+        target = float(getattr(table, "target_bler", 0.1))
+        mcs_table = int(getattr(table, "mcs_table", 3))
+        edges, row_thr = _cqi_quantiser(target, mcs_table)
+        loss = float(self.config.ue_implementation_loss_db)
+        obs = self._pmi[ue][snap] - loss                 # [rank]
+        for r in range(self._max_rank):
+            obs_db = float(obs[r])
+            if np.isfinite(obs_db):
+                self._last_obs_db[ue][r] = obs_db
+                raw = (obs_db if self._domain == "sinr_db"
+                       else float(self._quantise(obs_db, edges)))
+                state = self._filter[ue][r]
+                self._filter[ue][r] = (
+                    raw if state is None else state + self._lam * (raw - state))
+            state = self._filter[ue][r]
+            if state is None:
+                reported = 0
+            elif self._domain == "sinr_db":
+                reported = self._quantise(state, edges)
+            else:
+                reported = int(min(max(int(np.floor(state + 1e-9)), 0),
+                                   self._max_codepoint))
+            self._reported_cqi[ue, r] = reported
+            # codepoint 0 是协议语义的 out-of-range，没有可映射 MCS；
+            # 沿用建表阶段的防御占位：退到表行 0，可用性由 outage/BLER 硬判。
+            thr = float(row_thr[max(reported - 1, 0)])
+            if not np.isfinite(thr):
+                thr = (self._last_obs_db[ue][r]
+                       if np.isfinite(self._last_obs_db[ue][r]) else -20.0)
+            self._threshold_db[ue, r] = thr
+        self._last_update_tti[ue] = int(tti)
+        self._update_count[ue] += 1
+
+    # -- 对外 --------------------------------------------------------------
+    def cold_start(self) -> None:
+        """主循环开跑前给每个 UE 上报一次。
+
+        不做这一步，第一个 TTI 的 ``sinr_tx_db`` 是 NaN，MCS 无从判起。
+        冷启动用的仍然是"退了测量时延之后"的快照，所以它不是偷看当前信道。
+        """
+        for ue in range(len(self._tables)):
+            self._report(ue, 0)
+            self._next_tti[ue] = int(self.config.srs_period_tti)
+
+    def step(self, tti: int) -> bool:
+        """把本 TTI 到期的 UE 全部上报一遍；返回是否真的有人上报。
+
+        返回值给调用方省掉一次无谓的回写：十万 TTI 的主循环里，
+        ``srs_period_tti=4`` 时四次里有三次什么都没变。
+        """
+        period = int(self.config.srs_period_tti)
+        due = np.nonzero(self._next_tti <= int(tti))[0]
+        if due.size == 0:
+            return False
+        for ue in due:
+            self._report(int(ue), int(tti))
+            # 直接加周期而不是"从当前 TTI 重新起算"，避免上行时隙把节拍拖偏。
+            nxt = int(self._next_tti[ue]) + period
+            while nxt <= int(tti):
+                nxt += period
+            self._next_tti[ue] = nxt
+        return True
+
+    def apply_to_tables(self, snap: int) -> None:
+        """把当前持有的 CQI 写回链路表的 ``sinr_tx_db`` / ``sinr_tx_rbg_db``。
+
+        **为什么用回写而不是让每个读点改成调函数**：两条主循环加起来有二十
+        多处读这两个数组（频选打分、MU 准入、rank 观测、grant 复算……）。
+        逐点改动等于二十多个可能漏掉的地方，而漏掉的那个会**静默**继续用
+        建表阶段那份值。回写只有一个写点，读侧一行不用动。
+
+        写的是**本次 simulate 私有的副本**（见 :func:`attach`），不碰调用方
+        传进来的链路表——那份表会被多次 replication 复用。
+        """
+        for ue, table in enumerate(self._tables):
+            thr = self._threshold_db[ue]
+            rows = getattr(table, "sinr_tx_db", None)
+            if rows is not None:
+                limit = min(self._max_rank, int(rows.shape[1]))
+                gain = self._bf_gain_rows(ue, snap)
+                rows[int(snap), :limit] = thr[:limit] + gain[:limit]
+            rbg = getattr(table, "sinr_tx_rbg_db", None)
+            if rbg is not None:
+                values = self.sinr_tx_rbg_db_rows(ue, snap)
+                if values is not None:
+                    limit = min(self._max_rank, int(rbg.shape[1]))
+                    rbg[int(snap), :limit] = values[:limit]
+
+    def sinr_tx_rbg_db_rows(self, ue: int, snap: int) -> np.ndarray | None:
+        """``[rank, RBG]`` 的逐 RBG 决策坐标；没有逐 RBG BF Gain 时返回 None。"""
+        rows = self._bf_gain_rbg[int(ue)]
+        if rows is None:
+            return None
+        return self._threshold_db[int(ue)][:, None] + rows[int(snap)]
+
+    def sinr_tx_db(self, ue: int, snap: int, rank: int) -> float:
+        """该 UE 在当前快照下、rank 档的 AMC 决策 SINR（门限 + 瞬时 BF Gain）。"""
+        thr = float(self._threshold_db[int(ue), int(rank) - 1])
+        gain = self._bf_gain(int(ue), int(snap), int(rank) - 1)
+        return thr + (gain if np.isfinite(gain) else 0.0)
+
+    def sinr_tx_rbg_db(self, ue: int, snap: int, rank: int) -> np.ndarray | None:
+        """逐 RBG 版本；链路表没有逐 RBG BF Gain 时返回 ``None``。"""
+        rows = self.sinr_tx_rbg_db_rows(int(ue), int(snap))
+        return None if rows is None else rows[int(rank) - 1]
+
+    def _bf_gain_rows(self, ue: int, snap: int) -> np.ndarray:
+        """``[rank]`` 的瞬时 BF Gain；缺数据或非有限值都按 0 dB 处理。"""
+        rows = self._bf_gain[int(ue)]
+        return np.zeros(self._max_rank) if rows is None else rows[int(snap)]
+
+    def _bf_gain(self, ue: int, snap: int, rank_idx: int) -> float:
+        return float(self._bf_gain_rows(ue, snap)[rank_idx])
+
+    def age_tti(self, ue: int, tti: int) -> int:
+        """当前 TTI 与该 UE 最近一次上报之间隔了多少个 TTI。"""
+        last = int(self._last_update_tti[int(ue)])
+        return int(tti) - last if last >= 0 else -1
+
+    def reported_cqi(self, ue: int, rank: int) -> int:
+        return int(self._reported_cqi[int(ue), int(rank) - 1])
+
+    def diagnostics(self, tti: int) -> dict[str, Any]:
+        ages = [self.age_tti(u, tti) for u in range(len(self._tables))]
+        return {
+            **self.config.as_dict(),
+            "cqi_update_count": [int(x) for x in self._update_count],
+            "cqi_age_tti": [int(x) for x in ages],
+            "cqi_age_tti_max": int(max(ages)) if ages else 0,
+            "reported_cqi_codepoint": [
+                [int(v) for v in row] for row in self._reported_cqi],
+        }

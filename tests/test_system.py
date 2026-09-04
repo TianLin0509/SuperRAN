@@ -280,11 +280,19 @@ check(_merged[0].sinr_db.shape[0] == 8, "合并后每 UE 有 4 样本 x 2 时隙
 _unmerged = sysm.build_link_tables(_hs, [15.0] * 40)
 check(len(_unmerged) == 40, "不给 num_ues 时仍是每样本一个用户（向后兼容）")
 
-# 用户数直接决定每用户谱效 —— 同样的小区容量摊给不同人数
+# 用户数直接决定每用户谱效 —— 同样的小区容量摊给不同人数。
+# **OLLA 必须关掉**：这条守的是"资源怎么分"，不是"OLLA 收敛得多快"。
+# 这个夹具是全 1 信道、rank2 下 SINR ≈ 0 dB，正好压在 MCS 表最底下一档的
+# 边界上；OLLA 开着时 10 个 UE 每人被调度的次数是 40 个 UE 的 4 倍，
+# 偏置爬升速度差 4 倍，于是"小区总吞吐"里混进了一个与分组方式无关的
+# 收敛暂态。关掉 OLLA 后两边逐值相等（相对差 0.0000、每用户比值精确 4.00），
+# 比原来 0.15 的容差强得多。
 _r10 = sysm.simulate(_merged, sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=11),
-                     traffic=sysm.TrafficConfig(model="full_buffer"))
+                     traffic=sysm.TrafficConfig(model="full_buffer"),
+                     sched=sysm.SchedulerConfig(olla_enabled=False))
 _r40 = sysm.simulate(_unmerged, sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=11),
-                     traffic=sysm.TrafficConfig(model="full_buffer"))
+                     traffic=sysm.TrafficConfig(model="full_buffer"),
+                     sched=sysm.SchedulerConfig(olla_enabled=False))
 _p10 = float(np.mean([x["served_mbps"] for x in _r10.users]))
 _p40 = float(np.mean([x["served_mbps"] for x in _r40.users]))
 print(f"  10 用户每人 {_p10:.1f} Mbps / 40 用户每人 {_p40:.1f} Mbps  比值 {_p10 / _p40:.2f}")
@@ -2269,6 +2277,115 @@ for _bad_mp in (0, 17, 1.5, True):
         lambda v=_bad_mp: sysm.SystemConfig(harq_max_processes=v),
         "harq_max_processes", f"进程数 {_bad_mp!r} 在配置入口被拒")
 
+# --- 17.3 运行时 CQI 上报：新鲜度、测量时延与 UE 实现损失 ------------------
+# **棘轮。** 把 attach_runtime_cqi 换回"直接用建表那份 sinr_tx_db"会让这一节
+# 全红：上报计数与 CQI 年龄会变成 None，BLER 也退回离线那份系统性乐观的值。
+_cqi_rng = np.random.default_rng(20260904)
+_cqi_h = [((_cqi_rng.standard_normal((20, 32, 8, 4))
+            + 1j * _cqi_rng.standard_normal((20, 32, 8, 4))) / np.sqrt(2))
+          for _ in range(3)]
+_cqi_tabs = sysm.build_link_tables(
+    _cqi_h, [14.0, 12.0, 10.0], max_rank=2, rb_per_rbg=16,
+    csi=sysm.ca.CsiConfig(enabled=False))
+
+
+def _cqi_run(cfg, *, mode="capacity", olla=True, duration_s=3.0):
+    return sysm.simulate(
+        _cqi_tabs,
+        sys_cfg=sysm.SystemConfig(evaluation_mode=mode, duration_s=duration_s,
+                                  tdd_pattern="DDDSU", cqi_report=cfg),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=olla),
+        kpi=sysm.KpiConfig(warmup_tti=0), rng=rg.RngBook(5, 0))
+
+
+# 0) 运行时上报默认必须真的接上了。放在最前面，这样把 attach_runtime_cqi
+#    改回"永远返回 None"时这一节给出的是清清楚楚的 FAIL，而不是往下走到
+#    float(None) 崩掉——棘轮要能读，不能只是炸。
+_cqi_default_run = _cqi_run(ap.CqiReportConfig(), duration_s=0.5)
+check(_cqi_default_run.cell["cqi_update_count_mean"] is not None
+      and _cqi_default_run.cell["cqi_age_tti_max"] is not None,
+      "默认配置下运行时 CQI 上报确实生效（两个新鲜度诊断不是 None）")
+
+# 1) 上报节拍：次数随 TTI 线性增长，年龄峰值 = 周期 - 1
+_cqi_num_tti = sysm.SystemConfig(duration_s=3.0).num_tti
+for _per in (1, 4, 40):
+    _run_p = _cqi_run(ap.CqiReportConfig(srs_period_tti=_per))
+    _cnt_raw = _run_p.cell["cqi_update_count_mean"]
+    _age_raw = _run_p.cell["cqi_age_tti_max"]
+    if _cnt_raw is None or _age_raw is None:
+        check(False, f"SRS 周期 {_per} TTI：运行时上报没生效，新鲜度诊断为 None")
+        continue
+    _cnt = float(_cnt_raw)
+    _age = int(_age_raw)
+    check(abs(_cnt - _cqi_num_tti / _per) <= 1.0,
+          f"SRS 周期 {_per} TTI：上报次数 {_cnt:.0f} ≈ {_cqi_num_tti}/{_per}")
+    check(_age == _per - 1,
+          f"SRS 周期 {_per} TTI：CQI 年龄峰值 {_age} = 周期 - 1")
+
+# 2) 关掉运行时上报 → 退回建表那份数组，诊断键显式为 None（不是 0）
+_cqi_off = _cqi_run(ap.CqiReportConfig(enabled=False))
+check(_cqi_off.cell["cqi_update_count_mean"] is None
+      and _cqi_off.cell["cqi_age_tti_max"] is None,
+      "关闭运行时上报时两个新鲜度诊断是 None——离线预计算没有『上报时刻』")
+check(_cqi_off.config["system"]["cqi_report"]["enabled"] is False,
+      "CQI 上报口径随结果显式上报")
+
+# 3) 决策坐标的准确度：OLLA 关掉才能看见 AMC 坐标本身准不准
+_cqi_target = 0.1
+_bler_off = {}
+for _label, _cfg in (
+        ("offline", ap.CqiReportConfig(enabled=False)),
+        ("ideal", ap.CqiReportConfig(srs_period_tti=1, srs_delay_tti=0,
+                                     ue_implementation_loss_db=0.0)),
+        ("stale_no_loss", ap.CqiReportConfig(srs_period_tti=4, srs_delay_tti=3,
+                                             ue_implementation_loss_db=0.0)),
+        ("default", ap.CqiReportConfig()),
+):
+    _bler_off[_label] = float(_cqi_run(_cfg, olla=False).cell["bler_first_tx"])
+print("  OLLA 关闭时的首传 BLER（目标 0.1）：" + "，".join(
+    f"{k}={v:.4f}" for k, v in _bler_off.items()))
+check(_bler_off["offline"] > 0.25,
+      f"离线预计算的 AMC 坐标系统性乐观：BLER {_bler_off['offline']:.4f} 远高于 0.1")
+check(abs(_bler_off["ideal"] - _cqi_target)
+      < abs(_bler_off["offline"] - _cqi_target) / 3.0,
+      f"理想 CQI（周期1/时延0/无损失）的目标偏差至少小一大截："
+      f"{abs(_bler_off['ideal'] - _cqi_target):.4f} vs "
+      f"{abs(_bler_off['offline'] - _cqi_target):.4f}")
+check(_bler_off["stale_no_loss"] > _bler_off["ideal"],
+      f"CQI 陈旧（周期4+时延3）让 MCS 偏激进，BLER 从 "
+      f"{_bler_off['ideal']:.4f} 抬到 {_bler_off['stale_no_loss']:.4f}")
+# **只断言方向。** 1.5 dB 一定让 AMC 更保守；但它是否"正好落回 target"
+# 依赖场景落在 MCS 量化台阶的哪一侧——换个信道实测会过冲。不要把
+# "在某个夹具上刚好落回目标"写成普适结论。
+check(_bler_off["default"] < _bler_off["stale_no_loss"],
+      f"1.5 dB 的 UE 实现损失让 AMC 更保守："
+      f"{_bler_off['stale_no_loss']:.4f} → {_bler_off['default']:.4f}"
+      "（是否正好落回 target 与场景有关，不作断言）")
+
+# 4) 长周期下**不是**更激进而是更保守——IIR 的时间常数随周期一起变长。
+#    这条与任务书的猜测相反，实测如此，显式钉住免得以后当成 bug 修。
+_bler_long = float(_cqi_run(
+    ap.CqiReportConfig(srs_period_tti=40, srs_delay_tti=3,
+                       ue_implementation_loss_db=0.0), olla=False
+).cell["bler_first_tx"])
+print(f"  周期 40 TTI（OLLA 关）首传 BLER {_bler_long:.4f}，"
+      f"对照周期 4 的 {_bler_off['stale_no_loss']:.4f}")
+check(_bler_long < _bler_off["stale_no_loss"],
+      "周期拉长到 40 TTI 反而更保守：IIR 的 lambda 是**每次上报**作用一次，"
+      "周期越长，滤波器在时间上的记忆越长，持有的 CQI 越贴近长期均值")
+
+# 5) 不许偷看未来：上报测的是 srs_period + srs_delay 个 TTI **之前**的信道
+_probe = ap.CqiReporter(
+    _cqi_tabs, ap.CqiReportConfig(srs_period_tti=4, srs_delay_tti=3),
+    snap_every=10, cqi_filter_lambda=0.25, cqi_filter_domain="cqi_index")
+check(_probe._measure_snapshot(0) == 0 and _probe._measure_snapshot(7) == 0
+      and _probe._measure_snapshot(17) == 1,
+      "测量快照 = (max(0, tti-7) // snap_every) % n_snap，冷启动钳到 0")
+check(all(_probe._measure_snapshot(_t) <= max(0, _t) // 10
+          for _t in range(0, 200)),
+      "任何 TTI 的测量快照都不晚于当前快照——运行时 CQI 不偷看未来信道")
+
 # 快速回退的 NACK 门限只能在反馈到达后触发。先升到 rank2，在 t1 发送一个
 # NACK；t2..t4 必须保持 rank2，t5 将该 feedback 应用后才允许回退。
 _delayed_rank = ap.RankController(
@@ -2682,9 +2799,11 @@ check(float(np.mean(_open_loop_delta == 0)) > 0.8,
 _bler_runs = {}
 for _target, _tabs in _bler_tables.items():
     # **这一组守的是 OLLA 的稳态，所以要跑到稳态、而且不能被钳位截住。**
-    # buffer 改成发送时扣减 + 多进程放开之后，同一段时间里 OLLA 收到的反馈量
-    # 和 MCS 工作点都变了，1 s 不够收敛（实测两臂 1.65 / 1.64，差异淹没在噪声里）。
-    # 跑满 2 s 并把钳位放到 6 dB 之后两臂才真正分开。
+    # 三件事叠在一起把这条锚点推离了稳态：buffer 改成发送时扣减、多进程放开、
+    # CQI 改成运行时上报（默认口径含 1.5 dB UE 实现损失 + 测量时延，比建表那份
+    # 离线值保守约一档）。1 s 不够 OLLA 收敛（实测两臂 1.65 / 1.64，差异淹在
+    # 噪声里），而默认 olla_max_db=3.0 下两臂又都顶在 2.96/2.99 —— 那时候比的
+    # 是钳位值不是稳态偏置。跑满 2 s 并把钳位放到 6 dB 之后两臂才真正分开。
     _bler_runs[_target] = sysm.simulate(
         _tabs,
         sys_cfg=sysm.SystemConfig(duration_s=2.0,

@@ -577,6 +577,8 @@ DETAIL_SPECS.update({
             ("预测坐标", "CQI 经离散表得初始 MCS，取该档目标 BLER 的 NewTx 门限 Γ，"
                         "加上在 h_prec 上算出的 BF Gain，逐 rank 各存一份宽带值与"
                         "逐 RBG 值。"),
+            ("上报时刻（运行时）", "<code>CqiReportConfig</code> 与 <code>CqiReporter</code>（2026-09-04 起，默认启用）把这条链从建表阶段的逐快照预计算搬到 TTI 主循环：每 <code>srs_period_tti</code> 个 TTI 上报一次，测的是 <code>tti − srs_period_tti − srs_delay_tti</code> 时刻的信道并扣掉 <code>ue_implementation_loss_db</code>，IIR 在线更新。<strong>BF Gain 不进上报状态</strong>——它是瞬时量，读的时候按当前快照加回去。<code>attach_runtime_cqi</code> 给每次仿真造一份私有的链路表副本并把结果回写进 <code>sinr_tx_db</code>／<code>sinr_tx_rbg_db</code>，所以两条主循环二十多处读点一行没改。<code>enabled=False</code> 逐位退回旧行为。"),
+            ("两个老化维度不能合并", "<code>csi_aging</code> 管的是预编码权 <code>h_prec</code> 相对 <code>h_eval</code> 有多陈旧；<code>cqi_report</code> 管的是 MCS 决策输入 <code>sinr_tx_db</code> 多久更新一次；误块抽签用的 <code>h_eval</code> 真实 SINR 两者都不碰。三条互不覆盖，混成一个参数会让「预编码打偏」和「MCS 选高了」这两种完全不同的损失无法分开归因。"),
             ("选档与闭环", "在预测坐标上反折 mcs_without_olla，叠加用户级 OLLA 偏置，"
                           "floor 并钳到 profile 范围；MU 先在 SINR 域加 CorrLoss 与"
                           "PowerLoss 再反折。"),
@@ -588,6 +590,7 @@ DETAIL_SPECS.update({
             ("Rank 判决与回退", "step() 每 TTI 先跑回退监测（可立即回退并返回要恢复的 OLLA "
                               "偏置），再看是否到了退避后的判决周期；主循环把返回的 OLLA "
                               "写回自己的状态。"),
+            ("CQI 新鲜度诊断", "结果里带 <code>cqi_update_count_mean</code> 与 <code>cqi_age_tti_max</code>；关闭运行时上报时显式为 <code>null</code>，因为离线预计算没有「上报时刻」这个概念。"),
             ("解码与反馈", "同一发射权作用到 h_true，取被授 RBG 聚合成单码字 SINR，"
                           "用最终 MCS 查 NewTx 曲线抽 ACK/NACK；增量在发送时刻定下，"
                           "在反馈生效的 TTI 才落到 OLLA 状态上。"),

@@ -157,9 +157,12 @@ _LIGHT_TRAFFIC = dict(model="mixed", small_ue_share=0.5, small_file_bytes=600,
 # arrival_rate_hz 于 2026-09-03 由 4.0 重新标定为 3.5：下行 AMC 链修正
 # （HARQ 进程占用与 rank 反馈时序）下修了可达吞吐，同样的到达率现在要占 40.7%
 # 的 PRB。要保持"30% 工作点"这个场景名副其实，必须降到达率而不是放宽断言。
+# 2026-09-04 再由 3.5 标定为 3.0：TBS 扣掉 DM-RS+PDCCH 开销、CQI 改成运行时
+# 上报（含 1.5 dB UE 实现损失）之后，同样的到达率占到 40.0% 的 PRB。
+# 同样是降到达率，不是放宽断言。
 _PRB30_TRAFFIC = dict(model="mixed", small_ue_share=0.5, small_file_bytes=600,
                       small_arrival_rate_hz=100.0, file_bytes=400_000,
-                      arrival_rate_hz=3.5)
+                      arrival_rate_hz=3.0)
 
 _CACHE: dict[tuple, object] = {}
 
