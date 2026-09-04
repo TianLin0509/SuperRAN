@@ -2196,7 +2196,7 @@ def overview_page(modules: list[ModuleDoc], tools: list[SymbolDoc], tests: list[
 <h2>一句话定位</h2>
 <p><strong>SuperRAN 是给 Agent 使用的无线仿真实验编排与证据平台。</strong>
 它把本仓 first-party 统计信道物理内核包装成稳定的数据合同、MCP 工具、系统仿真和三道证据门；
-Sionna RT / QuaDRiGa 只允许作为显式可选 direct adapter。
+Sionna RT 是唯一的可选 direct adapter（QuaDRiGa 路线已明确不做并删除）。
 它的目标不是“能画一条曲线”，而是让配置、真值、估计、随机数、统计和结论都能回溯；
 交互配置 Mock 与 KPI 工作台分别承载运行前确认和运行后解释。</p>
 """
@@ -2592,7 +2592,7 @@ def hardware_page() -> Page:
         "<p>两者都采用 <code>r=p·N_H·N_V+h·N_V+v</code>（0-based），"
         "即先极化块、再水平列、垂直行最快，且 v=0 是物理顶部。64T 的关键端口是"
         " 1/5/33，256T 是 1/9/129。该顺序已同时贯通 InternalSim、Sionna RT、"
-        "QuaDRiGa、Type-I/DFT 码本与系统链路表；历史 64T 顺序只经显式置换读取。</p>",
+        "Type-I/DFT 码本与系统链路表；历史 64T 顺序只经显式置换读取。</p>",
     )
     body += """
 <h2>272 不是标准表写错</h2>
@@ -3848,7 +3848,7 @@ def calibration_page() -> Page:
     )
     body += """
 <h2>跨引擎对标如何避免“显著但不重要”</h2>
-<p><code>cross_engine_compare()</code> 对 internal_sim、Sionna/QuaDRiGa 等独立来源的同配置结果计算
+<p><code>cross_engine_compare()</code> 对 internal_sim 与 sionna_rt 这类独立来源的同配置结果计算
 两样本 KS 距离与 5% 临界值，同时报告中位数差。样本很大时极小差异也可能统计显著，所以 D、样本量、
 中位数差和工程容差必须一起解释，不能只给一个 p-value 式结论。</p>
 """
@@ -5919,7 +5919,7 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         ("扇区服务选择", "azimuth_deg 不进 path gain，三扇区同功率、按列表先后胜出", "110° 水平阵子图给相对 sector gain；pathloss 保持纯传播量", "boresight 反例"),
         ("SRS 时序", "样本 idx 直接当 slot；可在 DL/guard slot 合成 SRS", "idx 映射到第 n 个满足 TDD+T_SRS+offset 的真实机会；无交集硬失败", "paired 3→13 slot toy"),
         ("SRS 带宽与跳频", "历史 helper 的行表与 n_RRC 语义曾漂移", "本仓冻结产品 C_SRS=63/B_SRS=1/b_hop=0 与 17-hop 顺序；非产品 hopping 硬拒绝", "17 跳覆盖 272 RB + 非标反例"),
-        ("小载波 SRS 默认值", "Sionna/QuaDRiGa 固定 C_SRS=3；4 RB toy carrier 在历史 hopping 回看时映射到 RB[8,12) 并崩溃", "四种 source 均按实际载波自动选最宽合法 C_SRS；显式非法资源仍硬失败", "跨 backend 86 passed / 1 conditional skip"),
+        ("小载波 SRS 默认值", "历史外部实现固定 C_SRS=3；4 RB toy carrier 在 hopping 回看时映射到 RB[8,12) 并崩溃", "本仓按实际载波自动选最宽合法 C_SRS；显式非法资源仍硬失败", "跨 backend 86 passed / 1 conditional skip"),
         ("CDL 标准表校准", "历史 A/B/C 角度错、D/E 行数短；运行时 monkey patch 还会随 dataclass 漂移", "spec38901 成为本仓唯一运行表；native 直接读取，不修改外部注册表", "A/B/C/D/E 分别 23/23/24/14/15 行，逐字段 0 mismatch"),
         ("CDL ray 与 LOS", "每簇只生成一个 rank-1 方向，忽略 20-ray spread/XPR；D/E 又二次混 K；显式 UMa_LOS 仍随机出 NLOS", "20-ray 偏移/角耦合/逐 ray Jones+Doppler；D/E K 只用表功率；显式 LOS 强制 LOS/CDL-D", "CDL 定向 19/19 + LOS 反例"),
         ("配置/实际剖面", "摘要只突出 configured CDL-D，但 NLOS 链路实际由 CDL-C 生成，24-component 结果容易被误读成 D", "新增 configured_channel_model；repr、摘要与 E2E 同时展示 effective_channel_model_counts", "NLOS configured D→effective C 反例"),

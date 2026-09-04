@@ -253,7 +253,7 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 - **[MU-MIMO 算法流程 `MU_MIMO.html`](MU_MIMO.html)** —— 配对/预编码/功率分配逐步展开，含六个待确认的设计选择与实测数字
 - **[通宵成果与待审 `TONIGHT.html`](TONIGHT.html)** —— 6 个 bug、5 个新需求提案、8 个待拍板的决策点
 - **[通宵进展与待审问题 `MORNING_REVIEW.html`](MORNING_REVIEW.html)** —— 3GPP/ITU 对标结果 + 12 个待拍板的问题
-- **[还缺什么 `ROADMAP.html`](ROADMAP.html)** —— 对着 Sionna / MATLAB 5G Toolbox / QuaDRiGa / 5G-LENA 逐模块点名。**只下行 · 只 TDD · BLER 一律查表**，边界写在第七节
+- **[还缺什么 `ROADMAP.html`](ROADMAP.html)** —— 对着 Sionna / MATLAB 5G Toolbox / 5G-LENA 逐模块点名。**只下行 · 只 TDD · BLER 一律查表**，边界写在第七节
 - **[场景拓展与干扰量化 `SCENARIOS.html`](SCENARIOS.html)** —— IoT 噪声抬升、业务域 vs 测量域、21 个场景的实测画像、场景探测、哪些提速是真的
 
 ## 四条设计铁律
@@ -336,7 +336,7 @@ python scripts/make_offline_bundle.py --thin   # 轻量包 17 MB，要求目标�
 **wheel 是平台相关的**，必须在与目标机器同平台、同 Python 大版本的机器上打包。
 
 > 包内已经包含 first-party 统计信道物理内核，不需要第二个源码仓库。
-> 可选 Sionna RT / QuaDRiGa 仍按各自许可证和运行时单独安装。
+> 可选的 Sionna RT 仍按其许可证和运行时单独安装。
 
 ### 手动
 
@@ -468,7 +468,8 @@ ph.project_interference(...)       # 干扰投影：不投影会高估干扰
   Sionna 适配器必须显式导出逐径几何，否则 `ds.paths()` 仍应硬失败而非返回假角度。
 - **时延扩展的频域估计有固有误差**。可观测最大时延是 `1/(12·SCS)`，
   实测比值 0.8~1.0，仅作数量级检查。
-- **QuaDRiGa 未纳入**，需要 MATLAB/Octave 运行时。
+- **QuaDRiGa 不做**（2026-09-04 决定）。它需要 MATLAB/Octave 运行时，成本与收益不成比例；
+  要空间一致性就按 38.901 §7.6.3 自己实现一个子集。
 - **场景资产与源码解耦**。内置场景只依赖可选 Sionna 包；自有 OSM/PLY 数据通过
   `SUPERRAN_SCENES` 指向独立数据目录，不从其他源码 checkout 静默借用。
 - **CDL-A~E 都有标准表硬门**。`spec38901` 是本仓唯一运行表真相源，覆盖

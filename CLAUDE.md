@@ -42,12 +42,14 @@ SuperRAN 本仓的合同为准。统计信道生成、CDL/TDL 表、NR 载波/TD
 
 ``channelhub.py`` 只保留为历史 Python API 的兼容门面，实际实现固定指向
 ``native.py``。历史环境变量 ``SUPERRAN_CHANNELHUB`` 被有意忽略，不能改变生成字节。
-Sionna RT / QuaDRiGa 只能作为显式 direct optional adapter 接入；不可用时硬报告，
-不得退回另一个仓库。
+Sionna RT 只能作为显式 direct optional adapter 接入；不可用时硬报告，
+不得退回另一个仓库。**QuaDRiGa 路线已于 2026-09-04 明确不做并从代码与文档中删除**
+（需要 MATLAB/Octave 运行时，成本与收益不成比例）；要空间一致性就按 38.901 §7.6.3
+自己实现一个子集。
 
 **默认信道是 CDL**（``internal_sim``）。``sionna_rt`` 是本仓自己的直连适配层
 （``src/superran/sionna_rt.py``），装了 sionna-rt 才可用，必须在配置里显式写
-``source: sionna_rt`` 才会走。QuaDRiGa 仍未实现。
+``source: sionna_rt`` 才会走。引擎清单恒为这两条。
 
 ## 环境
 
@@ -160,7 +162,7 @@ KaTeX 未必收，光看 Python 源码看不出来。
 | `src/superran/native.py` | first-party 统计信道和 PHY 窄腰；本仓真相源，**默认引擎** |
 | `channelhub.py` | 只作旧 API 名兼容，不发现外部源码 |
 | `src/superran/sionna_rt.py` | 本仓自己的 Sionna RT 直连适配层；只换信道矩阵，阵列/大尺度/KPI 口径全部共用 |
-| QuaDRiGa | 显式可选 direct adapter，尚未实现；缺失时硬报告 |
+| QuaDRiGa | **不做**。已从代码与文档删除，不要再当作待办 |
 | 平台后端、训练、数据库、任务队列 | 不纳入；数据直接按 SuperRAN 合同落盘 |
 | 特征桥 / MAE token | 不纳入；只输出未归一化、未截断、未门控的物理量 |
 | source `w_dl` | 不接受；只从本地 `h_est` 重算 EBF/PEBF/NEBF |

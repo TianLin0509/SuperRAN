@@ -425,10 +425,10 @@ def ks_critical(n_a: int, n_b: int, alpha: float = 0.05) -> float:
 def cross_engine_compare(
     ds_a: Any, ds_b: Any, *, metrics: tuple[str, ...] = ("coupling_loss", "geometry")
 ) -> dict[str, Any]:
-    """两个引擎（如 internal_sim 与 quadriga_real）同配置结果的分布一致性。
+    """两个引擎（如 internal_sim 与 sionna_rt）同配置结果的分布一致性。
 
-    交叉验证是校准之外最有力的一招：QuaDRiGa 本身是独立通过 38.901 校准的实现，
-    两个各自独立写出来的仿真器在同一配置下给出同分布，比任何单边自查都更有说服力。
+    交叉验证是校准之外最有力的一招：两条各自独立的生成路径（统计信道与射线追踪）
+    在同一配置下给出同分布，比任何单边自查都更有说服力。
 
     判据用 KS 检验。**注意样本量大时 KS 极易显著**——分布只要有一点点系统差异，
     几百个样本就足以拒绝原假设。所以除了 D 与临界值，这里同时报中位数之差，

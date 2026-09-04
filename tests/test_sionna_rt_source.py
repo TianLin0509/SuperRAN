@@ -292,10 +292,18 @@ def test_missing_sionna_raises_and_never_returns_a_statistical_source(monkeypatc
         ch.probe_capabilities.cache_clear()
 
 
-def test_engine_list_is_always_three_entries() -> None:
+def test_engine_list_is_stable_and_every_entry_is_self_describing() -> None:
+    """清单长度不随环境变化，且不可用的引擎必须说清缺什么。
+
+    调用方是按名字取的（``engines["sionna_rt"]``）。引擎在运行时缺依赖时从清单里
+    消失，会把「可选依赖没装」变成一个看起来像工具坏了的 KeyError。
+    """
     ch.probe_capabilities.cache_clear()
-    names = [c.name for c in ch.probe_capabilities()]
-    assert names == ["internal_sim", "sionna_rt", "quadriga_real"]
+    caps = ch.probe_capabilities()
+    assert [c.name for c in caps] == ["internal_sim", "sionna_rt"]
+    for cap in caps:
+        assert cap.detail
+        assert cap.available or cap.missing
 
 
 def test_default_source_is_still_the_statistical_channel() -> None:

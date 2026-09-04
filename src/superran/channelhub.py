@@ -145,6 +145,13 @@ def _probe_module(name: str) -> bool:
 
 @lru_cache(maxsize=1)
 def probe_capabilities() -> tuple[Capability, ...]:
+    """Report every engine SuperRAN can generate channels with.
+
+    The list length must not depend on what is installed on this machine —
+    only ``available`` and ``missing`` may change.  Callers index it by name,
+    and an engine that disappears when its runtime is absent turns a missing
+    optional dependency into a ``KeyError`` that looks like a broken tool.
+    """
     internal_missing = [
         module
         for module in ("numpy", "scipy", "yaml", "filelock", "mcp")
@@ -178,12 +185,6 @@ def probe_capabilities() -> tuple[Capability, ...]:
                 else "Optional direct Sionna RT adapter needs sionna-rt; no fallback engine is used"
             ),
             rt_missing,
-        ),
-        Capability(
-            "quadriga_real",
-            False,
-            "Optional direct QuaDRiGa adapter requires MATLAB/Octave and is not installed",
-            ["superran-direct-quadriga-adapter", "octave"],
         ),
     )
 
