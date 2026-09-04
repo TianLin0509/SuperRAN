@@ -1213,6 +1213,23 @@ busy period 在"清空 buffer 的那一次发送"结束（`last_tx_tti`），`tx
 因此 `scheduler_finalize` 与 `_build_su_plan` 里"队列必须 ≥ 冻结 payload"的两道
 校验都已删除：重传的字节在首传时就走了，队列剩多少与它无关。
 
+**capacity 与 experience 用同一个口径**（2026-09-04 内网审核后补齐）。
+`system._Traffic.serve(..., is_retx=False)` 同样是发送即扣、重传只占资源。
+capacity 一开始漏了这一步，而它单独存在时并不刺眼——单进程下"ACK 才扣"是自洽的：
+被 NACK 的字节留在缓冲区，只有它自己的重传能把它们发走。**多进程放开后才出问题**：
+本 UE 的另一个进程会从同一个缓冲区头再取一份组成新 TB，等原 TB 的重传成功时又扣
+一次，于是有一批字节被记成送达却从来没上过空口。
+`_Traffic` 只记字节数、不记字节身份，所以 `serve()` 的 `min(n, bytes_left)` 钳位
+会把总量兜住（`served ≤ offered` 仍成立），**这个 bug 因此不会让小区吞吐虚高**，
+只会让 burst 提前算完。实测同一场景被钳掉的字节数：单进程 14,954 B，8 进程
+45,112 B，正好是三倍。
+
+**`pf_accounting="acked_goodput"` 的合同是「NACK 给 0」**，别拿发送字节当 credit。
+buffer 改成发送时扣减之后 `sent` 在 NACK 时也是正数，直接用它会把这条合同悄悄改掉
+——PF 会把没送达的字节也算成该用户已获得的服务，坏链路用户的 `r_avg` 涨得更快、
+优先级掉得更快。默认口径 `auto`（= `scheduled_tbs`）用的是 `tb_bytes`，本来就与
+ACK 无关，不受影响。
+
 ### 系统仿真入口的两道硬校验（2026-08-17 第三轮审查）
 
 `sr_system_sim` 在 server 边界新增两道硬失败，都是"静默算错不如直接拒绝"：

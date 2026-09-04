@@ -2802,10 +2802,23 @@ class _Traffic:
         b = self.active[u]
         return int(b.bytes_left) if b is not None else 0
 
-    def serve(self, u: int, tti: int, n_bytes: int) -> int:
-        """给这个 UE 发 ``n_bytes``，返回实际发出去的字节数。"""
+    def serve(self, u: int, tti: int, n_bytes: int, *,
+              is_retx: bool = False) -> int:
+        """给这个 UE 发 ``n_bytes``，返回实际从缓冲区扣掉的字节数。
+
+        **发送即扣减，与 ACK 无关**，口径与 ``experience.DrbQueue.transmit``
+        一致（见 CLAUDE.md「速率统计口径」）。``is_retx=True`` 的那次不带新
+        数据——它的字节在首传时就已经离开缓冲区——所以只占资源、返回 0。
+
+        以前是「只有 ACK 才扣」。单进程下那是自洽的：被 NACK 的字节留在缓冲区，
+        只有它自己的重传能把它们发走。**多进程放开后不再自洽**：本 UE 的另一个
+        进程会从同一个缓冲区头再取一份组成新 TB，等原 TB 的重传成功时又扣一次，
+        于是有一批字节被记成送达却从来没上过空口。
+        """
         b = self.active[u]
         if b is None or n_bytes <= 0:
+            return 0
+        if is_retx:
             return 0
         sent = min(n_bytes, b.bytes_left)
         b.bytes_left -= sent
@@ -3626,9 +3639,9 @@ def simulate(
                             int(pend.tb_bytes) * 8, mcs_obj.rate)[0])
                 bler = float(retx["bler"])
                 retx_cnt[u] += 1
-                if harq_draw[tti, u] > bler:
-                    served[u] += tr.serve(u, tti, payload_bytes)
-                else:
+                # 重传不带新数据：这批字节在首传时就已经离开缓冲区。它只占资源。
+                tr.serve(u, tti, payload_bytes, is_retx=True)
+                if harq_draw[tti, u] <= bler:
                     retx_nack[u] += 1
                     nack_final[u] += 1
                 # ACK/NACK outcome 已抽样，但 gNB 要等终次反馈回来才释放这个
@@ -3668,10 +3681,11 @@ def simulate(
                     (sched.mu_step_up if _ack else -sched.mu_step_down)
                     if _mu_link is not None
                     else (sched.step_up if _ack else -sched.step_down))
-            if _ack:
-                sent = tr.serve(u, tti, tb_bytes)
-                served[u] += sent
-            else:
+            # **发送即扣缓冲区，与 ACK 无关**（现场速率统计口径）。传丢的部分
+            # 不从已发送字节里扣回去，只体现在 residual BLER 与重传占的资源上。
+            sent = tr.serve(u, tti, tb_bytes)
+            served[u] += sent
+            if not _ack:
                 nack_first[u] += 1
             # 首传 ACK/NACK 都占住**这一个**进程，直到反馈到达；UE 的其它空闲
             # 进程不受影响。抽到的 outcome 只保存在事件里，不能在发送时刻喂给

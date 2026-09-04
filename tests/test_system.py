@@ -2106,6 +2106,97 @@ check(_mp_exp1["harq_feedback_wait_skips"] > 0
       f"（{_mp_exp1['harq_feedback_wait_skips']} → "
       f"{_mp_exp8['harq_feedback_wait_skips']}）")
 
+# --- 17.2f capacity 的缓冲区也必须在发送时扣减（内网审核 4609d9d 问题 1）----
+# **棘轮。** 把 capacity 的 _Traffic.serve 换回「只有 ACK 才扣、重传照扣」
+# 会让这一节全红。
+#
+# 单进程时「ACK 才扣」是自洽的：被 NACK 的字节留在缓冲区，只有它自己的重传能
+# 把它们发走。**多进程放开后不再自洽**：本 UE 的另一个进程会从同一个缓冲区头
+# 再取一份组成新 TB，等原 TB 的重传成功时又扣一次，于是有一批字节被记成送达
+# 却从来没上过空口。experience 侧已经在上一个 PR 里改成发送即扣，capacity 当时
+# 漏了——这一节把两条路径钉在同一个口径上。
+_cap_point = sysm.UeLinkTable(
+    ue=0, sinr_db=np.array([[16.0]] * 8), mcs=np.array([[20]] * 8),
+    se=np.array([[la.MCS_TABLE_3[20].se]] * 8),
+    best_rank=np.ones(8, dtype=int),
+    best_se=np.full(8, la.MCS_TABLE_3[20].se),
+    geo_sinr_db=16.0, outage=np.zeros(8, dtype=bool), mcs_table=3,
+    target_bler=0.1)
+
+# 1) 单元级：重传的 serve 不带新数据，返回 0 且不动缓冲区
+_cap_tr = sysm._Traffic(
+    sysm.TrafficConfig(model="full_buffer"), 1, 0.5,
+    np.random.default_rng(0))
+_cap_tr.step(0)
+_cap_before = _cap_tr.bytes_left(0)
+_cap_retx_sent = _cap_tr.serve(0, 1, 1000, is_retx=True)
+check(_cap_retx_sent == 0 and _cap_tr.bytes_left(0) == _cap_before,
+      f"capacity：重传的 serve 返回 0 且不动缓冲区（实得 {_cap_retx_sent}、"
+      f"{_cap_before}→{_cap_tr.bytes_left(0)}）")
+_cap_new_sent = _cap_tr.serve(0, 1, 1000)
+check(_cap_new_sent == 1000 and _cap_tr.bytes_left(0) == _cap_before - 1000,
+      "capacity：首传的 serve 发送即扣，与 ACK 无关")
+
+# 2) 端到端：强制首传全 NACK。发送即扣之后，已发送字节只由首传次数决定，
+#    与重传成功与否无关——这正是「KPI 不看这个 TB 对不对」。
+_cap_old_bler = sysm._bler_lookup
+_cap_old_retx = la.harq_retransmission_bler
+_cap_runs = {}
+
+
+def _cap_retx_stub(mcs, sinr, *, combining="ir", table=3, _v=0.0):
+    return {"bler": float(_v), "lookup_mcs": int(mcs),
+            "lookup_sinr_db": float(sinr), "combining": str(combining),
+            "table": int(table)}
+
+
+try:
+    for _cap_name, _cap_retx_p in (("retx_ok", 0.0), ("retx_fail", 1.0)):
+        sysm._bler_lookup = lambda _m, _s: 1.0            # 首传必错
+        la.harq_retransmission_bler = (
+            lambda m, s, _p=_cap_retx_p, **kw: _cap_retx_stub(m, s, _v=_p, **kw))
+        _cap_runs[_cap_name] = sysm.simulate(
+            [_cap_point],
+            sys_cfg=sysm.SystemConfig(
+                evaluation_mode="capacity", duration_s=1.0, tdd_pattern="DDDSU",
+                seed=99, harq_max_processes=8, harq_feedback_delay=True),
+            traffic=sysm.TrafficConfig(model="full_buffer"),
+            sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+            kpi=sysm.KpiConfig(warmup_tti=0)).cell
+finally:
+    sysm._bler_lookup = _cap_old_bler
+    la.harq_retransmission_bler = _cap_old_retx
+_cap_ok, _cap_bad = _cap_runs["retx_ok"], _cap_runs["retx_fail"]
+print(f"  capacity 8 进程 · 首传全错：重传全对 {_cap_ok['cell_served_mbps']:.2f} Mbps"
+      f" / 重传全丢 {_cap_bad['cell_served_mbps']:.2f} Mbps")
+check(abs(_cap_ok["cell_served_mbps"] - _cap_bad["cell_served_mbps"]) < 1e-9,
+      f"capacity：重传全对与重传全丢的已发送字节逐值相同"
+      f"（{_cap_ok['cell_served_mbps']:.4f} vs {_cap_bad['cell_served_mbps']:.4f}）"
+      "——重传不带新数据，KPI 也不看它对不对")
+
+# 3) 字节守恒：有限话务下，已发送字节不能超过到达字节。
+#    多进程 + 重传照扣时这条会被顶破（同一批字节扣两次）。
+_cap_conserve = {}
+_cap_old_bler2 = sysm._bler_lookup
+try:
+    sysm._bler_lookup = lambda _m, _s: 0.5
+    for _cap_proc in (1, 8):
+        _cap_conserve[_cap_proc] = sysm.simulate(
+            [_cap_point],
+            sys_cfg=sysm.SystemConfig(
+                evaluation_mode="capacity", duration_s=1.0, tdd_pattern="DDDSU",
+                seed=99, harq_max_processes=_cap_proc, harq_feedback_delay=True),
+            traffic=sysm.TrafficConfig(model="ftp3", file_bytes=400_000,
+                                       arrival_rate_hz=3.0),
+            sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+            kpi=sysm.KpiConfig(warmup_tti=0)).cell
+finally:
+    sysm._bler_lookup = _cap_old_bler2
+for _cap_proc, _cap_cell in _cap_conserve.items():
+    check(_cap_cell["served_bytes"] <= _cap_cell["offered_bytes"],
+          f"capacity {_cap_proc} 进程：已发送字节不超过到达字节"
+          f"（{_cap_cell['served_bytes']} ≤ {_cap_cell['offered_bytes']}）")
+
 # 进程数非法值必须在配置入口就被拒
 for _bad_mp in (0, 17, 1.5, True):
     _expect_value_error(

@@ -313,6 +313,15 @@ RngRun，保证每次只比较负载倍率。
 TB 其字节仍留在队列里，同一个 UE 的另一个 HARQ 进程会把同一批字节再发一遍，
 原 TB 的重传随后就会发现队列不够冻结的 payload。
 
+`capacity` 的 `_Traffic.serve` 用同一个口径（2026-09-04 内网审核后补齐）。
+它那边没有硬校验、只有 `min(n, bytes_left)` 钳位，所以同样的问题不会让
+`cell_served_mbps` 虚高（`served ≤ offered` 仍成立），只会让 burst 提前算完——
+更隐蔽。实测被钳掉的字节数从单进程的 14,954 B 涨到 8 进程的 45,112 B。
+
+`pf_accounting="acked_goodput"` 的合同是 **NACK 给 0**，所以它的 credit 仍然只算
+ACK 了的字节，不跟着 buffer 口径走。默认的 `auto`（= `scheduled_tbs`）用 `tb_bytes`，
+本来就与 ACK 无关。
+
 ### 本小区 PRB 利用率与逐 TTI RBG 分布
 
 `serving_cell_prb_utilization` 是**结果 KPI**：KPI 窗口内所有可用 DL 调度机会的
