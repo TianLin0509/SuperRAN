@@ -62,6 +62,8 @@ git config core.hooksPath .githooks
 
 - `AUTHOR.md` — 实现者合同
 - `REVIEWER.md` — 审核者合同
+- `TESTING.md` — 怎么跑测试。**两个坑会让 Agent 得出假的"测试通过"**，
+  Author 和 Reviewer 都必读
 - `RISK.md` — 风险分档（按文件路径写死，Agent 不许自己判断）
 - `SYNC.md` — 同步 GitHub 的流程
 - `INTEGRATOR.md` — 多条并行开发线合到一起时用（含解冲突与定位失败的方法）

@@ -46,18 +46,13 @@ A + B + C       -> 挂的集合有没有变？
   全部改成新值并保留旧值作对照。被证伪的**措辞**要删掉，不是留着。
 - **真的是新 bug** → 退回给作者，别自己硬修。
 
-## 验证（两条都要做，缺一不可）
+## 验证
 
-1. `pytest tests/` —— **注意它只覆盖一半的测试文件**。
-   28 个文件里有 12 个在 pytest 下收集到 0 个用例。
-2. 那 12 个脚本式测试要用 `python tests/test_x.py` 逐个跑，看退出码。
-   中文输出重定向到文件时要先 `set PYTHONIOENCODING=utf-8`，否则会假失败。
+按 `.agents/TESTING.md` 跑，**两种执行方式都要跑**（`pytest tests/` 只覆盖 28 个
+测试文件里的 16 个，另外 12 个必须走 `__main__` 入口）。
 
-用 `pytest tests/ --collect-only -q` 确认这一批到底覆盖了哪些文件，别凭记忆。
-
-**在主工作区跑，或在自己工作区跑但先设 `PYTHONPATH=<工作区>\src`。**
-跑之前用 `python -c "import superran; print(superran.__file__)"` 确认它指向你要测的代码
-（`__editable__.superran-0.1.0.pth` 硬指向主仓库，不设就会测错东西）。
+集成的最终回归**建议直接在主工作区 `C:\Vibe\Wireless\SuperRAN` 跑**——
+那里 editable 安装的导入天然与代码一致，少一个出错的机会。
 
 ## 上线
 
