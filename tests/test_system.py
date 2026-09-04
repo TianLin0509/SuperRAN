@@ -484,25 +484,33 @@ _rs82 = sysm.simulate(
 _bd = _rd.as_dict()["cell"]["cell_served_mbps"]
 _bs = _rs.as_dict()["cell"]["cell_served_mbps"]
 _bs82 = _rs82.as_dict()["cell"]["cell_served_mbps"]
-print(f"  全 D {_bd:.1f} Mbps vs 全 S {_bs:.1f} Mbps，比值 {_bs / max(_bd, 1e-9):.3f}")
-check(abs(_bs / max(_bd, 1e-9) - 0.7) < 0.06,
-      f"全 S 图案的吞吐约为全 D 的 0.7 倍（实得 {_bs / max(_bd, 1e-9):.3f}）")
-check(abs(_bs82 / max(_bd, 1e-9) - 0.82) < 0.06,
-      f"自定义 0.82 后，全 S 调度承载约为全 D 的 0.82 倍（实得 {_bs82 / max(_bd, 1e-9):.3f}）")
-# **比值不再等于 S_SLOT_DL_FRACTION。** DM-RS 与 PDCCH 是每时隙固定开销，
-# 不随下行符号数缩水：S 时隙的符号数按 0.7 折算，固定开销却照扣一份，
-# 于是可用 RE 之比小于 0.7。期望值直接从口径本身算出来，不写死成常数——
-# 换 DM-RS/PDCCH 参数时这条断言应该跟着走，而不是需要人来改数字。
+# **承载之比不等于 s_slot_dl_fraction 本身。** DM-RS 与 PDCCH 是每时隙固定
+# 开销，不随下行符号数缩水：S 时隙的符号数按该系数折算，固定开销却照扣一份，
+# 于是可用 RE 之比比系数更小（0.7 → 78/126 = 0.619，0.82 → 102/126 = 0.810）。
+# 期望值直接从口径本身算出来，不写死成常数——换 DM-RS/PDCCH 参数时这两条断言
+# 应该跟着走，而不是需要人来改数字。
 _oh_ds = sysm.SystemConfig().pdsch_overhead
-_expect_ds = (_oh_ds.re_per_prb("S", sysm.S_SLOT_DL_FRACTION)
-              / _oh_ds.re_per_prb("D"))
+
+
+def _expect_s_over_d(fraction: float) -> float:
+    return _oh_ds.re_per_prb("S", fraction) / _oh_ds.re_per_prb("D")
+
+
+_expect_ds = _expect_s_over_d(sysm.S_SLOT_DL_FRACTION)
+_expect_ds82 = _expect_s_over_d(0.82)
 print(f"  全 D {_bd:.1f} Mbps vs 全 S {_bs:.1f} Mbps，比值 "
-      f"{_bs / max(_bd, 1e-9):.3f}（RE 口径预期 {_expect_ds:.3f}）")
-check(abs(_expect_ds - 78.0 / 126.0) < 1e-9,
-      f"默认口径下 S/D 每 PRB 的 RE 之比是 78/126（实得 {_expect_ds:.4f}）")
+      f"{_bs / max(_bd, 1e-9):.3f}（RE 口径预期 {_expect_ds:.3f}）；"
+      f"系数 0.82 时 {_bs82 / max(_bd, 1e-9):.3f}（预期 {_expect_ds82:.3f}）")
+check(abs(_expect_ds - 78.0 / 126.0) < 1e-9
+      and abs(_expect_ds82 - 102.0 / 126.0) < 1e-9,
+      f"默认口径下 S/D 每 PRB 的 RE 之比：0.7→78/126、0.82→102/126"
+      f"（实得 {_expect_ds:.4f} / {_expect_ds82:.4f}）")
 check(abs(_bs / max(_bd, 1e-9) - _expect_ds) < 0.06,
       f"全 S 图案的吞吐约为全 D 的 {_expect_ds:.3f} 倍"
       f"（实得 {_bs / max(_bd, 1e-9):.3f}）")
+check(abs(_bs82 / max(_bd, 1e-9) - _expect_ds82) < 0.06,
+      f"自定义系数 0.82 后承载约为全 D 的 {_expect_ds82:.3f} 倍"
+      f"（实得 {_bs82 / max(_bd, 1e-9):.3f}）——系数确实被主循环读到了")
 
 # --- bug C：p_idle_tti 是对标锚点不是仿真输入，偏离要告警 ---
 # **它从来不生成空闲 TTI**，改它只改报告里的解析式。不说清楚的话，
