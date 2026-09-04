@@ -1024,6 +1024,36 @@ def _spatial_panel_response(
     return result / math.sqrt(max(result.size, 1))
 
 
+def fixed_subarray_response(
+    zenith_rad: float,
+    *,
+    elements_per_rf_port: int,
+    ae_vertical_spacing_lambda: float,
+    fixed_downtilt_deg: float,
+) -> complex:
+    """Complex pattern of one fixed vertical sub-array, seen from ``zenith_rad``.
+
+    The 1-to-M feed network applies a frozen progressive phase that points the
+    sub-array ``fixed_downtilt_deg`` below the horizon.  The scalar returned
+    here is that fixed beam evaluated in the arrival/departure direction; the
+    remaining RF-port array factor is separable and handled by
+    :func:`_spatial_panel_response` with the port phase-centre spacing.
+
+    Returns ``1`` for ``elements_per_rf_port <= 1`` (no feed network).
+    """
+    m = int(elements_per_rf_port)
+    if m <= 1:
+        return complex(1.0)
+    spacing = float(ae_vertical_spacing_lambda)
+    tilt = -math.radians(float(fixed_downtilt_deg))
+    offsets = np.arange(m, dtype=np.float64) - (m - 1.0) / 2.0
+    feed = np.exp(2j * np.pi * spacing * offsets * math.sin(tilt)) / math.sqrt(m)
+    element_response = np.exp(
+        2j * np.pi * spacing * offsets * math.sin(np.pi / 2.0 - float(zenith_rad))
+    )
+    return complex(np.vdot(feed, element_response))
+
+
 # ---------------------------------------------------------------------------
 # First-party statistical channel source
 # ---------------------------------------------------------------------------
@@ -1332,20 +1362,16 @@ class InternalSimSource:
                 )
                 feed_count = int(bs_subarray.get("elements_per_rf_port", 1) or 1)
                 if feed_count > 1:
-                    element_spacing = float(
-                        bs_subarray.get("ae_vertical_spacing_lambda", 0.67) or 0.67
+                    bs_space = bs_space * fixed_subarray_response(
+                        zod,
+                        elements_per_rf_port=feed_count,
+                        ae_vertical_spacing_lambda=float(
+                            bs_subarray.get("ae_vertical_spacing_lambda", 0.67) or 0.67
+                        ),
+                        fixed_downtilt_deg=float(
+                            bs_subarray.get("fixed_downtilt_deg", 0.0) or 0.0
+                        ),
                     )
-                    tilt = -math.radians(
-                        float(bs_subarray.get("fixed_downtilt_deg", 0.0) or 0.0)
-                    )
-                    offsets = np.arange(feed_count, dtype=np.float64) - (feed_count - 1.0) / 2.0
-                    feed = np.exp(
-                        2j * np.pi * element_spacing * offsets * math.sin(tilt)
-                    ) / math.sqrt(feed_count)
-                    element_response = np.exp(
-                        2j * np.pi * element_spacing * offsets * math.sin(np.pi / 2.0 - zod)
-                    )
-                    bs_space = bs_space * np.vdot(feed, element_response)
                 ue_space = _spatial_panel_response(
                     ue_shape[0], ue_shape[1], aoa, zoa,
                     horizontal_spacing=0.5, vertical_spacing=0.5,
