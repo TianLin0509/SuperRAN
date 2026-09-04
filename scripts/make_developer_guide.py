@@ -2709,13 +2709,13 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
         ["来源", "擅长", "项目中的角色", "边界"],
         [
             ("SuperRAN InternalSim", "38.901 风格 CDL/TDL、多小区几何、导频估计", "默认 first-party 物理源", "阵列/干扰模型仍含明确工程近似"),
-            ("Sionna RT", "场景网格、材料、射线与确定性路径", "已可用的可选 direct RT 源（channel_source=sionna_rt）", "装不上就硬失败不回退；static 不许多轮、非 static 不许多时隙；依赖和资产质量仍要单独验收"),
+            ("Sionna RT", "场景网格、材料、射线与确定性路径", "已可用的可选 direct RT 源（source=sionna_rt）", "装不上就硬失败不回退；static 不许多轮、非 static 不许多时隙；依赖和资产质量仍要单独验收"),
             ("SuperRAN 系统层", "合同、硬件默认、算法、TTI、统计门", "编排与证据层", "不把统计 source 冒充确定性 RT"),
         ],
     )
     body += """
 <h3>Direct Sionna RT adapter 的验收边界</h3>
-<p>adapter 已经落地：<code>channel_source=sionna_rt</code> 时走
+<p>adapter 已经落地：<code>source=sionna_rt</code> 时走（<strong>配置键是 <code>source</code>，写成 <code>channel_source</code> 会被静默忽略、跑成统计信道</strong>——<code>generate.py:844</code> 读的是 <code>cfg.pop("source", "internal_sim")</code>）
 <code>superran/sionna_rt.py</code>，自己按 <code>[time, rb, bs_port, ue_port]</code> 合成，
 不调 Sionna 的 <code>Paths.cfr()</code>（与它的对拍相对误差 4e-4，量级等于 Sionna 内部
 float32 的相位精度）。Doppler 用完整 UE 速度向量、逐径投影一次，<strong>不做径向压缩再投影</strong>。

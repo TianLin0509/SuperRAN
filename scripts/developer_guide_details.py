@@ -1467,7 +1467,7 @@ DETAIL_SPECS.update({
     "raytracing": DetailSpec(
         promise="把“射线追踪场景”拆成资产准备、后端身份、路径求解、时频采样、数据合同和快速探测六层，并明确 InternalSim probe 为什么能用于话务前的场景量级判断，却绝不能代替完整 RT/宽带信道。",
         principles=(
-            "场景名、信道模型名与真正生成后端不是一回事。Sionna 内置场景可由未来 direct adapter 解析，自有城市资产通过独立 OSM/PLY 数据目录提供。唯一可靠身份是结果 metadata 的 <code>channel_generation_mode</code>；不能因为配置写了 <code>sionna_rt</code> 就把输出称为 RT。",
+            "场景名、信道模型名与真正生成后端不是一回事。Sionna 内置场景由 direct adapter（<code>sionna_rt.py</code>）解析，自有城市资产通过独立 OSM/PLY 数据目录提供。唯一可靠身份是结果 metadata 的 <code>channel_generation_mode</code>；不能因为配置写了 <code>sionna_rt</code> 就把输出称为 RT。",
             "上游资产必须只读。Mitsuba 对部分VTK PLY头中的<code>obj_info</code>不兼容，<code>prepare_scene()</code>会在稳定进程锁内复制到独立缓存并清理副本；源树与准备后树各有内容SHA-256。缓存手改或源升级会重建，未完成发布journal会硬失败。",
             "场景几何身份与无线材料身份必须拆开。<code>scene_tree_fingerprint</code>绑定XML/PLY字节；<code>radio_config_revision</code>另绑定材料、玻璃比例和逐建筑无线覆写。这样同一几何的不同材料校准不会静默复用旧RT结果。",
             "场景fidelity必须由实际导出资产反推，而不是看OSM是否出现标签。L0只保证建筑/地面几何；L1要求道路、水体、绿地或植被同时有语义点与RT材质/mesh。材料参数存在仍不等于完成测量校准，calibration_status必须单列。",
@@ -1492,7 +1492,7 @@ DETAIL_SPECS.update({
             ("取出引擎无关的径集合", "<code>SionnaRTSource._split_paths()</code> 把 Sionna 的 <code>[num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths]</code> 拆成逐小区的 <code>RayPaths</code>（2x2 极化增益、时延、四个角度、多普勒），并按 <code>valid</code> 与 <code>tau &gt;= 0</code> 双判据剔除无效径。这一层不含 Sionna 类型，所以合成逻辑可以脱离 sionna 单测。"),
             ("合成信道矩阵", "<code>synthesize_channel()</code> 逐径乘上 BS 端口阵因子、1 驱 M 子阵方向图、UE 面板响应、载波+基带时延相位与多普勒时间相位，最后按平均功率归一到 1——与 CDL 路径同一约定，大尺度由上层 38.901 路损承担。"),
             ("同站扇区去重", "三个共址扇区的传播环境完全相同，差别只在天线朝向；按站点位置去重后 21 小区只追 7 次，朝向在 <code>synthesize_channel</code> 里按 <code>sector_azimuth_deg</code> 旋转。"),
-            ("形成时频 CFR", "按载波与 OFDM 网格生成频点，时间轴取 <code>time_offset_s + arange(num_slots_per_sample) × sample_interval_s</code>，其中 <code>time_offset_s = 轮次 × sample_interval_s</code>。没有 symbol 级中间层，也不做「抽中间 symbol」。"),
+            ("形成时频 CFR", "按载波与 OFDM 网格生成频点，时间轴取 <code>arange(num_slots_per_sample) × sample_interval_s</code>，<strong>恒从 0 起算</strong>（与 CDL 的 <code>native.py:1279</code> 逐字一致）。曾经有过 <code>time_offset_s = 轮次 × sample_interval_s</code> 这一项，已删除——父类挪位置后 RT 重追的径里已经含那段几何相位，再叠一次就是双算。没有 symbol 级中间层，也不做「抽中间 symbol」。"),
             ("解析场景身份", "<code>scene</code> 必须一路从公开入口传到适配层：<code>plan.translate()</code> 把它展开成 <code>scenario</code>/<code>osm_path</code>/站点布局之后，<strong>还要把名字本身放进引擎配置</strong>。只展开不透传时，etoile/florence/san_francisco 与本地城市会被静默跑成 munich，而结果仍标 <code>sionna_rt</code>。认不出的场景名当场报错，不退回默认场景。"),
             ("接本地城市资产", "<code>prepare_scene()</code> 返回的键是 <code>osm_path</code>。适配层优先用上层已解析好的 <code>cfg['osm_path']</code>，没有才自己准备一次。读错键（例如 <code>scene_file</code>）的后果是所有本地城市场景恒被判成「资产缺失」。"),
             ("判定真实后端身份", "落盘与加载均传播 <code>channel_generation_mode</code>、fallback reason、场景/资产 provenance；RT 的 <code>Dataset.paths()</code> 明确报未导出，绝不套 CDL 角度。"),
@@ -1507,7 +1507,7 @@ DETAIL_SPECS.update({
             ("资产不变", "准备前后源PLY不变；缓存双SHA逐字可复算，手改触发重建，发布journal阻止混版读取，RF材料变化修改revision。"),
             ("身份不冒充", "强制后端失败时 channel_generation_mode 明确为 fallback 并带原因；文档/报告标题不再按请求 source 推断。"),
             ("速度向量守恒", "正交、同向和反向路径的 Doppler toy case 与 v·k/λ 一致，不发生两次方向投影。"),
-            ("snapshot 因果", "RT 直接按 slot 生成，时间原点只取决于当前轮次；改后面的样本不会改变已产出样本的 CSI。"),
+            ("snapshot 因果", "RT 直接按 slot 生成，样本内部时间原点恒为 0、不含轮次；改后面的样本不会改变已产出样本的 CSI。"),
             ("probe 校正", "同 seed 的 full/probe 在 geometry、SIR、distance、LOS 上一致；first-party 修正 SNR/SINR 与 full 小样本逐位对齐。"),
             ("逐径出口诚实", "RT 数据可计算 H/PDP/协方差/PMI，但 paths() 必须抛未支持；统计 CDL/TDL 才按实际 effective profile 返回剖面路径。"),
             ("与厂商对拍", "单端口单极化下本仓合成与 Sionna <code>Paths.cfr()</code> 相对误差 &lt; 2e-3；时延、载波相位、多普勒三个约定错任何一个都会跳到 O(1)。"),

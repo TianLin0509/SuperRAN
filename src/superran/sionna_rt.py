@@ -725,11 +725,14 @@ class SionnaRTSource(InternalSimSource):
         产出重复矩阵，而它们看起来都完全正常——跑得通、有结果、meta 也自洽。
         把这批重复当成独立实现，就是在给样本量、置信区间和时间相关性证据造假。
 
-        1. ``static`` + 多轮。``mobility_mode='static'`` 时父类不挪 UE 位置，
-           样本内部时间轴又从 0 起算，于是同一个 UE 的第 2 轮与第 1 轮**逐位
-           相同**——与 ``ue_speed_kmh`` 无关，给多普勒也救不回来，因为两轮的
-           时间轴是同一段 ``[0, n_time x dt)``。CDL 靠 ``rng_small`` 每轮重画
-           小尺度实现，RT 没有这个随机源。
+        1. 几何不动 + 多轮。父类只在 ``mobility_mode != 'static'`` **且**
+           ``ue_speed_kmh > 0`` 时才挪 UE 位置，所以 ``static`` 和
+           ``linear + ue_speed_kmh=0``（名字像在动、实际不动）都属于这一类。
+           位置不变、样本内部时间轴又从 0 起算，于是同一个 UE 的第 2 轮与
+           第 1 轮**逐位相同**——给多普勒也救不回来，因为两轮的时间轴是同一段
+           ``[0, n_time x dt)``。CDL 靠 ``rng_small`` 每轮重画小尺度实现，
+           RT 没有这个随机源。轮数按**向上取整**算：``num_samples=3,
+           num_ues=2`` 的轮转分配是 UE ``[0, 1, 0]``，UE0 已经是第二轮了。
         2. 样本内部多时隙 + 零多普勒。``num_slots_per_sample>1`` 而
            ``ue_speed_kmh=0`` 时所有径的 Doppler 都是 0，时间相位恒为 1，
            一个样本里的 N 个 slot 逐位相同。
@@ -740,22 +743,34 @@ class SionnaRTSource(InternalSimSource):
            这个窗口合同要改的是父类的轨迹时钟，跨引擎、要维护者定案，
            **不在本 PR 范围内**；在它定案之前 RT 不产出这种数据。
         """
-        rounds = int(self.num_samples) // max(int(self.num_ues), 1)
+        # **向上取整。** ``num_samples=3, num_ues=2`` 时轮转分配是 UE [0, 1, 0]
+        # ——UE0 已经出现第二次了，而 floor 除法算出来是「1 轮」，守卫整个失效。
+        # 尾巴上多出来的那一个样本和第一个逐位相同，照样进数据集。
+        rounds = -(-int(self.num_samples) // max(int(self.num_ues), 1))
         n_time = max(int(_cfg_num(self.cfg, "num_slots_per_sample", 1)), 1)
-        moves = (str(_cfg_num(self.cfg, "mobility_mode", "static")).strip().lower()
-                 != "static")
+        mode = str(_cfg_num(self.cfg, "mobility_mode", "static")).strip().lower()
         speed_kmh = float(_cfg_num(self.cfg, "ue_speed_kmh", 3.0))
+        # **判据必须和父类真正挪不挪位置一致**（native.py:1505 的
+        # ``mobility_mode != "static" and speed_mps > 0.0``）。只看 mobility_mode
+        # 的话，``linear + ue_speed_kmh=0`` 这种「名字像在动、实际不动」的配置
+        # 会从守卫底下溜过去：位置不变、Doppler 为零，多轮 H 逐位重复。
+        moves = mode != "static" and speed_kmh > 0.0
 
         if not moves and rounds > 1:
+            why = (f"mobility_mode={mode!r} 但 ue_speed_kmh={speed_kmh:g}"
+                   if mode != "static" else "mobility_mode='static'")
             raise ValueError(
-                f"Sionna RT 是确定性引擎：mobility_mode='static' 时 UE 几何固定，"
+                f"Sionna RT 是确定性引擎：{why} 时父类根本不挪 UE 位置"
+                "（native.py 只在 mobility_mode≠static **且** speed>0 时才移动），"
                 f"样本内部时间轴又从 0 起算，因此每个 UE 的 {rounds} 轮样本会**逐位"
                 f"相同**，它们不是 {int(self.num_samples)} 个独立信道实现"
-                f"（给 ue_speed_kmh 也没用：两轮走的是同一段时间轴）。"
+                "（给 ue_speed_kmh 也救不回来：两轮走的是同一段时间轴）。"
                 "CLAUDE.md 的跨引擎合同要求 static 各样本小尺度实现独立，"
                 "而 RT 没有 CDL 那个 rng_small 随机源。"
-                "要么设 mobility_mode 让 UE 真的走（连续轨迹是 RT 唯一能提供的"
-                "样本间差异），要么把 num_samples 降到 num_ues 以内。"
+                "要么让 UE 真的走（mobility_mode≠static **且** ue_speed_kmh>0，"
+                "连续轨迹是 RT 唯一能提供的样本间差异），"
+                "要么把 num_samples 降到 num_ues 以内"
+                "（注意 num_samples=3/num_ues=2 也算两轮：轮转分配是 UE [0,1,0]）。"
                 "**不会静默产出重复矩阵。**"
             )
 
@@ -769,7 +784,7 @@ class SionnaRTSource(InternalSimSource):
 
         if moves and n_time > 1:
             raise ValueError(
-                f"mobility_mode={str(_cfg_num(self.cfg, 'mobility_mode', 'static'))!r} "
+                f"mobility_mode={mode!r} "
                 f"且 num_slots_per_sample={n_time}：父类每轮只把 UE 位置前移一个 "
                 "sample_interval_s，而一个样本内部横跨 %d 个间隔，相邻两轮的时间"
                 "窗口会重叠（下游 system.py 直接展平拼接，重叠时刻会被当成独立"

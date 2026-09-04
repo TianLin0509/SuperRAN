@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import math
 import pathlib
 import sys
@@ -760,6 +761,99 @@ def test_sample_round_is_labelled_before_the_parent_builds_the_sample():
                        lambda self: self._parent_samples()):
         list(srt.SionnaRTSource.iter_samples(probe))
     assert seen == [0, 0, 1, 1, 2, 2], seen
+
+
+# ---------------------------------------------------------------------------
+# 第三轮审核（2026-09-04）：守卫两处漏网 + 文档与实现对不上
+# ---------------------------------------------------------------------------
+
+
+def test_moving_by_name_only_is_still_refused():
+    """棘轮：``linear + ue_speed_kmh=0`` 名字像在动、实际不动，一样要拒。
+
+    守卫的判据必须和**父类真正挪不挪位置**一致。``native.py:1505`` 的条件是
+    ``mobility_mode != "static" and speed_mps > 0.0``——两个条件都要满足才移动。
+    只看 ``mobility_mode`` 的话，``linear + speed=0`` 会从守卫底下溜过去：
+    位置不变、Doppler 为零，多轮 H 逐位重复却被当成多个独立样本。
+    """
+    base = {"scene": "munich", "num_ues": 2, "num_samples": 4}
+    for mode in ("linear", "random_walk", "STATIC", "static"):
+        with pytest.raises(ValueError, match="逐位相同"):
+            srt.SionnaRTSource(
+                {**base, "mobility_mode": mode, "ue_speed_kmh": 0.0}
+            )._assert_samples_are_distinct()
+
+    # 判据必须和父类源码里的条件同源，不能各写各的
+    parent = inspect.getsource(native.InternalSimSource.iter_samples)
+    assert 'mobility_mode != "static" and speed_mps > 0.0' in parent, (
+        "父类的移动判据变了，守卫要跟着改")
+
+    # 真的在动才放行
+    srt.SionnaRTSource(
+        {**base, "mobility_mode": "linear", "ue_speed_kmh": 3.0}
+    )._assert_samples_are_distinct()
+
+
+def test_non_divisible_tail_sample_counts_as_a_second_round():
+    """棘轮：轮数要**向上取整**，尾巴上多出来的那一个样本也是第二轮。
+
+    ``num_samples=3, num_ues=2`` 的轮转分配是 UE ``[0, 1, 0]``——UE0 已经出现
+    第二次了。floor 除法算出来是「1 轮」，守卫整个失效，样本 0 与样本 2 逐位
+    相同却照样进数据集。
+    """
+    base = {"scene": "munich", "num_ues": 2, "mobility_mode": "static",
+            "ue_speed_kmh": 3.0}
+    with pytest.raises(ValueError, match="逐位相同"):
+        srt.SionnaRTSource({**base, "num_samples": 3})._assert_samples_are_distinct()
+    # 5 个样本 / 4 个 UE 同理
+    with pytest.raises(ValueError, match="逐位相同"):
+        srt.SionnaRTSource(
+            {**base, "num_ues": 4, "num_samples": 5}
+        )._assert_samples_are_distinct()
+    # 正好一轮或更少才放行
+    for n in (1, 2):
+        srt.SionnaRTSource({**base, "num_samples": n})._assert_samples_are_distinct()
+
+
+def test_documented_config_key_is_the_one_the_real_entry_point_reads():
+    """棘轮：文档里写的配置键，必须是 ``generate.py`` 真正读的那个。
+
+    这条守的是**文档级的静默失败**：写错键不会报错，``generate`` 直接用
+    默认值 ``internal_sim`` 跑完，summary 里 source=internal_sim，
+    而用户以为自己跑的是射线追踪——场景几何、径、空间结构和全部 KPI
+    都来自错误引擎。
+    """
+    from superran import generate as _gen
+    entry = inspect.getsource(_gen)
+    assert 'cfg.pop("source"' in entry, "真实入口读的键变了，文档要跟着改"
+
+    for doc in (ROOT / "README.md",
+                ROOT / "scripts" / "make_developer_guide.py",
+                ROOT / "scripts" / "developer_guide_details.py"):
+        text = doc.read_text(encoding="utf-8")
+        assert "channel_source=sionna_rt" not in text, (
+            f"{doc.name} 在教用户用一个不存在的配置键")
+
+    # 正面证明：这个键真的能选到 RT，写错的键选不到
+    assert srt.SionnaRTSource is ch.require_source("sionna_rt")
+
+
+def test_docs_do_not_promise_per_path_geometry_that_rt_never_persists():
+    """棘轮：文档不许承诺 RT 数据集能调 ``ds.paths()``。
+
+    适配层把逐径几何合成成 CFR 之后就丢掉了，逐径角度/时延没有落盘合同。
+    ``loader.py`` 对射线追踪数据集的 ``paths()`` 抛 NotImplementedError——
+    这是对的（返回 CDL 假角度更糟）。但文档若声称它可用，用户会照着设计依赖
+    真实逐径角度的算法，跑到一半才撞上。
+    """
+    from superran import loader
+
+    src = inspect.getsource(loader.Dataset.paths)
+    assert "NotImplementedError" in src and "is_ray_traced" in src
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "`ds.paths()` 返回真实角度/时延" not in readme
+    assert "RT 数据集不支持 `ds.paths()`" in readme
 
 
 if __name__ == "__main__":
