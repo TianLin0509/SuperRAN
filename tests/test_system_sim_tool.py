@@ -121,9 +121,13 @@ def test_capacity_ok() -> None:
     assert out["notes"]
     assert out["provenance"]["compatibility"]["status"] == "unknown"
     assert any("provenance" in note for note in out["notes"])
-    # busy period 永不结束 ⇒ 体验类 KPI 无定义。重复实验只汇总数值型 KPI，
-    # 所以它不出现在 cell 里；**为什么不出现由 notes 明说，不是静默消失**。
-    assert "cell_experienced_mbps" not in out["cell"]
+    # busy period 永不结束，但**体验速率照常算得出来**：在飞 busy period 的窗内
+    # 段进统计（buffer 没排空就没有尾巴可掐）。只有明确需要 burst 传完的键无值。
+    assert out["cell"]["drb_throughput_rel19_mbps"]["mean"] > 0
+    assert out["cell"]["cell_experienced_mbps"]["mean"] > 0
+    assert out["cell"]["ue_served_p5_mbps"]["mean"] > 0
+    assert "cell_experienced_completed_only_mbps" not in out["cell"]
+    assert out["cell"]["drb_throughput_inflight_share"]["mean"] == 1.0
     assert any("full buffer" in note for note in out["notes"])
     # 容量口径的指标照常在。**别断言 occupancy==1**：单 HARQ 进程 + DDDSU 的
     # 反馈时延本来就会让 2 个 UE 有一半 DL TTI 无人可发，那是物理不是缺陷。
