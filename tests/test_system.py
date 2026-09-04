@@ -500,6 +500,14 @@ _dd = sysm.SystemConfig(tdd_pattern="DDDD").dl_ratio
 _ds = sysm.SystemConfig(tdd_pattern="DDDS").dl_ratio
 check(abs(_dd - 1.0) < 1e-9 and abs(_ds - (3 + 0.7) / 4) < 1e-9,
       f"dl_ratio 用同一个常量（DDDD={_dd:.3f}, DDDS={_ds:.3f}）")
+check(abs(sysm.infer_s_slot_fraction("DDDSU") - 10 / 14) < 1e-12,
+      "DDDSU 的 S 时隙建议值来自 10/14 个下行符号")
+check(abs(sysm.infer_s_slot_fraction("DDDDDDDSUU") - 6 / 14) < 1e-12,
+      "DDDDDDDSUU 的 S 时隙建议值来自 6/14 个下行符号")
+_ds_custom = sysm.SystemConfig(
+    tdd_pattern="DDDS", s_slot_dl_fraction=0.82).dl_ratio
+check(abs(_ds_custom - (3 + 0.82) / 4) < 1e-12,
+      "dl_ratio 读取 SystemConfig.s_slot_dl_fraction，不再写死 0.7")
 # 纯 D 与含 S 的图案，实发字节必须有可分辨的差——否则说明 S 还是被当成满下行
 _tb_s = fake_tables(n_ue=6, n_snap=6, seed=17)
 _rd = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern="DDDD"),
@@ -508,11 +516,21 @@ _rd = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern
 _rs = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern="SSSS"),
                     traffic=sysm.TrafficConfig(model="full_buffer"),
                     kpi=sysm.KpiConfig(warmup_s=0.0))
+# S 时隙折算是可配置的（PR #23）：换成 0.82 后承载应当按比例跟着变。
+_rs82 = sysm.simulate(
+    _tb_s,
+    sys_cfg=sysm.SystemConfig(
+        duration_s=1.0, tdd_pattern="SSSS", s_slot_dl_fraction=0.82),
+    traffic=sysm.TrafficConfig(model="full_buffer"),
+    kpi=sysm.KpiConfig(warmup_s=0.0))
 _bd = _rd.as_dict()["cell"]["cell_served_mbps"]
 _bs = _rs.as_dict()["cell"]["cell_served_mbps"]
+_bs82 = _rs82.as_dict()["cell"]["cell_served_mbps"]
 print(f"  全 D {_bd:.1f} Mbps vs 全 S {_bs:.1f} Mbps，比值 {_bs / max(_bd, 1e-9):.3f}")
 check(abs(_bs / max(_bd, 1e-9) - 0.7) < 0.06,
       f"全 S 图案的吞吐约为全 D 的 0.7 倍（实得 {_bs / max(_bd, 1e-9):.3f}）")
+check(abs(_bs82 / max(_bd, 1e-9) - 0.82) < 0.06,
+      f"自定义 0.82 后，全 S 调度承载约为全 D 的 0.82 倍（实得 {_bs82 / max(_bd, 1e-9):.3f}）")
 
 # --- bug C：p_idle_tti / expected_prb_util 这类"对标锚点不驱动仿真"的旋钮，
 # 随 bimodal 一起下线。空闲 TTI 由到达率与信道决定，如实测出来。
@@ -965,6 +983,11 @@ check(sysm.SchedulerConfig(
           mu_precoder="rzf", mu_csi_error_variance=0.03).as_dict()[
               "mu_csi_error_variance"] == 0.03,
       "系统配置与结果合同显式携带鲁棒 RZF 误差方差")
+_mu_gate_cfg = sysm.SchedulerConfig()
+check(_mu_gate_cfg.min_pairing_mcs == 4
+      and _mu_gate_cfg.pf_gain_threshold == 0.0
+      and _mu_gate_cfg.orthogonalization_mode == "select",
+      "MU 门限默认值显式进入 SchedulerConfig；PF 门默认关闭以保兼容")
 try:
     sysm.SchedulerConfig(mu_csi_error_variance=-1e-3)
     check(False, "负 CSI 误差方差应硬失败")
@@ -984,6 +1007,37 @@ _large = sysm.simulate(
 check(_large.cell["mu_share"] > 0
       and _large.cell["su_mu_plan"]["mu_selected"] > 0,
       "大队列下数据受限 MU 方案确实被选中，不再用固定 MU 增益比例")
+_mcs_blocked = sysm.simulate(
+    _mu_tables,
+    sys_cfg=sysm.SystemConfig(
+        evaluation_mode="experience", duration_s=0.1, seed=51,
+        tdd_pattern="DDDSU"),
+    traffic=sysm.TrafficConfig(
+        model="mixed", small_ue_share=0.0,
+        file_bytes=500_000, arrival_rate_hz=20.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=True, max_mu_users=2, mu_corr_threshold=0.99,
+        min_pairing_mcs=28),
+    kpi=sysm.KpiConfig(warmup_tti=0))
+check(_mcs_blocked.cell["mu_share"] == 0
+      and (_mcs_blocked.cell["mu_candidate_scoring"]["rejection_reasons"].get(
+          "mcs_below_min_pairing", 0) > 0),
+      "experience_v2 的最低 MCS 门在实际 pair 计划入口否决并留原因")
+_pf_blocked = sysm.simulate(
+    _mu_tables,
+    sys_cfg=sysm.SystemConfig(
+        evaluation_mode="experience", duration_s=0.1, seed=51,
+        tdd_pattern="DDDSU"),
+    traffic=sysm.TrafficConfig(
+        model="mixed", small_ue_share=0.0,
+        file_bytes=500_000, arrival_rate_hz=20.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=True, max_mu_users=2, mu_corr_threshold=0.99,
+        min_pairing_mcs=0, pf_gain_threshold=100.0),
+    kpi=sysm.KpiConfig(warmup_tti=0))
+check(_pf_blocked.cell["mu_share"] == 0
+      and _pf_blocked.cell["su_mu_plan"]["pf_gain_rejects"] > 0,
+      "experience_v2 的 PF 增益否决读取真实 R_avg，不用和速率冒充")
 check(0 < _large.cell["mu_paired_prb_utilization"]
       <= _large.cell["serving_cell_prb_utilization"] + 1e-12
       and 0 < _large.cell["mu_paired_prb_share_of_used"] <= 1.0
@@ -1035,7 +1089,8 @@ _mixed_queue_plan = expm._build_mu_plan(
     base_tx_sinr_of=_base_of, mcs_without_olla_of=_mcs_of,
     true_sinr_of=_true_of, potential_of=_potential_of,
     tables=_mu_tables, snap=_snap,
-    sched=sysm.SchedulerConfig(mu_enabled=True, mu_corr_threshold=1.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=True, mu_corr_threshold=1.0, min_pairing_mcs=0),
     su_olla_db=np.zeros(len(_ordered)),
     mu_olla_db=np.zeros(len(_ordered)), blocked_data=False)
 _mixed_mu = next(
@@ -1130,7 +1185,8 @@ _floor_plan = expm._build_mu_plan(
     base_tx_sinr_of=_base_of, mcs_without_olla_of=_mcs_of,
     true_sinr_of=_true_of, potential_of=_potential_of,
     tables=_mu_tables, snap=_snap,
-    sched=sysm.SchedulerConfig(mu_enabled=True, mu_corr_threshold=1.0),
+    sched=sysm.SchedulerConfig(
+        mu_enabled=True, mu_corr_threshold=1.0, min_pairing_mcs=0),
     su_olla_db=np.full(len(_ordered), -100.0),
     mu_olla_db=np.zeros(len(_ordered)), blocked_data=False)
 check(_floor_plan.has_mu,
@@ -1247,6 +1303,18 @@ _expect_value_error(
 _expect_value_error(
     lambda: sysm.SchedulerConfig(mu_rank_per_user=True),
     "mu_rank_per_user", "MU rank 拒绝布尔值冒充整数")
+_expect_value_error(
+    lambda: sysm.SchedulerConfig(min_pairing_mcs=-1),
+    "min_pairing_mcs", "最低配对 MCS 拒绝负数")
+_expect_value_error(
+    lambda: sysm.SchedulerConfig(pf_gain_threshold=float("nan")),
+    "pf_gain_threshold", "PF 增益门限拒绝 NaN")
+try:
+    sysm.SchedulerConfig(orthogonalization_mode="schmidt")
+    check(False, "SchedulerConfig 不应把 schmidt 静默降级为 select")
+except NotImplementedError as _exc:
+    check("TODO" in str(_exc) and "Schmidt" in str(_exc),
+          "SchedulerConfig 的 schmidt 未实现时显式硬失败")
 _expect_value_error(
     lambda: sysm.KpiConfig(warmup_tti=-1),
     "warmup_tti", "预启动 TTI 拒绝负数")
@@ -2359,14 +2427,31 @@ for _bad_target in (0.0, 1.0, 0.0005, 0.999):
         check(False, f"target_bler={_bad_target} 应当被拒")
     except ValueError:
         check(True, f"target_bler={_bad_target} 越出预置曲线覆盖区间，被拒")
-for _unsupported_table in (1, 2):
+for _analytic_table in (1, 2):
+    _analytic_tabs = sysm.build_link_tables(
+        [np.ones((2, 16, 4, 2), dtype=complex)], [10.0],
+        table=_analytic_table, num_snapshots=2)
+    check(_analytic_tabs[0].mcs_table == _analytic_table,
+          f"build_link_tables table={_analytic_table} 走同表解析 BLER")
+    _analytic_run = sysm.simulate(
+        _analytic_tabs,
+        sys_cfg=sysm.SystemConfig(
+            evaluation_mode="capacity", duration_s=0.01, tdd_pattern="DDDSU"),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(olla_enabled=False))
+    check(any("有限码长解析 BLER" in note for note in _analytic_run.notes),
+          f"capacity table={_analytic_table} 显式标注解析、未标定边界")
     try:
-        sysm.build_link_tables([np.ones((1, 4, 2, 2), dtype=complex)], [10.0],
-                               table=_unsupported_table)
-        check(False, f"table={_unsupported_table} 应当被拒")
+        sysm.simulate(
+            _analytic_tabs,
+            sys_cfg=sysm.SystemConfig(
+                evaluation_mode="experience", duration_s=0.01,
+                tdd_pattern="DDDSU"),
+            traffic=sysm.TrafficConfig(model="full_buffer"))
+        check(False, f"experience_v2 不应接受 table={_analytic_table}")
     except ValueError as _exc:
-        check("只支持 MCS table 3" in str(_exc),
-              f"breaking migration：build_link_tables 在入口硬拒绝 table={_unsupported_table}")
+        check("experience_v2 当前只支持 MCS table 3" in str(_exc),
+              f"experience_v2 table={_analytic_table} 不静默借用错误 TBLER profile")
 
 
 # ---------------------------------------------------------------------------
@@ -2544,6 +2629,12 @@ print(f"  相关系数 0.999：MU 占比 {_corr_arm.cell['mu_share']:.0%}，"
       f"拒配原因 {_corr_reject}")
 check(_corr_arm.cell["mu_share"] < 0.05,
       "信道几乎同向时 ZF 无处零陷，SU/MU 自适应判 SU 赢")
+# PR #23 的意图保留：**具体查相关性门**，不是笼统数一下总拒配数。
+# 容量路径的 mu_pair_rejection_reasons 随该分支下线，体验路径的同名证据在
+# mu_candidate_scoring.rejection_reasons 里。
+check(int(_corr_reject.get("correlation_threshold", 0)) > 0,
+      f"信道同向时正是相关性门在否决配对（实得 "
+      f"{_corr_reject.get('correlation_threshold', 0)} 次）")
 check(int(_corr_plan["su_selected"]) > 0
       and sum(int(v) for v in _corr_reject.values()) > 0,
       "拒配对的原因被显式计数，不是静默不配")

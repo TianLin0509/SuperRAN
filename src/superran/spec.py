@@ -651,6 +651,8 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "ideal=拿真值；ls_mmse 比 ls_linear 实测好 0.7~4.6 dB，导频越挤差距越大"),
     ("num_samples", "样本数", "number", (1, 5000, 1), "由 sr_sample_size 算，别拍脑袋"),
     # --- 系统级仿真旋钮（sr_system_sim 用，不进 ChannelHub 的信道生成）---
+    ("s_slot_dl_fraction", "S 时隙下行折算", "number", (0.01, 1.0, 0.01),
+     "默认 0.7 保持兼容；报告占比与 TBS 折算共用该值"),
     ("replication_workers", "重复实验进程", "select", ["auto", "1", "2", "4", "8"],
      "auto 按 TTI×UE×重复数决定；短任务串行，长任务最多 4 进程；显式值会严格执行或报错"),
     ("traffic_model", "系统话务", "select",
@@ -742,6 +744,13 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "每个复信道系数的 sigma_e²；必须来自估计器协方差或离线标定，不能偷看 h_true"),
     ("mu_corr_threshold", "MU 相关性门限", "number", (0.0, 1.0, 0.05),
      "SUS 配对上限；默认 0.7，越低越严格"),
+    ("min_pairing_mcs", "MU 最低配对 MCS", "number", (0, 27, 1),
+     "默认 4；低于该档只参与 SU，设 0 退化旧行为"),
+    ("pf_gain_threshold", "MU 的 PF 增益比门限", "number", (0.0, 3.0, 0.05),
+     "默认 0 关闭；1 要求 MU 的 PF 度量严格不低于 SU"),
+    ("orthogonalization_mode", "MU 正交化模式", "select",
+     ["select", "none", "schmidt"],
+     "select=相关性筛选；none=不筛；schmidt 尚未实现并会硬失败"),
     ("mu_olla_step_up_db", "MU-OLLA ACK 步长（MCS档）", "number", (0.001, 1.0, 0.001),
      "用户级、非 pair-specific；与 down 步长共同决定目标 BLER"),
     ("mu_olla_step_down_db", "MU-OLLA NACK 步长（MCS档）", "auto_number",
@@ -795,6 +804,7 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
 #: 给它们一份默认值，**必须和 sr_system_sim 的函数签名一致**——
 #: 两处漂了的话页面显示的就不是实际会跑的值，而这种不一致没有任何提示。
 _SIM_DEFAULTS: dict[str, Any] = {
+    "s_slot_dl_fraction": 0.7,
     "replication_workers": "auto",
     "traffic_model": "ftp3",
     "small_ue_share": 0.5,
@@ -836,6 +846,9 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "mu_precoder": "zf",
     "mu_csi_error_variance": 0.0,
     "mu_corr_threshold": 0.7,
+    "min_pairing_mcs": 4,
+    "pf_gain_threshold": 0.0,
+    "orthogonalization_mode": "select",
     "mu_olla_step_up_db": 0.01,
     "mu_olla_step_down_db": None,
     "precoder": "svd",

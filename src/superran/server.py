@@ -1267,6 +1267,9 @@ def _throughput_sync(*, dataset_id: str, mcs_table: int, target_bler: float,
 def sr_mcs_info(
     table: int = 3,
     show_bler_anchors: bool = False,
+    reference_thresholds: dict[str, float] | None = None,
+    eesm_sinr_db_list: list[float] | None = None,
+    eesm_beta: float | list[float] | None = None,
 ) -> dict[str, Any]:
     """查 MCS / CQI 表，以及分析模型或表驱动 BLER 的门限。
 
@@ -1282,6 +1285,10 @@ def sr_mcs_info(
     其 `cqi_table` 同时给历史表行0..14和上报4-bit CQI1..15；上报CQI0是
     out-of-range。表行14/上报CQI15的 `requested_mcs=28` 在当前MCS0..27
     profile上会显式标记钳位。
+
+    `reference_thresholds` 可传 ``{"0": -6.0}`` 这种外部 10% BLER 门限，只返回
+    差值，不落盘也不内嵌参考曲线。`eesm_sinr_db_list` 与 `eesm_beta` 必须同时给出，
+    用于调用显式 EESM 压缩；beta 数组可一次计算多档 MCS。
     """
     from . import linkadapt as la
 
@@ -1309,10 +1316,26 @@ def sr_mcs_info(
         "cqi_source": la.INTERNAL_CQI_SOURCE if table == 3 else "same table family",
     }
     if show_bler_anchors:
+        refs = ({int(key): float(value) for key, value in reference_thresholds.items()}
+                if reference_thresholds is not None else None)
         out["bler_anchors"] = (
-            la.curve_anchor_check() if table == 3
-            else la.DEFAULT_BLER.anchor_check(table=table)
+            la.curve_anchor_check(reference_thresholds=refs) if table == 3
+            else la.DEFAULT_BLER.anchor_check(
+                table=table, reference_thresholds=refs)
         )
+    if (eesm_sinr_db_list is None) != (eesm_beta is None):
+        raise ValueError("eesm_sinr_db_list 与 eesm_beta 必须同时提供")
+    if eesm_sinr_db_list is not None and eesm_beta is not None:
+        compressed = la.eesm_compress(
+            np.asarray(eesm_sinr_db_list, dtype=float),
+            np.asarray(eesm_beta, dtype=float),
+        )
+        out["eesm"] = {
+            "sinr_db": [float(value) for value in eesm_sinr_db_list],
+            "beta": _jsonable(eesm_beta),
+            "effective_sinr_db": compressed.tolist(),
+            "beta_contract": "must be calibrated for the same channel/receiver/BLER profile",
+        }
     return _jsonable(out)
 
 
@@ -1322,6 +1345,7 @@ def sr_bler_curve(
     tx_mode: str = "newtx",
     sinr_db_list: list[float] | None = None,
     target_bler: float = 0.1,
+    source_id: str = "preset_20b_256qam",
 ) -> dict[str, Any]:
     """查预置表中的单档 BLER 曲线，并可在任意 SINR 点插值。
 
@@ -1337,7 +1361,7 @@ def sr_bler_curve(
 
     return _jsonable(la.bler_curve(
         mcs=mcs, tx_mode=tx_mode, target_bler=target_bler,
-        sinr_db=sinr_db_list,
+        sinr_db=sinr_db_list, source_id=source_id,
     ))
 
 
@@ -1952,10 +1976,14 @@ def sr_system_sim(
     mu_precoder: str = "zf",
     mu_csi_error_variance: float = 0.0,
     mu_corr_threshold: float = 0.7,
+    min_pairing_mcs: int = 4,
+    pf_gain_threshold: float = 0.0,
+    orthogonalization_mode: str = "select",
     mu_olla_step_up_db: float = 0.01,
     mu_olla_step_down_db: float | None = None,
     small_burst_policy: str = "fractional_slot",
     tdd_pattern: str = "DDDSU",
+    s_slot_dl_fraction: float = 0.7,
     neighbor_prb_util: float = 0.3,
     neighbor_load_jitter: float = 0.05,
     csi_aging: bool | str = True,
@@ -2159,8 +2187,15 @@ def sr_system_sim(
         alpha=beta=1、gamma=0、w=1，严格退化成经典 PF；它不是未确认定义的 EPF。
     small_burst_policy : experience_v2 默认 ``fractional_slot``，按 28.552 Rel-19
         的 TB volume / padding volume 折算单时隙小 burst；``exclude`` 保留旧式盲区。
+    s_slot_dl_fraction : S 时隙相对完整 D 时隙的下行承载比例。默认 0.7 保持兼容；
+        报告 ``dl_ratio``、capacity RE 预算和 experience TBS 查表共用该值。
     mu_enabled : 是否允许 MU 配对。默认关，先看清 SU 基线。
     mu_corr_threshold : MU SUS 配对的归一化相关性上限，默认 0.7。
+    min_pairing_mcs : MU 候选的最低发送 MCS，默认 4；0 关闭并退化旧行为。
+    pf_gain_threshold : MU 相对 SU 的 PF 度量比否决门，默认 0（关闭）；1 要求
+        严格不降低 PF，值大于 1 时要求相应余量。
+    orthogonalization_mode : ``select`` 用相关性门限筛选，``none`` 不筛；
+        ``schmidt`` 尚未实现，会明确报错而不会静默回落。
     olla_step_up_db / olla_step_down_db : 历史参数名；值是连续 MCS 档位步长，
         在 SINR 反折 MCS 之后叠加。down 省略时按 target_bler 反解。
     mu_olla_step_up_db / mu_olla_step_down_db : MU 专属用户级 MCS-domain OLLA；
@@ -2571,6 +2606,7 @@ def sr_system_sim(
         system_cfg = sysm.SystemConfig(
             duration_s=float(duration_s),
             tdd_pattern=tdd_pattern, harq_combining=str(harq_combining),
+            s_slot_dl_fraction=float(s_slot_dl_fraction),
             harq_feedback_delay=_flag(harq_feedback_delay),
             seed=seed, snapshot_update_ms=snap_ms,
             power_constraint=str(power_constraint), rb_power_control=power_cfg,
@@ -2601,6 +2637,9 @@ def sr_system_sim(
             mu_precoder=str(mu_precoder),
             mu_csi_error_variance=float(mu_csi_error_variance),
             mu_corr_threshold=float(mu_corr_threshold),
+            min_pairing_mcs=min_pairing_mcs,
+            pf_gain_threshold=float(pf_gain_threshold),
+            orthogonalization_mode=str(orthogonalization_mode),
             mu_olla_step_up_db=float(mu_olla_step_up_db),
             mu_olla_step_down_db=resolved_mu_down,
             olla_speedup=float(olla_speedup),

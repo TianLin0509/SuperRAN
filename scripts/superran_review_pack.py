@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 import zipfile
@@ -76,7 +77,21 @@ def find_author_report(sha: str, ref: str) -> tuple[Path | None, str | None]:
     return (None, None)
 
 
-def build_summary(base: str, head: str, ref: str, changed: list[str]) -> str:
+def load_task(ref: str) -> dict | None:
+    """分支名就是任务 ID，据此把台账里的标题带进包里。"""
+    try:
+        from superran_task import LEDGER
+        f = LEDGER / f"{ref}.json"
+        if f.exists():
+            import json
+            return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return None
+
+
+def build_summary(base: str, head: str, ref: str, changed: list[str],
+                  task: dict | None = None) -> str:
     commits = git("log", "--format=%H|%s", f"{base}..{head}").strip().splitlines()
     stat = git("diff", "--numstat", base, head, "--", ".", *GENERATED).strip().splitlines()
 
@@ -91,11 +106,18 @@ def build_summary(base: str, head: str, ref: str, changed: list[str]) -> str:
         h, _, subject = c.partition("|")
         commit_lines.append(f"- `{h[:9]}` {subject}")
 
+    ident = ""
+    if task:
+        tid, title = task["id"], task["title"]
+        ident = (f"- **任务 ID**：`{tid}`　←　"
+                 f"**你的报告文件名必须叫 `{tid}_内网审核.md`**\n"
+                 f"- **任务标题**：{title}\n")
+
     return f"""# 改动说明
 
 ## 审的是哪一版
 
-- **完整 SHA**：`{head}`
+{ident}- **完整 SHA**：`{head}`
 - **分支 / 引用**：`{ref}`
 - **基线（改动前）**：`{base}`
 - **打包时间**：{datetime.now().strftime("%Y-%m-%d %H:%M")}
@@ -154,10 +176,17 @@ def main() -> int:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = out_dir / f"SuperRAN-review-{short}-{datetime.now():%Y%m%d}.zip"
+    task_early = load_task(args.ref)
+    if task_early:
+        # 名字里带任务 ID 和中文标题，桌面上一眼认得出是哪个任务
+        safe = re.sub(r'[\/:*?"<>|]', "", task_early["title"])[:24]
+        zip_path = out_dir / f"{task_early['id']}_{safe}.zip"
+    else:
+        zip_path = out_dir / f"SuperRAN-review-{short}-{datetime.now():%Y%m%d}.zip"
 
     contract = (REPO / ".agents" / "COMPANY_REVIEW.md").read_text(encoding="utf-8")
-    summary = build_summary(base, head, args.ref, changed)
+    task = load_task(args.ref)
+    summary = build_summary(base, head, args.ref, changed, task)
     diff = git("diff", base, head, "--", ".", *GENERATED)
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:

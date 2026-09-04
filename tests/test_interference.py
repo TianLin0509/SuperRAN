@@ -1039,6 +1039,16 @@ for _d in _dv:
     check(all(len(x) == 3 for x in _d["steps"]), f"{_d['name']} 每步都有(做什么,公式,结果)")
     check(bool(_d["ref_src"]), f"{_d['name']} 带参考出处")
 
+_tdd_custom = next(
+    d for d in _alg.derivations({
+        "tdd_pattern": "DDDSU", "s_slot_dl_fraction": 0.82,
+    })
+    if d["key"] == "tdd_normalize"
+)
+check("0.82" in _tdd_custom["steps"][1][1]
+      and "0.82" in _tdd_custom["steps"][2][2],
+      "算法说明与系统调度读取同一个 S 时隙折算配置")
+
 # **数字必须现算，不能是抄进来的常量。** 抄的话改了 MCS 表这里不会跟着变。
 _peak = next(d for d in _dv if d["key"] == "peak_se")
 from superran import linkadapt as _la  # noqa: E402

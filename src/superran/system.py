@@ -3,8 +3,9 @@
 **这一层回答的问题和链路级不一样。** 链路级问"这个信道能跑多快"，
 系统级问"**这个小区里的用户实际体验到多快**"——后者要把话务的到达与结束、
 调度器在多用户间的取舍与缓冲区排空算进去。一次用户 grant 视为一个单码字 TB，
-只允许一次 IR/CC 重传：空口 MCS/RBG 数/rank/TBS 冻结，BLER 从预置 NewTx
-曲线推导。当前不展开 RV、LLR、并行 HARQ process 或标准时序。
+只允许一次 IR/CC 重传：空口 MCS/RBG 数/rank/TBS 冻结。
+表 3 的 BLER 从预置 NewTx 曲线推导；表 1/2 明确使用有限码长解析近似。
+当前不展开 RV、LLR、并行 HARQ process 或标准时序。
 
 **只有一条评估路径。** TTI 主循环、资源分配与 KPI 口径全在
 :mod:`superran.experience`（``experience_v2``：DRB busy-period、首传起点、
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import os
 import time
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
@@ -60,9 +62,36 @@ def _finite_real(value: Any) -> bool:
         and np.isfinite(float(value))
     )
 
-#: S 时隙折合成多少个下行 TTI。大部分符号是下行，但有 GP 与上行符号。
-#: **主循环与 dl_ratio 必须用同一个数**，否则实际调度的下行比报告的多。
+#: S 时隙折合成多少个下行 TTI 的兼容默认值。0.7 是符号占比近似；
+#: 另一类按可用 RE 标定的系数不是同一口径，必须由用户显式覆盖。
+#: **主循环与 dl_ratio 必须用同一个配置值**，否则实际调度的下行比报告的多。
 S_SLOT_DL_FRACTION = 0.7
+
+# D/S/U 字符本身不包含 DwPTS/GP/UpPTS 的符号配比，不能从任意字符串凭空反推。
+# 这里只登记已经明确给出特殊时隙格式的产品图案；未知图案要求用户显式配置。
+_S_SLOT_FRACTION_BY_PATTERN = {
+    "DDDSU": 10.0 / 14.0,
+    "DDDDDDDSUU": 6.0 / 14.0,
+}
+
+
+def infer_s_slot_fraction(tdd_pattern: str) -> float:
+    """返回已登记 TDD 图案的 S 时隙下行符号占比建议值。
+
+    ``tdd_pattern`` 只标出整时隙类型，并没有携带特殊时隙内部的
+    DwPTS/GP/UpPTS 配置。因此本函数只认已经有物理定义的产品图案，不对未知图案
+    猜测；返回值也只是建议，不会覆盖 :class:`SystemConfig` 的显式配置。
+    """
+    pattern = str(tdd_pattern).strip().upper()
+    if not pattern or any(slot not in "DSU" for slot in pattern):
+        raise ValueError("tdd_pattern 只允许 D/S/U 且不能为空")
+    try:
+        return float(_S_SLOT_FRACTION_BY_PATTERN[pattern])
+    except KeyError as exc:
+        raise ValueError(
+            f"TDD 图案 {pattern!r} 没有已登记的特殊时隙符号配置；"
+            "请显式设置 s_slot_dl_fraction，不能只凭 D/S/U 字符猜测"
+        ) from exc
 
 TrafficModel = Literal["full_buffer", "ftp3", "cbr", "mixed", "cdf"]
 SchedAlgorithm = Literal["pf", "qos_pf", "rr", "max_ci", "edf", "qos_pf_edf"]
@@ -451,6 +480,12 @@ class SchedulerConfig:
     max_mu_users: int = 2
     mu_rank_per_user: int = 2
     mu_corr_threshold: float = 0.7
+    # 低 MCS 用户只参与 SU；0 关闭并精确退化旧行为。
+    min_pairing_mcs: int = 4
+    # MU 方案的 PF 度量 / SU 方案 PF 度量至少达到该比值；0 关闭。
+    pf_gain_threshold: float = 0.0
+    # none=不做相关性筛选；select=当前门限筛选；schmidt 尚未实现并硬失败。
+    orthogonalization_mode: str = "select"
     mu_precoder: str = "zf"
     # RZF 的每个复信道系数 CSI 误差方差。它必须来自估计器协方差或离线标定，
     # 不能在运行时偷看 h_true 逐快照反推；0.0 精确保持历史 ZF/RZF 噪声加载口径。
@@ -552,6 +587,18 @@ class SchedulerConfig:
         if (not np.isfinite(self.mu_corr_threshold)
                 or not 0.0 <= float(self.mu_corr_threshold) <= 1.0):
             raise ValueError("mu_corr_threshold 必须是 [0,1] 内的有限数")
+        if (isinstance(self.min_pairing_mcs, (bool, np.bool_))
+                or not isinstance(self.min_pairing_mcs, (int, np.integer))
+                or int(self.min_pairing_mcs) < 0):
+            raise ValueError("min_pairing_mcs 必须是非负整数")
+        if (not np.isfinite(self.pf_gain_threshold)
+                or float(self.pf_gain_threshold) < 0.0):
+            raise ValueError("pf_gain_threshold 必须是有限非负数")
+        if self.orthogonalization_mode not in ("none", "select", "schmidt"):
+            raise ValueError(
+                "orthogonalization_mode 只支持 none / select / schmidt")
+        if self.orthogonalization_mode == "schmidt":
+            raise NotImplementedError("TODO: Schmidt 正交化未实现")
         if self.mu_accounting != "pair_table":
             raise ValueError(
                 "mu_accounting 只支持 pair_table，收到 "
@@ -641,6 +688,9 @@ class SchedulerConfig:
             "mu_enabled": self.mu_enabled, "max_mu_users": self.max_mu_users,
             "mu_rank_per_user": self.mu_rank_per_user,
             "mu_corr_threshold": self.mu_corr_threshold,
+            "min_pairing_mcs": int(self.min_pairing_mcs),
+            "pf_gain_threshold": float(self.pf_gain_threshold),
+            "orthogonalization_mode": self.orthogonalization_mode,
             "mu_precoder": self.mu_precoder,
             "mu_csi_error_variance": self.mu_csi_error_variance,
             "mu_accounting": self.mu_accounting,
@@ -858,7 +908,10 @@ class SystemConfig:
     # Type-0 首尾 RBG 可能不足名义 P。None 保持历史等长行为；显式 tuple
     # 则是每组真实 PRB 数，TBS、功控和利用率全部以它为准。
     rbg_prb_sizes: tuple[int, ...] | None = None
-    tdd_pattern: str = "DDDSU"           # 只统计 D 时隙
+    tdd_pattern: str = "DDDSU"
+    # S 时隙相对完整 D 时隙的下行承载比例。默认保留 0.7 兼容旧结果；
+    # 报告 dl_ratio、capacity RE 预算与 experience TBS 查表共用这一份值。
+    s_slot_dl_fraction: float = S_SLOT_DL_FRACTION
     # 每个 TB 最多一次重传。IR：半谱效等效 MCS（默认）；CC：SINR +10log10(2)。
     harq_combining: HarqCombining = "ir"
     # ACK/NACK 要等上行时隙才回得来：TB 在 D/S 发出，反馈在其后第一个 U 上报，
@@ -923,6 +976,24 @@ class SystemConfig:
             raise ValueError("tdd_pattern 只允许 D/S/U 且不能为空")
         if not any(slot in "DS" for slot in pattern):
             raise ValueError("下行系统仿真的 tdd_pattern 至少需要一个 D 或 S 时隙")
+        if (isinstance(self.s_slot_dl_fraction, (bool, np.bool_))
+                or not _finite_real(self.s_slot_dl_fraction)
+                or not 0.0 < float(self.s_slot_dl_fraction) <= 1.0):
+            raise ValueError("s_slot_dl_fraction 必须是 (0,1] 内的有限数")
+        if "S" in pattern:
+            try:
+                suggested = infer_s_slot_fraction(pattern)
+            except ValueError:
+                suggested = None
+            if (suggested is not None
+                    and abs(float(self.s_slot_dl_fraction) - suggested) > 0.15):
+                warnings.warn(
+                    f"TDD 图案 {pattern} 的已登记 S 时隙建议值为 "
+                    f"{suggested:.3f}，当前 s_slot_dl_fraction="
+                    f"{float(self.s_slot_dl_fraction):.3f}；请确认符号/RE 折算口径",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         if str(self.harq_combining).lower() not in ("ir", "cc"):
             raise ValueError("harq_combining 只支持 ir / cc")
         if not isinstance(self.harq_feedback_delay, (bool, np.bool_)):
@@ -968,9 +1039,10 @@ class SystemConfig:
 
     @property
     def dl_ratio(self) -> float:
-        """TDD 图案里下行时隙占比。S 时隙按 0.7 个下行折算（大部分符号是 D）。"""
+        """TDD 图案里的下行承载占比，S 时隙读取显式配置。"""
         p = self.tdd_pattern.upper() or "D"
-        return (p.count("D") + S_SLOT_DL_FRACTION * p.count("S")) / len(p)
+        return (p.count("D")
+                + float(self.s_slot_dl_fraction) * p.count("S")) / len(p)
 
     def as_dict(self) -> dict[str, Any]:
         return {"model_version": "experience_v2",
@@ -981,6 +1053,7 @@ class SystemConfig:
                 "rbg_boundaries": [list(pair) for pair in self.rbg_boundaries],
                 "num_rb": self.num_rb,
                 "tdd_pattern": self.tdd_pattern,
+                "s_slot_dl_fraction": float(self.s_slot_dl_fraction),
                 "harq_combining": str(self.harq_combining).lower(),
                 "harq_feedback_delay": bool(self.harq_feedback_delay),
                 "harq_feedback_offsets_tti": list(
@@ -1105,7 +1178,7 @@ class UeLinkTable:
     # 零时延时它与 ``se`` / ``best_se`` 逐位相同。
     se_gnb: np.ndarray | None = None       # [snapshot, rank]
     best_se_gnb: np.ndarray | None = None  # [snapshot]
-    mcs_table: int = 3                     # experience_v2 当前只接受预置表 3
+    mcs_table: int = 3                     # capacity 可用 1/2/3；experience 只接受表 3
     # 建表时用的目标 BLER。**主循环必须读它，不能自己写死 0.1**——
     # 否则 build_link_tables(target_bler=...) 选出来的 rank 和主循环选出来的 MCS
     # 是按两个不同判据来的，而这种不一致在结果里完全看不出来。
@@ -1226,11 +1299,10 @@ def _reported_cqi_of(sinr_db: float, target_bler: float, *,
 def _cqi_threshold_sinr(cqi_index: int, target_bler: float, *,
                         mcs_table: int = 3) -> float:
     """内部 CQI → 离散映射 MCS → 目标 BLER 的 NewTx SINR 门限。"""
-    from . import bler_curves as bc  # noqa: PLC0415
     from . import linkadapt as la  # noqa: PLC0415
 
-    m = la.internal_cqi_to_mcs(int(cqi_index), mcs_table=int(mcs_table))
-    return float(bc.get_curve(int(m["mcs"]), "newtx").required_sinr_db(float(target_bler)))
+    return float(la._internal_cqi_thresholds(
+        float(target_bler), int(mcs_table))[int(cqi_index)])
 
 
 def _nan_safe(fn, values, *args) -> float:
@@ -1415,7 +1487,6 @@ def build_link_tables(
     信道分辨率，并按 ``q_serving*S / (N + sum(q_k*I_k))`` 同时更新期望信号与
     每个邻区的干扰；聚合 SIR 不足以完成这一步，因此缺数据会硬失败。
     """
-    from . import bler_curves as bc_probe  # noqa: PLC0415
     from . import linkadapt as la  # noqa: PLC0415
 
     if precoder not in ("svd", "type1"):
@@ -1423,27 +1494,26 @@ def build_link_tables(
     if str(power_constraint).lower() not in ("ebf", "pebf", "nebf"):
         raise ValueError("power_constraint 只支持 ebf / pebf / nebf")
     # **CQI 量化门限、CQI→MCS 映射和 BF 后重选档必须用同一张表。**
-    # 当前只有 preset_20b_256qam（表 3）同时具备 28 档 NewTx 曲线与内部 CQI
-    # 映射；表 1/2 没有配套曲线，硬拒绝好过让两侧各用一张表安静地跑下去。
-    if int(table) != 3:
-        raise ValueError(
-            "系统链路表当前只支持 MCS table 3（preset_20b_256qam）："
-            f"收到 table={table}。表 1/2 没有配套的 NewTx 预置曲线与内部 CQI "
-            "映射，混用会让量化门限与选档口径不一致。")
-    # 目标 BLER 是可配的，但它必须落在预置曲线**实测覆盖**的区间内：
+    # 表 1/2 明确走有限码长解析 BLER；表 3 才走预置曲线，不能交叉借表。
+    if int(table) not in la.MCS_TABLES:
+        raise ValueError(f"未知 MCS table={table}")
+    # 表 3 的目标 BLER 必须落在预置曲线**实测覆盖**的区间内：
     # 越界时深层 required_sinr_db 会抛 ValueError，报的错看不出是哪一档。
     # 这里提前对全部 28 档求一次门限，越界就把可用区间原样告诉调用方。
     if not (np.isfinite(float(target_bler)) and 0.0 < float(target_bler) < 1.0):
         raise ValueError(f"target_bler 必须在 (0,1)，收到 {target_bler!r}")
-    _lo = max(float(bc_probe.get_curve(m.index, "newtx").bler_points[-1])
-              for m in la.MCS_TABLE_3)
-    _hi = min(float(bc_probe.get_curve(m.index, "newtx").bler_points[0])
-              for m in la.MCS_TABLE_3)
-    if not _lo <= float(target_bler) <= _hi:
-        raise ValueError(
-            f"target_bler={target_bler} 超出预置 NewTx 曲线的实测覆盖区间 "
-            f"[{_lo:.4g}, {_hi:.4g}]；该区间由 28 档曲线的共同范围决定，"
-            "越界只能外推，本项目不外推。")
+    if int(table) == 3:
+        from . import bler_curves as bc_probe  # noqa: PLC0415
+
+        _lo = max(float(bc_probe.get_curve(m.index, "newtx").bler_points[-1])
+                  for m in la.MCS_TABLE_3)
+        _hi = min(float(bc_probe.get_curve(m.index, "newtx").bler_points[0])
+                  for m in la.MCS_TABLE_3)
+        if not _lo <= float(target_bler) <= _hi:
+            raise ValueError(
+                f"target_bler={target_bler} 超出预置 NewTx 曲线的实测覆盖区间 "
+                f"[{_lo:.4g}, {_hi:.4g}]；该区间由 28 档曲线的共同范围决定，"
+                "越界只能外推，本项目不外推。")
     power_cfg = rb_power_control or pc.RbPowerControlConfig()
     if not isinstance(power_cfg, pc.RbPowerControlConfig):
         raise ValueError("rb_power_control 必须是 RbPowerControlConfig")
@@ -2062,7 +2132,13 @@ def build_link_tables(
         # 较大时仍会被调度，与已选定的 4-bit CQI 合同矛盾。
         outage = np.array([
             bool(reported_cqi_by_snapshot[t, best[t]] == 0)
-            or _bler_lookup(int(mcs[t, best[t]]), float(sinr[t, best[t]])) > 0.5
+            or (
+                _bler_lookup(int(mcs[t, best[t]]), float(sinr[t, best[t]]))
+                if int(table) == 3 else
+                _bler_lookup(
+                    int(mcs[t, best[t]]), float(sinr[t, best[t]]),
+                    table=int(table))
+            ) > 0.5
             for t in range(n_s)
         ])
         out.append(UeLinkTable(
@@ -2287,6 +2363,10 @@ def measure_mu_gain(
     power_constraint: str = "nebf",
     mu_precoder: str = "zf",
     mu_csi_error_variance: float = 0.0,
+    min_pairing_mcs: int = 4,
+    pf_gain_threshold: float = 0.0,
+    mu_corr_threshold: float = 0.7,
+    orthogonalization_mode: str = "select",
 ) -> dict[str, Any]:
     """实测 MU 相对 SU 的小区谱效比，供 TTI 主循环使用。
 
@@ -2335,6 +2415,20 @@ def measure_mu_gain(
     if (not np.isfinite(mu_csi_error_variance)
             or float(mu_csi_error_variance) < 0):
         raise ValueError("mu_csi_error_variance 必须是有限非负数")
+    if (isinstance(min_pairing_mcs, (bool, np.bool_))
+            or not isinstance(min_pairing_mcs, (int, np.integer))
+            or int(min_pairing_mcs) < 0):
+        raise ValueError("min_pairing_mcs 必须是非负整数")
+    if (not np.isfinite(pf_gain_threshold)
+            or float(pf_gain_threshold) < 0.0):
+        raise ValueError("pf_gain_threshold 必须是有限非负数")
+    if (not np.isfinite(mu_corr_threshold)
+            or not 0.0 <= float(mu_corr_threshold) <= 1.0):
+        raise ValueError("mu_corr_threshold 必须是 [0,1] 内的有限数")
+    if orthogonalization_mode not in ("none", "select", "schmidt"):
+        raise ValueError("orthogonalization_mode 只支持 none / select / schmidt")
+    if orthogonalization_mode == "schmidt":
+        raise NotImplementedError("TODO: Schmidt 正交化未实现")
 
     h_eval_users = [
         _time_major(x, label="h_users", index=i) for i, x in enumerate(h_users)]
@@ -2477,7 +2571,11 @@ def measure_mu_gain(
                                       precoder=mu_precoder,
                                       csi_error_variance=float(mu_csi_error_variance),
                                       power_constraint=power_constraint,
-                                      rbg_boundaries=resolved_boundaries)
+                                      rbg_boundaries=resolved_boundaries,
+                                      min_pairing_mcs=int(min_pairing_mcs),
+                                      pf_gain_threshold=float(pf_gain_threshold),
+                                      corr_threshold=float(mu_corr_threshold),
+                                      orthogonalization_mode=orthogonalization_mode)
         except (ValueError, np.linalg.LinAlgError) as exc:
             errors.append({
                 "snapshot": int(t),
@@ -2695,11 +2793,23 @@ def simulate(
         raise ValueError(
             "RB 功控要求链路表带唯一 serving_cell_index；"
             "请按当前数据集 metadata 重新 build_link_tables")
+    # **系统级仿真只认预置表 3。** #23 给表 1/2 加了有限码长解析 BLER，但那条
+    # 能力当时的消费者是 legacy 容量主循环；容量并入体验路径后它在系统级没有
+    # 消费者了（链路级工具 sr_throughput 仍然照用表 1/2）。这里显式拦住并说明，
+    # 不要让人对着下游那句只提 experience_v2 的报错猜。
+    if _table_id != 3:
+        raise ValueError(
+            f"系统级仿真只支持预置 MCS table 3（收到 table={_table_id}）。"
+            "表 1/2 的有限码长解析 BLER 目前只服务链路级工具（sr_throughput）；"
+            "系统级的 TBS/BLER 反查没有对应的 profile。"
+            "需要系统级跑表 1/2 的话，得先给它补齐 TBS/BLER 元数据。")
+
     from . import experience as ex  # noqa: PLC0415
 
     run = ex.simulate_experience(
         tables, sys_cfg=sys_cfg, traffic_cfg=traffic, sched=sched, kpi=kpi,
-        book=book, s_slot_fraction=S_SLOT_DL_FRACTION, progress=progress)
+        book=book, s_slot_fraction=float(sys_cfg.s_slot_dl_fraction),
+        progress=progress)
     return SystemResult(
         config={"system": sys_cfg.as_dict(), "traffic": traffic.as_dict(),
                 "scheduler": sched.as_dict(), "kpi": kpi.as_dict(),
@@ -2707,7 +2817,9 @@ def simulate(
                 "harq_model": {
                     "max_retransmissions": 1,
                     "combining": str(sys_cfg.harq_combining).lower(),
-                    "bler_source": "preset NewTx curves only",
+                    "bler_source": (
+                        "preset NewTx curves only" if _table_id == 3
+                        else "finite-blocklength analytic approximation"),
                     "identity": "same MCS/RBG-count/rank/TBS as initial TB",
                 },
                 "rng": book.as_dict(),
@@ -3411,10 +3523,18 @@ _BLER_CACHE: dict[tuple[str, int, int, str], float] = {}
 _BLER_CACHE_STEP_DB = 0.05
 
 
-def _bler_lookup(mcs: int, sinr_db: float, tx_mode: str = "newtx") -> float:
-    """查表 BLER，按源曲线 0.05 dB 网格量化后缓存。
+def _bler_lookup(
+    mcs: int,
+    sinr_db: float,
+    tx_mode: str = "newtx",
+    *,
+    table: int = 3,
+    n_coded_bits: int = 20000,
+    n_code_blocks: int = 1,
+) -> float:
+    """按 MCS 表路由 BLER；表 3 查曲线，表 1/2 用解析模型。
 
-    预置曲线的原始横轴步长就是 0.05 dB。旧实现按 0.5 dB 缓存，在瀑布区会把
+    表 3 预置曲线的原始横轴步长就是 0.05 dB。旧实现按 0.5 dB 缓存，在瀑布区会把
     工作点最多平移 0.25 dB，足以显著改变 ACK/NACK；缓存不能以牺牲源数据一个
     数量级的分辨率为代价。
 
@@ -3427,6 +3547,26 @@ def _bler_lookup(mcs: int, sinr_db: float, tx_mode: str = "newtx") -> float:
     # 一个用户的一个快照能把整条系统级仿真挂掉，报的错还看不出是谁。
     if sinr_db != sinr_db:                      # nan
         return 1.0                              # 发不出去
+    if int(table) not in (1, 2, 3):
+        raise ValueError(f"mcs table must be 1, 2 or 3, got {table}")
+    if int(table) in (1, 2):
+        if tx_mode != "newtx":
+            raise ValueError("解析 BLER 没有独立 ReTx 曲线；重传请走 harq_retransmission_bler")
+        from . import linkadapt as la  # noqa: PLC0415
+
+        table_rows = la.MCS_TABLES[int(table)]
+        if (isinstance(mcs, (bool, np.bool_))
+                or not isinstance(mcs, (int, np.integer))
+                or not 0 <= int(mcs) < len(table_rows)):
+            raise ValueError(
+                f"MCS 必须是 0..{len(table_rows) - 1} 的整数，收到 {mcs!r}")
+        model = la.make_bler_model(int(table))
+        return float(model.bler(
+            float(np.clip(float(sinr_db), -60.0, 60.0)),
+            table_rows[int(mcs)],
+            int(n_coded_bits),
+            int(n_code_blocks),
+        )[0])
     from . import bler_curves as bc  # noqa: PLC0415
 
     clipped = min(max(float(sinr_db), -60.0), 60.0)

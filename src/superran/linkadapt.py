@@ -41,7 +41,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -120,6 +120,53 @@ def qam_mi_inverse(m_order: int, mi: Any) -> np.ndarray:
 _EESM_BETA = {4: 1.57, 16: 4.56, 64: 14.35, 256: 45.0, 1024: 140.0}
 
 
+def eesm_compress(
+    sinr_db: np.ndarray,
+    beta: float | np.ndarray,
+) -> np.ndarray:
+    """用 EESM 把最后一维的逐资源 SINR 压成等效 SINR（dB）。
+
+    计算 ``-beta * ln(mean(exp(-gamma / beta)))``，其中 ``gamma`` 与 ``beta``
+    都在线性功率域。标量 ``beta`` 返回零维 ``ndarray``；数组 ``beta`` 与
+    ``sinr_db`` 的前导维按 NumPy 规则广播，因此一条 SINR 网格可同时计算多档 MCS。
+    ``beta`` 必须由相同信道、接收机与 BLER 口径标定；本函数只做压缩，不冒充
+    BLER 模型。
+    """
+    values = np.asarray(sinr_db, dtype=float)
+    if values.ndim == 0:
+        values = values.reshape(1)
+    if values.shape[-1] == 0:
+        raise ValueError("sinr_db 最后一维不能为空")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("sinr_db 必须全部为有限值")
+    betas = np.asarray(beta, dtype=float)
+    if betas.size == 0 or np.any(~np.isfinite(betas)) or np.any(betas <= 0.0):
+        raise ValueError("beta 必须是有限正数")
+
+    try:
+        target = np.broadcast_shapes(values.shape[:-1], betas.shape)
+        gamma = np.broadcast_to(
+            np.power(10.0, values / 10.0), target + (values.shape[-1],))
+        beta_grid = np.broadcast_to(betas, target)
+    except (ValueError, FloatingPointError) as exc:
+        raise ValueError(
+            "beta 形状必须能与 sinr_db 的前导维广播；"
+            f"收到 sinr_db={values.shape}, beta={betas.shape}"
+        ) from exc
+    if not np.all(np.isfinite(gamma)):
+        raise ValueError("sinr_db 转成线性功率后溢出")
+
+    exponent = -gamma / beta_grid[..., None]
+    # max-shift 避免深衰/极小 beta 时 exp 下溢；对大 beta 仍保留足够精度。
+    shift = np.max(exponent, axis=-1, keepdims=True)
+    log_mean = (shift[..., 0]
+                + np.log(np.mean(np.exp(exponent - shift), axis=-1)))
+    effective_linear = -beta_grid * log_mean
+    if np.any(~np.isfinite(effective_linear)) or np.any(effective_linear <= 0.0):
+        raise ValueError("EESM 计算得到非有限或非正的等效线性 SINR")
+    return np.asarray(10.0 * np.log10(effective_linear))
+
+
 def effective_sinr(
     sinr_db: Any,
     *,
@@ -153,9 +200,7 @@ def effective_sinr(
         return float(qam_mi_inverse(m_order, float(np.mean(mi)))[0])
     if method == "eesm":
         b = float(beta if beta is not None else _EESM_BETA.get(m_order, 14.35))
-        lin = 10.0 ** (g / 10.0)
-        val = -b * math.log(max(float(np.mean(np.exp(-lin / b))), 1e-300))
-        return float(10.0 * math.log10(max(val, 1e-30)))
+        return float(eesm_compress(g, b))
     raise ValueError(f"method 应为 miesm 或 eesm，收到 {method!r}")
 
 
@@ -230,6 +275,15 @@ MCS_TABLE_3: tuple[Mcs, ...] = tuple(
 )
 
 MCS_TABLES = {1: MCS_TABLE_1, 2: MCS_TABLE_2, 3: MCS_TABLE_3}
+
+# 公开文献中的调制阶数分组近似，按每张 MCS 表展开成逐 MCS 数组。它们不是
+# 现场/特定译码器标定值；调用方可把同形数组作为 ``eesm_compress`` 的 beta 覆盖。
+DEFAULT_BETA_BY_MCS_TABLE: dict[int, np.ndarray] = {
+    table_id: np.asarray([_EESM_BETA[m.m_order] for m in rows], dtype=float)
+    for table_id, rows in MCS_TABLES.items()
+}
+for _beta_values in DEFAULT_BETA_BY_MCS_TABLE.values():
+    _beta_values.setflags(write=False)
 MCS_TABLE_SOURCES = {
     1: "3GPP TS 38.214 Table 5.1.3.1-1",
     2: "3GPP TS 38.214 Table 5.1.3.1-2",
@@ -408,6 +462,14 @@ class BlerModel:
     implementation_loss_db: float = 1.0
     c: float = 2.2
 
+    def __post_init__(self) -> None:
+        self.implementation_loss_db = float(self.implementation_loss_db)
+        self.c = float(self.c)
+        if not math.isfinite(self.implementation_loss_db):
+            raise ValueError("implementation_loss_db 必须是有限数")
+        if not math.isfinite(self.c) or self.c <= 0.0:
+            raise ValueError("c 必须是有限正数")
+
     def bler(self, sinr_eff_db: Any, mcs: Mcs, n_coded_bits: int,
              n_code_blocks: int = 1) -> np.ndarray:
         from scipy.stats import norm  # noqa: PLC0415
@@ -433,8 +495,14 @@ class BlerModel:
                 hi = mid
         return 0.5 * (lo + hi)
 
-    def anchor_check(self, table: int = 1, n_coded_bits: int = 20000,
-                     target_bler: float = 0.1) -> dict[str, Any]:
+    def anchor_check(
+        self,
+        table: int = 1,
+        n_coded_bits: int = 20000,
+        target_bler: float = 0.1,
+        *,
+        reference_thresholds: dict[int, float] | None = None,
+    ) -> dict[str, Any]:
         """报出各 MCS 的 10% BLER 门限，供人工对照公开的 NR 链路级曲线。
 
         **这不是自动判定**——没有参考数据就没法自动判。它做的是把模型的
@@ -443,16 +511,29 @@ class BlerModel:
         香农极限对应信噪比。
         """
         tbl = MCS_TABLES[table]
+        refs: dict[int, float] = {}
+        for raw_mcs, raw_threshold in (reference_thresholds or {}).items():
+            if (isinstance(raw_mcs, (bool, np.bool_))
+                    or not isinstance(raw_mcs, (int, np.integer))):
+                raise ValueError("reference_thresholds 的 MCS key 必须是整数")
+            threshold = float(raw_threshold)
+            if not math.isfinite(threshold):
+                raise ValueError("reference_thresholds 的门限必须是有限 dB 值")
+            refs[int(raw_mcs)] = threshold
         rows, thr = [], []
         for m in tbl:
             t = self.required_sinr_db(m, n_coded_bits, target_bler)
             shannon_db = 10.0 * math.log10(2.0 ** m.se - 1.0) if m.se > 0 else -np.inf
+            reference_db = refs.get(int(m.index))
             rows.append({
                 "mcs": m.index, "modulation": _MOD_NAME[m.q_m],
                 "code_rate": round(m.rate, 3), "se": m.se,
                 "required_sinr_db": round(t, 2),
                 "shannon_limit_db": round(shannon_db, 2),
                 "gap_to_shannon_db": round(t - shannon_db, 2),
+                "reference_threshold_db": reference_db,
+                "diff_to_reference_db": (
+                    round(t - reference_db, 2) if reference_db is not None else None),
             })
             thr.append(t)
 
@@ -478,6 +559,8 @@ class BlerModel:
             "modulation_switch_drops": drops,
             "above_shannon_limit": above,
             "span_db": [rows[0]["required_sinr_db"], rows[-1]["required_sinr_db"]],
+            "reference_thresholds_supplied": bool(refs),
+            "unmatched_reference_mcs": sorted(set(refs) - {m.index for m in tbl}),
             "rows": rows,
             "expected_span_note": (
                 "公开 NR 链路级曲线的常见量级：MCS0 约 -5~-7 dB，MCS28 约 20~23 dB。"
@@ -505,8 +588,21 @@ class CurveBlerModel:
     tx_mode: str = "newtx"
     source_id: str = "preset_20b_256qam"
 
+    def __post_init__(self) -> None:
+        if self.tx_mode not in bc.TX_MODES:
+            raise ValueError(f"tx_mode must be one of {bc.TX_MODES}, got {self.tx_mode!r}")
+        if self.source_id not in _BLER_CURVE_SOURCES:
+            raise ValueError(
+                f"unknown BLER curve source {self.source_id!r}; "
+                f"available={available_bler_curve_sources()}"
+            )
+
     def _curve(self, mcs: Mcs) -> bc.DemodCurve:
-        curve = bc.get_curve(mcs.index, self.tx_mode)
+        curve = _BLER_CURVE_SOURCES[self.source_id](mcs.index, self.tx_mode)
+        if curve.source_id != self.source_id:
+            raise ValueError(
+                f"curve provider {self.source_id!r} returned source_id={curve.source_id!r}"
+            )
         if curve.q_m != mcs.q_m:
             raise ValueError(
                 f"curve MCS {mcs.index} uses Qm={curve.q_m}, but table uses Qm={mcs.q_m}"
@@ -528,26 +624,105 @@ class CurveBlerModel:
         return self._curve(mcs).required_sinr_db(target_bler)
 
 
-DEFAULT_BLER = BlerModel()
-DEFAULT_CURVE_BLER = CurveBlerModel("newtx")
-DEFAULT_CURVE_RETX_BLER = CurveBlerModel("retx")
+_BlerCurveProvider = Callable[[int, str], bc.DemodCurve]
+_BLER_CURVE_SOURCES: dict[str, _BlerCurveProvider] = {
+    bc.data.SOURCE_ID: bc.get_curve,
+}
+
+
+def available_bler_curve_sources() -> tuple[str, ...]:
+    """返回当前进程已注册的 BLER 曲线源 ID。"""
+    return tuple(sorted(_BLER_CURVE_SOURCES))
+
+
+def register_bler_curve_source(
+    source_id: str,
+    provider: _BlerCurveProvider,
+    *,
+    replace: bool = False,
+) -> None:
+    """注册由调用方提供的曲线源，不把外部曲线数据嵌入仓库。"""
+    source = str(source_id).strip()
+    if not source:
+        raise ValueError("source_id 不能为空")
+    if not callable(provider):
+        raise TypeError("provider 必须可调用")
+    if source in _BLER_CURVE_SOURCES and not replace:
+        raise ValueError(f"BLER curve source {source!r} is already registered")
+    _BLER_CURVE_SOURCES[source] = provider
+
+
+def make_bler_model(
+    table: int,
+    *,
+    config: dict[str, Any] | None = None,
+) -> BlerModel | CurveBlerModel:
+    """按 MCS 表与显式配置构造独立 BLER 模型实例。
+
+    表 1/2 使用有限码长解析模型；表 3 使用注册的预置曲线。未知配置项会硬失败，
+    避免用户以为 override 生效而实际被静默忽略。
+    """
+    if (isinstance(table, (bool, np.bool_))
+            or not isinstance(table, (int, np.integer))):
+        raise ValueError(f"mcs table must be one of {sorted(MCS_TABLES)}, got {table}")
+    table_id = int(table)
+    if table_id not in MCS_TABLES:
+        raise ValueError(f"mcs table must be one of {sorted(MCS_TABLES)}, got {table}")
+    if config is None:
+        values: dict[str, Any] = {}
+    elif isinstance(config, dict):
+        values = dict(config)
+    else:
+        raise TypeError("config 必须是 dict 或 None")
+    if table_id == 3:
+        allowed = {"source_id", "tx_mode"}
+        unknown = sorted(set(values) - allowed)
+        if unknown:
+            raise ValueError(f"table 3 BLER config 不支持字段 {unknown}")
+        return CurveBlerModel(
+            tx_mode=str(values.get("tx_mode", "newtx")),
+            source_id=str(values.get("source_id", bc.data.SOURCE_ID)),
+        )
+    allowed = {"c", "implementation_loss_db"}
+    unknown = sorted(set(values) - allowed)
+    if unknown:
+        raise ValueError(f"analytic BLER config 不支持字段 {unknown}")
+    return BlerModel(
+        implementation_loss_db=float(values.get("implementation_loss_db", 1.0)),
+        c=float(values.get("c", 2.2)),
+    )
+
+
+DEFAULT_BLER = make_bler_model(1)
+DEFAULT_CURVE_BLER = make_bler_model(3)
+DEFAULT_CURVE_RETX_BLER = make_bler_model(3, config={"tx_mode": "retx"})
 
 
 def _default_bler_model(table: int) -> BlerModel | CurveBlerModel:
-    if table not in MCS_TABLES:
-        raise ValueError(f"mcs table must be one of {sorted(MCS_TABLES)}, got {table}")
-    return DEFAULT_CURVE_BLER if table == 3 else DEFAULT_BLER
+    return make_bler_model(table)
 
 
-def curve_anchor_check(target_bler: float = 0.1) -> dict[str, Any]:
+def curve_anchor_check(
+    target_bler: float = 0.1,
+    *,
+    reference_thresholds: dict[int, float] | None = None,
+    source_id: str = "preset_20b_256qam",
+) -> dict[str, Any]:
     """Return NewTx/ReTx thresholds for every MCS in the tabulated profile."""
+    refs = {int(key): float(value)
+            for key, value in (reference_thresholds or {}).items()}
+    if any(not math.isfinite(value) for value in refs.values()):
+        raise ValueError("reference_thresholds 的门限必须是有限 dB 值")
+    newtx_model = CurveBlerModel("newtx", source_id=source_id)
+    retx_model = CurveBlerModel("retx", source_id=source_id)
     rows = []
     for mcs in MCS_TABLE_3:
-        new = bc.get_curve(mcs.index, "newtx")
-        retx = bc.get_curve(mcs.index, "retx")
+        new = newtx_model._curve(mcs)
+        retx = retx_model._curve(mcs)
         new_thr = new.required_sinr_db(target_bler)
         retx_thr = retx.required_sinr_db(target_bler)
         shannon_db = 10.0 * math.log10(2.0 ** mcs.se - 1.0) if mcs.se > 0 else -np.inf
+        reference_db = refs.get(int(mcs.index))
         rows.append({
             "mcs": mcs.index,
             "modulation": _MOD_NAME[mcs.q_m],
@@ -558,16 +733,24 @@ def curve_anchor_check(target_bler: float = 0.1) -> dict[str, Any]:
             "retx_gain_db": round(new_thr - retx_thr, 3),
             "shannon_limit_db": round(shannon_db, 3),
             "newtx_gap_to_shannon_db": round(new_thr - shannon_db, 3),
+            "reference_threshold_db": reference_db,
+            "diff_to_reference_db": (
+                round(new_thr - reference_db, 3)
+                if reference_db is not None else None),
         })
+    builtin = source_id == bc.data.SOURCE_ID
     return {
-        "source_id": bc.data.SOURCE_ID,
+        "source_id": source_id,
         "target_bler": target_bler,
-        "axis_source_name": bc.data.SOURCE_AXIS_NAME,
-        "axis_original_label": bc.data.SOURCE_AXIS_ORIGINAL_LABEL,
-        "axis_interpretation": bc.data.SOURCE_AXIS_USAGE,
-        "receiver_model": bc.data.RECEIVER_MODEL,
-        "profile_scope": bc.data.PROFILE_SCOPE,
-        "verify": bc.verify_curves(target_bler),
+        "reference_thresholds_supplied": bool(refs),
+        "unmatched_reference_mcs": sorted(set(refs) - {m.index for m in MCS_TABLE_3}),
+        "axis_source_name": bc.data.SOURCE_AXIS_NAME if builtin else "provider-defined",
+        "axis_original_label": (
+            bc.data.SOURCE_AXIS_ORIGINAL_LABEL if builtin else "provider-defined"),
+        "axis_interpretation": bc.data.SOURCE_AXIS_USAGE if builtin else "provider-defined",
+        "receiver_model": bc.data.RECEIVER_MODEL if builtin else "provider-defined",
+        "profile_scope": bc.data.PROFILE_SCOPE if builtin else "provider-defined",
+        "verify": bc.verify_curves(target_bler) if builtin else None,
         "rows": rows,
         "caveat": (
             "These are bundled preset demodulation curves, not 3GPP reference BLER. "
@@ -575,14 +758,23 @@ def curve_anchor_check(target_bler: float = 0.1) -> dict[str, Any]:
             "classic MMSE receiver. The MCS curve is universal across TBS/RE/rank/"
             "scenario by product decision. Raw ReTx rows are audit-only for the "
             "current system HARQ model."
+            if builtin else
+            "This curve source was registered at runtime. Its calibration, receiver, "
+            "axis and scope are provider-defined and must be validated by the caller."
         ),
     }
 
 
 def bler_curve(mcs: int, tx_mode: str = "newtx", target_bler: float = 0.1,
-               sinr_db: Any | None = None) -> dict[str, Any]:
+               sinr_db: Any | None = None, *,
+               source_id: str = "preset_20b_256qam") -> dict[str, Any]:
     """Return a raw curve plus an optional interpolated BLER query."""
-    curve = bc.get_curve(mcs, tx_mode)
+    if (isinstance(mcs, (bool, np.bool_))
+            or not isinstance(mcs, (int, np.integer))
+            or not 0 <= int(mcs) < len(MCS_TABLE_3)):
+        raise ValueError(f"MCS must be 0..{len(MCS_TABLE_3) - 1}, got {mcs!r}")
+    table_mcs = MCS_TABLE_3[int(mcs)]
+    curve = CurveBlerModel(tx_mode, source_id=source_id)._curve(table_mcs)
     out = curve.as_dict(include_points=True)
     out["target_bler"] = float(target_bler)
     out["required_sinr_db"] = round(curve.required_sinr_db(target_bler), 4)
@@ -615,8 +807,10 @@ def harq_retransmission_bler(
     *,
     combining: str = "ir",
     table: int = 3,
+    n_coded_bits: int = 20000,
+    n_code_blocks: int = 1,
 ) -> dict[str, Any]:
-    """一次重传的预置 TB-BLER 工程抽象。
+    """一次重传的 TB-BLER 工程抽象。
 
     发射侧 MCS、RBG 数、rank/TBS 由 HARQ TB 状态原样保留；这里返回的
     ``lookup_mcs`` 只是 BLER 查表用的等效档位，绝不改写重传 DCI/MCS。
@@ -625,15 +819,17 @@ def harq_retransmission_bler(
     * ``ir``：默认。两次传输共同解一份数据，等效谱效为原 MCS 的一半，
       在同一 MCS 表中向下映射后，以当前码字 SINR 查询 NewTx 曲线。
     """
-    if table != 3:
-        raise ValueError("预置 HARQ 合并抽象当前只支持 MCS table 3")
+    if table not in MCS_TABLES:
+        raise ValueError(f"mcs table must be one of {sorted(MCS_TABLES)}, got {table}")
     if (isinstance(transmitted_mcs, (bool, np.bool_))
             or not isinstance(transmitted_mcs, (int, np.integer))):
         raise ValueError(
-            f"transmitted_mcs 必须是 0..27 的整数，收到 {transmitted_mcs!r}")
+            f"transmitted_mcs 必须是整数，收到 {transmitted_mcs!r}")
     mcs = int(transmitted_mcs)
     if mcs < 0 or mcs >= len(MCS_TABLES[table]):
-        raise ValueError(f"transmitted_mcs 必须在 0..27，收到 {transmitted_mcs}")
+        raise ValueError(
+            f"transmitted_mcs 必须在 0..{len(MCS_TABLES[table]) - 1}，"
+            f"收到 {transmitted_mcs}")
     scheme = str(combining).strip().lower()
     if scheme not in ("cc", "ir"):
         raise ValueError("harq combining 只支持 ir / cc")
@@ -654,7 +850,16 @@ def harq_retransmission_bler(
         else:
             lookup_sinr = sinr
         lookup_sinr = float(np.clip(lookup_sinr, -60.0, 60.0))
-        bler = float(bc.get_curve(lookup_mcs, "newtx").evaluate(lookup_sinr)[0])
+        if table == 3:
+            bler = float(bc.get_curve(lookup_mcs, "newtx").evaluate(lookup_sinr)[0])
+        else:
+            model = make_bler_model(table)
+            bler = float(model.bler(
+                lookup_sinr,
+                MCS_TABLES[table][lookup_mcs],
+                int(n_coded_bits),
+                int(n_code_blocks),
+            )[0])
     return {
         "combining": scheme,
         "transmitted_mcs": mcs,
@@ -666,7 +871,9 @@ def harq_retransmission_bler(
         "original_spectral_efficiency": MCS_TABLES[table][mcs].se,
         "equivalent_spectral_efficiency": float(equivalent_se),
         "bler": float(np.clip(bler, 0.0, 1.0)),
-        "curve_tx_mode": "newtx",
+        "curve_tx_mode": "newtx" if table == 3 else "analytic",
+        "bler_source": (
+            bc.data.SOURCE_ID if table == 3 else "finite_blocklength_analytic"),
         "transmission_identity": "same transmitted MCS/RBG/rank/TBS; lookup-only abstraction",
     }
 
@@ -747,7 +954,7 @@ def reported_cqi_to_mcs(
     *,
     mcs_table: int = 3,
 ) -> dict[str, Any]:
-    """Resolve a reported 4-bit CQI codepoint 0..15 through the 256QAM profile.
+    """Resolve a reported 4-bit CQI codepoint 0..15 through the active profile.
 
     Codepoint 0 is an explicit out-of-range state and schedules no MCS. Codepoints
     1..15 map to legacy internal rows 0..14. Keeping this adapter separate avoids a
@@ -808,8 +1015,25 @@ def _internal_cqi_thresholds(
     future mapping clips two adjacent rows to the same MCS, only the first codepoint
     is reachable; the duplicate row is assigned ``+inf``.
     """
+    if mcs_table in (1, 2):
+        model = make_bler_model(int(mcs_table))
+        out: list[float] = []
+        previous_resolved_mcs: int | None = None
+        for cqi in range(len(INTERNAL_CQI_TO_MCS)):
+            row = internal_cqi_to_mcs(cqi, mcs_table=int(mcs_table))
+            resolved_mcs = int(row["mcs"])
+            if resolved_mcs == previous_resolved_mcs:
+                out.append(float("inf"))
+            else:
+                out.append(float(model.required_sinr_db(
+                    MCS_TABLES[int(mcs_table)][resolved_mcs],
+                    20000,
+                    float(target_bler),
+                )))
+            previous_resolved_mcs = resolved_mcs
+        return tuple(out)
     if mcs_table != 3:
-        raise ValueError("internal CQI threshold lookup currently requires mcs_table=3")
+        raise ValueError(f"mcs table must be one of {sorted(MCS_TABLES)}, got {mcs_table}")
     out: list[float] = []
     previous_resolved_mcs: int | None = None
     for cqi in range(len(INTERNAL_CQI_TO_MCS)):

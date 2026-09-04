@@ -1572,6 +1572,13 @@ def _build_mu_plan(
     corr_thr = float(getattr(sched, "mu_corr_threshold", 0.7))
     mu_rank = int(getattr(sched, "mu_rank_per_user", 2))
     olla_enabled = bool(getattr(sched, "olla_enabled", True))
+    min_pairing_mcs = int(getattr(sched, "min_pairing_mcs", 4))
+    orthogonalization_mode = str(
+        getattr(sched, "orthogonalization_mode", "select"))
+    if orthogonalization_mode not in ("none", "select", "schmidt"):
+        raise ValueError("orthogonalization_mode 只支持 none / select / schmidt")
+    if orthogonalization_mode == "schmidt":
+        raise NotImplementedError("TODO: Schmidt 正交化未实现")
 
     def _single_user_grant(user: int) -> _PlannedGrant | None:
         q = int(queue_bytes[user])
@@ -1697,10 +1704,19 @@ def _build_mu_plan(
         link = getattr(tables[anchor], "mu_links", {}).get(partner)
         if link is None:
             return _reject(anchor, partner, pf_order, "missing_pair_link")
+        below = [
+            user for user in (anchor, partner)
+            if int(mcs_of[user]) < min_pairing_mcs
+        ]
+        if below:
+            return _reject(
+                anchor, partner, pf_order,
+                "mcs_below_min_pairing")
         correlation = float(link.correlation[snap])
         if not np.isfinite(correlation):
             return _reject(anchor, partner, pf_order, "nonfinite_correlation")
-        if correlation > corr_thr:
+        if (orthogonalization_mode == "select"
+                and correlation > corr_thr):
             return _reject(
                 anchor, partner, pf_order, "correlation_threshold",
                 correlation=correlation)
@@ -1850,6 +1866,10 @@ def _build_mu_plan(
                     float(value["true"]))
 
         mcs_list = tuple(int(value["mcs"]) for value in actual)
+        if any(mcs < min_pairing_mcs for mcs in mcs_list):
+            return _reject(
+                anchor, partner, pf_order, "pair_mcs_below_min_pairing",
+                correlation=correlation)
         predicted_blers = tuple(
             _bler_lookup(
                 int(value["mcs"]),
@@ -2348,6 +2368,8 @@ def simulate_experience(
     mu_rbg_equiv = 0.0
     mu_prb_equiv = 0.0
     su_decisions = mu_decisions = su_forced_clear = harq_retx_forced_su = 0
+    pf_gain_rejects = 0
+    pf_gain_ratios: list[float] = []
     su_plan_useful = mu_plan_useful = 0
     allocated_rbg = scheduled_ues_sum = 0
     allocated_rbg_full = 0
@@ -2403,6 +2425,15 @@ def simulate_experience(
     srb_observed = False
     mixed_epf_medians: list[float] = []
     mixed_edf_medians: list[float] = []
+
+    def _plan_pf_metric(plan: _TtiPlan) -> float:
+        """当前 PF 状态下计划的线性化比例公平度量。"""
+        return float(sum(
+            float(useful) / max(float(r_avg[user]), _EPS)
+            for grant in plan.grants
+            for user, useful in zip(
+                grant.users, grant.useful_bytes, strict=True)
+        ))
 
     for tti in range(int(sys_cfg.num_tti)):
         in_measurement = tti >= warmup
@@ -2703,6 +2734,17 @@ def simulate_experience(
         if in_measurement and not pending_ready:
             su_plan_useful += su_plan.useful_bytes
             mu_plan_useful += mu_plan.useful_bytes
+        _su_pf = _plan_pf_metric(su_plan)
+        _mu_pf = _plan_pf_metric(mu_plan)
+        _pf_ratio = (_mu_pf / max(_su_pf, _EPS)
+                     if mu_plan.has_mu else 0.0)
+        _pf_threshold = float(getattr(sched, "pf_gain_threshold", 0.0))
+        _pf_gate_pass = (
+            _pf_threshold <= 0.0
+            or _pf_ratio >= _pf_threshold + 1e-9
+        )
+        if in_measurement and mu_plan.has_mu:
+            pf_gain_ratios.append(float(_pf_ratio))
         if pending_ready:
             selected_plan = su_plan
             selected_reason = "HARQ_retx_priority"
@@ -2712,14 +2754,19 @@ def simulate_experience(
             selected_reason = "SU_clears_all_queues"
             su_forced_clear += int(in_measurement)
         elif (bool(sched.mu_enabled) and mu_plan.has_mu
-              and mu_plan.useful_bytes >= su_plan.useful_bytes):
+              and mu_plan.useful_bytes >= su_plan.useful_bytes
+              and _pf_gate_pass):
             selected_plan = mu_plan
             selected_reason = "MU_useful_bytes_ge_SU"
             mu_decisions += int(in_measurement)
         else:
             selected_plan = su_plan
-            selected_reason = ("SU_useful_bytes_gt_MU" if mu_plan.has_mu
-                               else "SU_no_eligible_MU_pair")
+            if mu_plan.has_mu and not _pf_gate_pass:
+                selected_reason = "SU_pf_gain_below_threshold"
+                pf_gain_rejects += int(in_measurement)
+            else:
+                selected_reason = ("SU_useful_bytes_gt_MU" if mu_plan.has_mu
+                                   else "SU_no_eligible_MU_pair")
             su_decisions += int(in_measurement)
 
         final_grants = _finalize_selected_plan(
@@ -3833,6 +3880,15 @@ def simulate_experience(
             "mu_planned_useful_bytes": int(mu_plan_useful),
             "comparison_unit": "useful_payload_bytes_capped_by_queue",
             "tie_break": "MU when eligible and MU >= SU",
+            "min_pairing_mcs": int(getattr(sched, "min_pairing_mcs", 4)),
+            "pf_gain_threshold": float(
+                getattr(sched, "pf_gain_threshold", 0.0)),
+            "pf_gain_rejects": int(pf_gain_rejects),
+            "pf_gain_ratio_mean": (
+                float(np.mean(pf_gain_ratios)) if pf_gain_ratios else None),
+            "pf_gain_metric": "sum(useful_bytes / PF_R_avg_bytes)",
+            "orthogonalization_mode": str(
+                getattr(sched, "orthogonalization_mode", "select")),
         },
         "su_olla_db_mean": float(np.mean(olla_db)),
         "mu_olla_db_mean": float(np.mean(mu_olla_db)),

@@ -6,7 +6,7 @@ SuperRAN 由**一位维护者**（无线通信工程师）主导，Agent 是执�
 所有协作规则在 `.agents/` 目录，**开工前必读，不要按聊天里粘贴的 prompt 工作**：
 
 - 实现任务：`.agents/AUTHOR.md`
-- 独立审核：`.agents/REVIEWER.md`
+- 独立审核：`.agents/MERGER.md`
 - 需要几个 Reviewer：`.agents/RISK.md`（按文件路径查表，不许自己估）
 - 推送与建 PR：`.agents/SYNC.md`（只在维护者明确说“同步 GitHub”时执行）
 - 仿真设计、数据生成或性能结论：`skills/channel-sim/SKILL.md`
@@ -425,10 +425,11 @@ IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在�
 有MCS0..27，最高行请求MCS28但必须显式钳到27，不得伪造MCS28曲线。
 所有高层链路/吞吐/SNR扫频接口默认都用表3的256QAM profile；
 表1的64QAM和表2的标准256QAM只在调用方显式指定时使用。
-**`build_link_tables` 硬拒绝非表 3**：只有 preset_20b_256qam 同时具备 28 档 NewTx
-曲线与内部 CQI 映射，混用会让量化门限与选档口径各用一张表且不报错。
-这是 **breaking migration**：旧代码若调用 `build_link_tables(table=1/2)`，现在会在建表
-入口立即失败；系统/体验路径请迁移到 `table=3`，Table 1/2 仅保留在显式链路级接口。
+`build_link_tables` 的三张表各走同一口径：表 1/2 的 CQI 门限、MCS 选择、首传与一次
+IR/CC 重传统一使用有限码长解析 BLER；表 3 使用 preset_20b_256qam 曲线，不能交叉借表。
+`capacity/legacy_v1` 可显式选择表 1/2，但结果会逐次标注“解析、未按特定译码器或现场
+曲线标定”；`experience_v2` 仍硬拒绝非表 3，因为它的 TBS/单码字 TBLER profile 只在
+表 3 上冻结。默认仍是表 3，旧调用的数值路径不变。
 `target_bler` 可配，但必须落在 28 档曲线的**共同实测区间 [0.001, 0.998]** 内，
 越界提前硬失败而不是在深层抛一个看不出哪档的 ValueError。注意这条链里目标 BLER
 **开环几乎抵消**（它同时出现在 CQI→Γ 与 Γ→MCS 两侧，两次平移方向相同），真正
@@ -850,6 +851,13 @@ OLLA 前基准 MCS 即使不过 0.5，也不能替实际发送档放行配对。
 分支一起删除**，给了就在 `SchedulerConfig` 构造处硬失败。实测同一组配置：
 pair 表口径下开 MU 把首传平均 MCS 从 23.48 压到 19.93，历史口径是 22.68 → 22.69
 （一档都没降）——这就是删掉它的理由。`measure_mu_gain()` 本身保留为独立测量原语。
+
+MU 准入还有三层显式门：`min_pairing_mcs` 默认 4，低于该档的用户只参与 SU；
+`pf_gain_threshold` 默认 0（关闭、保持历史行为），启用后用当前
+`Σ(useful_bytes / PF_R_avg)` 比较 MU/SU 计划并作否决；`orthogonalization_mode`
+默认 `select`（相关性筛选），`none` 关闭筛选，`schmidt` 目前硬报
+`NotImplementedError`，绝不静默退回 `select`。这些是准入门，不替代最终的小区谱效或
+队列封顶 useful-bytes 方案比较；设 `min_pairing_mcs=0,pf_gain_threshold=0` 可复现旧准入。
 
 **−3.01 dB 只是记账标签，不是近似。** 按定义 `CorrLoss = pred_MU − pred_SU −
 PowerLoss`，所以决策里真正用的平移量 `CorrLoss + PowerLoss` 恒等于
