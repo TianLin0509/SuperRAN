@@ -16,6 +16,9 @@
 
 ## 公司 Agent 回路（单向）
 
+给它的合同是 `.agents/COMPANY.md`，连同 GitHub 下载的 zip 一起发。
+它的报告放 `docs/inbox/`（该目录已 gitignore，不进公开仓库）。
+
 公司 Agent 拿到的是 zip 快照，它给回来的 patch 大概率打不上当前 HEAD。所以：
 
 - 公司 Agent **只产出问题清单**：文件 + 行号 + 物理论据 + 最强反例。

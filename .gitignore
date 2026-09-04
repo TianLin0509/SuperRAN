@@ -28,3 +28,7 @@ Thumbs.db
 
 # playwright-cli 的会话日志（跑浏览器验证时产生）
 .playwright-cli/
+
+# 公司审阅报告只留本地，不进公开仓库
+docs/inbox/*
+!docs/inbox/README.md
