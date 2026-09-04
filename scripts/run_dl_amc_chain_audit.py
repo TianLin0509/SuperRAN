@@ -409,28 +409,22 @@ def experiment_capacity_mu_accounting() -> dict:
     cfg = sy.SystemConfig(evaluation_mode="capacity", duration_s=0.6,
                           tdd_pattern="DDDSU", seed=4242)
 
-    def run(tables, *, mu_on, accounting, ratio=1.0):
+    def run(tables, *, mu_on):
         return sy.simulate(
             tables, sys_cfg=cfg,
             traffic=sy.TrafficConfig(model="full_buffer"),
-            sched=sy.SchedulerConfig(mu_enabled=mu_on,
-                                     mu_accounting=accounting),
+            sched=sy.SchedulerConfig(mu_enabled=mu_on),
             kpi=sy.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
-            mu_se_ratio=ratio, rng=rg.RngBook(4242, 0))
+            rng=rg.RngBook(4242, 0))
 
     indep = _mu_tables(0.0)
     pair_graph = smu.validate_pair_graph(indep)
-    su = run(indep, mu_on=False, accounting="pair_table")
-    pair = run(indep, mu_on=True, accounting="pair_table")
-    corr = run(_mu_tables(0.999), mu_on=True, accounting="pair_table")
-    # 历史标量口径要用不含 pair 数据的表，与它当年的输入一致
-    legacy_tabs = sy.build_link_tables(
-        [indep[0].h_true_rbg, indep[1].h_true_rbg], [14.0, 12.0],
-        max_rank=2, rb_per_rbg=16, mu_enabled=False,
-        csi=ca.CsiConfig(enabled=False))
-    legacy = run(legacy_tabs, mu_on=True,
-                 accounting="se_ratio_legacy", ratio=1.4)
-    legacy_su = run(legacy_tabs, mu_on=False, accounting="pair_table")
+    su = run(indep, mu_on=False)
+    pair = run(indep, mu_on=True)
+    corr = run(_mu_tables(0.999), mu_on=True)
+    # 历史标量口径 se_ratio_legacy 的对照臂已随该路径于 2026-09-04 一起删除：
+    # 配置层就会拒绝它，跑不出来。它当年证明的"配对完全不压 MCS"由下面的
+    # 正向断言 pair < su 反过来守住。
 
     link = indep[0].mu_links[1]
     delta_db = float(np.mean(link.true_sinr_db
@@ -496,16 +490,12 @@ def experiment_capacity_mu_accounting() -> dict:
     assert olla_admission.cell["mu_share"] > 0
     assert olla_admission.cell["mu_pair_rejects"] > 0
     assert pair.cell["avg_mcs_first_tx"] < su.cell["avg_mcs_first_tx"]
-    assert abs(legacy.cell["avg_mcs_first_tx"]
-               - legacy_su.cell["avg_mcs_first_tx"]) < 0.5
     assert corr.cell["mu_share"] < 0.05
     return {
         "question": "capacity 开 MU 之后，配对的代价体现在哪几处",
         "arms": {
             "SU_only": _cell(su),
             "MU_pair_table": _cell(pair),
-            "MU_se_ratio_legacy": _cell(legacy),
-            "SU_baseline_for_legacy": _cell(legacy_su),
             "MU_pair_table_corr0.999": _cell(corr),
         },
         "pair_true_minus_su_true_db": round(delta_db, 3),

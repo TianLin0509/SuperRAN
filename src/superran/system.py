@@ -97,7 +97,7 @@ SmallBurstPolicy = Literal["fractional_slot", "exclude"]
 HarqCombining = Literal["ir", "cc"]
 TtiTraceMode = Literal["off", "sampled", "full"]
 FrequencySelectionMode = Literal["auto", "on", "off"]
-MuAccounting = Literal["pair_table", "se_ratio_legacy"]
+MuAccounting = Literal["pair_table"]
 
 
 # ---------------------------------------------------------------------------
@@ -497,9 +497,9 @@ class SchedulerConfig:
     # 默认 1.0 保持历史行为；正式短时体验实验若启用，必须随结果显式上报。
     olla_warmup_speedup: float = 1.0
     # **默认关**：先看清 SU 基线。这也与 ``sr_system_sim(mu_enabled=False)``
-    # 和 skills/channel-sim 的口径一致。历史上这里写的是 True，但当时
-    # ``mu_se_ratio`` 默认 1.0，``use_mu`` 需要 ratio>1 才成立，所以默认路径
-    # 上 MU 从来没真正触发过；experience 那边则是直接硬失败（缺 pair 表）。
+    # 和 skills/channel-sim 的口径一致。历史上这里写的是 True，但当时的标量
+    # 入口 ``mu_se_ratio`` 默认 1.0、需要 >1 才切 MU，所以默认路径上 MU 从来
+    # 没真正触发过；experience 那边则是直接硬失败（缺 pair 表）。
     # 两条路径现在都要求"开了 MU 就必须有 pair 数据"，默认必须显式为关。
     mu_enabled: bool = False             # 是否允许 MU 配对（SU/MU 自适应）
     max_mu_users: int = 2
@@ -518,19 +518,17 @@ class SchedulerConfig:
     # MU 与 SU 分开维护 OLLA；步长可先复用同一基线，但状态绝不能共用。
     mu_olla_step_up_db: float = 0.01
     mu_olla_step_down_db: float | None = None
-    # **MU 的记账口径**（用户 2026-09-02 定：capacity 的误码/重传要与
-    # experience 基本一致）。
+    # **MU 的记账口径**。现在只剩一种：``pair_table``。
     #
-    # ``pair_table``（默认）
     #     与 experience_v2 同构：MCS 从 pair 表的 ``CorrLoss + powerLoss``
     #     平移出来、TBS 按该 MCS 全带算、**误块抽签用 pair 的真实 SINR**
     #     （ZF 权打到双方 h_true、对方的流进干扰协方差）。配对的代价同时
     #     体现在"发得更保守"和"更容易错"两侧。要求链路表已建 pair 数据。
     #
-    # ``se_ratio_legacy``
-    #     历史行为，只用于复现旧结果：MCS 与误块抽签都走 SU 单用户口径，
-    #     配对的代价只表现为 TBS 乘一个建表阶段测出的标量 ``mu_se_ratio``。
-    #     也就是"包变小但不更容易错"——物理上说不通，结果会系统性乐观。
+    # 历史的 ``se_ratio_legacy`` 已于 2026-09-04 删除：它让 MCS 与误块抽签
+    # 都走 SU 单用户口径，配对代价只表现为 TBS 乘一个标量 ``mu_se_ratio``，
+    # 也就是"包变小但不更容易错"——物理上说不通，配对越激进结果越乐观。
+    # 保留成兜底只会让这种乐观**静默**发生，所以选中它现在直接报错。
     mu_accounting: MuAccounting = "pair_table"
 
     def __post_init__(self) -> None:
@@ -621,10 +619,15 @@ class SchedulerConfig:
                 "orthogonalization_mode 只支持 none / select / schmidt")
         if self.orthogonalization_mode == "schmidt":
             raise NotImplementedError("TODO: Schmidt 正交化未实现")
-        if self.mu_accounting not in ("pair_table", "se_ratio_legacy"):
+        if str(self.mu_accounting) == "se_ratio_legacy":
             raise ValueError(
-                "mu_accounting 只支持 pair_table / se_ratio_legacy，"
-                f"收到 {self.mu_accounting!r}")
+                "mu_accounting='se_ratio_legacy' 已于 2026-09-04 废除：它只把 TBS "
+                "乘一个标量 mu_se_ratio，配对代价不进误块抽签，结果系统性乐观。"
+                "请改用 mu_accounting='pair_table'（默认），并在预计算时传 "
+                "build_link_tables(..., mu_enabled=True) 建出 pair 表。")
+        if self.mu_accounting != "pair_table":
+            raise ValueError(
+                f"mu_accounting 只支持 pair_table，收到 {self.mu_accounting!r}")
         if self.mu_precoder not in ("zf", "rzf"):
             raise ValueError("mu_precoder 只支持 zf / rzf")
         if (not np.isfinite(self.mu_csi_error_variance)
@@ -2937,14 +2940,15 @@ def simulate(
     traffic: TrafficConfig | None = None,
     sched: SchedulerConfig | None = None,
     kpi: KpiConfig | None = None,
-    mu_se_ratio: float = 1.0,
     rng: rg.RngBook | None = None,
     progress: Any = None,
 ) -> SystemResult:
     """跑 TTI 主循环。**这里没有任何矩阵运算**，全是查表加算术。
 
-    ``mu_se_ratio`` 是 MU 相对 SU 的小区谱效比（由 :func:`mumimo.su_mu_adaptation`
-    在第一相测出来）。>1 时调度器会在有足够用户排队时切到 MU。
+    MU 是否配对完全由 pair 表决定（见 ``SchedulerConfig.mu_accounting``）。
+    历史上还有一个标量入口 ``mu_se_ratio``：>1 就切 MU、并把 TBS 乘 ratio/K。
+    它已于 2026-09-04 随 ``se_ratio_legacy`` 一起删除——配对代价只缩 TBS
+    却不进误块抽签，物理上说不通。
 
     ``rng`` 是 :class:`rng.RngBook`，**按用途分流**：话务到达、HARQ 误码抽样、
     调度器决胜各拿一条互相独立的流。不给的话从 ``sys_cfg.seed`` 构造
@@ -3065,7 +3069,7 @@ def simulate(
                         "bler_source": "preset NewTx curves only",
                         "identity": "same MCS/RBG-count/rank/TBS as initial TB",
                     },
-                    "mu_se_ratio": 1.0, "rng": book.as_dict(),
+                    "rng": book.as_dict(),
                     "physical_approximations": {
                         "sinr": (
                             "RBG grant-specific single-codeword SINR/MCS; current TB "
@@ -3466,9 +3470,12 @@ def simulate(
             else:
                 mu_pair_reject += 1      # 一个通过准入的配对都没有
         else:
-            use_mu = mu_se_ratio > 1.0
-            picked = ([cand[i] for i in order[:sched.max_mu_users]]
-                      if use_mu else [cand[order[0]]])
+            # _mu_on 为真却没走到 _mu_pair，只可能是 mu_accounting 不是
+            # pair_table——那条路已经废除，不留静默兜底。
+            raise ValueError(
+                "已启用 MU 但没有可用的 pair 表口径：mu_accounting 必须是 "
+                "'pair_table'，且链路表要用 build_link_tables(..., "
+                "mu_enabled=True) 预计算出 pair 数据。")
         if use_mu:
             mu_tti += 1
             mu_rbg += sys_cfg.num_rbg          # MU 时整band 都是配对的
@@ -3478,7 +3485,6 @@ def simulate(
         # **MU 是空间复用，不是频率复用。** 配对的每个用户都拿**全带宽**，
         # 靠不同的空间波束区分。早先按 1/K 分 RE，MU 的聚合吞吐就和 SU 一模一样——
         # 等于把空间复用做成了时频复用，MU 增益整个消失。
-        n_pair = len(picked)
         actual_inst_se = np.zeros(n_ue, dtype=float)
         for u in picked:
             pend = harq_pending.get(u)
@@ -3508,20 +3514,15 @@ def simulate(
                 tb_bytes = int(pend.tb_bytes)
                 payload_bytes = int(pend.payload_bytes)
             else:
+                # **MU 是空间复用**：配对的每个用户都拿全带宽的 RE。
+                # 配对的代价已经在 _planned_mcs 里通过 pair 表的
+                # CorrLoss + powerLoss 进了 MCS，并在下面用 pair 的真实
+                # SINR 进误块抽签，这里**不再**额外缩 TBS——那会是重复计费。
                 tbs_bits = la.transport_block_size(
                     re_per_tti, mcs_obj.rate, mcs_obj.q_m, layers=r)
-                if use_mu and _mu_link is None:
-                    # **历史标量口径**（mu_accounting='se_ratio_legacy'）。
-                    # 配对后每人只分到 1/K 的功率、还要吃残余干扰，
-                    # mu_se_ratio 是建表阶段用真实 SU/MU 自适应测出来的**聚合**
-                    # 比值，除以配对数使 K 个用户加起来 = ratio x 单用户 SU。
-                    # pair 表口径下 MU 的代价已经进了 MCS 与误块抽签，
-                    # 这里再缩一次就是重复计费。
-                    tbs_bits *= mu_se_ratio / n_pair
                 tb_bytes = max(1, int(tbs_bits // 8))
                 payload_bytes = min(int(tr.bytes_left(u)), tb_bytes)
-            actual_inst_se[u] = mcs_obj.se * r * (
-                mu_se_ratio / n_pair if (use_mu and _mu_link is None) else 1.0)
+            actual_inst_se[u] = mcs_obj.se * r
 
             # HARQ：首传按该 MCS 的 BLER 判 ACK/NACK，失败进重传
             if pend is not None:
@@ -3722,12 +3723,10 @@ def simulate(
         # 现场经验值：30%~50% PRB 利用率下大约 5%~20%。
         "mu_rbg_share": mu_rbg / max(busy_tti * sys_cfg.num_rbg, 1),
         "su_fits_skips": int(su_fits_skip),
-        # MU 的代价从哪儿来。``pair_table`` 与 experience_v2 同构；
-        # ``se_ratio_legacy`` 只缩 TBS，不进误块抽签，结果会系统性乐观。
+        # MU 的代价从哪儿来。只剩 ``pair_table`` 一种口径，与 experience_v2 同构。
         "mu_accounting": _mu_mode if _mu_on else "mu_disabled",
         "mu_pair_graph": (_mu_pair_graph if _mu_pair_graph is not None else {
-            "status": "not_required", "reason": (
-                "mu_disabled" if not _mu_on else "se_ratio_legacy")}),
+            "status": "not_required", "reason": "mu_disabled"}),
         "mu_pair_rejects": int(mu_pair_reject),
         "mu_su_wins": int(mu_su_wins),
         "mu_pair_rejection_reasons": mu_pair_rejection_reasons,
@@ -3876,13 +3875,6 @@ def simulate(
             f"{int(mu_pair_reject)} 个 TTI 没有任何可接受的配对、"
             f"{int(mu_su_wins)} 个 TTI 判定单发更划算，都退回 SU。"
             "重传恒按 SU 重发——冻结的发送身份不允许改 SINR 与 TBS。")
-    elif _mu_on:
-        notes.append(
-            "**MU 记账口径 = se_ratio_legacy（历史行为）**：MCS 与误块抽签都走 "
-            "SU 单用户口径，配对的代价只表现为 TBS 乘标量 "
-            f"mu_se_ratio={float(mu_se_ratio):.4f}。也就是"
-            "「包变小但不更容易错」，物理上说不通，结果会系统性乐观。"
-            "只用于复现旧结果；出正式结论请改回 mu_accounting='pair_table'。")
     notes.append(
         ("ACK/NACK 搭发送之后第一个 U 时隙回传，OLLA 更新与重传资格从该 U "
          f"之后第一个 D/S 时隙起生效；{pattern} 下逐相位偏移 "
@@ -3924,7 +3916,6 @@ def simulate(
                     "feedback_offsets_tti": [int(x) for x in _fb_offsets],
                 },
                 "rank_policy": _rank_ctl.diagnostics(),
-                "mu_se_ratio": round(float(mu_se_ratio), 4),
                 "rng": {**book.as_dict(),
                         "event_mapping": "harq and scheduler tie-break indexed by [TTI,UE]"}},
         cell=cell, users=[x.as_dict() for x in users],
@@ -3950,7 +3941,6 @@ def _init_replication_process(
     traffic: TrafficConfig | None,
     sched: SchedulerConfig | None,
     kpi: KpiConfig | None,
-    mu_se_ratio: float,
 ) -> None:
     """Install read-only simulation state once in each spawned worker."""
     _REPLICATION_PROCESS_STATE.clear()
@@ -3960,7 +3950,6 @@ def _init_replication_process(
         "traffic": traffic,
         "sched": sched,
         "kpi": kpi,
-        "mu_se_ratio": float(mu_se_ratio),
     })
 
 
@@ -3969,8 +3958,7 @@ def _run_replication_process(index: int, book: rg.RngBook) -> tuple[int, SystemR
     state = _REPLICATION_PROCESS_STATE
     return index, simulate(
         state["tables"], sys_cfg=state["sys_cfg"], traffic=state["traffic"],
-        sched=state["sched"], kpi=state["kpi"],
-        mu_se_ratio=float(state["mu_se_ratio"]), rng=book)
+        sched=state["sched"], kpi=state["kpi"], rng=book)
 
 
 def _resolve_replication_workers(
@@ -4134,7 +4122,6 @@ def simulate_replications(
     traffic: TrafficConfig | None = None,
     sched: SchedulerConfig | None = None,
     kpi: KpiConfig | None = None,
-    mu_se_ratio: float = 1.0,
     build_elapsed_s: float = 0.0,
     replication_workers: int | str = 1,
     progress: Any = None,
@@ -4211,7 +4198,7 @@ def simulate_replications(
         for i, bk in enumerate(books):
             runs.append(simulate(
                 tables, sys_cfg=sys_cfg, traffic=traffic, sched=sched,
-                kpi=kpi, mu_se_ratio=mu_se_ratio, rng=bk))
+                kpi=kpi, rng=bk))
             if progress:
                 progress(i + 1, n)
     else:
@@ -4220,7 +4207,7 @@ def simulate_replications(
             with ProcessPoolExecutor(
                 max_workers=workers,
                 initializer=_init_replication_process,
-                initargs=(tables, sys_cfg, traffic, sched, kpi, float(mu_se_ratio)),
+                initargs=(tables, sys_cfg, traffic, sched, kpi),
             ) as pool:
                 futures = {
                     pool.submit(_run_replication_process, i, bk): i
@@ -4247,7 +4234,7 @@ def simulate_replications(
             for i, bk in enumerate(books):
                 runs.append(simulate(
                     tables, sys_cfg=sys_cfg, traffic=traffic, sched=sched,
-                    kpi=kpi, mu_se_ratio=mu_se_ratio, rng=bk))
+                    kpi=kpi, rng=bk))
                 if progress:
                     progress(i + 1, n)
 
@@ -4446,7 +4433,6 @@ def calibrate_traffic_to_prb(
     traffic: TrafficConfig,
     sched: SchedulerConfig | None = None,
     kpi: KpiConfig | None = None,
-    mu_se_ratio: float = 1.0,
     build_elapsed_s: float = 0.0,
     replication_workers: int | str = 1,
 ) -> TrafficCalibrationResult:
@@ -4512,7 +4498,7 @@ def calibrate_traffic_to_prb(
             tables, num_replications=int(probe_replications),
             master_seed=int(master_seed), replication_start=0,
             sys_cfg=sys_cfg, traffic=cfg,
-            sched=sched, kpi=kpi, mu_se_ratio=mu_se_ratio,
+            sched=sched, kpi=kpi,
             replication_workers=replication_workers)
         stat = probe.cell.get("serving_cell_prb_utilization", {})
         util = float(stat.get("mean", 0.0))
@@ -4562,7 +4548,7 @@ def calibrate_traffic_to_prb(
             master_seed=int(master_seed),
             replication_start=int(probe_replications),
             sys_cfg=sys_cfg, traffic=formal_cfg,
-            sched=sched, kpi=kpi, mu_se_ratio=mu_se_ratio,
+            sched=sched, kpi=kpi,
             build_elapsed_s=float(build_elapsed_s),
             replication_workers=replication_workers)
         formal_stat = formal_result.cell.get(

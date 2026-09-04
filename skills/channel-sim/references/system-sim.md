@@ -534,9 +534,9 @@ bitmap TBS、payload/padding/useful bytes，并与 planner 估值逐值硬比较
 默认 **False**，先看清 SU 基线。**两种模式现在都读同一张 pair 表**
 （`mu_accounting="pair_table"`，默认）：在建表阶段预计算所有两用户、每用户 rank2
 的 pair 链路，MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、
-误块抽签用 pair 的 `true_sinr_db`。`legacy_v1` 的历史聚合 `mu_gain` 标量近似降级为
-`mu_accounting="se_ratio_legacy"`，**只用于复现旧结果**——它只缩 TBS、不进误块抽签，
-结果系统性乐观，选用时会写进 `notes`。capacity 的 SU/MU 判决是逐 TTI 比聚合谱效
+误块抽签用 pair 的 `true_sinr_db`。`legacy_v1` 的历史聚合 `mu_gain` 标量近似
+（`mu_accounting="se_ratio_legacy"`）**已于 2026-09-04 删除**——它只缩 TBS、
+不进误块抽签，结果系统性乐观；现在传这个值直接报错。capacity 的 SU/MU 判决是逐 TTI 比聚合谱效
 （还要过 predicted BLER ≤ 0.5 的准入；这里查询的是叠加 SU+MU OLLA 后的实际发送
 MCS，不是 OLLA 前的基准档），拒配对的两种原因分别计入
 `mu_pair_rejects` 与 `mu_su_wins`；重传恒按 SU 重发（冻结身份不许改 SINR/TBS）。TTI 主循环先固定 PF anchor，再枚举全部伙伴；缺 pair、相关性超门限、
