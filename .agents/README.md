@@ -11,7 +11,8 @@
 |---|---|
 | 让 Agent 改代码 | `读 .agents/AUTHOR.md 按它工作。任务：<一句话>` |
 | 审核 + 合并 PR | 把 Author 结尾自动生成的那段**原样转发**给新会话。它审完通过就直接合 |
-| 看现在什么状态 | 运行 `scripts\superran_board.ps1`，它会打开一张总览页 |
+| **每天开工先看这个** | 运行 `scripts\superran_tasks.ps1` —— 它直接告诉你「现在该做什么」，并给出可复制的命令 |
+| 看工作区细节 | 运行 `scripts\superran_board.ps1` |
 | 补对外改动文档 | `读 .agents/SYNC.md 按它工作` |
 | 让内网 Agent 通审整个仓库 | 跑 `scripts\superran_company_zip.ps1`，把它打的 zip 发过去 |
 | 让内网 Agent 审一次改动 | 跑 `scripts\superran_review_pack.ps1 <分支名>`，把审核包发过去 |
