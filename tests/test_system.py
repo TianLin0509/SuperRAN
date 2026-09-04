@@ -2453,6 +2453,72 @@ check(_delayed_rank.rank_of(0) == 1
       and _delayed_rank.diagnostics()["events"][-1]["tti"] == 10,
       "第二个 NACK 到达 t10 后才超过门限并回退，不在发送时刻窥见反馈")
 
+# --- 17.3b 运行时 CQI 的门限必须走**表相关**的那个入口 ---------------------
+# **棘轮。** 把 _cqi_quantiser 换回"自己去 bler_curves 按预置曲线另算一份行门限"
+# 这一节会红：table 1 抛 `ValueError: MCS must be 0..27, got 28`，table 2 静默
+# 拿到 table 3 的门限（15 行全偏，最大 3.29 dB）。
+#
+# bc.get_curve 是**表无关**的——只按 MCS 序号取预置曲线，那批曲线就是 table 3 的。
+# la._internal_cqi_thresholds 对 table 1/2 走的是解析 BLER 模型，只有 table 3 才
+# 回落到预置曲线。内部 CQI→MCS 的序号映射 table 2 与 table 3 重合（都止于 MCS27）、
+# table 1 止于 MCS28，所以同一个错误在两张表上一个崩、一个无声。
+#
+# 量化（"有多少个门限 <= 观测值"）与反查（"同一组门限按行下标取值"）是同一组门限
+# 的两个方向，必须共用 la._internal_cqi_thresholds 这一份；
+# system._cqi_threshold_sinr 用的也是它——离线与运行时同源。
+# 先放这条：它是单条最有诊断力的检查，而且**不会崩**。红态下 table 1 会直接抛
+# ValueError 中断整个文件，把它排在前面才看得见可读的 FAIL 而不是只有堆栈。
+# 同理下面的循环按 3→2→1 排：先过默认表，再让 table 2 给出可读 FAIL，最后才是
+# table 1 的崩溃。
+_q_t2 = np.asarray(ap._cqi_quantiser(0.1, 2), dtype=float)
+_q_t3 = np.asarray(ap._cqi_quantiser(0.1, 3), dtype=float)
+_q_gap = float(np.max(np.abs(_q_t2 - _q_t3)))
+check(_q_gap > 1.0,
+      f"table 2 的门限来自它自己的解析 BLER 模型，不是 table 3 的预置曲线"
+      f"（两表最大差 {_q_gap:.2f} dB）")
+
+_q_probe = np.arange(-15.0, 35.0, 0.25)
+for _q_table in (3, 2, 1):
+    for _q_bler in (0.1, 0.01):
+        _q_edges = np.asarray(ap._cqi_quantiser(_q_bler, _q_table), dtype=float)
+        _q_ref = np.asarray(
+            la._internal_cqi_thresholds(_q_bler, _q_table), dtype=float)
+        check(_q_edges.shape == _q_ref.shape
+              and bool(np.array_equal(_q_edges, _q_ref)),
+              f"table {_q_table} / 目标 BLER {_q_bler}：运行时门限与 linkadapt "
+              "逐值同源，没有第二份")
+        check(bool(np.all(np.diff(_q_edges) >= 0)),
+              f"table {_q_table} / 目标 BLER {_q_bler}：门限单调不减"
+              "——searchsorted 的前提")
+        _q_bad = [
+            float(_v) for _v in _q_probe
+            if int(np.searchsorted(_q_edges, float(_v), side="right"))
+            != int(la.select_reported_cqi(
+                float(_v), target_bler=_q_bler, mcs_table=_q_table))]
+        check(not _q_bad,
+              f"table {_q_table} / 目标 BLER {_q_bler}：量化与 "
+              f"la.select_reported_cqi 在 {_q_probe.size} 个探测点上逐值等价"
+              f"（不等的有 {len(_q_bad)} 个）")
+
+# 端到端：三张 MCS 表都要能跑完运行时上报，而且真的上报了。
+# experience_v2 只收 table 3，所以这里走 capacity。
+for _q_table in (3, 2, 1):
+    _q_tabs = sysm.build_link_tables(
+        [np.ones((2, 16, 4, 2), dtype=complex)], [10.0],
+        table=_q_table, num_snapshots=2)
+    _q_cell = sysm.simulate(
+        _q_tabs,
+        sys_cfg=sysm.SystemConfig(evaluation_mode="capacity", duration_s=0.05,
+                                  tdd_pattern="DDDSU"),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(olla_enabled=False),
+        kpi=sysm.KpiConfig(warmup_tti=0)).cell
+    check(_q_cell["cqi_update_count_mean"] is not None
+          and float(_q_cell["cqi_update_count_mean"]) > 0.0,
+          f"table {_q_table}：运行时 CQI 端到端跑通且真的上报了"
+          f"（平均上报 {_q_cell['cqi_update_count_mean']} 次）")
+
+
 # --- 17.3 解码 SINR 只在实际授予的 RBG 上取 --------------------------------
 # 前 8 个 RBG 极好、后 9 个极差；小包只会拿到少数几个 RBG。
 _grant_rbg = np.concatenate([np.full(8, 26.0), np.full(9, -4.0)])

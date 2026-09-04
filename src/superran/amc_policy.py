@@ -859,26 +859,28 @@ CSI_DELAY_TTI_DEFAULT = 3
 
 
 @lru_cache(maxsize=64)
-def _cqi_quantiser(target_bler: float, mcs_table: int) -> tuple[Any, Any]:
-    """(上报量化门限数组, 每个内部 CQI 行对应的发送门限数组)。
+def _cqi_quantiser(target_bler: float, mcs_table: int) -> Any:
+    """内部 CQI 各行的 NewTx 目标 BLER 门限数组。**量化与反查共用同一份。**
 
-    两个都是 ``(target_bler, mcs_table)`` 的纯函数，取值集合很小。运行时上报
-    每个周期、每个 UE、每个 rank 都要用，所以整表算一次缓存起来：量化用
-    ``searchsorted``、反查门限用数组下标，都不再走 Python 循环。
+    上报量化：``codepoint = 有多少个门限 <= 观测值``，与 ``la.select_reported_cqi``
+    逐值等价（它读的就是这个数组）。反查发送门限：同一数组按内部 CQI 行下标取值，
+    与 ``system._cqi_threshold_sinr`` 同源。两个方向是同一组门限，没有第二份。
+
+    **不要自己去 bler_curves 按预置曲线重算一遍。** ``_internal_cqi_thresholds``
+    是**表相关**的：table 1/2 走解析 BLER 模型而不是预置曲线，且会把被钳到同一个
+    MCS 的重复行标成 ``+inf`` 表示该码点不可达。绕过它的话 table 1 的最高行会
+    请求 MCS28 直接抛 ``ValueError``（预置曲线只到 MCS27），table 2 也拿不到
+    钳位语义。
+
+    ``(target_bler, mcs_table)`` 的纯函数且取值集合很小。运行时每个上报周期、
+    每个 UE、每个 rank 都要用，所以整表算一次缓存起来：量化走 ``searchsorted``、
+    反查走数组下标，都不再进 Python 循环。
     """
-    from . import bler_curves as bc  # noqa: PLC0415
     from . import linkadapt as la  # noqa: PLC0415
 
-    # 与 la.select_reported_cqi 逐值等价：codepoint = 有多少个门限 <= 观测值。
-    edges = np.asarray(
+    return np.asarray(
         la._internal_cqi_thresholds(float(target_bler), int(mcs_table)),
         dtype=float)
-    rows = np.array([
-        float(bc.get_curve(
-            int(la.internal_cqi_to_mcs(r, mcs_table=int(mcs_table))["mcs"]),
-            "newtx").required_sinr_db(float(target_bler)))
-        for r in range(len(la.INTERNAL_CQI_TO_MCS))], dtype=float)
-    return edges, rows
 
 
 @dataclass(frozen=True)
@@ -1096,7 +1098,7 @@ class CqiReporter:
         snap = self._measure_snapshot(tti)
         target = float(getattr(table, "target_bler", 0.1))
         mcs_table = int(getattr(table, "mcs_table", 3))
-        edges, row_thr = _cqi_quantiser(target, mcs_table)
+        edges = _cqi_quantiser(target, mcs_table)
         loss = float(self.config.ue_implementation_loss_db)
         obs = self._pmi[ue][snap] - loss                 # [rank]
         for r in range(self._max_rank):
@@ -1119,7 +1121,7 @@ class CqiReporter:
             self._reported_cqi[ue, r] = reported
             # codepoint 0 是协议语义的 out-of-range，没有可映射 MCS；
             # 沿用建表阶段的防御占位：退到表行 0，可用性由 outage/BLER 硬判。
-            thr = float(row_thr[max(reported - 1, 0)])
+            thr = float(edges[max(reported - 1, 0)])
             if not np.isfinite(thr):
                 thr = (self._last_obs_db[ue][r]
                        if np.isfinite(self._last_obs_db[ue][r]) else -20.0)
