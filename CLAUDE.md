@@ -423,11 +423,19 @@ IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在�
 等效 MCS 只用于 BLER lookup；空口 MCS、RBG 数、rank 与 TBS 必须和初传完全一致。
 重传失败后结束本次 HARQ，payload 留队并在后续成为新 TB；不得再挂第二次重传。
 
-**"最多一次重传 + 单 HARQ 进程"是显式决定，不是待补的半成品**（用户
-2026-09-02 确认："HARQ 我们先仅考虑一次重传"）。现场实现规格里是 16 个 HARQ
-进程、`max_retx=3`（共 4 次传输）；扩到那一档会同时改动队列模型、反馈时延语义
-（一个 UE 可以在等反馈时继续发别的进程）和全部 BLER/时延口径，因此**当前显式
-不做**。所有 residual BLER 都要按"一次重传后仍失败"来读。
+**"最多一次重传"是显式决定，不是待补的半成品**（用户 2026-09-02 确认：
+"HARQ 我们先仅考虑一次重传"）。现场实现规格里是 `max_retx=3`（共 4 次传输）；
+扩到那一档会改动全部 BLER/时延口径，因此**当前显式不做**。所有 residual BLER
+都要按"一次重传后仍失败"来读。
+
+**HARQ 进程数**（2026-09-04）：`capacity` 路径已支持 N 进程，
+`SystemConfig.harq_max_processes` 默认 **8**，38.213 §5.3 的下行上限是 16，
+设成 1 精确退回历史单进程行为（实测 8 组场景指纹逐位一致）。
+`experience` 路径**仍是单进程**。
+量出来的收益与直觉不同：全带调度下一个 TTI 本来就只服务一个 UE，所以
+**UE 数 ≥4 时小区吞吐几乎不动**（实测 +0.0%~+0.3%）；1~2 个 UE 时才暴涨
+（+259% / +83%）。真正被单进程压住的是**单个文件的完成时延**——
+`experience` 侧同一场景 p50 完成时延 39.0 ms vs 反馈零时延对照的 12.5 ms。
 表 3 使用版本化256QAM映射：历史内部表行0..14为
 `[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28]`，对应上报4-bit CQI1..15；
 上报CQI0是out-of-range。自动量化用各映射MCS的NewTx目标BLER门限。当前曲线仅
@@ -1137,16 +1145,19 @@ OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工
 `U` 时隙回来，OLLA 更新与该 TB 的重传资格都从**该 U 之后第一个 D/S** 起生效。
 偏移由 TDD 图案算出（`amc_policy.feedback_effective_offsets`），`DDDSU` 在
 30 kHz 下逐相位是 5/4/3/2 个 TTI；两个周期即 8 下行配 2 上行，与现场 8:2 一致。
-等待期间该 UE 因单 HARQ 进程模型不参与调度，单独计数为
-`harq_feedback_wait_skips`。**ACK 与 NACK 都建立 in-flight 状态**，所以 ACK 也不能在
-反馈回来前连续发新 TB；抽样结果只能在反馈到达时交给 OLLA 与 RankController。图案里
-没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
-零时延并在 notes 里说明。**k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。**
+**ACK 与 NACK 都建立 in-flight 状态**，占住发出它的那个 HARQ 进程；抽样结果只能在
+反馈到达时交给 OLLA 与 RankController。`capacity` 下一个 UE 可以同时有
+`harq_max_processes` 个 TB 在途（默认 8），进程池空了才发不出新传；
+`experience` 仍是每 UE 一个槽位。进程全满且都在等反馈的 UE 计入
+`harq_feedback_wait_skips`。图案里没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
+零时延并在 notes 里说明。**k1/k2 与 PUCCH 资源仍不建模**：当前取的是最小 K1，
+比 38.213 §5.3 Table 9.2-7 的查表值更快，OLLA 收敛也因此偏快。
 
 唯一一次重传发出后，其终次 ACK/NACK 也保留为 `await_final_feedback`，直到同样的反馈
-生效时刻才释放单 HARQ 进程。终次反馈只做释放：**不再进入首传 OLLA/Rank 学习，也不
+生效时刻才释放该 HARQ 进程。终次反馈只做释放：**不再进入首传 OLLA/Rank 学习，也不
 触发第三次发送**。DDDSU 的最小反例是 t0 首传 NACK、t5 重传，下一份新 TB 最早 t10，
-不能在 t6 提前发送。
+不能在 t6 提前发送（这条反例要在 `harq_max_processes=1` 下读；多进程时 t6 可以
+发的是**另一个进程**的新 TB，那份被 NACK 的 TB 仍然只能等到 t10）。
 
 顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 先用
 `sinr_tx_db` 反折 `mcs_without_olla`，再调 `apply_olla_mcs`），即实际调度下去的档位。

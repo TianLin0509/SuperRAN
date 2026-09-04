@@ -244,7 +244,12 @@ if free: alloc[order[0]] += free               # 尾料给第一名</code></pre>
 <p>而且 <code>tr.step(tti)</code> 投数据的同一个 TTI 里就可能被调度、被发出去
 —— <b>k0 / k1 / k2 三个都是 0</b>。</p>
 <div class="callout c-green"><p><b>底稿列出的两个「顺手要修」的 bug，我在 P0 阶段已经修完了</b>：
-重传 BLER 查错 MCS、S 时隙口径不一致。<b>所以 P1-B 的实际工作量比底稿估的小。</b></p></div>"""),
+重传 BLER 查错 MCS、S 时隙口径不一致。<b>所以 P1-B 的实际工作量比底稿估的小。</b></p></div>
+<div class="callout c-amber"><p><b>2026-09-04 后记：上面这段「现状」已经过时。</b>
+<code>capacity</code> 路径已改成 N 进程（<code>SystemConfig.harq_max_processes</code>，
+默认 8），<code>experience</code> 仍是每 UE 一个槽位。实测结论与本页的估计不同：
+UE 数 ≥4 时小区吞吐几乎不动（全带调度下一个 TTI 本来就只服务一个 UE），
+收益集中在 1~2 个 UE 的场景和单文件完成时延上。本页其余内容保留当时的原样。</p></div>"""),
             ("DDDSU 下的 RTT 手算（我逐格验过）", """
 <p>时隙相位 <code>n mod 5</code> = <code>[D0, D1, D2, S3, U4]</code>，
 ACK 只能落在 U 上。{rtt}</p>

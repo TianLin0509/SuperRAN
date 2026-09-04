@@ -1890,6 +1890,9 @@ check(_amc_rows[True]["olla_before_db"] == 0.0
 # --- 17.2a 单 HARQ 进程：ACK 也必须等反馈，rank 不能提前看 NACK ---------
 # 强制所有首传 ACK。DDDSU 的 t0 反馈到 t5 才生效，所以 10 TTI 内同一 UE
 # 只能在 t0/t5 发两次；旧实现只为 NACK 建 pending，会在 8 个 D/S 全部连发。
+# **capacity 现在默认 8 进程**，这里显式钉成 1 —— 单进程仍是受支持的配置，
+# 这一节守的就是它的时序合同。多进程的合同在 17.2c。experience 侧本来就
+# 只有一个槽位，harq_max_processes 对它无效。
 _old_system_bler = sysm._bler_lookup
 _old_experience_bler = expm._bler_lookup
 _feedback_calls: dict[str, list[int]] = {"capacity": [], "experience": []}
@@ -1914,7 +1917,8 @@ try:
             [_amc_table],
             sys_cfg=sysm.SystemConfig(
                 evaluation_mode=_feedback_mode, duration_s=0.005,
-                tdd_pattern="DDDSU", harq_feedback_delay=True, seed=650),
+                tdd_pattern="DDDSU", harq_feedback_delay=True, seed=650,
+                harq_max_processes=1),
             traffic=sysm.TrafficConfig(model="full_buffer"),
             sched=sysm.SchedulerConfig(
                 mu_enabled=False, olla_enabled=True,
@@ -1929,7 +1933,8 @@ finally:
 for _feedback_mode, _run_feedback in _feedback_runs.items():
     check(_run_feedback.cell["scheduled_tti"] == 2
           and _run_feedback.cell["harq_feedback_wait_skips"] == 6,
-          f"{_feedback_mode}：ACK 也占住单 HARQ 进程，DDDSU 只在 t0/t5 发送")
+          f"{_feedback_mode}：max_processes=1 时 ACK 也占住进程，"
+          "DDDSU 只在 t0/t5 发送")
     check(_feedback_calls[_feedback_mode] == [5],
           f"{_feedback_mode}：首个 ACK 只在反馈到达 t5 交给 OLLA/rank，不在 t0 偷看")
 
@@ -1973,7 +1978,8 @@ try:
                 [_amc_table],
                 sys_cfg=sysm.SystemConfig(
                     evaluation_mode=_terminal_mode, duration_s=0.006,
-                    tdd_pattern="DDDSU", harq_feedback_delay=True, seed=651),
+                    tdd_pattern="DDDSU", harq_feedback_delay=True, seed=651,
+                    harq_max_processes=1),
                 traffic=sysm.TrafficConfig(model="full_buffer"),
                 sched=sysm.SchedulerConfig(
                     mu_enabled=False, olla_enabled=True,
@@ -1999,6 +2005,55 @@ for _terminal_key, _terminal_run in _terminal_runs.items():
         check([(row["tti"], row["harq_tx_mode"]) for row in _terminal_alloc]
               == [(0, "newtx"), (5, "retx"), (10, "newtx")],
               f"{_terminal_key}：逐 TTI 轨迹明确没有 t6 新 TB，也没有第三次重传")
+
+# --- 17.2c 多 HARQ 进程：不同进程号互不阻塞（capacity）------------------
+# **棘轮。** 把 harq_inflight 换回"每 UE 一个槽位"会让这一节全红。
+# 同一份夹具、同样强制 ACK：单进程下 10 个 TTI 只发得出 2 次（t0/t5），
+# 8 进程下 8 个 D/S 时隙每一个都能发。
+_old_mp_bler = sysm._bler_lookup
+try:
+    sysm._bler_lookup = lambda _mcs, _sinr: 0.0
+    _mp_runs = {}
+    for _mp in (1, 2, 4, 8, 16):
+        _mp_runs[_mp] = sysm.simulate(
+            [_amc_table],
+            sys_cfg=sysm.SystemConfig(
+                evaluation_mode="capacity", duration_s=0.005,
+                tdd_pattern="DDDSU", harq_feedback_delay=True, seed=650,
+                harq_max_processes=_mp),
+            traffic=sysm.TrafficConfig(model="full_buffer"),
+            sched=sysm.SchedulerConfig(
+                mu_enabled=False, olla_enabled=True,
+                rank=ap.RankConfig(fixed_rank=1)),
+            kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="full"))
+finally:
+    sysm._bler_lookup = _old_mp_bler
+
+_mp_sched = {k: int(v.cell["scheduled_tti"]) for k, v in _mp_runs.items()}
+_mp_skip = {k: int(v.cell["harq_feedback_wait_skips"]) for k, v in _mp_runs.items()}
+print(f"  进程数 -> 已调度 TTI {_mp_sched}；被在途反馈挡住 {_mp_skip}")
+check(_mp_sched[1] == 2, f"1 进程：10 个 TTI 只发得出 2 次（实得 {_mp_sched[1]}）")
+check(_mp_sched[8] == 8,
+      f"8 进程：DDDSU 的 8 个 D/S 时隙全部发得出（实得 {_mp_sched[8]}）")
+check(all(_mp_sched[a] <= _mp_sched[b]
+          for a, b in zip((1, 2, 4, 8), (2, 4, 8, 16), strict=True)),
+      "已调度 TTI 数随进程数单调不降")
+check(_mp_skip[1] > 0 and _mp_skip[8] == 0,
+      f"进程够用时不再有 UE 被在途反馈挡住（1 进程 {_mp_skip[1]} 次 → "
+      f"8 进程 {_mp_skip[8]} 次）")
+check(_mp_sched[8] == _mp_sched[16],
+      "DDDSU 下 8 个进程已经够用，加到 16 不再有增量")
+_mp_sys_cfg = _mp_runs[8].config["system"]
+check(_mp_sys_cfg["harq_max_processes"] == 8
+      and "up to 8 TBs in flight" in _mp_sys_cfg["harq_feedback_contract"],
+      "进程数与合同文字随结果显式上报")
+check(int(_mp_runs[8].cell["harq_max_processes"]) == 8,
+      "cell 层也带上进程数，分析脚本不必去 config 里翻")
+# 进程数非法值必须在配置入口就被拒
+for _bad_mp in (0, 17, 1.5, True):
+    _expect_value_error(
+        lambda v=_bad_mp: sysm.SystemConfig(harq_max_processes=v),
+        "harq_max_processes", f"进程数 {_bad_mp!r} 在配置入口被拒")
 
 # 快速回退的 NACK 门限只能在反馈到达后触发。先升到 rank2，在 t1 发送一个
 # NACK；t2..t4 必须保持 rank2，t5 将该 feedback 应用后才允许回退。
@@ -2489,11 +2544,16 @@ def _mu_pair_tables(corr: float, seed: int = 20260902):
         csi=sysm.ca.CsiConfig(enabled=False))
 
 
-def _mu_run(tables, *, mu_on: bool):
+def _mu_run(tables, *, mu_on: bool, processes: int = 1):
+    # **HARQ 进程数在这组对照里必须钉死。** 本节比的是 SU 与 MU 两个臂的
+    # 物理差异，进程数是另一个自变量：放开它，"发得出多少 TB" 会跟着变，
+    # OLLA 看到的反馈量随之变化，配对准入的通过率也跟着动（见 17.2d）。
+    # 钉在 1 还有一个好处：这一节的数字与多进程改动之前逐值可比。
     return sysm.simulate(
         tables,
         sys_cfg=sysm.SystemConfig(evaluation_mode="capacity", duration_s=0.6,
-                                  tdd_pattern="DDDSU", seed=4242),
+                                  tdd_pattern="DDDSU", seed=4242,
+                                  harq_max_processes=processes),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(mu_enabled=mu_on),
         kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
@@ -2588,6 +2648,27 @@ print(f"  独立信道：SU 首传 MCS {_su_arm.cell['avg_mcs_first_tx']:.2f} �
       f"MU {_mu_arm.cell['avg_mcs_first_tx']:.2f}，"
       f"MU 占比 {_mu_arm.cell['mu_share']:.0%}")
 check(_mu_arm.cell["mu_share"] > 0.3, "独立信道下确实发生了配对")
+
+# --- 17.2d 多进程与 MU 的交互：不是 bug，是 OLLA 看到了更多反馈 ----------
+# 放开进程数后同一场景的 MU 占比会**下降**。原因不是配对逻辑变了，而是
+# UE 不再被自己的在途反馈挡住 → 发出的 TB 多出 3 倍 → MU OLLA 收到的反馈
+# 也多 3 倍、偏置爬得更高 → 实发 MCS 的预测 BLER 更容易越过 0.5 准入线 →
+# 更多 TTI 一个可接受的配对都没有。把这条交互显式钉住，免得以后有人看到
+# mu_share 掉了就以为配对坏了。
+_mu_arm8 = _mu_run(_T_indep, mu_on=True, processes=8)
+print(f"  进程 1→8：已调度 TTI {_mu_arm.cell['scheduled_tti']}→"
+      f"{_mu_arm8.cell['scheduled_tti']}，MU 占比 "
+      f"{_mu_arm.cell['mu_share']:.3f}→{_mu_arm8.cell['mu_share']:.3f}，"
+      f"配对全拒 TTI {_mu_arm.cell['mu_pair_rejects']}→"
+      f"{_mu_arm8.cell['mu_pair_rejects']}")
+check(_mu_arm8.cell["scheduled_tti"] > 2 * _mu_arm.cell["scheduled_tti"],
+      "8 进程让这两个 UE 发得出 2 倍以上的 TB")
+check(_mu_arm8.cell["mu_pair_rejects"] > 5 * _mu_arm.cell["mu_pair_rejects"],
+      "配对被拒的 TTI 数同步暴涨——MU 占比下降的原因在准入，不在配对逻辑")
+check(_mu_arm8.cell["mu_share"] < _mu_arm.cell["mu_share"],
+      "因此 MU 占比下降；这是已知交互，不是配对失效")
+check(_mu_arm8.cell["cell_served_mbps"] > _mu_arm.cell["cell_served_mbps"],
+      "尽管 MU 占比下降，小区吞吐仍然更高（少了被反馈挡住的空转）")
 check(_mu_arm.cell["avg_mcs_first_tx"] < _su_arm.cell["avg_mcs_first_tx"],
       "pair 表口径下配对的代价进了 MCS 决策：MU 的首传 MCS 低于 SU")
 check(_mu_arm.cell["mu_accounting"] == "pair_table",

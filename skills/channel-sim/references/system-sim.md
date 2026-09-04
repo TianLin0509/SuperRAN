@@ -519,14 +519,19 @@ BF Gain 来自当前矩阵计算，CQI/OLLA 参数仍是版本化工程近似，
 
 `avg_mcs` 报的是 **OLLA 之后**的 MCS，即实际调度下去的档位。
 
-单 HARQ 进程下，首传 ACK 和 NACK 都建立 in-flight 状态；反馈生效前同一 UE
-不得发新 TB。抽样 outcome 只在发送时冻结，直到按 TDD 图案算出的反馈时刻才同时
-交给 OLLA 与 RankController。这样 ACK 连发不会穿透反馈窗口，rank 快速回退也不会
-提前看到尚未到达的 NACK。
+首传 ACK 和 NACK 都建立 in-flight 状态，占住发出它的那个 HARQ 进程。抽样 outcome
+只在发送时冻结，直到按 TDD 图案算出的反馈时刻才同时交给 OLLA 与 RankController。
+这样 ACK 连发不会穿透反馈窗口，rank 快速回退也不会提前看到尚未到达的 NACK。
 
-唯一一次重传的终次 ACK/NACK 也占住进程直到反馈生效；终次反馈只释放进程，不再
-更新 OLLA/Rank，也不产生第三次发送。DDDSU 下 t0 首传 NACK、t5 重传后，下一份新 TB
-最早只能在 t10 发送，不能在 t6 抢跑。
+**进程数**：`capacity` 的 `SystemConfig.harq_max_processes` 默认 8（38.213 §5.3
+下行上限 16），一个 UE 可以同时有 8 个 TB 在途；设成 1 精确退回历史单进程行为。
+`experience` 目前仍是每 UE 一个槽位。收益集中在 1~2 个 UE 的场景（实测吞吐
++259% / +83%）与单文件完成时延；UE 数 ≥4 时小区吞吐几乎不动，因为全带调度下
+一个 TTI 本来就只服务一个 UE，被挡住的 UE 会被别人顶上。
+
+唯一一次重传的终次 ACK/NACK 也占住该进程直到反馈生效；终次反馈只释放进程，不再
+更新 OLLA/Rank，也不产生第三次发送。`harq_max_processes=1` 且 DDDSU 时，
+t0 首传 NACK、t5 重传后，下一份新 TB 最早只能在 t10 发送，不能在 t6 抢跑。
 
 `experience_v2` 目前只接受 `preset_20b_256qam / MCS table 3` 预置表，Table 1/2
 传入后硬失败。代码保留显式 `mcs_table/profile` 边界与带数据指纹的 BLER cache key，
