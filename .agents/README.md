@@ -9,10 +9,11 @@
 
 | 你想干什么 | 你说这一句 |
 |---|---|
-| 让 Agent 改代码 | `读 .agents/AUTHOR.md 按它工作。任务：<一句话>` |
-| 让另一个 Agent 审核 | 把 Author 结尾自动生成的那段**原样转发**给新会话 |
-| 看现在什么状态 | 运行 `scripts\superran_board.ps1`，它会打开一张总览页 |
-| 同步到 GitHub | `读 .agents/SYNC.md 按它工作` |
+| 让 Agent 改代码 | `请根据 C:\Vibe\Wireless\SuperRAN\.agents\AUTHOR.md 展开工作。任务：<一句话>` |
+| 审核 + 合并 PR | 把任务 Agent 结尾生成的那段**原样转发**给新会话。它审完通过就直接合 |
+| **每天开工先看这个** | 运行 `scripts\superran_tasks.ps1` —— 它直接告诉你「现在该做什么」，并给出可复制的命令 |
+| 看工作区细节 | 运行 `scripts\superran_board.ps1` |
+| 补对外改动文档 | `读 .agents/SYNC.md 按它工作` |
 | 让内网 Agent 通审整个仓库 | 跑 `scripts\superran_company_zip.ps1`，把它打的 zip 发过去 |
 | 让内网 Agent 审一次改动 | 跑 `scripts\superran_review_pack.ps1 <分支名>`，把审核包发过去 |
 | 处理内网审来的意见 | 把它的 md 放进 `docs\inbox\`，然后说「处理 docs\inbox 里的内网审阅报告」 |
@@ -21,6 +22,45 @@
 除此之外不需要记任何路径、SHA、分支名或命令。
 
 ---
+
+## 任务 ID：把所有东西串起来的那根线
+
+每个任务开工时由 Agent 生成一个 ID，形如 `T20260904-cqi-event-driven`，
+**四样东西都用它**，你一眼就能认出哪个文件属于哪个任务：
+
+```
+分支      T20260904-cqi-event-driven
+PR 标题   [T20260904-cqi-event-driven] CQI 改为运行时事件驱动
+审核包    T20260904-cqi-event-driven_CQI改为运行时事件驱动.zip
+内网意见  docs\inbox\T20260904-cqi-event-driven_内网审核.md
+```
+
+工作台也靠它把一条任务的所有节点串成一条泳道。
+
+## 流程长什么样
+
+```
+你说一句要干什么
+    ↓
+① Author 实现 → 自查 → push 分支 + 开 PR
+                          ↓  红档才继续走 ②③
+② 打审核包 → 你带进内网 → 内网 Agent 出意见 md
+   （这期间分支冻住，别再往上推提交）
+                          ↓
+③ Author 按意见改 → 更新 PR + 附「意见对照表」
+                          ↓
+④ Reviewer 审 PR + 核对对照表 → PASS 就由它合并
+```
+
+绿档、黄档直接从 ① 跳到 ④。**你只做两件事：说要干什么，转发一段话。**
+
+Agent **能开 PR，但不能合自己的 PR**。合并权只在 Reviewer 手里，
+而且它有三条硬闸：不许审自己写的、只有 PASS 才合、合的必须是它亲自验过的那个 SHA。
+
+**你只做两件事**：说要干什么，转发一段话。
+
+Agent **能开 PR，但不能合自己的 PR**。合并权只在 Reviewer 手里，
+而且它有三条硬闸：不许审自己写的、只有 PASS 才合、合的必须是它亲自验过的那个 SHA。
 
 ## 唯一可信的地方
 
@@ -61,12 +101,13 @@ git config core.hooksPath .githooks
 
 ## 目录里其他文件
 
-- `AUTHOR.md` — 实现者合同
-- `REVIEWER.md` — 审核者合同
+- `OUTPUT.md` — **怎么跟你说话**。所有角色开工前必读，讲人话的五条铁律
+- `AUTHOR.md` — 任务 Agent 指令（含任务 ID 与全流程）
+- `MERGER.md` — 合并 Agent 指令。**审 PR，通过就由它执行合并**（含三条硬闸）
 - `TESTING.md` — 怎么跑测试。**两个坑会让 Agent 得出假的"测试通过"**，
   Author 和 Reviewer 都必读
 - `RISK.md` — 风险分档（按文件路径写死，Agent 不许自己判断）
-- `SYNC.md` — 同步 GitHub 的流程
+- `SYNC.md` — 对外改动文档与批次记录
 - `INTEGRATOR.md` — 多条并行开发线合到一起时用（含解冲突与定位失败的方法）
 - `COMPANY.md` — 内网 Agent **通审整个仓库**的合同，**含保密红线**
 - `COMPANY_REVIEW.md` — 内网 Agent **审一次具体改动**的合同，打包时会自动放进审核包
