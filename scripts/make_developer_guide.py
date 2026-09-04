@@ -2303,7 +2303,6 @@ print(comparison["statement"])  # 只有 passed=True 才能写成已验证收益
     followup = r'''# 可选：同一数据集继续跑 5 s 体验仿真，1 s 后开始统计
 experience = sr_system_sim(
     dataset_id=data["dataset_id"],
-    evaluation_mode="experience",
     traffic_model="mixed",
     duration_s=5.0,
     warmup_s=1.0,
@@ -2373,7 +2372,7 @@ dataset，也不要把两种场景的均值直接相减。并行器会按 UE bat
     body += """
 <h2>把同一数据集继续送进 KPI 工作台</h2>
 <p>链路级 Hello World 回答“哪种权的谱效更高”；下面这一步才回答有限话务下的首包、体验速率、
-PRB 占用和用户差异。<code>sr_system_sim(evaluation_mode="experience")</code> 会自动写出自包含 HTML，
+PRB 占用和用户差异。<code>sr_system_sim()</code> 会自动写出自包含 HTML，
 返回 <code>kpi_view.url/html_path</code>、小区/用户双 Tab 和完整 KPI 排序证据。</p>
 """ + code(followup, "MCP tool sequence")
     body += """
@@ -4816,7 +4815,7 @@ def modes_page() -> Page:
 但体验/KPI 只统计 1–5 s。这样既让状态真实收敛，又不把初始空队列、SRS 未扫齐和 OLLA 冷启动损失
 混入稳态指标。预热时可以加速 OLLA，但测量窗应恢复正常步长，并回传切窗时的状态。</p>
 """
-    body += "<p class=source-row>模式路由：" + source_ref("src/superran/system.py", "evaluation_mode") + " · 体验入口：" + source_ref("src/superran/experience.py", "def simulate_experience") + "</p>"
+    body += "<p class=source-row>仿真入口：" + source_ref("src/superran/system.py", "def simulate") + " · TTI 主循环：" + source_ref("src/superran/experience.py", "def simulate_experience") + "</p>"
     return Page(
         "modes", "容量评估与体验评估", "系统仿真", "EVALUATION PROFILES",
         "capacity/legacy_v1 与 experience/experience_v2 的语义、实现和 KPI 边界。", body,
@@ -5212,7 +5211,7 @@ def kpi_page() -> Page:
     body += """
 <section data-kpi-workbench="standard-output">
 <h2>KPI 工作台是体验仿真的标准交付物</h2>
-<p>当 <code>evaluation_mode="experience"</code> 时，数值结果完成后会自动生成一份自包含、可离线打开的
+<p>数值结果完成后会自动生成一份自包含、可离线打开的
 HTML 工作台，并把 <code>html_path</code>、可用时的 loopback <code>url</code>、双 Tab、支持的 KPI 清单和
 本次排序证据一起放进 <code>result["kpi_view"]</code>。页面生成失败不会吞掉仿真结果，但会显式返回 error，
 因此交付者不能在没有页面的情况下假装工作台已经生成。</p>
@@ -5314,7 +5313,6 @@ print(comparison["url"] or comparison["html_path"])
     )
     body += code(r'''result = sr_system_sim(
     dataset_id=dataset_id,
-    evaluation_mode="experience",
     traffic_model="mixed", duration_s=5.0, warmup_s=1.0,
     target_prb_utilization=0.30, num_replications=8,
     kpi_intent="关注首包、边缘体验、PRB 利用率和用户差异",
@@ -5727,7 +5725,6 @@ OLLA、MU 与 KPI 口径。最终写入数据集的是解析后的配置，不�
                 cfg = item.get("system", {}) or {}
                 meta = (
                     f'channel=<code>{esc(item.get("channel_preset", "—"))}</code> · '
-                    f'mode=<code>{esc(cfg.get("evaluation_mode", "—"))}</code> · '
                     f'traffic=<code>{esc(cfg.get("traffic_model", "—"))}</code>'
                 )
                 expect = item.get("expect", {}) or {}

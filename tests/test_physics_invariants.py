@@ -377,7 +377,7 @@ for u, mcs in enumerate((8, 10, 12, 14)):
         geo_sinr_db=8.0 + u, outage=np.zeros(2, dtype=bool),
         iot_db=3.0, sir_db=12.0, se_gnb=se_u.copy(), best_se_gnb=se_u[:, 0].copy()))
 
-cfg = sy.SystemConfig(evaluation_mode="experience", duration_s=0.2,
+cfg = sy.SystemConfig(duration_s=0.2,
                       tdd_pattern="DDDSU", seed=9)
 tr = sy.TrafficConfig(model="mixed", small_ue_share=1.0,
                       small_file_bytes=500, small_arrival_rate_hz=250.0)
@@ -420,7 +420,7 @@ check(np.array_equal(ta.cqi_index_per_snapshot[0], tb.cqi_index_per_snapshot[0])
 
 # 过载观测窗：超过 deadline 仍未完成的是确定 miss；未到 deadline 的才右删失。
 over_cfg = sy.SystemConfig(
-    evaluation_mode="experience", duration_s=0.25, tdd_pattern="DDDSU")
+    duration_s=0.25, tdd_pattern="DDDSU")
 over = sy.simulate(
     tables[:1], sys_cfg=over_cfg,
     traffic=sy.TrafficConfig(model="cbr", cbr_mbps=1000.0),
@@ -437,16 +437,39 @@ check(over.cell["ue_experience_eligible"] == 1
       and over.cell["cell_experienced_mbps"] == 0.0,
       "有到达但无完成 burst 的饿死 UE 以 0 留在体验分布中")
 
-# legacy/capacity 路径也必须在 U 时隙维护外生到达；DDDSU 不能漏掉 20% CBR。
-legacy = sy.simulate(
+# **外生到达与时隙类型无关。** 话务进缓冲区是 UE 侧的事，和这个 TTI 是 D/S/U
+# 没有关系；只有"发不发得出去"才看时隙。历史上到达只在下行 TTI 走了一遍，
+# DDDSU 就静默少 20% 的 CBR——offered load 被打折，而结果里看不出来。
+cbr = sy.simulate(
     tables[:1],
-    sys_cfg=sy.SystemConfig(evaluation_mode="capacity", duration_s=0.05,
-                            tdd_pattern="DDDSU"),
+    sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="DDDSU"),
     traffic=sy.TrafficConfig(model="cbr", cbr_mbps=1.0),
     sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
     kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(92, 0))
-check(abs(legacy.cell["offered_mbps"] - 1.0) < 1e-9,
+check(abs(cbr.cell["offered_mbps"] - 1.0) < 1e-9,
       "D/S/U 每个 TTI 都维护业务到达，DDDSU 不再漏掉 U 时隙的 20% CBR")
+
+# **"容量仿真"必须是同一条路径上的一个话务配置，不是另一套语义。**
+# 把这条 revert 掉（恢复独立容量分支）就会红：满缓冲下按需 RBG 必须退化成
+# 全带宽、每忙 TTI 恰好一个 SU，且体验类 KPI 报 None 而不是 0。
+fb = sy.simulate(
+    tables,
+    sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="DDDD"),
+    traffic=sy.TrafficConfig(model="full_buffer"),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False,
+                             frequency_selective="off"),
+    kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(93, 0))
+check(fb.config["system"]["model_version"] == "experience_v2",
+      "full_buffer 走的就是体验路径，没有第二个 model_version")
+check(abs(float(fb.cell["scheduled_ues_per_busy_tti"]) - 1.0) < 1e-9,
+      "满缓冲下按需 RBG 退化成全带宽：每个忙 TTI 恰好服务 1 个 SU")
+check(abs(float(fb.cell["resource_utilization"]) - 1.0) < 1e-9,
+      "满缓冲下 RBG 全部用满，没有留空的尾料")
+check(fb.cell["cell_experienced_mbps"] is None
+      and fb.cell["drb_throughput_rel19_mbps"] is None,
+      "busy period 永不结束，体验速率报 None 而不是假装测到 0")
+check(float(fb.cell["cell_served_mbps"]) > 0.0,
+      "容量口径仍然照常输出 cell_served_mbps")
 
 
 print("\n" + "=" * 70)

@@ -69,7 +69,7 @@ def interarrival_rows() -> list[tuple[float, float]]:
 
 
 def write(path: Path, header: str, unit: str, rows) -> None:
-    lines = [f"# {header}", f"# 由 scripts/make_field_bimodal_cdf.py 生成，勿手改",
+    lines = [f"# {header}", "# 由 scripts/make_field_bimodal_cdf.py 生成，勿手改",
              f"value_{unit},cdf"]
     lines += [f"{v},{c}" for v, c in rows]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

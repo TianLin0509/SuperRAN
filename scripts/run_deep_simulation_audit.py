@@ -227,7 +227,7 @@ def run_one_experience(
     return sy.simulate(
         tables,
         sys_cfg=sy.SystemConfig(
-            evaluation_mode="experience", duration_s=5.0,
+            duration_s=5.0,
             tdd_pattern="DDDSU", seed=MASTER_SEED,
             snapshot_update_ms=5.0),
         traffic=sy.TrafficConfig(
@@ -354,7 +354,7 @@ def run_experience() -> dict[str, Any]:
     arm_common = {
         "dataset_id": ds.dataset_id,
         "config": {
-            "evaluation_mode": "experience", "duration_s": 5.0,
+            "duration_s": 5.0,
             "traffic_model": "mixed", "file_bytes": 500_000,
             "arrival_rate_hz": 5.0, "small_ue_share": 0.5,
             "small_file_bytes": 1_500, "small_arrival_rate_hz": 20.0,

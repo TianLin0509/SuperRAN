@@ -69,7 +69,7 @@ def _cell(run) -> dict[str, float]:
 def experiment_rank_stability() -> dict:
     """固定 rank2 与逐快照跟随 best_rank 的对照。"""
     tables = _tables()
-    cfg = sy.SystemConfig(evaluation_mode="experience", duration_s=1.0,
+    cfg = sy.SystemConfig(duration_s=1.0,
                           tdd_pattern="DDDSU", seed=77)
     arms = {}
     for name, rank_cfg in (
@@ -115,7 +115,7 @@ def _expected_base_tx(table, alloc) -> float:
 def experiment_olla_coordinate() -> dict:
     """关掉 OLLA 时决策坐标是否仍是 CQI+BF。"""
     tables = _tables()
-    cfg = sy.SystemConfig(evaluation_mode="experience", duration_s=0.5,
+    cfg = sy.SystemConfig(duration_s=0.5,
                           tdd_pattern="DDDSU", seed=31)
     rows = {}
     for name, olla in (("olla_on", True), ("olla_off", False)):
@@ -154,7 +154,7 @@ def experiment_feedback_delay() -> dict:
     arms = {}
     for name, delay in (("delay_on", True), ("delay_off_control", False)):
         cfg = sy.SystemConfig(
-            evaluation_mode="experience", duration_s=1.0, tdd_pattern="DDDSU",
+            duration_s=1.0, tdd_pattern="DDDSU",
             seed=88, harq_feedback_delay=delay)
         run = _run(tables, sched=sy.SchedulerConfig(mu_enabled=False),
                    sys_cfg=cfg)
@@ -185,7 +185,7 @@ def experiment_feedback_delay() -> dict:
             result = _run(
                 one, sched=sy.SchedulerConfig(mu_enabled=False),
                 sys_cfg=sy.SystemConfig(
-                    evaluation_mode=mode, duration_s=0.005,
+                    duration_s=0.005,
                     tdd_pattern="DDDSU", seed=650))
             ack_runs[mode] = {
                 "scheduled_tti": int(result.cell["scheduled_tti"]),
@@ -221,7 +221,7 @@ def experiment_feedback_delay() -> dict:
                 result = _run(
                     one, sched=sy.SchedulerConfig(mu_enabled=False),
                     sys_cfg=sy.SystemConfig(
-                        evaluation_mode=mode, duration_s=0.006,
+                        duration_s=0.006,
                         tdd_pattern="DDDSU", seed=651))
                 key = f"{mode}/retx_{'ack' if terminal_ack else 'nack'}"
                 terminal_runs[key] = {
@@ -406,7 +406,7 @@ def _mu_tables(corr: float, n_snap: int = 6, seed: int = 20260902):
 
 def experiment_capacity_mu_accounting() -> dict:
     """capacity 开 MU 时，配对的代价进了哪几处。"""
-    cfg = sy.SystemConfig(evaluation_mode="capacity", duration_s=0.6,
+    cfg = sy.SystemConfig(duration_s=0.6,
                           tdd_pattern="DDDSU", seed=4242)
 
     def run(tables, *, mu_on, accounting, ratio=1.0):
@@ -483,7 +483,7 @@ def experiment_capacity_mu_accounting() -> dict:
         olla_admission = sy.simulate(
             indep,
             sys_cfg=sy.SystemConfig(
-                evaluation_mode="capacity", duration_s=0.01,
+                duration_s=0.01,
                 tdd_pattern="DDDSU", seed=313),
             traffic=sy.TrafficConfig(model="full_buffer"),
             sched=sy.SchedulerConfig(

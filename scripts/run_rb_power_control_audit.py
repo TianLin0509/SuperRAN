@@ -391,7 +391,6 @@ def _run_ab(uniform_tables: list[Any], shaped_tables: list[Any],
             uniform_cfg: pc.RbPowerControlConfig,
             shaped_cfg: pc.RbPowerControlConfig) -> dict[str, Any]:
     common = {
-        "evaluation_mode": "experience",
         "duration_s": 5.0,
         "scs_khz": 30,
         "num_rbg": 17,

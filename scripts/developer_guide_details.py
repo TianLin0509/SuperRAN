@@ -1444,7 +1444,7 @@ DETAIL_SPECS.update({
             ("分类可重复", "同一 intent 多次运行得到同一 TaskProfile、同一命中证据和稳定 generic fallback；不依赖外部模型状态。"),
             ("两轮收敛", "代表性任务在目标两轮内填满结论槽位；默认接受、已回答项和 also_configurable 不会制造重复问题。"),
             ("优先级可证明", "defaults→preset→task hints→user overrides 用冲突值逐层测试，最终值与 explicit/history 均可追溯。"),
-            ("目录来自配置", "切换 channel_est_mode、precoder、power_constraint 或 evaluation_mode 后，algorithm_list、derivations 与 caveat 同步变化。"),
+            ("目录来自配置", "切换 channel_est_mode、precoder、power_constraint 或 traffic_model 后，algorithm_list、derivations 与 caveat 同步变化。"),
             ("桥接最小权限", "非 loopback、错误 token、未知键、嵌套对象、超大 payload、过期 draft 与重放 nonce 全部拒绝；合法 delta 幂等。"),
             ("执行身份一致", "spec、Agent 摘要、resolved_config 与数据集/系统结果 manifest 对关键字段逐项相等。"),
             ("交互降级可见", "post 模式可按 spec_id 收到 delta；服务关闭/失败时页面和返回值明确为 clipboard，且 serve_error 可审计。"),

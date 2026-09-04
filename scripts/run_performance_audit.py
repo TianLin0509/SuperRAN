@@ -181,7 +181,7 @@ def _replication_benchmark() -> dict[str, Any]:
     rows: dict[str, Any] = {}
     for duration_s in (5.0, 50.0):
         cfg = sy.SystemConfig(
-            evaluation_mode="capacity", duration_s=duration_s,
+            duration_s=duration_s,
             power_constraint="nebf", seed=20260823)
         books = rg.replications(20260823, 8)
         def loop_serial(cfg=cfg, books=books):

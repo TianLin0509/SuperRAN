@@ -128,7 +128,6 @@ def test_company_tdd_grid_is_fixed_and_not_user_editable() -> None:
 
 def test_system_adaptation_metadata_distinguishes_auto_and_override() -> None:
     out = server._system_adaptation_contract(
-        mode="experience",
         target_bler=0.2,
         olla_step_up_db=0.01,
         olla_step_down_db=None,
@@ -314,7 +313,7 @@ def test_full_buffer_partial_grid_prb_accounting_is_exact() -> None:
         rbg_boundaries=grid.boundaries,
     )
     cfg = system.SystemConfig(
-        evaluation_mode="experience", duration_s=0.01,
+        duration_s=0.01,
         tdd_pattern="DDDD", num_rbg=grid.num_rbg,
         rb_per_rbg=grid.nominal_rb_per_rbg,
         rbg_prb_sizes=grid.rbg_prb_sizes,

@@ -5,9 +5,9 @@ SRS 来源不符、ue_id 与轮转布局错位）。数据集是合成的小型 
 """
 from __future__ import annotations
 
+import inspect
 import json
 import shutil
-import inspect
 from dataclasses import replace
 from functools import wraps
 from pathlib import Path
@@ -15,8 +15,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from superran import provenance
 from superran import amc_policy as ap
+from superran import provenance
 from superran import server as srv
 from superran import spec as specm
 from superran import system as sysm
@@ -111,8 +111,9 @@ def test_rank_switch_default_is_identical_across_all_entry_points() -> None:
 
 
 def test_capacity_ok() -> None:
+    """"容量仿真"就是 full_buffer 话务，不是另一条路径。"""
     _write_dataset()
-    out = _run(evaluation_mode="capacity")
+    out = _run(traffic_model="full_buffer")
     assert "error" not in out, out.get("error")
     served = out["cell"]["cell_served_mbps"]
     assert isinstance(served, dict) and served["mean"] > 0  # KpiStat 结构
@@ -120,12 +121,23 @@ def test_capacity_ok() -> None:
     assert out["notes"]
     assert out["provenance"]["compatibility"]["status"] == "unknown"
     assert any("provenance" in note for note in out["notes"])
+    # busy period 永不结束 ⇒ 体验类 KPI 无定义。重复实验只汇总数值型 KPI，
+    # 所以它不出现在 cell 里；**为什么不出现由 notes 明说，不是静默消失**。
+    assert "cell_experienced_mbps" not in out["cell"]
+    assert any("full buffer" in note for note in out["notes"])
+    # 容量口径的指标照常在。**别断言 occupancy==1**：单 HARQ 进程 + DDDSU 的
+    # 反馈时延本来就会让 2 个 UE 有一半 DL TTI 无人可发，那是物理不是缺陷。
+    # "满缓冲退化成全带宽"这条不变量在 test_physics_invariants 里用 DDDD 守。
+    assert out["cell"]["serving_cell_prb_utilization"]["mean"] > 0.0
+    assert out["cell"]["cell_served_mbps"]["mean"] > 0.0
+    assert out["config"]["system"]["model_version"] == "experience_v2"
+    assert "evaluation_mode" not in out["config"]["system"]
 
 
 def test_experience_ok() -> None:
     _write_dataset()
     out = _run(
-        evaluation_mode="experience", traffic_model="ftp3",
+        traffic_model="ftp3",
         algorithm_label="PF 基线", tti_trace_mode="sampled",
         tti_trace_max_points=32)
     assert "error" not in out, out.get("error")
@@ -148,11 +160,11 @@ def test_experience_ok() -> None:
 def test_compare_two_system_results_generates_real_workbench() -> None:
     _write_dataset()
     baseline = _run(
-        evaluation_mode="experience", traffic_model="ftp3",
+        traffic_model="ftp3",
         scheduler="pf", algorithm_label="PF 基线",
         tti_trace_max_points=24)
     candidate = _run(
-        evaluation_mode="experience", traffic_model="ftp3",
+        traffic_model="ftp3",
         scheduler="rr", algorithm_label="RR 候选",
         tti_trace_max_points=24)
     out = srv.sr_compare_system_results(
@@ -186,10 +198,10 @@ def test_matching_dataset_and_runtime_provenance_is_reported() -> None:
 def test_replication_processes_preserve_results_and_report_actual_backend() -> None:
     _write_dataset()
     serial = _run(
-        evaluation_mode="capacity", duration_s=0.5,
+        duration_s=0.5,
         num_replications=4, replication_workers=1)
     parallel = _run(
-        evaluation_mode="capacity", duration_s=0.5,
+        duration_s=0.5,
         num_replications=4, replication_workers=2)
     assert "error" not in parallel, parallel.get("error")
     assert parallel["cell"] == serial["cell"]
@@ -244,7 +256,7 @@ def test_multicell_dataset_missing_serving_identity_hard_fails() -> None:
 
 def test_zero_speed_is_not_defaulted_to_three_kmh() -> None:
     _write_dataset(ue_speed_kmh=0.0)
-    out = _run(evaluation_mode="capacity")
+    out = _run()
     assert "error" not in out, out.get("error")
     assert out["csi_aging"]["speed_kmh"] == 0.0
     assert out["csi_aging"]["doppler_hz"] == 0.0
@@ -265,7 +277,7 @@ def test_result_reports_effective_allocator_period_not_request(monkeypatch) -> N
         return tables
 
     monkeypatch.setattr(sysm, "build_link_tables", _with_effective_period)
-    out = _run(evaluation_mode="capacity", srs_period_ms=10.0)
+    out = _run(srs_period_ms=10.0)
     assert "error" not in out, out.get("error")
     aging = out["csi_aging"]
     assert aging["requested_config"]["srs_period_ms"] == 10.0
@@ -277,7 +289,7 @@ def test_result_reports_effective_allocator_period_not_request(monkeypatch) -> N
 def test_srs_capacity_error_returns_structured_tool_error() -> None:
     _write_dataset(n_samples=5, n_ues=5)
     out = _run(
-        evaluation_mode="capacity", srs_hopping=False,
+        srs_hopping=False,
         srs_period_adaptive=False)
     assert "error" in out
     assert "srs_hopping=false" in out["error"]

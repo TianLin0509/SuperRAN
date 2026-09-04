@@ -189,7 +189,6 @@ def _run(case: Case, tables: list[sy.UeLinkTable]) -> dict[str, Any]:
         num_replications=6,
         master_seed=case.master_seed,
         sys_cfg=sy.SystemConfig(
-            evaluation_mode="experience",
             duration_s=1.0,
             tdd_pattern="DDDSU",
             seed=case.master_seed,

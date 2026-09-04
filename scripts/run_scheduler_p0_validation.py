@@ -89,7 +89,7 @@ def _frequency_experiment() -> dict[str, object]:
         _su_table(1, [-8.0] * 8 + [22.0] * 9, best_rank=1),
     ]
     cfg = sy.SystemConfig(
-        evaluation_mode="experience", duration_s=0.1,
+        duration_s=0.1,
         tdd_pattern="D", seed=42)
     traffic = sy.TrafficConfig(model="full_buffer")
     kpi = sy.KpiConfig(warmup_tti=0, tti_trace_mode="off")
@@ -196,7 +196,7 @@ def _mu_experiment() -> dict[str, object]:
     run = sy.simulate(
         tables,
         sys_cfg=sy.SystemConfig(
-            evaluation_mode="experience", duration_s=0.01,
+            duration_s=0.01,
             tdd_pattern="D", seed=0),
         traffic=sy.TrafficConfig(model="full_buffer"),
         sched=sy.SchedulerConfig(

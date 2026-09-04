@@ -1020,6 +1020,14 @@ def _finite(values: Iterable[float]) -> list[float]:
     return [float(x) for x in values if np.isfinite(x)]
 
 
+def _nan_safe(fn, values, *args) -> float:
+    """对可能全是 nan 的序列做聚合；空或全 nan 时返回 nan 而不是抛 warning。"""
+    arr = np.asarray(list(values), dtype=float)
+    if arr.size == 0 or not np.any(np.isfinite(arr)):
+        return float("nan")
+    return float(fn(arr, *args))
+
+
 def _pct(values: Iterable[float], q: float) -> float | None:
     v = _finite(values)
     return float(np.percentile(v, q)) if v else None
@@ -3610,6 +3618,29 @@ def simulate_experience(
         "olla_mcs_p5": float(np.percentile(olla_db, 5)),
         "olla_mcs_p95": float(np.percentile(olla_db, 95)),
         "olla_domain": "continuous_mcs_index",
+        "olla_target_bler": round(
+            float(sched.olla_step_up_db)
+            / (float(sched.olla_step_up_db) + float(sched.olla_step_down_db)), 4),
+        # **IoT = (I+N)/N**：干扰主导还是噪声主导。密集城区常 >20 dB。
+        # 它是链路表的纯函数，和话务模型无关，所以任何配置下都该报。
+        "iot_db_median": _nan_safe(np.nanmedian, [t.iot_db for t in tables]),
+        "iot_db_p5": _nan_safe(np.nanpercentile, [t.iot_db for t in tables], 5),
+        "iot_db_p95": _nan_safe(np.nanpercentile, [t.iot_db for t in tables], 95),
+        # **有效率必须按样本算，不是按用户。** 逐用户的 nanmedian 会把
+        # "8 个快照里 4 个算不出来"的用户也算成有效，于是小区级恒报 100%，
+        # 正确的多时隙告警从不触发。两个口径都报出来，差异才可见。
+        "iot_sample_valid_share": (
+            float(np.mean([t.iot_sample_valid for t in tables])) if tables else 0.0),
+        "iot_valid_ue_share": float(np.mean(
+            [bool(np.isfinite(t.iot_db)) for t in tables])) if tables else 0.0,
+        "high_iot_ue_share": float(np.mean([
+            (t.iot_db >= 20.0) if np.isfinite(t.iot_db) else False
+            for t in tables])) if tables else 0.0,
+        # **边缘用户 MCS**：现场经验通常 < 5，比平均 MCS 更能暴露覆盖问题。
+        "edge_mcs_p5": _nan_safe(
+            np.nanpercentile,
+            [float(row["avg_mcs"]) for row in users
+             if int(row.get("sched_tti", 0) or 0) > 0], 5),
         "mu_share": float(mu_tti / max(busy_tti, 1)),
         "mu_rbg_share": float(mu_rbg / max(allocated_rbg, 1)),
         "mu_paired_prb_share_of_used": mu_paired_prb_share_of_used,
@@ -3883,6 +3914,34 @@ def simulate_experience(
             "start_backlog + arrived_in_window 必须等于 acked_in_window + end_backlog。")
     if cell["serving_cell_prb_utilization"] > 0.98:
         notes.append("**本小区 PRB 利用率超过 98%**，当前结果更接近容量上限而非稳态体验。")
+    # **判据必须是逐样本有效率。** 逐用户的那个恒等于 1（nanmedian 会把半数 nan
+    # 的用户也算成有效），于是这条正确的告警从不触发，反而触发下面那条"检查
+    # 站间距"——把用户支使去查一个根本没问题的配置。
+    _iot_ok = float(cell.get("iot_sample_valid_share", 1.0))
+    if _iot_ok < 0.9:
+        notes.append(
+            f"**IoT 不可信：只有 {_iot_ok:.0%} 的样本算得出来**"
+            f"（逐用户口径会报 {cell['iot_valid_ue_share']:.0%}，那个数会骗人）。"
+            "根因是生成时 num_slots_per_sample > 1——那时 sinr_dB 是各 slot 的 dB "
+            "均值、sir_dB 只取最后一个 slot，两者不同口径，会出现 SIR < SINR 这种"
+            "物理上不可能的值。**别去查站间距和邻区负载，配置没问题，是这个量本身"
+            "在多时隙下不成立。** 要看 IoT 就用 num_slots_per_sample=1 单独生成一批"
+            "——但那批做不了系统级仿真（PF 拿不到时间分集、CSI 老化恒为 0）。")
+    elif (np.isfinite(cell["iot_db_median"]) and cell["iot_db_median"] < 3):
+        notes.append(
+            f"**IoT 中位只有 {cell['iot_db_median']:.1f} dB**，几乎是噪声受限。"
+            "密集城区实际常在 20 dB 以上——检查是不是站间距太大、"
+            "或者邻区负载 prb_utilization 设得过低。")
+    if np.isfinite(cell["edge_mcs_p5"]) and cell["edge_mcs_p5"] > 8:
+        notes.append(
+            f"**5% 边缘用户的 MCS 是 {cell['edge_mcs_p5']:.1f}，偏高**"
+            "（现场经验通常 <5）。多半是撒点没覆盖到真正的边缘，"
+            "或者邻区负载设得太低、干扰被低估了。")
+    if cell["outage_ue"]:
+        notes.append(
+            f"**{cell['outage_ue']} 个用户全程处于覆盖外**"
+            "（用户级 SINR 够不到 MCS 0 的门限），已从调度中剔除。"
+            "他们不进 BLER 与体验速率统计——但这本身就是个结论：这些点位需要补站或降配。")
     diagnostics = {
         "rank_policy": rank_ctl.diagnostics(),
         "harq_feedback": {

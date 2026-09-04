@@ -925,8 +925,8 @@ _gran = next(a for a in _ai if a["key"] == "rbg_granularity")
 check("272 RB" in _gran["choice"] and "功控" in _gran["formula"],
       "粒度说明保留 RB 功控的 272-RB 精确路径")
 _phase = next(a for a in _ai if a["key"] == "two_phase")
-check("pair" in _phase["choice"] and "experience_v2 不使用" in _phase["caveat"],
-      "体验 MU 使用真实 pair 表，不再冒充标量近似")
+check("pair" in _phase["choice"] and "se_ratio_legacy" in _phase["caveat"],
+      "MU 使用真实 pair 表；标量近似已下线且说明里点名了它")
 
 # 现网锚点必须带出处
 check(_alg.FIELD_ANCHORS["avg_rank"] == 2.7 and _alg.FIELD_ANCHORS["avg_mcs"] == 15.0,
