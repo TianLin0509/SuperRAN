@@ -119,8 +119,43 @@ def state_of(t: dict, prs: dict) -> dict:
     return dict(node=0, who="agent", label="Agent 实现中", tone="", why="", action="")
 
 
-def track(node: int, tone: str) -> str:
-    """五个节点的进度条。当前节点按 tone 上色。"""
+# 点开每个节点看到的操作指南。写成「谁做什么」，不写实现细节。
+NODE_GUIDE = [
+    {"who": "任务 Agent", "what":
+     "它在自己的工作区改代码、跑测试、写报告。中间不会打扰你。",
+     "you": "等它交付。它会给你 5 行摘要和一份 HTML 报告。",
+     "how": "要开一个新任务，对新会话说：\n"
+            "请根据 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\AUTHOR.md 展开工作。任务：<一句话>"},
+    {"who": "内网审核 Agent", "what":
+     "它拿参照实现做基准，判断这次改动物理上对不对，约 20 分钟。\n"
+     "只有红档（动了物理核心）才走这一步，黄档绿档直接跳过。",
+     "you": "① 右键任务 Agent 打好的 zip 的 URL → AI HUB 同步选项\n"
+            "② 在内网开个会话，把 zip 给它，说一句话（指令已经在 zip 里了）\n"
+            "③ 把它给的 md 拷回 docs\\inbox\\，文件名要带任务 ID",
+     "how": "在内网说这一句：\n"
+            "这是 SuperRAN 一次改动的审核包。先读里面的 00-开始读这里.md，按它的规矩工作。\n"
+            "任务：拿参照实现做基准，判断这次改动在物理上对不对，按模板写一份 Markdown 审核报告。"},
+    {"who": "任务 Agent", "what":
+     "它逐条处理内网意见，改完更新 PR，并附一张「意见对照表」。\n"
+     "不采纳某条是允许的，但必须写理由——悄悄跳过会被合并 Agent 查出来。",
+     "you": "把工作台上那句话复制给原来那个任务 Agent。",
+     "how": "请根据 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\AUTHOR.md 展开工作。\n"
+            "任务 <任务ID>：按 docs\\inbox\\ 里的意见修改，改完更新 PR"},
+    {"who": "合并 Agent", "what":
+     "全新会话、独立审这个 PR。三条硬闸：不许审自己写的、只有 PASS 才合、\n"
+     "合的必须是它亲自验过的那个 SHA。",
+     "you": "把交接词复制给一个新会话，最好换个模型（Claude 写的让 Codex 审）。",
+     "how": "请根据 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\MERGER.md 展开工作。\n"
+            "任务 <任务ID>，审 PR #<号>，通过就由你合并。"},
+    {"who": "合并 Agent", "what":
+     "PASS 之后由它执行 squash 合并，并把 main 跟上 develop。",
+     "you": "不用做什么。任务会从上面消失，收进底部的历史区。",
+     "how": ""},
+]
+
+
+def track(node: int, tone: str, tid: str) -> str:
+    """五个节点的进度条。当前节点按 tone 上色，每个节点可点开看操作指南。"""
     cur = "stuck" if tone in ("warn", "bad") else "now"
     out = []
     for i in range(5):
@@ -130,7 +165,8 @@ def track(node: int, tone: str) -> str:
             cls = cur
         else:
             cls = ""
-        out.append(f'<span class="node {cls}" title="{NODES[i]}"></span>')
+        out.append(f'<span class="node {cls}" data-n="{i}" data-t="{esc(tid)}" '
+                   f'title="{NODES[i]} —— 点开看这一步谁做什么"></span>')
         if i < 4:
             out.append(f'<span class="seg {"done" if i < node - 1 else ""}"></span>')
     return '<div class="track">' + "".join(out) + "</div>"
@@ -146,7 +182,7 @@ def lane(t: dict, s: dict) -> str:
             f'<div class="left"><span class="t">{esc(t["title"])}</span>'
             f'<span class="tid">{esc(t["id"])}</span> '
             f'<span class="badge {badge}">{esc(t.get("risk") or "?")}</span></div>'
-            f"{track(s['node'], s['tone'])}"
+            f"{track(s['node'], s['tone'], t['id'])}"
             f'<div class="st">{tag}<small>{esc(s.get("why", ""))}</small></div>'
             f"</div>{act}")
 
@@ -194,9 +230,52 @@ def build() -> str:
             '<span><i class="id"></i>未开始</span></div></div>'
             + (f'<details class="card"><summary>历史（{len(done)} 件已完成）</summary>'
                f'<div style="margin-top:12px">{hist}</div></details>' if done else "")
-            + f'<p class="foot">数据来自任务台账，Agent 每完成一步自己记一行 · '
+            + f'<p class="foot">点任意一个圆点，看那一步谁做什么 · '
               f'<a href="{esc((REPORT_DIR / "index.html").as_uri())}">全部报告</a></p>'
-            "</div></body></html>")
+            "</div>" + modal(rows) + "</body></html>")
+
+
+def modal(rows: list[tuple[dict, dict]]) -> str:
+    """点节点弹出的操作指南。数据内嵌，离线可用。"""
+    meta = {t["id"]: {"title": t["title"], "pr": t.get("pr") or "",
+                      "node": s["node"], "risk": t.get("risk") or ""}
+            for t, s in rows}
+    return (
+        '<div id="mask" onclick="if(event.target===this)close_()"><div id="box">'
+        '<button id="x" onclick="close_()" aria-label="关闭">×</button>'
+        '<div id="mt"></div><div id="mb"></div></div></div>'
+        "<script>\n"
+        f"const G={json.dumps(NODE_GUIDE, ensure_ascii=False)};\n"
+        f"const M={json.dumps(meta, ensure_ascii=False)};\n"
+        f"const N={json.dumps(NODES, ensure_ascii=False)};\n"
+        """
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function close_(){document.getElementById('mask').style.display='none';}
+function open_(tid,i){
+  const g=G[i], m=M[tid]||{}, cur=m.node===i;
+  const fill=s=>esc(s||'').replace(/&lt;任务ID&gt;/g,tid)
+                          .replace(/&lt;号&gt;/g,m.pr||'?')
+                          .replace(/\\n/g,'<br>');
+  let h='<p class="mrow"><b>谁在做</b>'+esc(g.who)+'</p>'
+       +'<p class="mrow"><b>这一步发生什么</b>'+fill(g.what)+'</p>'
+       +'<p class="mrow"><b>你要做什么</b>'+fill(g.you)+'</p>';
+  if(g.how) h+='<div class="mhow"><div class="mlab">'
+      +(cur?'现在就复制这段':'到这一步时用这段')+'</div><pre>'+fill(g.how)+'</pre></div>';
+  if(m.risk==='绿'||m.risk==='黄'){
+    if(i===1) h='<div class="mskip">这个任务是 '+esc(m.risk)
+      +'档，<b>不走内网这一步</b>，会直接跳到「修改 / 提 PR」。</div>'+h;
+  }
+  document.getElementById('mt').innerHTML='<span class="mstep">第 '+(i+1)+' 步</span>'
+    +esc(N[i])+'<small>'+esc(m.title||tid)+'</small>';
+  document.getElementById('mb').innerHTML=h;
+  document.getElementById('mask').style.display='flex';
+}
+document.querySelectorAll('.node').forEach(n=>{
+  n.style.cursor='pointer';
+  n.addEventListener('click',()=>open_(n.dataset.t,+n.dataset.n));
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')close_();});
+</script>""")
 
 
 EXTRA = """
@@ -230,6 +309,27 @@ margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:5px;margin-right:5px}
 .legend i.ok{background:var(--ok)}.legend i.ac{background:var(--accent)}
 .legend i.wn{background:var(--warn)}.legend i.id{background:var(--line)}
+#mask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);
+z-index:99;align-items:center;justify-content:center;padding:20px}
+#box{background:var(--card);color:var(--ink);border:1px solid var(--line);
+border-radius:14px;max-width:620px;width:100%;max-height:82vh;overflow:auto;
+padding:24px 26px;position:relative;box-shadow:0 18px 48px rgba(0,0,0,.28)}
+#x{position:absolute;top:12px;right:14px;border:0;background:transparent;
+color:var(--soft);font-size:26px;line-height:1;cursor:pointer;padding:2px 6px}
+#mt{font-size:19px;font-weight:700;margin:0 0 16px;padding-right:30px}
+#mt small{display:block;font-size:13px;font-weight:400;color:var(--soft);margin-top:4px}
+.mstep{display:inline-block;background:var(--accent);color:#fff;font-size:12px;
+font-weight:700;border-radius:5px;padding:2px 9px;margin-right:9px;vertical-align:2px}
+.mrow{margin:0 0 14px;font-size:14px;line-height:1.7}
+.mrow b{display:block;font-size:12px;color:var(--soft);font-weight:700;margin-bottom:3px}
+.mhow{margin-top:16px}
+.mlab{font-size:12px;color:var(--soft);font-weight:700;margin-bottom:6px}
+.mhow pre{background:var(--code-bg);color:var(--code-ink);border-radius:8px;
+padding:12px 14px;font-size:12.5px;white-space:pre-wrap;word-break:break-word;margin:0}
+.mskip{background:var(--tint);color:var(--tint-ink);border-radius:9px;
+padding:12px 14px;font-size:13.5px;margin:0 0 16px}
+.node{transition:transform .12s}
+.node:hover{transform:scale(1.5)}
 .hrow{display:flex;gap:12px;align-items:baseline;padding:8px 0;
 border-bottom:1px solid var(--line);font-size:13.5px}
 .hrow:last-child{border-bottom:0}
