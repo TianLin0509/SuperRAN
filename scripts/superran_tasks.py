@@ -11,6 +11,7 @@ PR 状态从 GitHub 实时补齐。已合并的任务从主区消失，收进历
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import webbrowser
@@ -58,6 +59,15 @@ def pr_states() -> dict[int, dict]:
         return {p["number"]: p for p in json.loads(raw)} if raw else {}
     except json.JSONDecodeError:
         return {}
+
+
+def safe_name(title: str) -> str:
+    """和 superran_review_pack.py 用同一套清洗规则，否则看板显示的文件名会不存在。
+
+    标题里出现 `/`（比如「BLER/EESM 显式化」）在 Windows 文件名里非法，
+    打包脚本会剥掉它 —— 这边不剥就会显示一条打不开的路径。
+    """
+    return re.sub(r'[\/:*?"<>|]', "", title)[:24]
 
 
 def inbox_for(tid: str) -> Path | None:
@@ -129,18 +139,20 @@ NODE_GUIDE = [
     {"who": "内网审核 Agent", "what":
      "它拿参照实现做基准，判断这次改动物理上对不对，约 20 分钟。\n"
      "只有红档（动了物理核心）才走这一步，黄档绿档直接跳过。",
-     "you": "① 右键任务 Agent 打好的 zip 的 URL → AI HUB 同步选项\n"
-            "② 在内网开个会话，把 zip 给它，说一句话（指令已经在 zip 里了）\n"
-            "③ 把它给的 md 拷回 docs\\inbox\\，文件名要带任务 ID",
+     "you": "① 右键这个 zip 的 URL → AI HUB 同步选项：\n"
+            "　　{zip}\n"
+            "② 在内网开个会话，把 zip 给它，说下面这段（指令已经在 zip 里了）\n"
+            "③ 把它给的 md 存成：{inbox}",
      "how": "在内网说这一句：\n"
             "这是 SuperRAN 一次改动的审核包。先读里面的 00-开始读这里.md，按它的规矩工作。\n"
             "任务：拿参照实现做基准，判断这次改动在物理上对不对，按模板写一份 Markdown 审核报告。"},
     {"who": "任务 Agent", "what":
      "它逐条处理内网意见，改完更新 PR，并附一张「意见对照表」。\n"
      "不采纳某条是允许的，但必须写理由——悄悄跳过会被合并 Agent 查出来。",
-     "you": "把工作台上那句话复制给原来那个任务 Agent。",
+     "you": "把下面这段复制给原来那个任务 Agent，它的工作区在\n　　{wt}",
      "how": "请根据 C:\\Vibe\\Wireless\\SuperRAN\\.agents\\AUTHOR.md 展开工作。\n"
-            "任务 <任务ID>：按 docs\\inbox\\ 里的意见修改，改完更新 PR"},
+            "任务 <任务ID>：内网意见在 {inbox}，逐条处理后更新 PR #<号>，\n"
+            "并在 PR 正文附意见对照表（不采纳的要写理由）"},
     {"who": "合并 Agent", "what":
      "全新会话、独立审这个 PR。三条硬闸：不许审自己写的、只有 PASS 才合、\n"
      "合的必须是它亲自验过的那个 SHA。",
@@ -237,9 +249,23 @@ def build() -> str:
 
 def modal(rows: list[tuple[dict, dict]]) -> str:
     """点节点弹出的操作指南。数据内嵌，离线可用。"""
-    meta = {t["id"]: {"title": t["title"], "pr": t.get("pr") or "",
-                      "node": s["node"], "risk": t.get("risk") or ""}
-            for t, s in rows}
+    meta = {}
+    for t, s in rows:
+        tid = t["id"]
+        ev = t.get("events") or []
+        zip_path = next((e["zip"] for e in reversed(ev) if e.get("zip")), "")
+        report = next((e["report"] for e in reversed(ev) if e.get("report")), "")
+        inbox = inbox_for(tid)
+        meta[tid] = {
+            "title": t["title"], "pr": t.get("pr") or "", "node": s["node"],
+            "risk": t.get("risk") or "",
+            "zip": zip_path or f"{tid}_{safe_name(t['title'])}.zip",
+            "inbox": (f"docs\inbox\{inbox.name}" if inbox
+                      else f"docs\inbox\{tid}_内网审核.md"),
+            "inboxReady": bool(inbox),
+            "report": report,
+            "wt": f"C:\Vibe\Worktrees\SuperRAN\{tid}",
+        }
     return (
         '<div id="mask" onclick="if(event.target===this)close_()"><div id="box">'
         '<button id="x" onclick="close_()" aria-label="关闭">×</button>'
@@ -255,12 +281,20 @@ function open_(tid,i){
   const g=G[i], m=M[tid]||{}, cur=m.node===i;
   const fill=s=>esc(s||'').replace(/&lt;任务ID&gt;/g,tid)
                           .replace(/&lt;号&gt;/g,m.pr||'?')
+                          .replace(/\\{zip\\}/g,esc(m.zip||''))
+                          .replace(/\\{inbox\\}/g,esc(m.inbox||''))
+                          .replace(/\\{wt\\}/g,esc(m.wt||''))
                           .replace(/\\n/g,'<br>');
   let h='<p class="mrow"><b>谁在做</b>'+esc(g.who)+'</p>'
        +'<p class="mrow"><b>这一步发生什么</b>'+fill(g.what)+'</p>'
        +'<p class="mrow"><b>你要做什么</b>'+fill(g.you)+'</p>';
+  if(i===2&&!m.inboxReady){
+    h+='<div class="mskip">内网意见还没进收件箱。把内网给的 md 存成 <b>'
+      +esc(m.inbox)+'</b> 之后，这条任务会自动变成「待转交」，下面这段才有意义。</div>';
+  }
   if(g.how) h+='<div class="mhow"><div class="mlab">'
-      +(cur?'现在就复制这段':'到这一步时用这段')+'</div><pre>'+fill(g.how)+'</pre></div>';
+      +(cur?'现在就复制这段':'到这一步时用这段')+'</div><pre>'+fill(g.how)+'</pre>'
+      +'<button class="mcopy" onclick="cp(this)">复制</button></div>';
   if(m.risk==='绿'||m.risk==='黄'){
     if(i===1) h='<div class="mskip">这个任务是 '+esc(m.risk)
       +'档，<b>不走内网这一步</b>，会直接跳到「修改 / 提 PR」。</div>'+h;
@@ -274,6 +308,12 @@ document.querySelectorAll('.node').forEach(n=>{
   n.style.cursor='pointer';
   n.addEventListener('click',()=>open_(n.dataset.t,+n.dataset.n));
 });
+function cp(btn){
+  const pre=btn.previousElementSibling;
+  navigator.clipboard.writeText(pre.innerText).then(()=>{
+    btn.textContent='已复制';setTimeout(()=>btn.textContent='复制',1600);
+  }).catch(()=>{btn.textContent='复制失败，请手动选中';});
+}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')close_();});
 </script>""")
 
@@ -326,6 +366,9 @@ font-weight:700;border-radius:5px;padding:2px 9px;margin-right:9px;vertical-alig
 .mlab{font-size:12px;color:var(--soft);font-weight:700;margin-bottom:6px}
 .mhow pre{background:var(--code-bg);color:var(--code-ink);border-radius:8px;
 padding:12px 14px;font-size:12.5px;white-space:pre-wrap;word-break:break-word;margin:0}
+.mcopy{margin-top:9px;border:1px solid var(--line);background:var(--card);
+color:var(--ink);font:600 12px inherit;padding:5px 14px;border-radius:7px;cursor:pointer}
+.mcopy:hover{border-color:var(--accent);color:var(--accent)}
 .mskip{background:var(--tint);color:var(--tint-ink);border-radius:9px;
 padding:12px 14px;font-size:13.5px;margin:0 0 16px}
 .node{transition:transform .12s}
