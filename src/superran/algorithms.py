@@ -74,6 +74,10 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             "64T 与 256T 统一采用 pol_h_v + top_to_bottom："
             "先极化块、再水平列、垂直行最快，v=0 对应物理顶部。"
             "水平间距 0.5λ、物理垂直阵子间距 0.67λ。")
+    min_pairing_mcs = int(cfg.get("min_pairing_mcs", 4))
+    pf_gain_threshold = float(cfg.get("pf_gain_threshold", 0.0))
+    orthogonalization_mode = str(
+        cfg.get("orthogonalization_mode", "select"))
 
     return [
         Algorithm(
@@ -196,13 +200,17 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="su_mu_adaptation",
             name="SU/MU 自适应",
             stage="多用户",
-            choice="PF排序后分别构造完整SU/MU计划，比较队列封顶的useful payload bytes",
-            formula="B_useful=Σmin(queue,TBS)；SU能清空全部队列时强制SU，否则MU≥SU才选MU",
+            choice=("PF排序后分别构造完整SU/MU计划；"
+                    f"MCS≥{min_pairing_mcs}，正交化={orthogonalization_mode}，"
+                    f"PF增益门={pf_gain_threshold:g}"),
+            formula=("B_useful=Σmin(queue,TBS)；G_PF=Σ(B_useful/R_avg)；"
+                     "SU能清空全部队列时强制SU，否则MU须同时过useful bytes与PF门"),
             why="SU赢在无MU干扰且可到rank4；MU赢在同一RBG并行两位rank2用户。"
                 "使用useful bytes可自动剔除超出业务包的padding，并保留实际队列收益。",
-            caveat="MU伙伴不是第一个相关性过门者：PF只固定anchor，全部伙伴仍需经过"
-                   "pair link、相关性、层数、预测BLER和useful bytes/RBG评分。"
-                   "当前仅支持两用户、每用户rank2。",
+            caveat=("MU伙伴不是第一个相关性过门者：PF只固定anchor，全部伙伴仍需经过"
+                    "最低MCS、pair link、相关性、层数、预测BLER和useful bytes/RBG评分。"
+                    "PF增益门为0时关闭；schmidt 尚未实现且不会静默回落。"
+                    "当前仅支持两用户、每用户rank2。"),
             source="当前 experience_v2 已确认调度合同",
         ),
         Algorithm(
@@ -422,7 +430,10 @@ def derivations(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
 
     # --- 小区谱效的 TDD 归一 ---
     pat = str(cfg.get("tdd_pattern", "DDDSU")).upper() or "DDDSU"
-    dl_ratio = (pat.count("D") + 0.7 * pat.count("S")) / len(pat)
+    s_slot_fraction = float(cfg.get("s_slot_dl_fraction", 0.7))
+    if not 0.0 < s_slot_fraction <= 1.0:
+        raise ValueError("s_slot_dl_fraction 必须是 (0,1] 内的有限数")
+    dl_ratio = (pat.count("D") + s_slot_fraction * pat.count("S")) / len(pat)
     out.append({
         "key": "tdd_normalize",
         "name": "小区谱效的 TDD 归一",
@@ -433,10 +444,11 @@ def derivations(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
             ("TDD 图案", f"{pat}",
              f"{pat.count('D')} 个 D + {pat.count('S')} 个 S + "
              f"{pat.count('U')} 个 U，周期 {len(pat)} 个时隙"),
-            ("S 时隙折算", "按 0.7 个下行算",
-             "S 时隙大部分符号是下行，剩下给 GP 和上行导频"),
-            ("下行占比", "(D + 0.7×S) / 周期",
-             f"({pat.count('D')} + 0.7×{pat.count('S')}) / {len(pat)} = {dl_ratio:.4f}"),
+            ("S 时隙折算", f"按 {s_slot_fraction:g} 个下行算",
+             "该显式配置同时用于报告占比与调度 RE/TBS 预算"),
+            ("下行占比", "(D + α×S) / 周期",
+             f"({pat.count('D')} + {s_slot_fraction:g}×{pat.count('S')}) / "
+             f"{len(pat)} = {dl_ratio:.4f}"),
             ("归一", "仿真谱效 / 下行占比",
              f"仿真里一秒只有 {dl_ratio:.0%} 的时隙能发下行，"
              f"而 ITU 的参考值是按全下行定义的，所以要除以 {dl_ratio:.4f} 才可比"),

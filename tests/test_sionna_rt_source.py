@@ -856,6 +856,39 @@ def test_docs_do_not_promise_per_path_geometry_that_rt_never_persists():
     assert "RT 数据集不支持 `ds.paths()`" in readme
 
 
+def test_legacy_channel_source_key_is_a_hard_error():
+    """旧错误文档留下的键不能继续静默选择 internal_sim。"""
+    from superran import generate as _gen
+
+    with pytest.raises(ValueError, match="channel_source.*source.*internal_sim"):
+        _gen.generate({"channel_source": "sionna_rt"}, num_samples=1)
+
+
+def test_single_moving_multislot_window_is_not_rejected():
+    """只有一轮时没有跨轮窗口重叠，移动多时隙必须放行。"""
+    src = srt.SionnaRTSource({
+        "scene": "munich",
+        "num_ues": 1,
+        "num_samples": 1,
+        "num_slots_per_sample": 2,
+        "mobility_mode": "linear",
+        "ue_speed_kmh": 30.0,
+    })
+    src._assert_samples_are_distinct()
+
+
+def test_primary_docs_use_the_current_rt_time_and_capability_contract():
+    """主手册和 CLAUDE 不能继续发布已删除的轮次时间原点。"""
+    claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    compact = (ROOT / "scripts" / "make_developer_guide.py").read_text(
+        encoding="utf-8")
+    assert "当前 direct adapter 尚未实现" not in claude
+    assert "清单必须恒为三条" not in claude
+    assert "第 k 轮从 <code>k × sample_interval_s</code> 起算" not in compact
+    assert "修好之后同一 UE 相邻两轮实测 NMSE 约 −18 dB" not in compact
+    assert "每个样本内部恒从 <code>t=0</code> 起算" in compact
+
+
 if __name__ == "__main__":
     # run_test_matrix.py 是用 `python tests/<file>.py` 跑每个文件的。
     # 没有这个入口，pytest 式的文件会「什么都不做地退出 0」——在矩阵里

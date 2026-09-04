@@ -736,10 +736,11 @@ class SionnaRTSource(InternalSimSource):
         2. 样本内部多时隙 + 零多普勒。``num_slots_per_sample>1`` 而
            ``ue_speed_kmh=0`` 时所有径的 Doppler 都是 0，时间相位恒为 1，
            一个样本里的 N 个 slot 逐位相同。
-        3. 非 static + 样本内部多时隙。父类每轮只把位置前移**一个**
+        3. 非 static + 多轮 + 样本内部多时隙。父类每轮只把位置前移**一个**
            ``sample_interval_s``，而一个样本内部横跨 ``n_time`` 个间隔，于是
            相邻两轮的窗口在物理时间上重叠（n_time=8 时重叠 7/8，16 个输出只有
            9 个独特时刻），下游 ``system.py`` 还会把它们直接展平拼接当独立快照。
+           只有一轮时不存在跨轮重叠，必须放行。
            这个窗口合同要改的是父类的轨迹时钟，跨引擎、要维护者定案，
            **不在本 PR 范围内**；在它定案之前 RT 不产出这种数据。
         """
@@ -782,10 +783,11 @@ class SionnaRTSource(InternalSimSource):
                 % n_time
             )
 
-        if moves and n_time > 1:
+        if moves and n_time > 1 and rounds > 1:
             raise ValueError(
                 f"mobility_mode={mode!r} "
-                f"且 num_slots_per_sample={n_time}：父类每轮只把 UE 位置前移一个 "
+                f"、num_slots_per_sample={n_time} 且每个 UE 有 {rounds} 轮："
+                "父类每轮只把 UE 位置前移一个 "
                 "sample_interval_s，而一个样本内部横跨 %d 个间隔，相邻两轮的时间"
                 "窗口会重叠（下游 system.py 直接展平拼接，重叠时刻会被当成独立"
                 "快照，虚增有效样本并破坏时间单调）。"
@@ -800,10 +802,9 @@ class SionnaRTSource(InternalSimSource):
         inner = super().iter_samples()
         local_index = 0
         while True:
-            # **必须在父类算这个样本之前设好轮次。** 写成
-            # ``for i, sample in enumerate(super().iter_samples())`` 是错的：
-            # 生成器在循环体执行前就已经把样本算完了，于是信道用的是上一轮的
-            # 时间原点，而 meta 里写的是这一轮——数字自洽，物理不对。
+            # **必须在父类算这个样本之前设好轮次标签。** ``_sample_round`` 只进
+            # meta、不再参与物理时间轴；设晚了不会改 H，但会把第 k 轮的诊断
+            # 错标成第 k-1 轮，仍然会误导后续审计。
             self._sample_round = (
                 int(self._offset) + local_index) // max(int(self.num_ues), 1)
             try:

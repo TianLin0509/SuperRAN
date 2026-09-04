@@ -238,3 +238,20 @@ meta 键：新增 `rt_sample_round`（诊断标签）与
 2. **`_spatial_panel_response` 垂直相位符号。** 上面已量化，改完与权威模型
    残差 0.0000。它会改掉所有 64T/256T 的既有 CDL 基线，需要单独 PR 与
    基线重签。
+
+## 维护者授权后的最终收口
+
+维护者明确授权本轮直接修改 PR #12 并在独立双审通过后合入。收口只处理第四轮
+审核仍未闭合的边界，不夹带垂直相位修复：
+
+1. `generate()` 对历史错误键 `channel_source` 直接报错并给出
+   `source='sionna_rt'` 迁移方式，禁止静默落回 `internal_sim`。
+2. 移动多时隙守卫只在**确有第二轮**时拦截；单窗口
+   `linear + 30 km/h + T=2` 没有跨轮重叠，必须放行。
+3. 主手册删除“第 k 轮从 k×dt 起算”和“跨轮 NMSE −18 dB 是正确结果”的旧说法；
+   `_sample_round` 只作 meta 标签，不进入物理时间轴。
+4. `CLAUDE.md` 统一为 direct adapter 已实现、引擎清单恒为两条。
+
+棘轮同时进入 `tests/test_sionna_rt_source.py` 与
+`tests/test_physics_invariants.py`：错误键必须硬失败，单窗口移动多时隙必须放行，
+主手册与 `CLAUDE.md` 不得恢复旧合同。

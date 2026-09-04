@@ -288,6 +288,65 @@ def main() -> None:
     check(b24 > b1, "码块越多 TB 级 BLER 越高（任一块错则整块错）")
 
     # -----------------------------------------------------------------------
+    sect("6.1  BLER 工厂、参考门限与显式 EESM")
+
+    analytic = la.make_bler_model(
+        1, config={"c": 2.5, "implementation_loss_db": 1.5})
+    check(isinstance(analytic, la.BlerModel)
+          and analytic.c == 2.5
+          and analytic.implementation_loss_db == 1.5,
+          "表 1 工厂返回按配置构造的解析 BLER，不污染全局默认实例")
+    tabulated = la.make_bler_model(3)
+    check(isinstance(tabulated, la.CurveBlerModel)
+          and tabulated.source_id == "preset_20b_256qam",
+          "表 3 工厂路由到已注册的预置曲线源")
+    from dataclasses import replace as _dc_replace
+
+    _test_source = "test_runtime_curve_source"
+
+    def _test_curve_provider(mcs, tx_mode):
+        return _dc_replace(
+            la.bc.get_curve(mcs, tx_mode), source_id=_test_source)
+
+    la.register_bler_curve_source(
+        _test_source, _test_curve_provider, replace=True)
+    switched = la.make_bler_model(3, config={"source_id": _test_source})
+    check(abs(float(switched.bler(
+        0.0, la.MCS_TABLE_3[0], 20000)[0])
+                    - float(tabulated.bler(
+                        0.0, la.MCS_TABLE_3[0], 20000)[0])) < 1e-12,
+          "CurveBlerModel 按 source_id 切换已注册曲线提供者")
+    try:
+        la.make_bler_model(3, config={"source_id": "not_registered"})
+        check(False, "未注册曲线源应在模型构造时失败")
+    except ValueError:
+        check(True, "未注册曲线源硬失败，不静默回落默认曲线")
+    ref = analytic.anchor_check(
+        table=3, reference_thresholds={0: -6.0, 28: 21.0})
+    check("diff_to_reference_db" in ref["rows"][0]
+          and ref["rows"][0]["diff_to_reference_db"] is not None,
+          "anchor_check 输出相对外部参考门限的只读差值")
+    check(ref["unmatched_reference_mcs"] == [28],
+          "参考曲线含当前表不存在的 MCS 时显式列出，不伪造 MCS28")
+
+    grid = np.array([0.0, 5.0, 10.0])
+    eesm_scalar = la.eesm_compress(grid, beta=10.0)
+    eesm_by_mcs = la.eesm_compress(grid, beta=np.array([1.0, 10.0, 100.0]))
+    linear_mean_db = 10.0 * np.log10(np.mean(10.0 ** (grid / 10.0)))
+    eesm_large_beta = float(la.eesm_compress(grid, beta=1e6))
+    check(isinstance(eesm_scalar, np.ndarray) and eesm_scalar.shape == (),
+          "显式 EESM 对一维 SINR + 标量 beta 返回标量 ndarray")
+    check(eesm_by_mcs.shape == (3,),
+          "显式 EESM 支持逐 MCS beta 数组广播")
+    check(abs(eesm_large_beta - linear_mean_db) < 1e-4,
+          "beta 趋于无穷时 EESM 趋近线性 SINR 的算术平均")
+    check(set(la.DEFAULT_BETA_BY_MCS_TABLE) == {1, 2, 3}
+          and len(la.DEFAULT_BETA_BY_MCS_TABLE[3]) == len(la.MCS_TABLE_3),
+          "默认 beta 由公开调制阶数近似展开到各 MCS 表，不嵌入外部私有数据")
+    check(la.DEFAULT_BLER.anchor_check()["table"] == 1,
+          "DEFAULT_BLER 薄壳保持旧调用兼容")
+
+    # -----------------------------------------------------------------------
     sect("6.5  预置单码字 TB-BLER 曲线与一次 HARQ 工程抽象")
 
     cv = la.bc.verify_curves()

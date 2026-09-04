@@ -19,12 +19,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from superran import beamforming as bf  # noqa: E402
 from superran import csi_aging as ca  # noqa: E402
 from superran import experience as ex  # noqa: E402
+from superran import generate as gen  # noqa: E402
 from superran import interference as itf  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import linklevel as ll  # noqa: E402
 from superran import measure  # noqa: E402
 from superran import mumimo as mu  # noqa: E402
 from superran import rng as rg  # noqa: E402
+from superran import sionna_rt as srt  # noqa: E402
 from superran import system as sy  # noqa: E402
 
 FAILED: list[str] = []
@@ -447,6 +449,89 @@ legacy = sy.simulate(
     kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(92, 0))
 check(abs(legacy.cell["offered_mbps"] - 1.0) < 1e-9,
       "D/S/U 每个 TTI 都维护业务到达，DDDSU 不再漏掉 U 时隙的 20% CBR")
+
+
+def test_s_slot_fraction_single_source_of_truth() -> None:
+    """报告占比和调度承载必须读取同一个显式 S 时隙系数。"""
+    default = sy.SystemConfig(tdd_pattern="DDDSU")
+    custom = sy.SystemConfig(tdd_pattern="DDDSU", s_slot_dl_fraction=0.82)
+    assert abs(default.s_slot_dl_fraction - sy.S_SLOT_DL_FRACTION) < 1e-12
+    assert abs(default.dl_ratio - (3 + sy.S_SLOT_DL_FRACTION) / 5) < 1e-12
+    assert abs(custom.dl_ratio - (3 + 0.82) / 5) < 1e-12
+    assert abs(sy.infer_s_slot_fraction("DDDSU") - 10 / 14) < 1e-12
+    assert abs(sy.infer_s_slot_fraction("DDDDDDDSUU") - 6 / 14) < 1e-12
+
+
+test_s_slot_fraction_single_source_of_truth()
+
+
+def test_bler_factory_and_eesm_are_explicit() -> None:
+    """BLER 后端选择和频选 SINR 压缩都必须是显式、可审计输入。"""
+    model = la.make_bler_model(
+        1, config={"c": 2.5, "implementation_loss_db": 1.5})
+    assert isinstance(model, la.BlerModel)
+    assert model.c == 2.5 and model.implementation_loss_db == 1.5
+    assert isinstance(la.make_bler_model(3), la.CurveBlerModel)
+    assert la.eesm_compress(
+        np.array([0.0, 5.0, 10.0]), beta=np.array([1.0, 10.0])).shape == (2,)
+
+
+test_bler_factory_and_eesm_are_explicit()
+
+
+def test_mu_admission_gates_are_explicit_and_reversible() -> None:
+    """低 MCS、PF 增益和 Schmidt 缺口都不能被静默吞掉。"""
+    h_eff = np.zeros((3, 1, 1, 3), dtype=np.complex128)
+    h_eff[0, 0, 0, 0] = 1.0
+    h_eff[1, 0, 0, 1] = 0.9
+    h_eff[2, 0, 0, 2] = 0.8
+    gated = mu.pair_users(
+        h_eff, criterion="all", mcs_indices=np.array([3, 10, 10]),
+        min_pairing_mcs=4)
+    assert gated.users == [1, 2] and gated.dropped_by_mcs == [0]
+    legacy = mu.pair_users(
+        h_eff, criterion="all", mcs_indices=np.array([3, 10, 10]),
+        min_pairing_mcs=0)
+    assert legacy.users == [0, 1, 2]
+    try:
+        mu.pair_users(h_eff, orthogonalization_mode="schmidt")
+    except NotImplementedError as exc:
+        assert "TODO" in str(exc) and "Schmidt" in str(exc)
+    else:
+        raise AssertionError("schmidt 未实现时必须硬失败")
+
+
+test_mu_admission_gates_are_explicit_and_reversible()
+
+
+# ---------------------------------------------------------------------------
+section("9  Sionna RT 入口不能静默选错引擎，也不能误伤单窗口时间轴")
+
+
+def test_sionna_rt_source_key_and_single_window_contract() -> None:
+    """审核发现的两条边界必须在物理不变量层形成棘轮。"""
+    try:
+        gen.generate({"channel_source": "sionna_rt"}, num_samples=1)
+    except ValueError as exc:
+        check("channel_source" in str(exc) and "source" in str(exc)
+              and "internal_sim" in str(exc),
+              "错误 channel_source 键被硬拒绝，不再静默生成统计信道")
+    else:
+        check(False, "错误 channel_source 键必须硬失败")
+
+    try:
+        srt.SionnaRTSource({
+            "scene": "munich", "num_ues": 1, "num_samples": 1,
+            "num_slots_per_sample": 2, "mobility_mode": "linear",
+            "ue_speed_kmh": 30.0,
+        })._assert_samples_are_distinct()
+    except ValueError as exc:
+        check(False, f"单窗口移动多时隙没有跨轮重叠，不应拒绝（{exc}）")
+    else:
+        check(True, "单窗口移动多时隙合法，不被跨轮守卫误伤")
+
+
+test_sionna_rt_source_key_and_single_window_contract()
 
 
 print("\n" + "=" * 70)
