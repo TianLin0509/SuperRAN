@@ -442,3 +442,10 @@ def test_cosited_sectors_share_one_ray_trace() -> None:
     assert len(diag) == 3
     assert len({row["num_paths"] for row in diag}) == 1
     assert len({round(row["rt_pathloss_db"], 9) for row in diag}) == 1
+
+
+if __name__ == "__main__":
+    # run_test_matrix.py 是用 `python tests/<file>.py` 跑每个文件的。
+    # 没有这个入口，pytest 式的文件会「什么都不做地退出 0」——在矩阵里
+    # 表现为一个假通过。见 .agents/TESTING.md 的坑 2。
+    raise SystemExit(pytest.main([__file__, "-q"]))

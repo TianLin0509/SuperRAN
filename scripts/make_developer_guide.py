@@ -2759,12 +2759,29 @@ OSM里看见标签但三角化失败不能算已建模。<code>calibration_statu
 <h2>Paths 到 CFR 的物理时间轴</h2>
 """ + F_CHANNEL + F_MAX_DOPPLER
     body += """
-<p>Sionna 路径对象携带时延、复幅度、出发/到达角和材料交互；CFR 还需要完整 UE 速度向量与
-物理采样率。当前适配器按平均 OFDM-symbol 周期设置采样，频率网格围绕载波中心；随后只把
-中间 symbol 作为一个 slot snapshot 落盘。若未设置 velocity 或沿用 1 Hz 默认采样，14 个 symbol
-会变成静态复制。当前 ChannelSample 只落 CFR，没有持久化 Sionna 的原始 Paths；因此 RT 数据调用
+<p>Sionna 路径对象携带时延、复幅度、出发/到达角和材料交互。本仓的直连适配层
+<code>src/superran/sionna_rt.py</code> 把它们拆成引擎无关的 <code>RayPaths</code>，再逐径合成
+<code>H += g·exp(j2π f_d t)·exp(−j2π (f_c + f) τ)·a_BS·conj(a_UE)</code>。载波项不能省：CDL 的时延
+是合成的、每簇另有随机相位，而 RT 的径长差是真实的，径间相对相位就来自这一项。锚点是与
+Sionna 自己的 <code>Paths.cfr()</code> 对拍，单端口单极化下相对误差小于 2e-3。
+当前 ChannelSample 只落 CFR，没有持久化 Sionna 的原始 Paths；因此 RT 数据调用
 <code>Dataset.paths()</code> 会明确抛 <code>NotImplementedError</code>，而不是套一张 CDL 表伪造角度。
 PDP、协方差、PMI 与几何量仍可从现有合同计算。这是当前数据合同的硬边界，不以空数组占位。</p>
+<h2>换引擎只换信道矩阵</h2>
+<p>默认信道仍是 38.901 统计信道；要走射线追踪必须在配置里显式写 <code>source: sionna_rt</code>
+并给一个 <code>scene</code>。适配层唯一覆写的是 <code>InternalSimSource._small_scale_channel</code>
+这个接缝——以上的站点布局、撒点、LOS、路损、阴影衰落、服务小区选择、预波束 S/N/I 预算，
+以下的估计噪声、SSB、TDD 成对与元数据全部共用。所以同一套几何下 CDL 与 RT 的
+<code>pathloss_dB</code>/<code>snr_dB</code>/<code>sir_dB</code>/<code>sinr_dB</code> 逐位相同，
+KPI 差异可归因到信道矩阵本身。RT 自己算出的路损与时延扩展只写进 <code>meta.rt_pathloss_db</code>
+与 <code>meta.rt_delay_spread_ns</code> 作旁证，不驱动链路预算。</p>
+<p><b>1 驱 3 / 1 驱 6 一个字都没变。</b>BS 端口阵因子与固定子阵方向图调的是 CDL 路径用的同两个
+函数，不是另写一份；64T 的 8×4×2、256T 的 16×8×2、垂直 0.67λ 与 <code>pol_h_v + top_to_bottom</code>
+照旧。两处容易踩的坑：Sionna 自带的 <code>cross</code> 极化是 [−45°, +45°]，与本仓配置的
+[+45°, −45°] 顺序相反，直接用会把两个极化端口块整体对调；内置场景的坐标原点未必在城区里，
+站点必须平移到包围盒中心，否则随机撒点会大面积落进全遮挡区。服务链路一条径都追不到时
+适配层直接抛"覆盖空洞"并打印坐标，绝不退回 TDL/CDL；干扰小区零径则返回零信道，因为那是
+真实的"该小区没有干扰"。</p>
 <h2>InternalSim 的快速 probe 为什么能快、又为什么不能多算</h2>
 """ + F_PROBE_SNR + F_SINR_COMBINE
     body += """
@@ -2787,7 +2804,7 @@ SNR/SINR；历史导入数据若恰落在旧 ±50 dB 边界才会标记为不可
         "<p>它只覆盖 8.64 MHz，并非对 100 MHz 稀疏抽样。即使 shape 看起来像普通数据集，也不能拿去算 "
         "PDP、频选 rank 或吞吐；<code>not_available</code> 是硬边界清单，不是建议项。</p>",
     )
-    body += "<p class=source-row>场景资产：" + source_ref("src/superran/scenes.py", "def prepare_scene") + " · 资产合同：" + source_ref("src/superran/scene_assets.py", "def scene_tree_fingerprint") + " · 快速探测：" + source_ref("src/superran/scenario.py", "def probe") + " · RT 适配：" + source_ref("src/superran/channelhub.py", "sionna_rt") + "</p>"
+    body += "<p class=source-row>场景资产：" + source_ref("src/superran/scenes.py", "def prepare_scene") + " · 资产合同：" + source_ref("src/superran/scene_assets.py", "def scene_tree_fingerprint") + " · 快速探测：" + source_ref("src/superran/scenario.py", "def probe") + " · RT 适配：" + source_ref("src/superran/sionna_rt.py", "def synthesize_channel") + "</p>"
     return Page(
         "raytracing", "射线追踪、场景资产与快速探测", "物理内核", "RAY TRACING",
         "Sionna RT 场景如何准备、形成时变 CFR，以及 InternalSim probe 的严格可用边界。", body,
@@ -5842,7 +5859,7 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         ["本轮补齐的能力簇", "此前隐藏在哪里", "现在的独立章节", "关键审计边界"],
         [
             ("Agent 决策与说明书闭环", "decisions / plan / algorithms / algo_defs* / spec / bridge", '<a href="#/agentloop">决策引擎、算法目录与说明书闭环</a>', "确定性关键词路由；单一 resolved config；loopback 白名单回传"),
-            ("射线追踪与场景探测", "scenes / scenario / channelhub", '<a href="#/raytracing">射线追踪、场景资产与快速探测</a>', "channel_generation_mode 判真；资产只读；probe 不可算 PDP/SE"),
+            ("射线追踪与场景探测", "scenes / scenario / sionna_rt", '<a href="#/raytracing">射线追踪、场景资产与快速探测</a>', "channel_generation_mode 判真；资产只读；probe 不可算 PDP/SE；RT 只换信道矩阵"),
             ("参考信号与物理基线", "physical / hardware / csi_aging", '<a href="#/referencesignals">参考信号、TDD 与波束扫描</a>', "38.104 RB 表；SRS 周期；CSI-RS DFT 不等于 PMI"),
             ("BLER 与有效 SINR", "linkadapt / bler_curves / bler_data_20b", '<a href="#/bler">BLER：MCS 表、曲线与 HARQ 复现</a>', "MIESM/EESM 尚未进入体验链；预置曲线不是 3GPP 曲线"),
             ("外部算法证据合同", "analysis / results / deliver", '<a href="#/externalresults">预注册、外部算法与结果合同</a>', "MCP 不执行外部代码；摘要与有序 sample_ids 先于统计"),

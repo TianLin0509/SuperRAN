@@ -199,3 +199,12 @@ def test_lazy_module_does_not_leak_through_dunder():
     assert out["raised"] is True
     assert out["numpy"] is False, "探测 dunder 不该触发加载"
     assert out["loaded"] is False
+
+
+if __name__ == "__main__":
+    # run_test_matrix.py 用 `python tests/<file>.py` 跑每个文件。没有这个入口，
+    # pytest 式文件会「什么都不做地退出 0」，在矩阵里表现为假通过。
+    # 见 .agents/TESTING.md 的坑 2。
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-q"]))
