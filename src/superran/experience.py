@@ -1,8 +1,13 @@
-"""体验评估模式：DRB busy-period、按需 RBG 分配与 Rel-19 KPI。
+"""系统级 TTI 主循环：DRB busy-period、按需 RBG 分配与 Rel-19 KPI。
 
-这个模块只做系统级第二相（TTI 主循环），不碰信道矩阵。它和
-``system.simulate`` 的 legacy 路径并存：legacy 用来复现历史结果，本文实现的
+这个模块只做系统级第二相（TTI 主循环），不碰信道矩阵，是**唯一**的评估路径。
 ``experience_v2`` 用实际分配的 TBS 给 PF 记账，并允许一个 TTI 服务多个 UE。
+
+**"容量仿真"不是另一条分支**，而是 ``TrafficConfig(model="full_buffer")``
+这个话务配置点：缓冲区永不空 ⇒ :func:`_build_su_plan` 的按需 RBG 反查恒等于
+全带宽、每 TTI 一个 SU（或一对 MU）。调度、AMC、HARQ、解调 SINR 聚合全部照
+本模块的定义走，**没有为它开的任何特例分支**。代价是 busy period 永不结束，
+28.552 的体验速率因此按定义无定义，如实报 ``None``。
 
 物理边界明确写在结果里：逐 RBG 频选与 RB 功控是两个独立开关；只要链路表
 带逐 RBG SINR，实际 grant 就按 bitmap 聚合并重选 MCS。当前聚合仍是 dB
@@ -2049,11 +2054,9 @@ def simulate_experience(
             raise ValueError("experience_v2 当前 MU 基线固定每用户 rank2")
         if str(getattr(sched, "mu_precoder", "zf")) not in ("zf", "rzf"):
             raise ValueError("experience_v2 的 MU precoder 只支持 zf / rzf")
-    if str(traffic_cfg.model) == "bimodal":
-        raise ValueError("experience_v2 不接受按目标 RBG 数反推包长的 bimodal；请用 mixed")
     if str(traffic_cfg.model) not in (
             "mixed", "cdf", "ftp3", "full_buffer", "cbr"):
-        raise ValueError(f"experience_v2 不支持话务 {traffic_cfg.model!r}")
+        raise ValueError(f"不支持的话务模型 {traffic_cfg.model!r}")
     if str(sched.algorithm) not in (
             "pf", "qos_pf", "rr", "max_ci", "edf", "qos_pf_edf"):
         raise ValueError(f"experience_v2 不支持调度器 {sched.algorithm!r}")
@@ -2065,7 +2068,7 @@ def simulate_experience(
         # 不做静默降级。
         raise ValueError(
             f"{sched.algorithm} 需要有限队列，不接受 full_buffer 话务；"
-            "容量口径请用 pf / max_ci，长期公平口径请用 qos_pf")
+            "容量口径（话务开到最大）请用 pf / max_ci，长期公平口径请用 qos_pf")
     if str(getattr(sched, "qos_priority_weighting", "none")) not in (
             "none", "inverse_priority"):
         raise ValueError("qos_priority_weighting 只支持 none / inverse_priority")
@@ -2081,8 +2084,8 @@ def simulate_experience(
     if accounting == "auto":
         accounting = "scheduled_tbs"
     if accounting not in ("scheduled_tbs", "acked_goodput", "legacy_fullband"):
-        raise ValueError("experience_v2 的 pf_accounting 只支持 scheduled_tbs / "
-                         "acked_goodput / legacy_fullband")
+        raise ValueError("pf_accounting 只支持 scheduled_tbs / acked_goodput / "
+                         "legacy_fullband")
 
     warmup = int(kpi.resolve_warmup_tti(sys_cfg.tti_ms))
     trace_mode = str(getattr(kpi, "tti_trace_mode", "sampled")).lower()

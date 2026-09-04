@@ -237,15 +237,17 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             key="experienced_throughput",
             name="体验速率口径",
             stage="系统级",
-            choice="profile 分离：legacy trim / experience_v2 DRB busy-period",
+            choice="唯一口径：experience_v2 的 DRB busy-period + FIFO 到达对象",
             formula="large: (ΣACK pieces − final piece)/(T_penultimate_ACK − T_first_TX)；"
                     "small: (TBVol−PaddingVol)/fractional-slot",
             why="experience_v2 把标准 burst 吞吐、到首次调度的等待、每个 FIFO 到达对象"
                 "的完成时延/PDB 分开记录；同一个 DRB busy period 可合并多个到达对象。",
-            caveat="legacy_v1 才使用 trim。experience_v2 中 NACK 字节留在队列，下一次"
-                   "仍按 NewTx 判错；当前没有 HARQ 软合并。小区体验速率是用户均值而非求和。",
+            caveat="历史的 trim（掐尾/掐头去尾）已随 legacy 容量路径下线。NACK 字节留在"
+                   "队列，下一次仍按 NewTx 判错；当前没有 HARQ 软合并。小区体验速率是"
+                   "用户均值而非求和。**full_buffer（容量口径）下 busy period 永不结束，"
+                   "本 KPI 按定义无定义、报 None。**",
             source="ETSI TS 28.552 V19.5.0；本项目 experience.py",
-            alternatives=["legacy_v1 trim", "experience_v2 fractional_slot", "exclude"],
+            alternatives=["fractional_slot", "exclude"],
         ),
         Algorithm(
             key="tx_rx_sinr",
@@ -314,10 +316,10 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             choice="Phase A 预计算单用户表与 MU pair（配对）链路表；"
                    "Phase B 按 TTI 纯查表、排队与记账",
             why="矩阵分解、预编码和干扰计算放在 Phase A：逐 UE、逐快照、逐 rank 生成 SU 表，"
-                "experience_v2 还为候选两用户组合生成真实 MU pair 表。Phase B 只做 PF 排序、"
+                "并为候选两用户组合生成真实 MU pair 表。Phase B 只做 PF 排序、"
                 "SU/MU 计划比较、按需 RBG 分配、BLER 抽样与 FIFO/KPI 更新。",
-            caveat="legacy_v1 为历史复现仍可使用 MU/SU 标量比值；experience_v2 不使用该"
-                   "近似，而要求完整 pair 链路表，当前边界固定为两用户、每用户 rank2、"
+            caveat="历史的 MU/SU 标量比值（se_ratio_legacy）已随 legacy 容量路径下线；"
+                   "现在一律要求完整 pair 链路表，边界固定为两用户、每用户 rank2、"
                    "ZF/RZF。扩到一般 rank/多用户需扩充表维度与候选裁剪策略。",
             source="本项目 system.build_link_tables / mumimo.build_mu_pair_tables / experience",
         ),

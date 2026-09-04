@@ -651,13 +651,12 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "ideal=拿真值；ls_mmse 比 ls_linear 实测好 0.7~4.6 dB，导频越挤差距越大"),
     ("num_samples", "样本数", "number", (1, 5000, 1), "由 sr_sample_size 算，别拍脑袋"),
     # --- 系统级仿真旋钮（sr_system_sim 用，不进 ChannelHub 的信道生成）---
-    ("evaluation_mode", "系统评估模式", "select", ["capacity", "experience"],
-     "capacity=历史全带调度；experience=DRB burst + 按需 RBG，多 UE/TTI"),
     ("replication_workers", "重复实验进程", "select", ["auto", "1", "2", "4", "8"],
      "auto 按 TTI×UE×重复数决定；短任务串行，长任务最多 4 进程；显式值会严格执行或报错"),
     ("traffic_model", "系统话务", "select",
-     ["ftp3", "mixed", "full_buffer", "cbr", "bimodal"],
-     "experience 推荐 mixed；bimodal 是按目标 RBG 反推包长的 legacy 模型"),
+     ["ftp3", "mixed", "cdf", "full_buffer", "cbr"],
+     "推荐 mixed；full_buffer 就是「容量仿真」：话务开到最大、缓冲区永不空，"
+     "体验速率按定义无定义、报 None"),
     ("small_ue_share", "小业务 UE 占比", "number", (0.0, 1.0, 0.05),
      "mixed 模式；业务类先定义 bytes/arrival，再由 TBS 决定实际 RBG"),
     ("small_file_bytes", "小包 bytes", "number", (64, 100000, 64), "mixed 模式默认 1500 B"),
@@ -734,9 +733,9 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "fractional_slot 对齐 28.552 Rel-19；exclude 保留旧式单时隙盲区"),
     ("mu_enabled", "SU/MU 自适应", "select", ["off", "on"],
      "experience：PF 排序后比较数据受限 SU/MU 方案；SU 能清空全部队列时强制 SU"),
-    ("mu_accounting", "MU 记账口径", "select", ["pair_table", "se_ratio_legacy"],
-     "pair_table：MCS 与误块抽签都读 pair 表真值，与 experience 同构；"
-     "se_ratio_legacy：只按标量比值缩 TBS，不进误块抽签，仅用于复现旧结果"),
+    ("mu_accounting", "MU 记账口径", "select", ["pair_table"],
+     "pair_table：MCS 与误块抽签都读 pair 表真值。历史的 se_ratio_legacy"
+     "（只缩 TBS、不进误块抽签）已随 legacy 容量路径下线"),
     ("mu_precoder", "MU 预编码", "select", ["zf", "rzf"],
      "ZF 为历史基线；RZF 在噪声加载之外可加入 N_BS·sigma_e² 的 CSI 不确定性加载"),
     ("mu_csi_error_variance", "MU CSI 误差方差", "number", (0.0, 1.0, 0.001),
@@ -796,7 +795,6 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
 #: 给它们一份默认值，**必须和 sr_system_sim 的函数签名一致**——
 #: 两处漂了的话页面显示的就不是实际会跑的值，而这种不一致没有任何提示。
 _SIM_DEFAULTS: dict[str, Any] = {
-    "evaluation_mode": "capacity",
     "replication_workers": "auto",
     "traffic_model": "ftp3",
     "small_ue_share": 0.5,

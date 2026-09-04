@@ -466,7 +466,7 @@ def _load_gauge(cell: dict[str, Any]) -> str:
     value, _, _ = _stat(cell, "serving_cell_prb_utilization")
     if value is None:
         return ('<div class="gauge"><p>正式仿真实测 <strong>n/a</strong>'
-                '——该结果口径不含本小区 PRB 利用率（legacy_v1 不产出此键）。'
+                '——本次结果里没有 serving_cell_prb_utilization。'
                 '</p></div>')
     pct = max(0.0, min(100.0, (value or 0.0) * 100.0))
     return (

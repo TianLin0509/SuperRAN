@@ -176,7 +176,6 @@ _FAIRNESS_PATHS: tuple[tuple[str, ...], ...] = (
     ("dataset_id",),
     ("analysis_identity",),
     ("config", "system", "model_version"),
-    ("config", "system", "evaluation_mode"),
     ("config", "system", "duration_s"),
     ("config", "system", "tti_ms"),
     ("config", "system", "tdd_pattern"),

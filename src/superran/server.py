@@ -253,7 +253,6 @@ def _carrier_grid(config: dict[str, Any], *, num_rb: int) -> dict[str, Any]:
 
 def _system_adaptation_contract(
     *,
-    mode: str,
     target_bler: float,
     olla_step_up_db: float,
     olla_step_down_db: float | None,
@@ -312,10 +311,7 @@ def _system_adaptation_contract(
                 "internal row14 / reported CQI15 requests MCS28; current MCS0..27 "
                 "curve profile clips to 27"
             ),
-            "scope": (
-                "experience_v2 fixed preset table"
-                if mode == "experience" else "capacity legacy table"
-            ),
+            "scope": "experience_v2 fixed preset table",
             "bler_abstraction": (
                 "one user grant per TTI is one independent single-codeword TB; "
                 "codeword SINR is averaged in dB across RBGs and rank streams; "
@@ -1896,7 +1892,6 @@ async def sr_await_config(timeout_s: float = 90.0, spec_id: str | None = None) -
 @tool()
 def sr_system_sim(
     dataset_id: str,
-    evaluation_mode: str = "capacity",
     duration_s: float = 5.0,
     traffic_model: str = "ftp3",
     file_bytes: int = 500_000,
@@ -1959,7 +1954,6 @@ def sr_system_sim(
     mu_corr_threshold: float = 0.7,
     mu_olla_step_up_db: float = 0.01,
     mu_olla_step_down_db: float | None = None,
-    trim: str = "tail",
     small_burst_policy: str = "fractional_slot",
     tdd_pattern: str = "DDDSU",
     neighbor_prb_util: float = 0.3,
@@ -1994,26 +1988,29 @@ def sr_system_sim(
 
     这是和链路级完全不同的一层。链路级问"这个信道能跑多快"，
     系统级问"**这个小区里的用户实际体验到多快**"——把话务到达与结束、
-    调度器的多用户取舍与缓冲区排空全算进去。两种模式都把一个用户在一个 TTI
-    的 grant 视为一个独立单码字 TB；最多一次重传，发送 MCS/RBG/rank/TBS 不变。
+    调度器的多用户取舍与缓冲区排空全算进去。一个用户在一个 TTI 的 grant 视为
+    一个独立单码字 TB；最多一次重传，发送 MCS/RBG/rank/TBS 不变。
     默认 IR 以“原 MCS 半谱效对应的等效 MCS”查 NewTx 曲线；CC 以原 MCS、SINR
     +10log10(2) dB 查同一 NewTx 曲线。
 
-    ``capacity`` 保留历史 ``legacy_v1`` 的全带/trim 口径以复现旧结果；
-    ``experience`` 的 ``experience_v2`` 才使用 28.552 Rel-19 DRB busy-period：
-    起点是首传、排队等待另报、末段 ACK piece 排除，并为单时隙小 burst 提供
-    TBVol/PaddingVol 的 fractional-slot 口径；另报“首包时延”（每个 arrival object
-    从生成到首次调度）与“含头速率”（相同 payload/去尾规则，只把首包时延加回分母）。
-    两套结果不可混为同一指标。
+    **只有一条评估路径**（``experience_v2``），没有模式开关。KPI 用 28.552
+    Rel-19 DRB busy-period：起点是首传、排队等待另报、末段 ACK piece 排除，
+    并为单时隙小 burst 提供 TBVol/PaddingVol 的 fractional-slot 口径；另报
+    “首包时延”（每个 arrival object 从生成到首次调度）与“含头速率”（相同
+    payload/去尾规则，只把首包时延加回分母）。
 
-    **``mu_accounting`` 决定 MU 的代价怎么记账**（用户 2026-09-02 定：capacity
-    的误码与重传要与 experience 基本一致）。``pair_table``（默认）与
-    ``experience_v2`` 同构：MCS 从 pair 表的 ``CorrLoss + powerLoss`` 平移出来、
-    TBS 按该 MCS 全带算、**误块抽签用 pair 的真实 SINR**（ZF 权按基站可能已
-    老化的 CSI 打，但打在双方 ``h_true`` 上，对方的流进干扰协方差）。
-    ``se_ratio_legacy`` 是历史行为，只用于复现旧结果：MCS 与误块抽签都走 SU
-    单用户口径，配对代价只表现为 TBS 乘一个标量 ``mu_se_ratio``——「包变小但
-    不更容易错」，结果会系统性乐观，并且会写进 ``notes``。
+    **“容量仿真”是这条路径的一个话务配置**：``traffic_model="full_buffer"``。
+    缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU），
+    这就是容量口径。调度、AMC、HARQ、解调 SINR 聚合全部照体验模式的定义走，
+    没有任何为它开的特例。代价是 busy period 永不结束，**28.552 的体验速率在
+    这个配置下按定义无定义、如实报 ``None``**；容量口径看 ``cell_served_mbps``
+    与 ``serving_cell_prb_utilization``。
+
+    **``mu_accounting`` 决定 MU 的代价怎么记账**：``pair_table``（唯一支持的
+    口径）MCS 从 pair 表的 ``CorrLoss + powerLoss`` 平移出来、TBS 按该 MCS 全带
+    算、**误块抽签用 pair 的真实 SINR**（ZF 权按基站可能已老化的 CSI 打，但打在
+    双方 ``h_true`` 上，对方的流进干扰协方差）。历史的 ``se_ratio_legacy``
+    （只把 TBS 乘一个标量、误块抽签仍按 SU）已随 legacy 容量路径一起下线。
 
     ``mu_precoder`` 可选 ``zf`` 或 ``rzf``。RZF 的
     ``mu_csi_error_variance`` 是每个复信道系数的估计误差方差，加载项为
@@ -2090,17 +2087,13 @@ def sr_system_sim(
         在 ChannelHub 修复多时隙 SIR/SINR 聚合前，优先用
         ``num_slots_per_sample=1`` 且 ``num_samples/num_ues>=8``，既保留时间序列，
         又避免门 1 的 IoT 自洽性失败。
-    duration_s : 仿真时长，3~20 秒。40000 TTI 实测 0.2 秒跑完。
-    evaluation_mode : ``capacity`` 保留 legacy_v1 的全带调度口径；
-        ``experience`` 使用 experience_v2：DRB busy-period、按需 RBG、多 UE/TTI、
-        scheduled-TBS PF 与 Rel-19 小 burst KPI。两者是两个评估 profile，
-        不是一个算法的精度开关。
+    duration_s : 仿真时长，3~20 秒。逐 TTI 的 FIFO 与 RBG 分配是主要开销。
     traffic_model : ``ftp3``（3GPP FTP Model 3，评价体验速率的标准话务）/
         ``cdf``（两份 value,cdf 文件驱动包大小与包间隔 renewal process）/
-        ``mixed``（experience_v2 推荐：大小 UE 混跑，包长与到达率外生定义）/
-        ``bimodal``（**现网话务两头高中间低**：绝大部分是只占 1 个 RBG 的小包
-        和占满全带宽的大包，两者的体验速率分开报）/
-        ``full_buffer``（**体验速率在这个模型下没有意义**，缓冲区永不空）/ ``cbr``
+        ``mixed``（推荐：大小 UE 混跑，包长与到达率外生定义）/
+        ``full_buffer``（**这就是"容量仿真"**：话务开到最大、缓冲区永不空，
+        按需 RBG 退化成全带宽。体验速率按定义无定义、报 ``None``，
+        容量口径看 ``cell_served_mbps``）/ ``cbr``
     arrival_rate_hz : 每用户每秒到达几个文件。控制负载——太高会积压，
         ``notes`` 会拦。
     packet_size_cdf / interarrival_cdf : UTF-8 两列经验 CDF，cdf 支持 0..1 或
@@ -2117,8 +2110,8 @@ def sr_system_sim(
         也可选 ``packet_size`` 或 ``balanced``。
     load_calibration_formal_refinements : probe 后首轮正式均值仍未达标时，最多再用
         正式 ``num_replications`` 反馈校正几轮；默认 2，完整轨迹会返回。
-    pf_accounting : ``auto`` 会在 legacy_v1 使用历史 best_se，在 experience_v2
-        使用实际 scheduled TBS。``acked_goodput`` 只供研究，不是默认 PF 口径。
+    pf_accounting : ``auto`` 解析成实际 scheduled TBS。``acked_goodput`` 与
+        ``legacy_fullband`` 只供研究，不是默认 PF 口径。
     frequency_selective : ``auto`` 在逐 RBG 字段完整时启用，``on`` 缺字段硬失败，
         ``off`` 是宽带/顺序 RBG 基线。它与 RB 功控开关相互独立。
     max_layers_per_rbg / max_logical_prb_per_tti : P0 资源账本的空间层和逻辑
@@ -2133,7 +2126,7 @@ def sr_system_sim(
         ``qos_pf_edf``。后两个是包长感知：``edf`` 用 ``TBS/Buffer``，优先调度
         最快能传完的用户，**牺牲长期公平性换小包时延**；``qos_pf_edf`` 是它与
         ``qos_pf`` 的 蓝本原式加权混合。两者都需要有限队列，
-        ``full_buffer`` 与 ``evaluation_mode='capacity'`` 会硬失败。
+        搭 ``full_buffer`` 会硬失败——容量口径请用 ``pf`` / ``max_ci``。
     edf_mixed_weight : ``qos_pf_edf`` 里 EDF 的权重 w ∈ [0,1]。0 严格退化成
         ``qos_pf``，1 严格退化成 ``edf``。
     edf_mixed_epf_scale : 蓝本的 ``thp_filter`` 配平系数，默认 1.0。两个
@@ -2255,11 +2248,6 @@ def sr_system_sim(
     from . import system as sysm  # noqa: PLC0415
 
     ds = _load(dataset_id)
-    mode = str(evaluation_mode).strip().lower()
-    if mode not in ("capacity", "experience"):
-        return {"error": "evaluation_mode 只支持 capacity / experience"}
-    if target_prb_utilization is not None and mode != "experience":
-        return {"error": "target_prb_utilization 只支持 experience 模式"}
     if traffic_profiles is not None and not isinstance(traffic_profiles, list):
         return {"error": "traffic_profiles 必须是对象数组"}
     if traffic_profiles and str(traffic_model) not in ("mixed", "cdf"):
@@ -2406,12 +2394,6 @@ def sr_system_sim(
                 "RB 功控的当前 SystemResult 是单小区调度结果，数据集却包含多个 "
                 f"serving cell {_serving_cells}。不能把独立小区的 RBG 当成一个互斥"
                 "资源池；请生成/筛选同一服务小区的 UE。跨小区联合调度属于下一阶段。")}
-    if (power_cfg.enabled and mode == "capacity" and _flag(mu_enabled)
-            and str(mu_accounting) == "se_ratio_legacy"):
-        return {"error": (
-            "RB 功控与 MU 同开时不能用 mu_accounting='se_ratio_legacy'："
-            "标量 MU 增益没有逐 RBG pair SINR，不能准确评估。改用 "
-            "mu_accounting='pair_table'（默认）或 evaluation_mode='experience'。")}
     try:
         csi_cfg = sysm.ca.CsiConfig(
             enabled=_flag(csi_aging), srs_period_ms=float(srs_period_ms),
@@ -2422,7 +2404,7 @@ def sr_system_sim(
             csi_report_period_ms=float(csi_report_period_ms),
             cqi_filter_lambda=float(cqi_filter_lambda),
             cqi_filter_domain=str(cqi_filter_domain),
-            periodic_trace_history=(mode == "experience" and float(warmup_s) > 0))
+            periodic_trace_history=float(warmup_s) > 0)
     except ValueError as exc:
         return {"error": str(exc)}
     # **h_est 的物理来源必须与 SRS 语义一致。** 系统仿真把 h_est 当基站侧
@@ -2497,7 +2479,7 @@ def sr_system_sim(
             max_backoff_times=int(rank_max_backoff_times),
             probe_enabled=_flag(rank_probe_enabled))
         system_cfg = sysm.SystemConfig(
-            evaluation_mode=mode, duration_s=float(duration_s),
+            duration_s=float(duration_s),
             tdd_pattern=tdd_pattern, harq_combining=str(harq_combining),
             harq_feedback_delay=_flag(harq_feedback_delay),
             seed=seed, snapshot_update_ms=snap_ms,
@@ -2534,14 +2516,13 @@ def sr_system_sim(
             olla_speedup=float(olla_speedup),
             olla_warmup_speedup=float(olla_warmup_speedup))
         kpi_cfg = sysm.KpiConfig(
-            trim=trim, small_burst_policy=small_burst_policy,
+            small_burst_policy=small_burst_policy,
             warmup_s=float(warmup_s),
             tti_trace_mode=str(tti_trace_mode),
             tti_trace_max_points=tti_trace_max_points)
     except (TypeError, ValueError) as exc:
         return {"error": str(exc)}
     load_rng = load_book.generator("neighbor_load")
-    mu_load_rng = load_book.generator("neighbor_load")
     _t_build = time.perf_counter()
     try:
         _array_md = ds.summary.get("antenna_model", {}) or {}
@@ -2600,31 +2581,13 @@ def sr_system_sim(
                 f"{sorted(effective_periods)}")}
         effective_csi_cfg = replace(
             csi_cfg, srs_period_ms=float(next(iter(effective_periods))))
-    mu_gain = (sysm.measure_mu_gain(
-        h_users, [float(x) for x in sinr], num_ues=n_ue,
-        h_for_precoding_users=h_est_users,
-        geo_sir_db=sir, neighbor_load=float(neighbor_prb_util),
-        neighbor_load_jitter=float(neighbor_load_jitter),
-        rb_per_rbg=carrier["rb_per_rbg"],
-        rbg_boundaries=tuple(
-            (int(pair[0]), int(pair[1])) for pair in carrier["rbg_boundaries"]),
-        load_jitter_rng=(mu_load_rng if float(neighbor_load_jitter) > 0 else None),
-        csi=csi_cfg, snapshot_ms=snap_ms,
-        power_constraint=str(power_constraint), mu_precoder=str(mu_precoder),
-        mu_csi_error_variance=float(mu_csi_error_variance))
-        if (_flag(mu_enabled) and mode == "capacity"
-            and str(mu_accounting) == "se_ratio_legacy")
-        else {"ratio": 1.0, "measured": False,
-              "note": ("逐 pair 查表口径（mu_accounting='pair_table'）不使用标量"
-                       "比值；MU 代价直接进 MCS 与误块抽签"
-                       if _flag(mu_enabled) else "未开 MU")})
-    if (_flag(mu_enabled) and mode == "capacity"
-            and str(mu_accounting) == "se_ratio_legacy"
-            and not mu_gain.get("measured")):
-        return {
-            "error": "已启用 MU，但没有任何快照完成 MU/SU 配对；已停止，未用 1.0 静默降级。",
-            "mu_gain": mu_gain,
-        }
+    # 标量 MU 增益随 se_ratio_legacy 一起下线：MU 的代价直接进 MCS 与误块抽签。
+    # `measure_mu_gain` 仍是独立的测量原语，只是不再喂给主循环。
+    mu_gain = {
+        "ratio": 1.0, "measured": False,
+        "note": ("逐 pair 查表口径（mu_accounting='pair_table'）不使用标量比值；"
+                 "MU 代价直接进 MCS 与误块抽签"
+                 if _flag(mu_enabled) else "未开 MU")}
     build_s = time.perf_counter() - _t_build
 
     # **建表只做一次，重复的只是 TTI 主循环。** build_link_tables 与随机种子
@@ -2643,7 +2606,7 @@ def sr_system_sim(
                 formal_refinements=load_calibration_formal_refinements,
                 num_replications=num_replications, master_seed=seed,
                 sys_cfg=system_cfg, traffic=traffic_cfg, sched=scheduler_cfg,
-                kpi=kpi_cfg, mu_se_ratio=float(mu_gain["ratio"]),
+                kpi=kpi_cfg,
                 build_elapsed_s=build_s,
                 replication_workers=replication_workers)
             res = calibration.result
@@ -2651,14 +2614,13 @@ def sr_system_sim(
             res = sysm.simulate_replications(
                 tables, num_replications=num_replications, master_seed=seed,
                 sys_cfg=system_cfg, traffic=traffic_cfg, sched=scheduler_cfg,
-                kpi=kpi_cfg, mu_se_ratio=float(mu_gain["ratio"]),
+                kpi=kpi_cfg,
                 build_elapsed_s=build_s,
                 replication_workers=replication_workers)
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}
     out = res.as_dict()
     out.update(_system_adaptation_contract(
-        mode=mode,
         target_bler=float(target_bler),
         olla_step_up_db=float(olla_step_up_db),
         olla_step_down_db=olla_step_down_db,
@@ -2856,19 +2818,18 @@ def sr_system_sim(
                    "它复用 gates.py 的配对检验并给出明确判决。"
                    "用户级明细在 users 里。")
     serializable = _jsonable(out)
-    if mode == "experience":
-        try:
-            from . import kpi_view as _kpi_view  # noqa: PLC0415
+    try:
+        from . import kpi_view as _kpi_view  # noqa: PLC0415
 
-            serializable["kpi_view"] = _kpi_view.write_kpi_report(
-                serializable, dataset_id=dataset_id,
-                kpi_focus=kpi_focus, kpi_intent=str(kpi_intent))
-        except Exception as exc:  # noqa: BLE001
-            # 页面是呈现层；失败不能吞掉已经完成的仿真，但降级必须显式可见。
-            serializable["kpi_view"] = {
-                "error": f"KPI 页面生成失败：{exc}",
-                "notice": "仿真数值仍完整返回；请先修复页面生成错误再交付结果。",
-            }
+        serializable["kpi_view"] = _kpi_view.write_kpi_report(
+            serializable, dataset_id=dataset_id,
+            kpi_focus=kpi_focus, kpi_intent=str(kpi_intent))
+    except Exception as exc:  # noqa: BLE001
+        # 页面是呈现层；失败不能吞掉已经完成的仿真，但降级必须显式可见。
+        serializable["kpi_view"] = {
+            "error": f"KPI 页面生成失败：{exc}",
+            "notice": "仿真数值仍完整返回；请先修复页面生成错误再交付结果。",
+        }
     return serializable
 
 

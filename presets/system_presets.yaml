@@ -39,7 +39,6 @@ sys_dense_urban_loaded:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 3.0
@@ -47,8 +46,12 @@ sys_dense_urban_loaded:
     csi_aging: true
     srs_period_ms: 10.0
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_9625340c
     n_replications: 8
     # 格式一律是 [均值, 95% 区间半宽占均值的百分比]。**半宽和数值不可分割**——
@@ -89,7 +92,6 @@ sys_dense_urban_light:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 1.0
@@ -97,8 +99,12 @@ sys_dense_urban_light:
     csi_aging: true
     srs_period_ms: 10.0
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_9625340c
     n_replications: 8
     avg_mcs: [7.84, 7.8]
@@ -137,7 +143,6 @@ sys_urban_macro_field_csi:
     num_slots_per_sample: 8
     ue_speed_kmh: 30.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 2.0
@@ -145,8 +150,12 @@ sys_urban_macro_field_csi:
     csi_aging: true
     srs_period_ms: 10.0
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_984082de
     n_replications: 8
     avg_mcs: [7.99, 5.4]
@@ -182,7 +191,6 @@ sys_urban_macro_ideal_csi:
     num_slots_per_sample: 8
     ue_speed_kmh: 30.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 2.0
@@ -190,8 +198,12 @@ sys_urban_macro_ideal_csi:
     csi_aging: false
     srs_period_ms: 10.0
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_984082de
     n_replications: 8
     avg_mcs: [10.36, 2.2]
@@ -216,10 +228,12 @@ sys_field_bimodal_traffic:
   group: 系统级 · 话务
   label: 现网话务画像 · 两头高中间低（30% 小包 / 30% 满包）
   summary: >-
-    用户给的现网口径：小包（1 个 RBG）约占 30%、满包（17 个 RBG）约占 30%、
-    中间 2~16 个 RBG 相对均匀，另有 30% 的 TTI 完全没调度。
-    这是 legacy_v1 按目标 RBG 数反推包长的历史画像；它的小包在 legacy trim 下
-    不可测。要研究真实大小文件竞争，请用 experience_v2 的 mixed 预设。
+    用户给的现网口径：小包约占 30%、满包约占 30%、中间相对均匀。
+    **口径已迁移**：退役的 bimodal 是"按占用 RBG 数"抽样再乘一个写死的
+    3.0 bit/s/Hz 折成字节；现在改成 cdf 驱动的**包长分布**，
+    一次传输实际占几个 RBG 由该用户当时的 MCS/rank 经 TBS 反查决定。
+    两份 CDF 由 scripts/make_field_bimodal_cdf.py 机械转写自原旋钮，
+    **不是新的现网测量**。小包不再是盲区：Rel-19 的 fractional-slot 口径可测。
   answers:
     - 现网话务下 PRB 利用率是多少
     - 大包用户和小包用户的体验差多少
@@ -230,14 +244,19 @@ sys_field_bimodal_traffic:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: capacity
     duration_s: 5.0
-    traffic_model: bimodal
+    traffic_model: cdf
+    packet_size_cdf: presets/traffic_cdf/field_bimodal_packet_size.csv
+    interarrival_cdf: presets/traffic_cdf/field_bimodal_interarrival.csv
     neighbor_prb_util: 0.3
     csi_aging: true
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_6e9715bc
     n_replications: 8
     avg_mcs: [9.46, 4.8]
@@ -275,7 +294,6 @@ sys_mobility_60kmh:
     num_slots_per_sample: 8
     ue_speed_kmh: 60.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 2.0
@@ -284,8 +302,12 @@ sys_mobility_60kmh:
     srs_period_ms: 10.0
     olla_speedup: 20.0
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_0ef213d2
     cell_experienced_mbps: 138.3
     ue_experienced_p5_mbps: 49.7
@@ -300,11 +322,13 @@ sys_mobility_60kmh:
 # ---------------------------------------------------------------------------
 sys_capacity_full_buffer:
   group: 系统级 · 容量上界
-  label: 满缓冲容量上界 · full buffer
+  label: 容量仿真 · 话务开到最大（full buffer）
   summary: >-
-    **体验速率在这个模型下没有意义**——缓冲区永不清空，找不到完整 busy period。
-    它只用来看小区吞吐上界与调度器的公平性，
-    结果里只该引用 cell_served_mbps 与 Jain 公平度，不要引用体验速率。
+    **"容量仿真"就是这个场景**：它不是另一条仿真分支，只是把话务开到最大。
+    缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU），
+    调度、AMC、HARQ、解调 SINR 聚合全部照体验口径走。
+    代价是 busy period 永不结束，**体验速率按定义无定义、报 None（不是 0）**。
+    结果里只该引用 cell_served_mbps、PRB 利用率与 Jain 公平度。
   answers:
     - 这个小区的吞吐上界是多少
     - PF 在满负载下的公平性如何
@@ -315,25 +339,30 @@ sys_capacity_full_buffer:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: full_buffer
     neighbor_prb_util: 0.3
     csi_aging: true
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_6e9715bc
     n_replications: 8
     cell_served_mbps: [169.96, 0.2]
     avg_mcs: [7.99, 0.1]
     avg_rank: [2.005, 0.0]
     occupancy: [1.0, 0.0]
-    cell_experienced_mbps: 0.0                # **确实是 0，这是设计意图不是 bug**
+    cell_experienced_mbps: null               # **是 None 不是 0，设计意图不是 bug**
     note: >-
-      2026-08-07 实测，8 次重复。**体验速率确实是 0**：full buffer 下缓冲区永不
-      清空，3GPP TS 28.552 的掐尾口径找不到任何一个完整 burst，
-      measured_bursts=0。这验证了 summary 里那句话，**别把它当成 bug 去修**。
+      2026-08-07 实测，8 次重复（数值已因口径变更作废，见 invalidated_by）。
+      **体验速率是 None**：full buffer 下缓冲区永不清空，28.552 的 DRB
+      busy-period 找不到终点，KPI 按定义无定义。合并前的 legacy 路径报的是 0，
+      那是在假装"测到了 0 Mbps"；现在报 None 并在 notes 里说明。
+      **别把它当成 bug 去修。**
       注意所有区间都极窄（≤0.2%）——因为 full buffer 没有话务随机性，
       唯一的随机源只剩 HARQ 抽样。**这反过来说明其他场景那些宽区间主要来自话务**。
 
@@ -358,7 +387,6 @@ sys_experience_mixed_pf:
     num_slots_per_sample: 1
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: experience
     duration_s: 5.0
     traffic_model: mixed
     file_bytes: 500000
@@ -385,7 +413,11 @@ sys_experience_mixed_pf:
     seed: 20260809
     num_replications: 16
   expect:
-    measured: true
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
     model_version: experience_v2
     dataset: ds_329edafb
     result: artifacts/results/experience_pf_accounting_crn_n16.json
@@ -423,7 +455,6 @@ sys_experience_mixed_pf_wrong_accounting:
     num_slots_per_sample: 1
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: experience
     duration_s: 5.0
     traffic_model: mixed
     file_bytes: 500000
@@ -450,7 +481,11 @@ sys_experience_mixed_pf_wrong_accounting:
     seed: 20260809
     num_replications: 16
   expect:
-    measured: true
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
     model_version: experience_v2_fault_injection
     dataset: ds_329edafb
     result: artifacts/results/experience_pf_accounting_crn_n16.json
