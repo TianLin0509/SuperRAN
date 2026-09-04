@@ -32,6 +32,7 @@ def _write_dataset(*, num_rb: int = 272, n_samples: int = 8, n_ues: int = 2,
                    serving_cell_indices: np.ndarray | None = None,
                    include_serving_cell_indices: bool = True,
                    cells_configured: int = 1,
+                   sir_db: np.ndarray | None = None,
                    ue_speed_kmh: float = 3.0) -> None:
     rng = np.random.default_rng(20260817)
     # Baseline terminal is 2T4R: the channel tensor retains four logical UE
@@ -51,7 +52,8 @@ def _write_dataset(*, num_rb: int = 272, n_samples: int = 8, n_ues: int = 2,
         h_est=h + noise,
         ue_position=rng.standard_normal((n_samples, 3)) * 50,
         scalar__sinr_dB=np.full(n_samples, 18.0),
-        scalar__sir_dB=np.full(n_samples, 30.0),
+        scalar__sir_dB=(np.full(n_samples, 30.0) if sir_db is None
+                        else np.asarray(sir_db, dtype=float)),
         scalar__snr_dB=np.full(n_samples, 20.0),
         metastr__precoding_csi_source=np.asarray([csi_source] * n_samples),
     )
@@ -274,6 +276,54 @@ def test_serving_cell_selection_picks_one_cell_and_keeps_ue_rotation() -> None:
     # 只剩被选中那两个 UE，且样本数按快照数 x 选中 UE 数收缩
     assert len(out["users"]) == 2
     assert out["num_samples"] == 4
+
+
+def test_serving_cell_selection_reports_real_interference_profile() -> None:
+    """**选哪个小区是物理选择，工具必须把判断依据一起给出来。**
+
+    依据是选中小区那批 UE 的几何 SIR 与由它推出的 IoT
+    （``IoT = SIR/(SIR-SINR)``，与仿真里 ``cell["iot_db_median"]`` 同一个公式）。
+    没有 wrap-around 的撒点里，边缘小区邻区不完整 ⇒ SIR 偏高、IoT 偏低，
+    选错会系统性低估干扰。
+
+    **棘轮**：早先这里去查数据集的 ``iot_dl_dB`` 标量——多小区数据集根本没有那个
+    measurement，裸 ``except`` 把它吞成恒 None，看起来像"没有干扰信息"。
+    把它改回去，下面三条断言全红。
+    """
+    # UE0/UE2 在小区 0（SIR 20 dB，被包围得紧），UE1/UE3 在小区 1（SIR 34 dB，边缘）。
+    # SIR 必须 > SINR(=18 dB)，否则物理上不成立——见下面第二段。
+    _write_dataset(n_samples=8, n_ues=4,
+                   serving_cell_indices=np.asarray([0, 1, 0, 1] * 2),
+                   sir_db=np.asarray([20.0, 34.0, 20.0, 34.0] * 2),
+                   cells_configured=2)
+    inner = _run(serving_cell=0)["serving_cell_selection"]
+    edge = _run(serving_cell=1)["serving_cell_selection"]
+    assert inner["selected_interference_note"] is None
+    assert edge["selected_interference_note"] is None
+    # 几何 SIR 如实回报，不是 None 也不是全数据集的中位
+    assert abs(inner["selected_geometric_sir_db_median"] - 20.0) < 1e-6
+    assert abs(edge["selected_geometric_sir_db_median"] - 34.0) < 1e-6
+    # IoT 由同一对 SINR/SIR 推出：SIR 越低（被包围越完整）IoT 越高
+    def _iot(sir_db_val: float, sinr_db_val: float = 18.0) -> float:
+        sir_lin = 10.0 ** (sir_db_val / 10.0)
+        sinr_lin = 10.0 ** (sinr_db_val / 10.0)
+        return 10.0 * np.log10(sir_lin / (sir_lin - sinr_lin))
+    assert abs(inner["selected_iot_db_median"] - _iot(20.0)) < 1e-2
+    assert abs(edge["selected_iot_db_median"] - _iot(34.0)) < 1e-2
+    assert inner["selected_iot_db_median"] > edge["selected_iot_db_median"]
+    assert "under-estimate" in inner["selection_criterion"]
+
+    # **拿不到就明说拿不到，不留哑 None。** SIR <= SINR 物理上不成立
+    # （夹逼或口径错配才会出现），此时 IoT 没有有限值，必须给出原因。
+    _write_dataset(n_samples=8, n_ues=4,
+                   serving_cell_indices=np.asarray([0, 1, 0, 1] * 2),
+                   sir_db=np.full(8, 6.0),   # < SINR 18 dB
+                   cells_configured=2)
+    bad = _run(serving_cell=0)["serving_cell_selection"]
+    assert bad["selected_iot_db_median"] is None
+    assert "SIR<=SINR" in bad["selected_interference_note"]
+    # 几何 SIR 本身仍然如实给出——它不依赖 IoT 能不能算
+    assert abs(bad["selected_geometric_sir_db_median"] - 6.0) < 1e-6
 
 
 def test_serving_cell_selection_rejects_empty_and_single_ue_cells() -> None:

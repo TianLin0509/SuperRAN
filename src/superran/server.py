@@ -2130,16 +2130,22 @@ def sr_system_sim(
         不给（默认）时，多小区数据集仍按原来那样硬失败。
         挑哪个小区是**物理选择**：拓扑没有 wrap-around，边缘站的邻区不完整、
         干扰被低估，应当挑被邻区包围最完整的中心站小区；结果里的
-        ``serving_cell_selection`` 会回报实际选中的小区、它有几个 UE 以及
-        该小区 UE 的 IoT 中位，便于核对选得对不对。
+        ``serving_cell_selection`` 会回报实际选中的小区、它有几个 UE，以及
+        **判断依据**：该小区 UE 的几何 SIR 中位与 IoT 中位
+        （``IoT = SIR/(SIR-SINR)``，与结果里的 ``iot_db_median`` 同一公式）。
+        算不出来时给 ``selected_interference_note`` 说明原因，不留哑 ``None``。
+        实测同一份 210 UE 数据集只换 ``serving_cell``：中心站（SIR 中位 4.22 dB）
+        与边缘站（16.25 dB）相比，后者把 ``cell_served_mbps`` 高估 28.8%、
+        把 ``ue_served_p5_mbps`` 高估 154%。
         与 ``rb_power_control_enabled`` 同开会硬失败：逐 RB 功控的几何量直接来自
         数据集、不随样本筛选走，混用会得到一个半对半错的资源池。
     traffic_model : ``ftp3``（3GPP FTP Model 3，评价体验速率的标准话务）/
         ``cdf``（两份 value,cdf 文件驱动包大小与包间隔 renewal process）/
         ``mixed``（推荐：大小 UE 混跑，包长与到达率外生定义）/
         ``full_buffer``（**这就是"容量仿真"**：话务开到最大、缓冲区永不空，
-        按需 RBG 退化成全带宽。两个体验速率口径都有值
-        （``drb_throughput_rel19_mbps`` 与 ``ue_served_p5_mbps``，满缓冲下收敛））/ ``cbr``
+        按需 RBG 退化成全带宽。TS 28.552 的样本只在 buffer 排空事件上形成，满缓冲下
+        不发生 ⇒ ``drb_throughput_rel19_mbps`` 报 ``None``；看工程口径
+        ``ue_served_p5_mbps`` 与 ``active_window_goodput_mbps``，两者应收敛）/ ``cbr``
     arrival_rate_hz : 每用户每秒到达几个文件。控制负载——太高会积压，
         ``notes`` 会拦。
     packet_size_cdf / interarrival_cdf : UTF-8 两列经验 CDF，cdf 支持 0..1 或
@@ -2434,15 +2440,39 @@ def sr_system_sim(
         sinr = np.asarray(sinr)[order]
         if sir is not None:
             sir = [sir[i] for i in order]
+        # **选小区是物理选择，得给出判断依据**：这个小区被邻区包围得多完整。
+        # 依据就是几何 SIR 与由它推出的 IoT（IoT = SIR/(SIR-SINR)，与仿真里
+        # cell["iot_db_median"] 同一个公式、同一批样本）。
+        # 早先这里去查数据集里的 iot_dl_dB 标量，**多小区数据集根本没有这个
+        # measurement**，于是恒 None 且被裸 except 吞掉——看起来像"选中小区没有
+        # 干扰信息"，其实只是查错了地方。拿不到就明说拿不到，不留哑 None。
+        _sel_sir_median = None
         _iot_median = None
-        try:
-            _iot_all = np.asarray(ds.scalar("iot_dl_dB")).ravel()
-            _sel_iot = np.asarray([float(_iot_all[i]) for i in order], dtype=float)
-            _sel_iot = _sel_iot[np.isfinite(_sel_iot)]
-            if _sel_iot.size:
-                _iot_median = round(float(np.median(_sel_iot)), 3)
-        except Exception:  # noqa: BLE001
-            _iot_median = None
+        _iot_note = None
+        if sir is None:
+            _iot_note = "数据集没有 sir_dB，无法给出选中小区的几何干扰画像"
+        else:
+            from . import interference as itf  # noqa: PLC0415
+
+            _sel_sir = np.asarray(sir, dtype=float)   # 已按 order 重排
+            _sel_sinr = np.asarray(sinr, dtype=float)
+            _ok = np.isfinite(_sel_sir) & np.isfinite(_sel_sinr)
+            if not _ok.any():
+                _iot_note = "选中小区的 sir_dB / sinr_dB 全部非有限"
+            else:
+                _sel_sir_median = round(float(np.median(_sel_sir[_ok])), 3)
+                _iot_vals = np.asarray(
+                    itf.iot_db(_sel_sinr[_ok], _sel_sir[_ok]), dtype=float)
+                _iot_finite = _iot_vals[np.isfinite(_iot_vals)]
+                if _iot_finite.size:
+                    _iot_median = round(float(np.median(_iot_finite)), 3)
+                    if _iot_finite.size < _iot_vals.size:
+                        _iot_note = (
+                            f"{int(_iot_vals.size - _iot_finite.size)}/"
+                            f"{int(_iot_vals.size)} 个样本 SIR<=SINR，"
+                            "IoT 为 inf，已从中位里剔除")
+                else:
+                    _iot_note = "选中小区所有样本 SIR<=SINR，IoT 无有限值"
         serving_cell_selection = {
             "requested": target_cell,
             "ues_in_cell": len(selected_ues),
@@ -2451,7 +2481,14 @@ def sr_system_sim(
             "ue_count_by_cell": {
                 str(c): serving_cell_ids_by_ue.count(c)
                 for c in sorted(set(serving_cell_ids_by_ue))},
+            "selected_geometric_sir_db_median": _sel_sir_median,
             "selected_iot_db_median": _iot_median,
+            "selected_interference_note": _iot_note,
+            "selection_criterion": (
+                "geometric SIR/IoT of the selected cell's UEs; a lower SIR (higher "
+                "IoT) means the cell is more completely surrounded by neighbours. "
+                "Edge cells of a drop without wrap-around under-estimate "
+                "inter-cell interference."),
             "sample_layout": (
                 "re-interleaved as (snapshot, selected UE) so that sample i still "
                 "belongs to UE i % num_ues, which group_samples_by_ue relies on"),

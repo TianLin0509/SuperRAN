@@ -4083,8 +4083,11 @@ def simulate_experience(
             "**用户体验速率仍然有定义**，只是走另一个口径：ue_served_p5_mbps "
             "是 ITU-R M.2412 / TR 38.913 的 cell-edge user throughput（每 UE "
             "已服务净荷 / 观测窗长的 5% 分位），ue_served_mean/median_mbps 是同一"
-            "分布的均值与中位；小区总吞吐看 cell_served_mbps。"
-            "**这两个口径不是同一个数的两种精度，不可互相顶替。**")
+            "分布的均值与中位；另一个工程口径是 active_window_goodput_mbps"
+            "（在飞 busy period 落在测量窗内那段的 goodput）——它与 ue_served "
+            "算法完全不同，满缓冲下应当收敛，可拿来互相自查；"
+            "小区总吞吐看 cell_served_mbps。"
+            "**标准与工程不是同一个数的两种精度，不可互相顶替。**")
     if measured_bursts < 20 and not tr.unbounded:
         notes.append(f"只有 {measured_bursts} 个 busy period 进入体验 KPI，样本太少；"
                      "加长 duration_s 或调高到达率。")

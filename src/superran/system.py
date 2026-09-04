@@ -336,9 +336,12 @@ class TrafficConfig:
             d |= {"cbr_mbps": self.cbr_mbps}
         elif self.model == "full_buffer":
             d |= {"note": ("话务开到最大（旧称容量仿真）：缓冲区永不空，按需 RBG "
-                           "反查恒等于全带宽。两个体验速率口径都有值："
-                           "drb_throughput_rel19_mbps 与 ue_served_p5_mbps，"
-                           "满缓冲下收敛；小区总吞吐看 cell_served_mbps 与 PRB 利用率。")}
+                           "反查恒等于全带宽。TS 28.552 的样本只在 buffer 排空事件上"
+                           "形成，满缓冲下不发生 ⇒ drb_throughput_rel19_mbps / "
+                           "cell_experienced_mbps 报 None（定义使然）。看工程口径："
+                           "ue_served_p5_mbps 与 active_window_goodput_mbps，"
+                           "两者算法不同但应收敛；小区总吞吐看 cell_served_mbps "
+                           "与 PRB 利用率。")}
         elif self.model in ("mixed", "cdf"):
             d |= {
                 "classes": [c.as_dict() for c in self.resolved_classes()],

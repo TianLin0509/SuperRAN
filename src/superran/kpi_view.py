@@ -36,8 +36,10 @@ class KpiSpec:
 
 CELL_KPIS = (
     # **用户体验速率有两个口径，页面上都要给。** ITU-R M.2412 / TR 38.913 的
-    # 分母是观测窗长；TS 28.552 的分母是 busy period。满缓冲下两者收敛，
-    # 有限话务下相差可达一个数量级，任何一个单独出现都会被误读成另一个。
+    # 分母是观测窗长；TS 28.552 的分母是**已排空的** busy period。
+    # 有限话务下两者相差可达一个数量级，任何一个单独出现都会被误读成另一个；
+    # **满缓冲下 28.552 那个直接没有样本（报 None）**，此时看 ITU 口径与
+    # active_window_goodput_mbps，这两条算法不同却应当收敛。
     KpiSpec("ue_served_p5_mbps", "5% 边缘用户吞吐（ITU 口径）", "Mbps",
             tags=("experience", "fairness", "capacity")),
     KpiSpec("ue_served_median_mbps", "用户吞吐中位（ITU 口径）", "Mbps",

@@ -2207,7 +2207,11 @@ Sionna RT / QuaDRiGa 只允许作为显式可选 direct adapter。
         "FIFO、按需 RBG、真实 MU pair、PF 实际 TBS 记账和 Rel-19 体验 KPI。"
         "所谓“容量仿真”是它的一个话务配置 <code>traffic_model=\"full_buffer\"</code>："
         "队列无限使按需 RBG 退化成全带宽。**不许为它开特例分支**；"
-        "代价是 busy period 永不结束，体验速率按定义无定义、报 None。</p>",
+        "代价是 busy period 永不结束，<strong>TS 28.552 的样本只在 buffer 排空事件上"
+        "形成，满缓冲下一个都不会形成</strong>，"
+        "<code>drb_throughput_rel19_mbps</code> 报 None——定义使然，不是缺陷。"
+        "满缓冲看工程口径：ITU-R M.2412 的 <code>ue_served_p5_mbps</code> 与 "
+        "<code>active_window_goodput_mbps</code>，两者算法不同但应收敛。</p>",
     )
     body += """
 <h2>推荐阅读路径</h2>
@@ -4800,9 +4804,16 @@ DRB busy-period 与 FIFO 到达对象。文档和对话里说的<strong>“容�
             ("MU", "候选 pair 的真实链路表与完整 SU/MU plan", "同左（同一份实现）"),
             ("PF credit", "实际 scheduled TBS", "实际 scheduled TBS；可选 ACK goodput"),
             ("队列", "每 UE 一个永不排空的 DRB", "arrival-object FIFO、NACK 留队、warmup 切窗"),
-            ("体验速率", "<strong>按定义无定义，报 None（不是 0）</strong>",
+            ("体验速率（标准，TS 28.552）",
+             "<strong>无样本 ⇒ 报 None（不是 0）</strong>：样本只在 buffer 排空事件上形成",
              "DRB busy-period + fractional small burst + 含头速率"),
-            ("该看什么", "cell_served_mbps、serving_cell_prb_utilization、Jain、avg_mcs_first_tx",
+            ("体验速率（工程）",
+             "<strong>有值</strong>：ITU-R M.2412 的 ue_served_p5/median/mean_mbps，"
+             "以及 active_window_goodput_mbps；两者算法不同但应收敛",
+             "同样有值，但与标准口径量的是不同的东西，轻载下可差一个数量级"),
+            ("该看什么",
+             "cell_served_mbps、serving_cell_prb_utilization、Jain、avg_mcs_first_tx、"
+             "ue_served_p5_mbps",
              "drb_throughput_rel19_mbps、queue wait、completion delay、PDB miss"),
             ("HARQ", "一次 IR/CC；身份冻结并有 allocation 证据", "同左（同一份实现）"),
         ],

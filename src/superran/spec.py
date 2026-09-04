@@ -657,8 +657,9 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "auto 按 TTI×UE×重复数决定；短任务串行，长任务最多 4 进程；显式值会严格执行或报错"),
     ("traffic_model", "系统话务", "select",
      ["ftp3", "mixed", "cdf", "full_buffer", "cbr"],
-     "推荐 mixed；full_buffer 就是「容量仿真」：话务开到最大、缓冲区永不空，"
-     "两个体验速率口径都有值：drb_throughput_rel19_mbps 与 ue_served_p5_mbps，满缓冲下收敛"),
+     "推荐 mixed；full_buffer 就是「容量仿真」：话务开到最大、缓冲区永不空。"
+     "满缓冲下 28.552 的 drb_throughput_rel19_mbps 无样本、报 None；"
+     "看工程口径 ue_served_p5_mbps 与 active_window_goodput_mbps，两者应收敛"),
     ("small_ue_share", "小业务 UE 占比", "number", (0.0, 1.0, 0.05),
      "mixed 模式；业务类先定义 bytes/arrival，再由 TBS 决定实际 RBG"),
     ("small_file_bytes", "小包 bytes", "number", (64, 100000, 64), "mixed 模式默认 1500 B"),

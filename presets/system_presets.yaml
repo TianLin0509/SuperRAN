@@ -671,6 +671,8 @@ sys_multicell_center_cell:
   answers:
     - 有真实几何邻区干扰时，合并后的单路径容量是多少
     - 选中心站还是边缘站对结论影响多大
+  pair_with: sys_multicell_edge_cell
+  pair_varies: [serving_cell]
   channel_preset: company_64t4r_multicell
   generate:
     num_ues: 210               # 21 扇区 x 每扇区 10 个（TR 36.814 标准密度）
@@ -707,9 +709,67 @@ sys_multicell_center_cell:
       区间，且与单小区场景的 0.004 dB 形成决定性对比——**这一个数就证明多小区
       数据集真的带几何邻区干扰、单小区确实噪声受限，两族场景不可能被搞混**；
       ④ 满缓冲下 completed_bursts = 0、inflight_share = 1.0。
-      **中心站 vs 边缘站的对比证据在数据集层就成立**（不依赖仿真）：
+      **中心站 vs 边缘站的对比在数据集层与仿真层都成立**。数据集层（不依赖仿真）：
       小区 1 几何 SIR 中位 4.22 dB / IoT 28.54 dB；小区 11（边缘）16.25 dB / 21.95 dB。
-      选错小区会把干扰低估 12 dB。边缘站的仿真臂本轮**没测成**——本机内存不足
-      （31.8 GB 总量但只剩 5.6 GB 可用，反复被系统杀），三次重试均失败，如实记录。
+      仿真层见对照组 sys_multicell_edge_cell（只差 serving_cell）：选边缘站会把小区
+      吞吐高估 28.8%、把 ITU 小区边缘用户速率 ue_served_p5 高估 154%。
       **运行约束**：这个数据集必须 replication_workers=1 串行跑。默认的 auto 会起
       多进程、每个复制一份链路表，实测单进程 84 s，多进程反而被内存杀掉。
+
+sys_multicell_edge_cell:
+  group: 系统级 · 多小区基线
+  label: 反向对照 · 边缘站小区（**不得作为推荐配置**）
+  summary: >-
+    与 sys_multicell_center_cell **只差一个 serving_cell**，用来回答「多小区拓扑里
+    挑哪个小区，对结论影响多大」。撒点没有 wrap-around，小区 11 在拓扑边缘、邻区
+    不完整，几何 SIR 中位 16.25 dB（中心站 4.22 dB），干扰被系统性低估。
+    **它同时是「场景合格判据」的反面教材**：首传 BLER 实测 0.0315，只有 10% 目标的
+    0.32 倍，因为信道太好、MCS 顶到表 3 的天花板（最高 27 档，实测均值 26.19），
+    外环想再往上爬也没有档位，BLER 只能低于目标。
+    所以边缘站不是「另一个可用锚点」，是**选错小区的示范**。
+  answers:
+    - 挑错 serving cell 会把容量高估多少
+    - 为什么信道太好的场景不能拿来当外环收敛的锚点
+  pair_with: sys_multicell_center_cell
+  pair_varies: [serving_cell]
+  channel_preset: company_64t4r_multicell
+  generate:
+    num_ues: 210               # 21 扇区 x 每扇区 10 个（TR 36.814 标准密度）
+    num_samples: 420           # 每 UE 2 个样本
+    num_slots_per_sample: 4    # 每 UE 共 8 个快照（CLAUDE.md 的下限是 4）
+    ue_speed_kmh: 3.0
+  system:
+    duration_s: 3.0
+    traffic_model: full_buffer
+    serving_cell: 11
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_b0f4a906
+    n_replications: 8
+    replication_workers: 1
+    cell_served_mbps: [799.3052, 0.1]
+    avg_mcs_first_tx: [26.1865, 0.0]
+    avg_rank: [2.0, 0.0]
+    bler_first_tx: [0.0315, 1.8]
+    serving_cell_prb_utilization: [1.0, 0.0]
+    edge_mcs_p5: [22.8296, 0.1]
+    ue_served_p5_mbps: [71.6702, 0.2]
+    ue_served_median_mbps: [94.418, 0.1]
+    ue_served_mean_mbps: [88.8117, 0.1]
+    active_window_goodput_mbps: [88.9457, 0.1]
+    note: >-
+      2026-09-04 实测，8 次重复，单进程，serving_cell=11（9 个 UE / 210 个 / 21 小区）。
+      与中心站**逐字受控**，只差 serving_cell。配对差：
+      cell_served **+28.8%**（799.31 vs 620.52）、
+      ue_served_p5 **+154%**（71.67 vs 28.24）、
+      IoT 中位 16.78 vs 23.23 dB（**低估 6.45 dB**）。
+      **BLER 0.0315 = 目标的 0.32 倍，这个场景按本仓库的判据是不合格的**，
+      原因可查且是物理的：avg_mcs_first_tx 26.19 已经贴着表 3 的最高档 27，
+      olla_db_mean = +1.43 dB（外环在往上推却推不动），
+      而中心站是 21.88 档 / −3.07 dB（外环在正常回退）。
+      **信道太好 ⇒ MCS 撞天花板 ⇒ 外环失去调节余量 ⇒ BLER 低于目标。**
+      这条同时解释了为什么锚点必须挑被邻区包围最完整的小区。
+      **不得把这个场景的数字当成「多小区容量」引用。**

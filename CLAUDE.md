@@ -1456,6 +1456,35 @@ full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst �
 容量工况还要看 `cell_served_mbps`、`serving_cell_prb_utilization`、
 `avg_mcs_first_tx`、`bler_first_tx`。
 
+### 多小区数据集：挑哪个小区是物理选择，不是随便挑一个
+
+3GPP TR 36.814 的标准撒点密度是每扇区 10 个 UE，21 扇区共 210 个；而仿真器一次
+只调度一个小区，所以 `sr_system_sim(serving_cell=<编号>)` 必须挑一批出来。
+
+**撒点没有 wrap-around，边缘小区的邻区不完整、干扰被系统性低估。**
+挑被邻区包围最完整的那个（几何 SIR 中位最低）。实测同一份 210 UE 数据集，
+只换 `serving_cell`、其余逐字相同（preset `sys_multicell_center_cell` ↔
+`sys_multicell_edge_cell`）：
+
+| | 中心站（小区 1） | 边缘站（小区 11） | 差 |
+|---|---|---|---|
+| 几何 SIR 中位 | 4.22 dB | 16.25 dB | 12.0 dB |
+| IoT 中位（仿真） | 23.23 dB | 16.78 dB | 低估 6.45 dB |
+| `cell_served_mbps` | 620.52 | 799.31 | **高估 28.8%** |
+| `ue_served_p5_mbps` | 28.24 | 71.67 | **高估 154%** |
+| `bler_first_tx` | 0.1041（1.04×） | 0.0315（**0.32×**） | |
+
+**边缘站那一列同时说明「信道太好的场景不能当外环锚点」**：它的
+`avg_mcs_first_tx` 是 26.19，已经贴着表 3 的最高档 27，`olla_db_mean` 为 **+1.43 dB**
+（外环在往上推却推不动），于是 BLER 只能低于目标。中心站是 21.88 档 / −3.07 dB，
+外环在正常回退。**MCS 撞天花板 ⇒ 外环失去调节余量 ⇒ BLER 偏低**，这不是 bug，
+是场景选错。
+
+`serving_cell_selection` 会把判断依据一起回报：选中小区的几何 SIR 中位与 IoT 中位
+（`IoT = SIR/(SIR−SINR)`，与结果里的 `iot_db_median` 同一公式）。
+算不出来时给 `selected_interference_note` 说明原因，**不留哑 `None`**。
+它与 `rb_power_control_enabled` 同开硬失败（逐 RB 功控的几何量不随样本筛选走）。
+
 随容量分支一起下线的配置，给了都硬失败、不静默降级：
 `evaluation_mode`、`traffic_model="bimodal"`（连同 `p_small_rbg`/`p_full_rbg`/
 `p_idle_tti`/`expected_prb_util`）、`KpiConfig.trim`/`min_burst_tti`、

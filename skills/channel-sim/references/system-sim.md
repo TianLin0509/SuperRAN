@@ -250,7 +250,7 @@ SCS、BWP 起点与 RBG configuration 若存在也必须匹配；任何错配立
 | `ftp3` | 3GPP FTP Model 3，泊松到达的固定大小文件 | **默认**，评价体验速率的标准话务 |
 | `mixed` | 一部分 UE 发 1500 B 小文件，另一部分 UE 发大文件；包长和到达率都是外生量 | **experience_v2 推荐**，验证“小包不再偷走整个 TTI” |
 | `cdf` | 两份 `value,cdf` 文件分别驱动包大小与逐 UE renewal 包间隔 | 接现场话务 CDF；外部曲线未接入前只能用明确标注的 synthetic 输入 |
-| `full_buffer` | **这就是「容量仿真」**：话务开到最大、缓冲区永不空，按需 RBG 退化成全带宽 | 容量上限、调度公平性、两个口径的用户体验速率（`ue_served_p5_mbps` 与 `drb_throughput_rel19_mbps`，满缓冲下两者收敛）；只有需要 burst 传完的键（完成时延、PDB、含头速率）报 `None` |
+| `full_buffer` | **这就是「容量仿真」**：话务开到最大、缓冲区永不空，按需 RBG 退化成全带宽 | 容量上限、调度公平性、工程口径的用户体验速率（`ue_served_p5_mbps` 与 `active_window_goodput_mbps`，两者算法不同但应收敛）；**28.552 的 `drb_throughput_rel19_mbps` 无样本、报 `None`**，与完成时延、PDB、含头速率一样 |
 | `cbr` | 恒定比特率 | 固定码率业务 |
 
 `ftp3` 的负载由 `file_bytes × 8 × arrival_rate_hz` 决定，
