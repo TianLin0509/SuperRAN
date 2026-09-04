@@ -192,11 +192,31 @@ def test_doppler_becomes_a_time_phase_ramp() -> None:
     assert step == pytest.approx(((2 * np.pi * fd * dt) + np.pi) % (2 * np.pi) - np.pi, abs=1e-6)
 
 
-def test_polarization_slot_order_follows_the_superran_contract() -> None:
-    """gains 的第 0 个极化下标必须落在配置里第 0 个倾角的端口块上。
+@requires_sionna
+def test_registered_polarization_keeps_the_configured_slant_order() -> None:
+    """注册给 Sionna 的极化必须与配置同序。
 
-    Sionna 自带的 "cross" 是 [-45, +45]，SuperRAN 配置是 [+45, -45]。
-    把 _polarization_name() 换回 "cross" 这条断言就会红。
+    Sionna 自带的 "cross" 是 [-45°, +45°]，SuperRAN 配置是 [+45°, -45°]。
+    把 _polarization_name() 换回返回 "cross" 这条断言就会红。
+    """
+    from sionna.rt.antenna_pattern import polarization_registry
+
+    source = srt.SionnaRTSource(_company_cfg())
+    name = source._polarization_name()  # noqa: SLF001
+    assert name != "cross"
+    registered = polarization_registry.get(name)
+    assert [round(math.degrees(v), 6) for v in registered] == [45.0, -45.0]
+    assert [round(math.degrees(v), 6) for v in polarization_registry.get("cross")] == [
+        -45.0,
+        45.0,
+    ]
+
+
+def test_polarization_slot_order_follows_the_superran_contract() -> None:
+    """gains 的第 0 个极化下标必须落在 bs_layout/ue_layout 的第 0 个极化块上。
+
+    这条只管合成层的下标映射；「注册给 Sionna 的倾角顺序对不对」由
+    test_registered_polarization_keeps_the_configured_slant_order 守。
     """
     cfg = _company_cfg()
     spec = srt.array_spec_from_config(cfg, 64, 4)
