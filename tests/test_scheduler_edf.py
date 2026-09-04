@@ -519,13 +519,23 @@ def test_multiprocess_harq_weakens_the_starvation_guard() -> None:
     """**单进程 HARQ 在做一件调度器没在做的事：强制轮空。**
 
     单进程下 UE 发完一个 TB 就要等反馈，这期间不参与调度——等于给了弱用户
-    一个天然的插空机会。放开到 8 进程后强用户不再轮空，24 UE 饱和小区里
-    最弱那个（geo SINR −0.74 dB）即使被饿死兜底抬进候选集 5000 多次，
-    仍然抢不到足够的 RBG，实测 served = 0。
+    一个天然的插空机会。放开到 8 进程后强用户不再轮空，弱用户被挤。
 
     **这不是 bug，是把调度器的真实公平性暴露出来了**：以前的"不饿死"有一部分
-    是 HARQ 阻塞白送的。阈值 200 ms 是在旧行为上标定的，需要维护者重新决定。
-    这条用例把这个交互钉住，免得以后当成回归去修。
+    是 HARQ 阻塞白送的。
+
+    严重程度取决于 AMC 有多激进，所以它随这条 PR 栈变化，这里如实记录：
+
+    * 只到「HARQ 多进程」那一层时，24 UE 饱和小区里最弱那个（geo SINR
+      −0.74 dB）即使被饿死兜底抬进候选集 5000 多次仍抢不到 RBG，**served = 0**，
+      且兜底阈值扫 200/100/50/20/10 ms 都消灭不了。
+    * 叠加「CQI 运行时上报」之后 AMC 变保守、强用户不再一口吃满，
+      **饿死消失**（最弱 UE 0.496 → 0.499 Mbps）。留下的只是公平性下降：
+      Jain 0.4552 → 0.4281，p5 0.616 → 0.499 Mbps。
+
+    所以这里断言的是**留下来的那个机制**（公平性下降），不是那个已经被上层
+    改动掩盖掉的症状（饿死）。饿死会不会在别的场景回来，取决于 AMC 工作点，
+    维护者做公平性结论前要自己在目标场景确认。
     """
     def _run_mp(procs: int):
         tables_of, scen_traffic, duration = _SCENARIOS["saturated"]
@@ -540,14 +550,16 @@ def test_multiprocess_harq_weakens_the_starvation_guard() -> None:
                                        edf_starvation_hol_ms=200.0),
             kpi=sysm.KpiConfig(warmup_tti=0))
 
-    single = _run_mp(1)
-    multi = _run_mp(8)
-    starved_single = sum(1 for x in _served(single) if x <= 0.0)
-    starved_multi = sum(1 for x in _served(multi) if x <= 0.0)
-    assert starved_single == 0, starved_single
-    assert starved_multi > 0, starved_multi
+    single, multi = _run_mp(1), _run_mp(8)
+    s_single, s_multi = _served(single), _served(multi)
     # 兜底确实在动，不是没触发
     assert multi.cell["scheduler_starvation_lifts"]["lifted_candidate_ttis"] > 0
+    # 小区吞吐基本不动：它是 offered-limited 的，多进程只改谁拿到
+    assert abs(multi.cell["cell_served_mbps"]
+               / single.cell["cell_served_mbps"] - 1.0) < 0.05
+    # 留下来的机制：公平性下降。Jain 与 5% 分位同向变差。
+    assert _jain(s_multi) < _jain(s_single), (_jain(s_single), _jain(s_multi))
+    assert float(np.percentile(s_multi, 5)) < float(np.percentile(s_single, 5))
 
 
 def test_hard_starvation_guard_eliminates_starvation() -> None:
