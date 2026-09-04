@@ -10,9 +10,9 @@
 | 你想干什么 | 你说这一句 |
 |---|---|
 | 让 Agent 改代码 | `读 .agents/AUTHOR.md 按它工作。任务：<一句话>` |
-| 让另一个 Agent 审核 | 把 Author 结尾自动生成的那段**原样转发**给新会话 |
+| 审核 + 合并 PR | 把 Author 结尾自动生成的那段**原样转发**给新会话。它审完通过就直接合 |
 | 看现在什么状态 | 运行 `scripts\superran_board.ps1`，它会打开一张总览页 |
-| 同步到 GitHub | `读 .agents/SYNC.md 按它工作` |
+| 补对外改动文档 | `读 .agents/SYNC.md 按它工作` |
 | 让内网 Agent 通审整个仓库 | 跑 `scripts\superran_company_zip.ps1`，把它打的 zip 发过去 |
 | 让内网 Agent 审一次改动 | 跑 `scripts\superran_review_pack.ps1 <分支名>`，把审核包发过去 |
 | 处理内网审来的意见 | 把它的 md 放进 `docs\inbox\`，然后说「处理 docs\inbox 里的内网审阅报告」 |
@@ -21,6 +21,24 @@
 除此之外不需要记任何路径、SHA、分支名或命令。
 
 ---
+
+## 流程长什么样
+
+```
+你说一句  →  Author 干活、跑测试、出报告
+                  ↓  自己 push 分支 + 开 PR
+          你把它生成的交接词转发给新会话
+                  ↓
+          Reviewer 审这个 PR
+                  ↓
+        PASS → 它自己合并，并把 main 跟上
+        REVISE / BLOCKED → 不合，交回去改
+```
+
+**你只做两件事**：说要干什么，转发一段话。
+
+Agent **能开 PR，但不能合自己的 PR**。合并权只在 Reviewer 手里，
+而且它有三条硬闸：不许审自己写的、只有 PASS 才合、合的必须是它亲自验过的那个 SHA。
 
 ## 唯一可信的地方
 
@@ -62,11 +80,11 @@ git config core.hooksPath .githooks
 ## 目录里其他文件
 
 - `AUTHOR.md` — 实现者合同
-- `REVIEWER.md` — 审核者合同
+- `REVIEWER.md` — 审核者合同。**审 PR，通过就由它执行合并**（含三条硬闸）
 - `TESTING.md` — 怎么跑测试。**两个坑会让 Agent 得出假的"测试通过"**，
   Author 和 Reviewer 都必读
 - `RISK.md` — 风险分档（按文件路径写死，Agent 不许自己判断）
-- `SYNC.md` — 同步 GitHub 的流程
+- `SYNC.md` — 对外改动文档与批次记录
 - `INTEGRATOR.md` — 多条并行开发线合到一起时用（含解冲突与定位失败的方法）
 - `COMPANY.md` — 内网 Agent **通审整个仓库**的合同，**含保密红线**
 - `COMPANY_REVIEW.md` — 内网 Agent **审一次具体改动**的合同，打包时会自动放进审核包

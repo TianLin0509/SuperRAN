@@ -23,7 +23,9 @@
 ## 允许 / 禁止
 
 - 允许：在自己的工作区改代码、跑测试、建本地 commit（**要多提交，别攒着**）。
-- 禁止：`push`、建 PR、合并、改远端分支。除非维护者明确说"同步 GitHub"。
+- 允许：干完之后 **push 自己的分支并开 PR**——审核就是在 PR 上做的。
+- **禁止合并 PR**，也禁止合并别人的 PR。合并是 Reviewer 的事，见 `.agents/REVIEWER.md`。
+- 禁止：改 `develop` / `main`，删除别人的分支或工作区。
 - 禁止：`git worktree remove --force`（Windows 上会穿透 junction 递归删除）。
 
 ## 实现规则
@@ -61,16 +63,37 @@
 需要人决定什么。代码路径与命令默认折叠。
 **中间过程不要生成报告、不要粘贴日志。**
 
-**最后追加一段可直接转发的 Reviewer 交接**，把尖括号内容全部填好：
+## 开 PR（报告出完之后）
+
+审核在 PR 上做，所以你要自己把它推上去：
+
+```
+git push -u origin HEAD:refs/heads/<你的分支名>
+gh pr create --base develop --head <你的分支名> --title "<一句话>" --body "<见下>"
+```
+
+PR 正文必须写清这五项，Reviewer 靠它对照 diff：
+
+1. 改了哪个无线环节（物理因果链）
+2. 为什么这么改
+3. 证据：跑了哪些测试、关键数字。**写清 `superran.__file__` 指向哪里**
+4. **没证明什么**：未覆盖的场景、工程近似、未确认的口径。这一节不许写"无"
+5. 风险档（查 `.agents/RISK.md`）与本次触碰的物理机制
+
+**建完 PR 不要自己合。** 最后输出一段可直接转发的交接词，尖括号全部填好：
 
 ```
 读 C:\Vibe\Wireless\SuperRAN\.agents\REVIEWER.md 按它工作。
+审 PR #<号>，通过就由你合并。
 任务：<一句话>
-分支：<branch>   完整 SHA：<40 位>
+PR head SHA：<40 位>
 Author 报告：<绝对路径>
 风险档：<绿/黄/红>   本次触碰的物理机制：<模块名>
 棘轮测试：<测试函数名，或"本次无">
 ```
 
-> 红档任务要生成两段：一段给 Physics Reviewer，一段给 Integration Reviewer。
-> 绿档（纯文档、纯报告排版）不需要 Reviewer，写一句说明即可。
+> 红档任务生成两段：一段给 Physics Reviewer，一段给 Integration Reviewer。
+> **两段都 PASS 才允许合**，由第二个 Reviewer 执行合并。
+>
+> 绿档（纯文档、纯报告排版）仍然要有人合，但可以省掉物理审——
+> 在交接词里写明"绿档，只需核对确实未触碰 src/ 与 tests/"。
