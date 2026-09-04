@@ -45,6 +45,10 @@ SuperRAN 本仓的合同为准。统计信道生成、CDL/TDL 表、NR 载波/TD
 Sionna RT / QuaDRiGa 只能作为显式 direct optional adapter 接入；不可用时硬报告，
 不得退回另一个仓库。
 
+**默认信道是 CDL**（``internal_sim``）。``sionna_rt`` 是本仓自己的直连适配层
+（``src/superran/sionna_rt.py``），装了 sionna-rt 才可用，必须在配置里显式写
+``source: sionna_rt`` 才会走。QuaDRiGa 仍未实现。
+
 ## 环境
 
 - Python ≥ 3.10，需要 numpy / scipy / pydantic v2 / pyyaml / structlog / mcp
@@ -107,6 +111,8 @@ test_physics_contract_extensions + test_channel_generation_contract + test_resul
 改动 `amc_policy.py` 要跑 test_system + test_scheduler_p0 + test_csi_aging；
 改动 `native.py` / `channelhub.py` / `physical.py` 要跑 test_native_independence +
 test_channel_generation_contract + test_physics_invariants + test_linklevel + test_gates；
+改动 `sionna_rt.py` 或 `native.py` 里的 `_small_scale_channel` / `_spatial_panel_response` /
+`fixed_subarray_response` 要额外跑 test_sionna_rt_source + test_raytracing；
 改动 `rng.py` 要跑 test_rng + test_system；
 改动 `algorithms.py` / `algo_defs*.py` 要跑 test_interference（算法页签在它第 9.10 节）；
 改动开发者文档生成器要跑 `tests/test_developer_guide.py`。
@@ -151,9 +157,10 @@ KaTeX 未必收，光看 Python 源码看不出来。
 |---|---|
 | 部分 | 怎么对待 |
 |---|---|
-| `src/superran/native.py` | first-party 统计信道和 PHY 窄腰；本仓真相源 |
+| `src/superran/native.py` | first-party 统计信道和 PHY 窄腰；本仓真相源，**默认引擎** |
 | `channelhub.py` | 只作旧 API 名兼容，不发现外部源码 |
-| Sionna RT / QuaDRiGa | 显式可选 direct adapter；缺失时硬报告 |
+| `src/superran/sionna_rt.py` | 本仓自己的 Sionna RT 直连适配层；只换信道矩阵，阵列/大尺度/KPI 口径全部共用 |
+| QuaDRiGa | 显式可选 direct adapter，尚未实现；缺失时硬报告 |
 | 平台后端、训练、数据库、任务队列 | 不纳入；数据直接按 SuperRAN 合同落盘 |
 | 特征桥 / MAE token | 不纳入；只输出未归一化、未截断、未门控的物理量 |
 | source `w_dl` | 不接受；只从本地 `h_est` 重算 EBF/PEBF/NEBF |
@@ -583,6 +590,41 @@ first-party source 的 `measurements.interferer_channels` 默认 `False`——�
 Mitsuba 3.8 的解析器直接报错。`scenes.prepare_scene()` 会复制到 artifacts
 缓存再清理，**不动源资产**。加新城市场景时如果报
 "invalid PLY header"，就是这个原因。
+
+### 射线追踪信道：换的是矩阵，不是口径
+
+`sionna_rt` 只覆写 `InternalSimSource._small_scale_channel` 这一个接缝。接缝以上
+（站点布局、撒点、LOS、路损、阴影衰落、服务小区选择、预波束 S/N/I 预算）与以下
+（估计噪声、SSB、TDD 成对、元数据）全部共用，所以 CDL↔RT 的 KPI 差异**可归因**。
+RT 自己算的路损与时延扩展只写进 `meta.rt_pathloss_db` / `meta.rt_delay_spread_ns`
+作旁证，不驱动链路预算——想让 RT 接管大尺度必须是另一次显式改动。
+
+**载波相位项不能省。** 合成用
+`H += g · exp(j2π f_d t) · exp(-j2π (f_c + f) τ) · a_BS · conj(a_UE)`。
+CDL 的时延是合成的、每簇另有随机相位，载波项被吸收了；RT 的径长差是真实的，
+径间相对相位就来自这一项。锚点是与 Sionna 自己的 `Paths.cfr()` 对拍，
+单端口单极化下相对误差 < 2e-3（就是 Sionna 内部 float32 的相位精度）。
+
+**极化槽顺序是反的。** Sionna 自带的 `"cross"` 是 `[-45°, +45°]`，SuperRAN 的
+`polarization_slant_angles_deg` 默认是 `[+45°, -45°]`。直接用 `"cross"` 会把两个
+极化端口块整体对调，所以适配层按配置 `register_polarization` 一个同序的极化。
+
+**站点要平移到场景中心。** Sionna 内置场景的坐标原点未必在城区里——munich 的
+包围盒中心是 `(-68, -86)`，把站点摆在 `(0,0)` 实测 40 个随机 UE 只有 6 个能追到径；
+按包围盒中心平移后四个内置场景覆盖率回到 10~12/12。平移只作用于送进 RT 的坐标，
+SuperRAN 自己的几何与路损仍在原坐标系（距离是平移不变量）。可用
+`rt_scene_offset_m` 覆盖。
+
+**覆盖空洞是硬错误，不是回退。** 服务链路一条径都追不到时直接抛错并打印 BS/UE
+坐标与修复建议，绝不退回 TDL/CDL。干扰小区零径则返回零信道——那是真实的
+"该小区没有干扰"。慕尼黑老城随机撒点会有相当比例落在全遮挡处，所以 `rt_munich`
+预设写死了 6 个实测有覆盖的 UE 位置；**换站高、换场景、换平移量都要重新扫**。
+
+**两份阵列响应实现的垂直相位符号相反。** `EffectiveArray.effective_tx_steering`
+用 `z0 - v·d_v`（物理 top_to_bottom），`_spatial_panel_response` 用 `+v·d_v`，
+幅度完全一致、相位差一个符号。这是**收编前就存在**的不一致，当前无实际影响
+（`effective_tx_steering` 全仓只被一个审计脚本用来取模方），但两者都号称是同一个
+阵列的响应，谁要拿它做波束赋形之前必须先把这件事定下来。
 
 ### CDL-A~E 表、20-ray 展开与 K 因子都有硬门
 
