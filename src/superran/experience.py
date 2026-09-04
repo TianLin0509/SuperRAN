@@ -7,8 +7,10 @@
 这个话务配置点：缓冲区永不空 ⇒ :func:`_build_su_plan` 的按需 RBG 反查恒等于
 全带宽、每 TTI 一个 SU（或一对 MU）。调度、AMC、HARQ、解调 SINR 聚合全部照
 本模块的定义走，**没有为它开的任何特例分支**。代价是 busy period 永不结束，
-28.552 的 busy-period 吞吐因此无边界可用，如实报 ``None``；用户体验速率改走
-ITU-R M.2412 / TR 38.913 口径（``ue_served_p5_mbps``），任何话务下都有定义。
+但**体验速率照常算得出来**：在飞 busy period 的窗内段进统计（buffer 没排空就
+没有尾巴可掐）。两个口径——28.552 的 ``drb_throughput_rel19_mbps`` 与 ITU-R
+M.2412 / TR 38.913 的 ``ue_served_p5_mbps``——在满缓冲下收敛。只有明确需要
+burst 真的传完的键报 ``None``。
 
 物理边界明确写在结果里：逐 RBG 频选与 RB 功控是两个独立开关；只要链路表
 带逐 RBG SINR，实际 grant 就按 bitmap 聚合并重选 MCS。当前聚合仍是 dB
@@ -399,6 +401,44 @@ class BurstMetrics:
     completion_delay_ms: float | None
     pdb_miss: bool | None
     head_inclusive_throughput_mbps: float | None = None
+
+
+def inflight_burst_metrics(burst: BusyPeriod, tti_ms: float,
+                           warmup_tti: int) -> BurstMetrics:
+    """还在飞的 busy period 在测量窗内那一段的 28.552 吞吐。
+
+    **不计它等于把"慢到没传完"的 burst 系统性丢掉。** 长/慢 burst 更容易在仿真
+    结束时还没排空，只统计已完成 busy period 会让吞吐系统性偏乐观——这和
+    :func:`arrival_item_metrics` 里已经修过的那个删失是同一个 bug。
+    full buffer 只是它的极端情形：**每个 UE 恰好有一个永不结束的 busy period，
+    于是全部被丢掉**，KPI 因此看起来"无定义"。
+
+    **在飞的 burst 没有尾巴可掐。** 掐尾是为了去掉"清空缓冲区那一下"的伪影：
+    最后那个 TTI 通常只用了一部分就把数据发完，算进去等于用整个 TTI 的时间去除
+    半个 TTI 的数据。buffer 没排空就没有这个半 slot，窗内最后一个 ACK 是满的，
+    所以分子取窗内全部 ACK 净荷、分母取首传（或窗起点）到窗内最后一个 ACK。
+
+    含头速率只在**该 busy period 本身起始于测量窗内**时才给：起始于窗外的 burst，
+    它的排队等待发生在窗外，加进窗内分母是两个口径混用。
+    """
+    if burst.first_tx_tti < 0:
+        return BurstMetrics(None, None, None, None, None)
+    events = [e for e in burst.ack_events if e.tti >= int(warmup_tti)]
+    if not events:
+        return BurstMetrics(None, None, None, None, None)
+    vol = int(sum(e.payload_bytes for e in events))
+    start_tti = max(int(burst.first_tx_tti), int(warmup_tti))
+    duration_tti = int(events[-1].tti) - start_tti + 1
+    if vol <= 0 or duration_tti <= 0:
+        return BurstMetrics(None, None, None, None, None)
+    duration_ms = duration_tti * float(tti_ms)
+    thp = vol * 8.0 / (duration_ms / 1000.0) / 1e6
+    head_thp = None
+    if int(burst.start_tti) >= int(warmup_tti):
+        wait = max(0, burst.first_tx_tti - burst.start_tti) * float(tti_ms)
+        head_thp = vol * 8.0 / ((wait + duration_ms) / 1000.0) / 1e6
+    # 完成时延与 PDB 需要对象真的传完，在飞的 burst 给不出，保持 None。
+    return BurstMetrics(thp, "rel19_inflight_burst", None, None, None, head_thp)
 
 
 def burst_metrics(burst: BusyPeriod, tti_ms: float,
@@ -3089,6 +3129,7 @@ def simulate_experience(
     large_pdb_flags: list[bool] = []
     class_arrival_kpis: dict[str, dict[str, Any]] = {}
     measured_bursts = completed_bursts = 0
+    completed_burst_count = inflight_burst_count = 0
     completed_arrival_objects = 0
     queue_wait_observed_objects = 0
     queue_wait_right_censored_objects = 0
@@ -3098,6 +3139,18 @@ def simulate_experience(
     for u, q in enumerate(tr.queues):
         done = [b for b in q.done if b.start_tti >= warmup]
         metrics = [burst_metrics(b, sys_cfg.tti_ms, small_policy) for b in done]
+        # **在飞的 busy period 也要计入。** 只统计已排空的会把"慢到没传完"的
+        # burst 系统性丢掉，吞吐偏乐观；full buffer 是这个删失的极端情形。
+        # 它单独计数，覆盖率随结果上报，判读时能看出有多少来自在飞样本。
+        inflight_metric = (
+            inflight_burst_metrics(q.active, sys_cfg.tti_ms, warmup)
+            if q.active is not None else None)
+        if inflight_metric is not None and inflight_metric.throughput_mbps is not None:
+            metrics = [*metrics, inflight_metric]
+            inflight_burst_count += 1
+        thp_completed = [m.throughput_mbps for m in metrics[:len(done)]
+                         if m.throughput_mbps is not None]
+        completed_burst_count += len(thp_completed)
         thp = [m.throughput_mbps for m in metrics if m.throughput_mbps is not None]
         head_thp = [m.head_inclusive_throughput_mbps for m in metrics
                     if m.head_inclusive_throughput_mbps is not None]
@@ -3208,7 +3261,12 @@ def simulate_experience(
             "head_inclusive_experienced_mbps": (
                 ue_head_thp if experience_eligible else None),
             "experience_kpi_eligible": experience_eligible,
-            "experience_kpi_measured": bool(thp),
+            # **"measured" 保持原义 = 有已完成 burst 的样本**，它是删失诊断：
+            # 和 experience_kpi_eligible 之差就是"有话务但一个 burst 都没传完"。
+            # 在飞样本进 experienced_mbps，但不许把这个诊断也填满。
+            "experience_kpi_measured": bool(thp_completed),
+            "experienced_completed_only_mbps": (
+                float(np.mean(thp_completed)) if thp_completed else None),
             "large_burst_experienced_mbps": _mean(lvals),
             "large_burst_head_inclusive_mbps": _mean(lhead),
             "small_burst_fractional_mbps": _mean(svals),
@@ -3283,8 +3341,9 @@ def simulate_experience(
                 if bool(u["experience_kpi_eligible"])]
     user_head_exp = [float(u["head_inclusive_experienced_mbps"]) for u in users
                      if bool(u["experience_kpi_eligible"])]
-    user_exp_completed_only = [float(u["experienced_mbps"]) for u in users
-                               if bool(u["experience_kpi_measured"])]
+    user_exp_completed_only = [float(u["experienced_completed_only_mbps"])
+                               for u in users
+                               if u["experienced_completed_only_mbps"] is not None]
     offered = int(tr.offered_bytes)
     offered_measured = max(0, offered - int(offered_before_measurement))
     backlog = int(tr.backlog_bytes)
@@ -3487,6 +3546,20 @@ def simulate_experience(
             len(user_exp_completed_only) / max(len(user_exp), 1)),
         "drb_throughput_rel19_mbps": _mean(all_thp),
         "drb_throughput_head_inclusive_mbps": _mean(all_head_thp),
+        # **样本构成必须可见。** 在飞 busy period 的那一段没有尾巴可掐，口径与
+        # 已完成 burst 略有差别（分母到窗内最后一个 ACK 而不是倒数第二个）；
+        # 不报构成的话，"这个吞吐里有多少来自没传完的 burst"就无从判读。
+        "drb_throughput_completed_bursts": int(completed_burst_count),
+        "drb_throughput_inflight_bursts": int(inflight_burst_count),
+        "drb_throughput_inflight_share": float(
+            inflight_burst_count
+            / max(completed_burst_count + inflight_burst_count, 1)),
+        "drb_throughput_sample_scope": (
+            "completed busy periods (tail-trimmed at the penultimate ACK) plus the "
+            "in-window segment of each still-in-flight busy period (no tail to trim, "
+            "since the buffer never drained). Dropping in-flight bursts would "
+            "systematically discard the slow ones and bias throughput optimistic; "
+            "full buffer is the extreme case where every busy period is in flight."),
         "large_burst_drb_throughput_mbps": _mean(large_thp),
         "large_burst_head_inclusive_mbps": _mean(large_head_thp),
         "large_flow_drb_throughput_p5_mbps": _pct(large_user_thp, 5),
@@ -3782,16 +3855,14 @@ def simulate_experience(
             weight=mixed_weight, epf_scale=mixed_epf_scale)
 
     if tr.unbounded:
-        # **只有 busy-period 口径的那几个键无定义**：full buffer 下 buffer 永不
-        # 排空，burst 没有边界。这不影响 ue_served_* ——那是另一个定义
-        # （每 UE 已服务字节 / 观测窗长），满缓冲评估用的就是它，照常输出。
-        # 报 None 而不是 0.0：zero-inclusive 口径是为"有外生到达但被饿死"的
-        # UE 设计的，把"测不了"写成 0 会被当成"测到了 0 Mbps"。
-        for _k in ("cell_experienced_mbps",
-                   "cell_head_inclusive_experienced_mbps",
-                   "cell_experienced_completed_only_mbps",
-                   "ue_experienced_mean_mbps", "ue_experienced_median_mbps",
-                   "ue_experienced_p5_mbps"):
+        # **吞吐类的键现在有值**：在飞 busy period 的窗内段照常统计（没有尾巴
+        # 可掐），full buffer 只是"每个 busy period 都在飞"的极端情形。
+        # 只有**明确需要 burst 真的传完**的那两个键留 None：
+        #   * cell_experienced_completed_only_mbps 顾名思义只收已完成 burst；
+        #   * 含头速率需要该 busy period 起始于窗内，而无界话务的 burst 起于 0。
+        # 报 None 而不是 0.0：把"测不了"写成 0 会被当成"测到了 0 Mbps"。
+        for _k in ("cell_head_inclusive_experienced_mbps",
+                   "cell_experienced_completed_only_mbps"):
             cell[_k] = None
 
     notes: list[str] = [

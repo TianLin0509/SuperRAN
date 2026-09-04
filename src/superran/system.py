@@ -14,8 +14,10 @@
 ``TrafficConfig(model="full_buffer")``。缓冲区永不空 ⇒ 按需 RBG 反查恒等于
 全带宽、每 TTI 一个 SU（或一对 MU）。调度、AMC、HARQ、解调 SINR 聚合一律
 照体验口径走，**没有为它开的任何特例**。代价是 busy period 永不结束，
-28.552 的 busy-period 吞吐因此无边界可用，如实报 ``None``；用户体验速率改走
-ITU-R M.2412 / TR 38.913 口径（``ue_served_p5_mbps``），任何话务下都有定义。
+但**体验速率照常算得出来**：在飞 busy period 的窗内段进统计（buffer 没排空就
+没有尾巴可掐）。两个口径——28.552 的 ``drb_throughput_rel19_mbps`` 与 ITU-R
+M.2412 / TR 38.913 的 ``ue_served_p5_mbps``——在满缓冲下收敛。只有明确需要
+burst 真的传完的键报 ``None``。
 
 架构上分两相，这是能跑十万 TTI 的关键：
 
@@ -302,9 +304,9 @@ class TrafficConfig:
             d |= {"cbr_mbps": self.cbr_mbps}
         elif self.model == "full_buffer":
             d |= {"note": ("话务开到最大（旧称容量仿真）：缓冲区永不空，按需 RBG "
-                           "反查恒等于全带宽。28.552 的 busy-period 吞吐无边界可用、"
-                           "报 None；用户体验速率走 ITU 口径 ue_served_p5_mbps，"
-                           "小区总吞吐看 cell_served_mbps 与 PRB 利用率。")}
+                           "反查恒等于全带宽。两个体验速率口径都有值："
+                           "drb_throughput_rel19_mbps 与 ue_served_p5_mbps，"
+                           "满缓冲下收敛；小区总吞吐看 cell_served_mbps 与 PRB 利用率。")}
         elif self.model in ("mixed", "cdf"):
             d |= {
                 "classes": [c.as_dict() for c in self.resolved_classes()],
@@ -2609,9 +2611,10 @@ def simulate(
     全带宽、每 TTI 一个 SU（或一对 MU），这正是容量口径。解调 SINR 仍按本次实际
     授予的那几个 RBG 聚合——full buffer 下"那几个"天然就是全部，所以不需要、
     也不允许为它开任何特例分支。代价是 busy period 永不结束，因此 28.552 的
-    **busy-period 吞吐**在该配置下无边界可用，如实报 ``None``。**用户体验速率
-    仍然有定义**，走 ITU-R M.2412 / TR 38.913 口径 ``ue_served_p5_mbps``；
-    小区总吞吐看 ``cell_served_mbps`` 与 PRB 利用率。
+    **busy-period 吞吐照常有值**（在飞 busy period 的窗内段进统计）。另一个口径
+    是 ITU-R M.2412 / TR 38.913 的 ``ue_served_p5_mbps``，满缓冲下两者收敛；
+    只有明确需要 burst 传完的键报 ``None``。小区总吞吐看 ``cell_served_mbps``
+    与 PRB 利用率。
 
     ``rng`` 是 :class:`rng.RngBook`，**按用途分流**：话务到达、HARQ 误码抽样、
     调度器决胜各拿一条互相独立的流。不给的话从 ``sys_cfg.seed`` 构造

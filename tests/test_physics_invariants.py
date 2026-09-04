@@ -432,10 +432,20 @@ check(over.cell["deadline_missed_incomplete_arrival_objects"] > 0
       and over.cell["pdb_decidable_arrival_objects"]
       > over.cell["completed_arrival_objects"],
       "PDB 分母纳入已超时未完成对象，并把未到 deadline 的对象单列右删失")
+# **过载 ≠ 饿死。** 这个 UE 一个 burst 都没传完（measured=0），但它一直在被
+# 服务（33.6 Mbps）。旧实现只统计已完成 busy period，于是给它报 0——那不是
+# "饿死"，是把一个正在满速收数据的用户写成了零。现在在飞段进统计，报实际速率；
+# 删失本身由 eligible/measured 之差如实暴露。
 check(over.cell["ue_experience_eligible"] == 1
-      and over.cell["ue_experience_measured"] == 0
-      and over.cell["cell_experienced_mbps"] == 0.0,
-      "有到达但无完成 burst 的饿死 UE 以 0 留在体验分布中")
+      and over.cell["ue_experience_measured"] == 0,
+      "有到达但无完成 burst 的 UE 仍留在体验分布里，删失由 eligible/measured 之差暴露")
+check(over.cell["cell_experienced_completed_only_mbps"] == 0.0,
+      "completed-only 视图如实报 0：确实一个 burst 都没传完")
+check(float(over.cell["cell_experienced_mbps"]) > 0.0
+      and abs(float(over.cell["cell_experienced_mbps"])
+              - float(over.cell["cell_served_mbps"]))
+      <= 0.15 * float(over.cell["cell_served_mbps"]),
+      "过载但持续被服务的 UE 报实际速率而不是 0（与 cell_served_mbps 一致）")
 
 # **外生到达与时隙类型无关。** 话务进缓冲区是 UE 侧的事，和这个 TTI 是 D/S/U
 # 没有关系；只有"发不发得出去"才看时隙。历史上到达只在下行 TTI 走了一遍，
@@ -465,11 +475,25 @@ check(abs(float(fb.cell["scheduled_ues_per_busy_tti"]) - 1.0) < 1e-9,
       "满缓冲下按需 RBG 退化成全带宽：每个忙 TTI 恰好服务 1 个 SU")
 check(abs(float(fb.cell["resource_utilization"]) - 1.0) < 1e-9,
       "满缓冲下 RBG 全部用满，没有留空的尾料")
-check(fb.cell["cell_experienced_mbps"] is None
-      and fb.cell["drb_throughput_rel19_mbps"] is None,
-      "busy period 永不结束，**28.552 的 busy-period 吞吐**报 None 而不是假装测到 0")
 check(float(fb.cell["cell_served_mbps"]) > 0.0,
       "容量口径仍然照常输出 cell_served_mbps")
+
+# **28.552 的体验速率在 full buffer 下同样算得出来。** 掐尾是为了去掉"清空
+# 缓冲区那一下"的半 slot 伪影；buffer 没排空就没有这个尾巴，分子取窗内全部
+# ACK 净荷、分母取首传到窗内最后一个 ACK 即可。把在飞 busy period 从统计里
+# 拿掉（回到只数 q.done）这几条就会红。
+check(fb.cell["drb_throughput_rel19_mbps"] is not None
+      and fb.cell["cell_experienced_mbps"] is not None
+      and float(fb.cell["drb_throughput_rel19_mbps"]) > 0.0,
+      "full buffer 下 28.552 体验速率有值——在飞 busy period 也进统计")
+_fb_rel19 = fb.cell["drb_throughput_rel19_mbps"]
+_fb_served_mean = float(fb.cell["ue_served_mean_mbps"])
+check(_fb_rel19 is not None
+      and abs(float(_fb_rel19) - _fb_served_mean) <= 0.10 * _fb_served_mean,
+      "满缓冲下 UE 一直活跃，「在传时多快」必须收敛到「全窗平均多快」（差 <10%）")
+check(abs(float(fb.cell["drb_throughput_inflight_share"]) - 1.0) < 1e-9
+      and int(fb.cell["drb_throughput_completed_bursts"]) == 0,
+      "满缓冲下全部样本来自在飞 busy period，构成如实上报")
 
 # **用户体验速率在 full buffer 下是有定义的，只是走另一个口径。**
 # ITU-R M.2412 / TR 38.913：每 UE 已服务净荷 / 观测窗长，5% 分位就是
@@ -501,6 +525,32 @@ check(np.isfinite(_fin.cell["ue_served_mean_mbps"])
       "有限话务下两个口径同时有值")
 check(_fin.cell["ue_served_mean_mbps"] < _fin.cell["cell_experienced_mbps"],
       "轻载下 UE 全时段平均低于 busy-period 吞吐——证明它们是两个定义，不可互换")
+check(int(_fin.cell["drb_throughput_inflight_bursts"]) == 0
+      and abs(float(_fin.cell["drb_throughput_inflight_share"])) < 1e-9,
+      "轻载下 burst 都传完了，没有在飞样本——修复对良性场景零扰动")
+
+# **反向哨兵：只统计已完成 burst 会系统性偏乐观。** 过载下慢 burst 更不容易
+# 传完，把它们丢掉等于只留漂亮样本。构造一个大部分 burst 传不完的有限话务，
+# 断言"只看已完成"给出的数明显高于把在飞段也计入的数。
+_ovl = sy.simulate(
+    tables,
+    sys_cfg=sy.SystemConfig(duration_s=1.0, tdd_pattern="DDDD"),
+    traffic=sy.TrafficConfig(model="ftp3", arrival_rate_hz=5.0,
+                             file_bytes=500_000),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False,
+                             frequency_selective="off"),
+    kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(95, 0))
+check(int(_ovl.cell["drb_throughput_inflight_bursts"]) > 0
+      and int(_ovl.cell["drb_throughput_completed_bursts"]) > 0,
+      "过载场景里已完成与在飞 busy period 同时存在（哨兵前提成立）")
+# **只断言"含不含在飞样本会改变结果"，不断言方向。** 偏差方向随场景而定：
+# 慢 burst 更不容易传完会让 completed-only 偏乐观；但若在飞的恰好是刚起步的
+# 好信道用户，方向就反过来。实测两种都见过（中载 11.59→8.78；本例 126.0→131.9）。
+# 能守住的不变量是：completed-only 用的是 rel19 样本集的真子集，两者必须不同。
+check(_ovl.cell["cell_experienced_completed_only_mbps"] is not None
+      and abs(float(_ovl.cell["cell_experienced_completed_only_mbps"])
+              - float(_ovl.cell["drb_throughput_rel19_mbps"])) > 1e-9,
+      "completed-only 与含在飞段的数确实不同——在飞样本真的进了统计")
 
 
 print("\n" + "=" * 70)

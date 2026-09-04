@@ -289,9 +289,11 @@ sys_capacity_full_buffer:
     **"容量仿真"就是这个场景**：它不是另一条仿真分支，只是把话务开到最大。
     缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU），
     调度、AMC、HARQ、解调 SINR 聚合全部照体验口径走。
-    代价是 busy period 永不结束，**28.552 的 busy-period 吞吐无边界可用、报 None
-    （不是 0）**。用户体验速率仍然有定义，走 ITU 口径 ue_served_p5_mbps。
-    结果里引用 cell_served_mbps、ue_served_p5_mbps、PRB 利用率与 Jain 公平度。
+    两个体验速率口径都有值：ITU 口径 ue_served_p5_mbps 与 28.552 口径
+    drb_throughput_rel19_mbps（在飞 busy period 的窗内段照常统计），
+    满缓冲下两者收敛。只有需要 burst 真的传完的键报 None（完成时延、PDB、
+    含头速率）。结果里引用 cell_served_mbps、ue_served_p5_mbps、
+    drb_throughput_rel19_mbps、PRB 利用率与 Jain 公平度。
   answers:
     - 这个小区的吞吐上界是多少
     - PF 在满负载下的公平性如何
@@ -318,7 +320,6 @@ sys_capacity_full_buffer:
     note: >-
       2026-08-07 实测，8 次重复（数值已因口径变更作废，见 invalidated_by）。
       **体验速率是 None**：full buffer 下缓冲区永不清空，28.552 的 DRB
-      busy-period 找不到终点，该口径无定义（ITU 口径的 ue_served_* 照常有值）。
       合并前的 legacy 路径报的是 0，
       那是在假装"测到了 0 Mbps"；现在报 None 并在 notes 里说明。
       **别把它当成 bug 去修。**

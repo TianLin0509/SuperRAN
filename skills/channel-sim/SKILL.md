@@ -163,10 +163,12 @@ RBG 数、rank 与 TBS，最多一次 IR/CC 重传；失败字节留在 FIFO，�
 
 **"容量仿真"= `traffic_model="full_buffer"`，是这条路径上的一个话务配置，不是另一
 条分支。** 缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU）。
-代价是 busy period 永不结束，**28.552 的 busy-period 吞吐**（`cell_experienced_mbps` /
-`drb_throughput_rel19_mbps` / 完成时延 / PDB）无边界可用，报 `None`（不是 0）。
-**用户体验速率仍然有定义**，走 ITU-R M.2412 / TR 38.913 口径：`ue_served_p5_mbps`
-是 cell-edge user throughput（每 UE 已服务净荷 ÷ 观测窗长的 5% 分位）。
+**两个体验速率口径在 full_buffer 下都有值**：ITU-R M.2412 / TR 38.913 的
+`ue_served_p5_mbps`（每 UE 已服务净荷 ÷ 观测窗长的 5% 分位，即 cell-edge user
+throughput），与 TS 28.552 的 `drb_throughput_rel19_mbps`（在飞 busy period 的
+窗内段照常统计，没有尾巴可掐）。满缓冲下 UE 一直活跃，两者收敛（实测 7.05 vs 7.03）。
+只有明确需要 burst 传完的键报 `None`：完成时延分位数、`pdb_miss_ratio`、
+`cell_head_inclusive_experienced_mbps`、`cell_experienced_completed_only_mbps`。
 小区总吞吐看 `cell_served_mbps` 与 `serving_cell_prb_utilization`。要体验速率就用
 `traffic_model="mixed"`（推荐，大小文件 UE 同场竞争）/ `ftp3` / `cdf`。
 

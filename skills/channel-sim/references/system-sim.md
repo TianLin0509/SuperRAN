@@ -62,11 +62,20 @@ FIFO 到达对象，小 burst 按 fractional slot 折算。
 | 口径 | 键 | 量什么 | full_buffer 下 |
 |---|---|---|---|
 | ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | 每 UE 已服务净荷 ÷ 观测窗长，跨 UE 取分布；5% 分位 = cell-edge user throughput | **照常有值，这是满缓冲评估的主指标** |
-| TS 28.552 busy-period | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | 一个 burst 从首传到发完有多快，需要 buffer 排空来划边界 | **无边界可用，报 `None`（不是 0）** |
+| TS 28.552 busy-period | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | 一个 burst 在传的时候有多快（首传 → 窗内最后一个 ACK） | **有值**：在飞 busy period 的窗内段照常统计，没有尾巴可掐 |
 
 轻载 FTP3 实测：`ue_served_mean_mbps=1.85` vs `cell_experienced_mbps=46.96`，
 同一次仿真差 25 倍——UE 全时段平均 vs 它的 burst 在飞时的速率，本来就不是一个量。
-`pdb_miss_ratio` 与完成时延同样依赖 burst 边界，full_buffer 下一并报 `None`。
+满缓冲下两者收敛（UE 一直活跃），实测 7.05 vs 7.03。
+
+**在飞 busy period 也进统计**：只数已排空的会把"慢到没传完"的 burst 系统性丢掉。
+这不是 full_buffer 特有的——普通过载同样中招（8 UE / ftp3 20 Hz × 500 kB / 1 s，
+旧口径直接返回 `None`）。样本构成看 `drb_throughput_completed_bursts` /
+`_inflight_bursts` / `_inflight_share`。**掐尾只在 buffer 排空时才有尾巴可掐。**
+
+full_buffer 下留 `None` 的只有明确需要 burst 传完的：
+`cell_experienced_completed_only_mbps`、`cell_head_inclusive_experienced_mbps`、
+完成时延分位数、`pdb_miss_ratio`。
 
 当前支持两用户、每用户 rank2 的数据受限 SU/MU 自适应；矩阵运算集中在
 `build_link_tables` 建表相，TTI 主循环只查 pair 表。逐 TTI 的 FIFO 与 RBG 分配是
@@ -233,7 +242,7 @@ SCS、BWP 起点与 RBG configuration 若存在也必须匹配；任何错配立
 | `ftp3` | 3GPP FTP Model 3，泊松到达的固定大小文件 | **默认**，评价体验速率的标准话务 |
 | `mixed` | 一部分 UE 发 1500 B 小文件，另一部分 UE 发大文件；包长和到达率都是外生量 | **experience_v2 推荐**，验证“小包不再偷走整个 TTI” |
 | `cdf` | 两份 `value,cdf` 文件分别驱动包大小与逐 UE renewal 包间隔 | 接现场话务 CDF；外部曲线未接入前只能用明确标注的 synthetic 输入 |
-| `full_buffer` | **这就是「容量仿真」**：话务开到最大、缓冲区永不空，按需 RBG 退化成全带宽 | 容量上限、调度公平性、**ITU 口径的用户体验速率 `ue_served_p5_mbps`**；28.552 的 busy-period 吞吐无边界可用，报 `None` |
+| `full_buffer` | **这就是「容量仿真」**：话务开到最大、缓冲区永不空，按需 RBG 退化成全带宽 | 容量上限、调度公平性、两个口径的用户体验速率（`ue_served_p5_mbps` 与 `drb_throughput_rel19_mbps`，满缓冲下两者收敛）；只有需要 burst 传完的键（完成时延、PDB、含头速率）报 `None` |
 | `cbr` | 恒定比特率 | 固定码率业务 |
 
 `ftp3` 的负载由 `file_bytes × 8 × arrival_rate_hz` 决定，

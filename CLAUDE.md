@@ -1413,12 +1413,24 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 | 口径 | 键 | 分母是什么 | full_buffer 下 |
 |---|---|---|---|
 | ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | **观测窗长**（每 UE 已服务净荷 ÷ 窗长，跨 UE 取分布） | **照常有值——这就是满缓冲评估的主指标**，5% 分位即 cell-edge user throughput |
-| TS 28.552 busy-period | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | **busy period 时长**（buffer 空→非空→空） | 无边界可用，报 `None`（不是 0） |
+| TS 28.552 busy-period | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | **busy period 时长**（首传 → 窗内最后一个 ACK） | **同样有值**：在飞 busy period 的窗内段照常统计 |
 
 它们**不是同一个数的两种精度**。轻载 FTP3 实测：`ue_served_mean_mbps=1.85` 而
 `cell_experienced_mbps=46.96`，同一次仿真差 25 倍——前者是 UE 全时段平均，
-后者是它的 burst 在飞时的速率。完成时延与 `pdb_miss_ratio` 同样依赖 burst 边界，
-full_buffer 下一并报 `None`。
+后者是它的 burst 在飞时的速率。满缓冲下两者收敛（UE 一直活跃），实测 7.05 vs 7.03。
+
+**在飞 busy period 必须进统计。** 只数已排空的 busy period 会把"慢到没传完"的
+burst 系统性丢掉，这**不是 full_buffer 特有的**：普通有限话务过载下同样中招——
+实测 8 UE / ftp3 20 Hz × 500 kB / 1 s，旧口径 `drb_throughput_rel19_mbps` 直接
+返回 `None`（0 个 burst 传完）；5 Hz × 500 kB 那档旧值 11.59 是拿 9 个 burst 里
+唯一传完的那 1 个算出来的，比含在飞段的 8.78 高 32%。轻载（36/36 传完）零扰动。
+**掐尾只在 buffer 排空时才有尾巴可掐**：在飞段的最后一个 ACK 是满 slot，不掐。
+样本构成由 `drb_throughput_completed_bursts` / `_inflight_bursts` / `_inflight_share`
+如实上报。
+
+full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst 真的传完**：
+`cell_experienced_completed_only_mbps`、`cell_head_inclusive_experienced_mbps`
+（需要该 busy period 起始于窗内）、完成时延分位数、`pdb_miss_ratio`。
 
 `ue_served_*` **无条件计算，不按话务模型分支**——任何话务下它都有意义，
 这也是它不构成「为 full_buffer 开特例」的原因。
