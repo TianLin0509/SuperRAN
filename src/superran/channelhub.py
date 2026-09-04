@@ -152,9 +152,11 @@ def probe_capabilities() -> tuple[Capability, ...]:
     ]
     contract = probe_source_contract()
     internal_missing.extend(f"source-contract:{name}" for name in contract.blockers)
-    rt_missing = [module for module in ("sionna", "mitsuba", "drjit") if not _probe_module(module)]
-    if not rt_missing:
-        rt_missing.append("superran-direct-sionna-adapter")
+    from .sionna_rt import adapter_missing as _rt_missing  # noqa: PLC0415
+
+    # 只探顶层包名。探 ``sionna.rt`` 会为了拿父包 __path__ 真的 import sionna，
+    # 连带拉起 mitsuba / drjit / matplotlib（历史实测 +455 MB）。
+    rt_missing = _rt_missing()
     return (
         Capability(
             "internal_sim",
@@ -168,8 +170,13 @@ def probe_capabilities() -> tuple[Capability, ...]:
         ),
         Capability(
             "sionna_rt",
-            False,
-            "Optional direct Sionna RT adapter is not installed; no ChannelHub fallback is used",
+            not rt_missing,
+            (
+                "SuperRAN first-party direct Sionna RT adapter: ray-traced multipath "
+                "on the shared effective-subarray array model"
+                if not rt_missing
+                else "Optional direct Sionna RT adapter needs sionna-rt; no fallback engine is used"
+            ),
             rt_missing,
         ),
         Capability(
@@ -227,18 +234,38 @@ def ensure_spec_tables() -> dict[str, Any]:
     return apply_spec_tables()
 
 
-def require_source(name: str) -> Any:
+def _engine_registry() -> dict[str, Any]:
+    """First-party statistical core plus any optional engine that is installed.
+
+    Optional engines live in their own module so that a missing third-party
+    runtime can never affect ``internal_sim``; they are only imported when the
+    top-level dependency probe already succeeded.
+    """
     from .native import SOURCE_REGISTRY
 
+    registry: dict[str, Any] = dict(SOURCE_REGISTRY)
+    from .sionna_rt import OPTIONAL_SOURCE_REGISTRY, adapter_missing  # noqa: PLC0415
+
+    if not adapter_missing():
+        registry.update(OPTIONAL_SOURCE_REGISTRY)
+    return registry
+
+
+def require_source(name: str) -> Any:
+    registry = _engine_registry()
     cap = {item.name: item for item in probe_capabilities()}.get(str(name))
     if cap is None:
-        raise RuntimeError(f"unregistered engine {name!r}; available={sorted(SOURCE_REGISTRY)}")
+        raise RuntimeError(f"unregistered engine {name!r}; available={sorted(registry)}")
     if not cap.available:
         raise RuntimeError(
             f"仿真引擎 {name!r} 在本机不可用：{cap.detail}"
             + (f"（缺 {', '.join(cap.missing)}）" if cap.missing else "")
         )
-    return SOURCE_REGISTRY[str(name)]
+    if str(name) not in registry:
+        raise RuntimeError(
+            f"引擎 {name!r} 报告可用但没有注册实现；这是适配层 bug，不做静默回退"
+        )
+    return registry[str(name)]
 
 
 def cdl_profile(name: str) -> Any:
@@ -256,7 +283,7 @@ def list_channel_models() -> dict[str, list[str]]:
 def iter_samples(source_name: str, cfg: dict[str, Any]) -> Iterator[Any]:
     source = require_source(source_name)(dict(cfg))
     for sample in source.iter_samples():
-        if source_name == "internal_sim":
+        if source_name in ("internal_sim", "sionna_rt"):
             _validate_internal_site_state_contract(sample, cfg)
         yield sample
 
