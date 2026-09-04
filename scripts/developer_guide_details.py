@@ -11,6 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 
+from superran import kpi_view as _kpi_view
+
+#: **计数一律从 kpi_view 算，不许手写。** 手写的数字漂过两次：加 KPI 的人
+#: 不会想到来改一段散文。test_developer_guide 用算出来的值做断言守这条。
+_N_CELL_KPI = len(_kpi_view.CELL_KPIS)
+_N_USER_KPI = len(_kpi_view.USER_KPIS)
+
 
 @dataclass(frozen=True)
 class DetailSpec:
@@ -781,7 +788,7 @@ DETAIL_SPECS.update({
             "任何带 eligibility 的指标都要同时给覆盖率。仿真结束时尚未第一次调度的包不能填 0；未形成足够完整包的短 burst 不能硬算无限/零速率。结果应给 observed count、eligible count、share 与排除原因。这样，算法通过让困难用户“没有样本”来美化均值时会立即暴露。",
             "PRB 利用率是本小区在测量窗口内已用物理资源/可用资源；0..17 RBG 直方图以每个 DL 等价 TTI 的唯一 used index 数计数。mixed 业务常呈两头高：空闲 TTI 落在 0，大包或积压落在 17，小包填在低 RBG；这是一种预期形态而非硬编码通过条件。MU 配对比例则是 MU PRB/已用 PRB，与 MU 用户传输次数不同。",
             "呈现分小区级和用户级两个 tab。小区级看整体负载、尾部分位和模式；用户级展示每 UE 的无线条件、业务、吞吐、首包时延、资源、MU/BLER，并支持散点、时间序列与跨 UE CDF。Agent 可以根据用户问题给 KPI relevance score，把更相关卡片前置、其他折叠，但所有原始 KPI、公式和选择理由仍可查看，不能让 LLM 在库内偷偷改数。",
-            "工作台是 experience_v2 的标准结果面，而不是运行结束后手工挑几张图。当前登记 27 项小区 KPI 与 25 项用户 KPI；可用项取决于 Result 是否真的携带相应数据。页面同时保留 95% CI、replication 数、KPI key、定义、告警、话务 profile 与校准轨迹，使一张卡片能向下追到统计样本和公式。<code>url</code> 只是便利入口，UTF-8 自包含 <code>html_path</code> 才是稳定离线产物；loopback 服务失败必须显式呈现，不能导致数值结果丢失或被悄悄替换。",
+            "工作台是 experience_v2 的标准结果面，而不是运行结束后手工挑几张图。当前登记 " + str(_N_CELL_KPI) + " 项小区 KPI 与 " + str(_N_USER_KPI) + " 项用户 KPI；可用项取决于 Result 是否真的携带相应数据。页面同时保留 95% CI、replication 数、KPI key、定义、告警、话务 profile 与校准轨迹，使一张卡片能向下追到统计样本和公式。<code>url</code> 只是便利入口，UTF-8 自包含 <code>html_path</code> 才是稳定离线产物；loopback 服务失败必须显式呈现，不能导致数值结果丢失或被悄悄替换。",
             "多算法页面不按算法分 tab：算法是贯穿总览、KPI 矩阵、用户 CDF、TTI 趋势和单 TTI 详情的固定颜色系列，基线不可隐藏；tab 表示读者正在回答的问题。每个算法臂必须携带同一 dataset 与逐位一致的 (master_seed, replication)，主 KPI 的候选对基线复用 Gate 3，并在 2~5 臂场景用 Holm step-down 收紧家族判决。只有 dataset 的生成前 prereg 同时匹配主 KPI 与基线标签时才允许产生 publishable winner；否则即使显著也保持 exploratory_unregistered。单 TTI 只能解释机制分叉，不能从一个事件外推算法收益。",
         ),
         implementation=(

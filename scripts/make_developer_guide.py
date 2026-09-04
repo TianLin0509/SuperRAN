@@ -56,6 +56,7 @@ DETAILED_MODULE_EXEMPTIONS = {"__init__", "katex", "mathml", "_lazy"}
 
 from superran import bler_curves as bc  # noqa: E402
 from superran import katex as kx  # noqa: E402
+from superran import kpi_view as _kv  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import mathml as mm  # noqa: E402
 from superran import srs_resource as srsres  # noqa: E402
@@ -2152,7 +2153,7 @@ def product_surfaces_showcase() -> str:
         <span class="surface-stage">RUN · AFTER</span>
         <h3>多算法 KPI 对比与单 TTI 复盘</h3>
         <p>2~5 个算法同屏固定颜色，基线不可隐藏；总览、KPI 矩阵、用户 CDF、TTI 趋势、同 TTI grant 详情与
-        统计门禁形成一条钻取链。单臂工作台仍保留 27 项小区 KPI、25 项用户 KPI 和 Agent 自适应首屏。</p>
+        统计门禁形成一条钻取链。单臂工作台仍保留 """ + f"{len(_kv.CELL_KPIS)} 项小区 KPI、{len(_kv.USER_KPIS)} 项用户 KPI" + """ 和 Agent 自适应首屏。</p>
         <a href="#/kpi">查看 KPI 口径与工作台合同 →</a>
       </div>
       """ + kpi_shot + """
