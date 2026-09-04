@@ -453,3 +453,165 @@ sys_experience_mixed_pf_wrong_accounting:
       2026-08-09 正式 n=16 CRN 的反向控制。它故意给部分 RBG 用户按全带记 PF，
       只用于验证不变量，**不得作为推荐配置**。与正确臂的主指标配对差及判决见
       sys_experience_mixed_pf 和 result JSON。
+
+# ---------------------------------------------------------------------------
+# 九、单小区基线（合并后唯一路径的实测锚点）
+#
+# 为什么新增：合并容量/体验模式后，原有 9 个多小区场景的锚点全部失效，而它们
+# **当前跑不通**——`sr_system_sim` 要求数据集内所有 UE 同属一个 serving cell，
+# 而 21 小区里撒 10 个 UE 每小区只落 1 个（要让单个小区拿到 10 个 UE，撒点量
+# 需放大约 21 倍）。这三个单小区场景是能实跑、能重复、能当漂移哨兵的那部分。
+# **它们不替代那 9 个多小区场景**：这里没有几何邻区干扰，邻区负载只有解析项。
+# ---------------------------------------------------------------------------
+sys_single_cell_capacity:
+  group: 系统级 · 单小区基线
+  label: 单小区容量口径 · 话务开到最大（full buffer）
+  summary: >-
+    合并后唯一路径的容量锚点。单站单扇区，无几何邻区干扰（邻区负载只进解析项），
+    所以吞吐显著高于多小区场景，**不能和 sys_capacity_full_buffer 直接比**。
+    体验类标准 KPI 按 TS 28.552 定义无样本（buffer 永不排空），报 None；
+    容量口径看 cell_served_mbps 与 ITU 口径的 ue_served_p5_mbps。
+  answers:
+    - 合并后的单路径在满缓冲下吞吐/MCS/BLER 是多少
+    - 标准 KPI 与工程 KPI 在满缓冲下各自给什么
+  channel_preset: single_cell_64t4r
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 8
+    ue_speed_kmh: 3.0
+    # **这四类覆盖缺一不可**，否则 sr_system_sim 会分别在载波格栅、CSI 来源上硬失败：
+    num_rb: 272                 # 预设默认 273，系统口径固定 272 = 17 RBG x 16 RB
+    link: BOTH                  # SRS 是上行；只给 DL 拿不到 ul_srs_estimate
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
+  system:
+    duration_s: 3.0
+    traffic_model: full_buffer
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_e94f1f09
+    n_replications: 8
+    cell_served_mbps: [618.6804, 0.1]
+    avg_mcs_first_tx: [21.6953, 0.1]
+    avg_rank: [2.0, 0.0]
+    bler_first_tx: [0.0884, 1.4]
+    serving_cell_prb_utilization: [1.0, 0.0]
+    ue_served_p5_mbps: [19.5095, 0.4]
+    note: >-
+      2026-09-04 实测，8 次重复，dataset ds_e94f1f09（单小区 272 RB + SRS 来源）。
+      格式 [均值, 95% 区间半宽占均值的百分比]。**这是三个新场景里统计最干净的一个**
+      （所有半宽 <= 1.4%），因为 full buffer 没有话务随机性，唯一随机源是 HARQ 抽样。
+      首传 BLER 0.0884 落在 10% 目标附近，说明 OLLA 在满缓冲下收敛良好。
+      自洽核对：active_window_goodput_mbps 实测 61.97 ≈ cell_served/10 = 61.87，
+      与「满缓冲下 UE 一直活跃、在传速率收敛到全窗平均」一致。
+      **标准 KPI（drb_throughput_rel19_mbps / cell_experienced_mbps）为 None
+      是设计意图**：TS 128 552 V19.5.0 p54 的样本只在 buffer emptied 事件上形成。
+
+sys_single_cell_experience_ftp3:
+  group: 系统级 · 单小区基线
+  label: 单小区体验口径 · FTP3 轻载
+  summary: >-
+    合并后唯一路径的体验锚点。占用率约 0.28，标准与工程两套 KPI 同时有值，
+    可用来核对「busy-period 吞吐」与「全窗平均」在轻载下相差一个数量级这件事。
+    **当前 OLLA 未收敛（首传 BLER 约 2 倍目标），不得用本场景下 BLER 结论。**
+  answers:
+    - 轻载下标准 KPI 与工程 KPI 差多少
+    - 合并后的单路径在有限话务下资源占用是多少
+  channel_preset: single_cell_64t4r
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 8
+    ue_speed_kmh: 3.0
+    num_rb: 272
+    link: BOTH
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
+  system:
+    duration_s: 5.0
+    traffic_model: ftp3
+    arrival_rate_hz: 3.0
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_e94f1f09
+    n_replications: 8
+    cell_served_mbps: [121.6753, 5.3]
+    avg_mcs_first_tx: [16.009, 5.0]
+    serving_cell_prb_utilization: [0.2906, 4.2]
+    drb_throughput_rel19_mbps: [183.5624, 3.4]
+    cell_experienced_mbps: [176.0849, 0.7]
+    ue_experienced_p5_mbps: [49.7779, 3.0]
+    ue_served_p5_mbps: [7.6679, 12.4]
+    note: >-
+      2026-09-04 实测，8 次重复，dataset ds_e94f1f09。
+      **只记半宽站得住的项。** 未记的两个：bler_first_tx 实测 0.2066（半宽 15.7%，
+      且是 10% 目标的 2 倍——低占用下 ACK/NACK 太少、OLLA 未收敛，olla_db_mean
+      只压到 -3.24）；active_window_goodput_mbps 半宽 82.5%（在飞样本只有 0.9%，
+      样本太少）。**这个场景当前不能用来下 BLER 结论**；要看稳态 BLER 请加长
+      duration_s 或临时开 olla_speedup。
+      口径对照：标准 busy-period 吞吐 183.6 Mbps 与 ITU 全窗口径 ue_served
+      中位 12.2 Mbps 相差约 15 倍——前者是「burst 在传时多快」，后者是「UE 全时段
+      平均拿到多少」，轻载下必然分开，**不可互相顶替**。
+
+sys_single_cell_experience_mixed:
+  group: 系统级 · 单小区基线
+  label: 单小区体验口径 · 大小包混跑（mixed）
+  summary: >-
+    大小 UE 同场竞争的单小区锚点。占用率约 0.18，用于守住 mixed 话务在合并后
+    仍能跑通并给出分层 KPI。**统计质量是三个里最差的**，多项半宽超过 30%，
+    只作漂移哨兵，不得作为性能结论来源。
+  answers:
+    - mixed 话务在合并后的单路径上还跑不跑得通
+    - 大小包混跑时分层 KPI 的量级
+  channel_preset: single_cell_64t4r
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 8
+    ue_speed_kmh: 3.0
+    num_rb: 272
+    link: BOTH
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
+  system:
+    duration_s: 5.0
+    traffic_model: mixed
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_e94f1f09
+    n_replications: 8
+    drb_throughput_rel19_mbps: [72.1381, 5.8]
+    avg_mcs_first_tx: [18.9448, 6.7]
+    ue_experienced_p5_mbps: [30.6176, 9.5]
+    cell_experienced_mbps: [113.788, 10.2]
+    note: >-
+      2026-09-04 实测，8 次重复，dataset ds_e94f1f09。
+      **大量指标因半宽过大被有意不记**：active_window_goodput_mbps 半宽 325.6%
+      （在飞样本占比仅 0.16%，等于一两个样本）、drb_throughput_inflight_share
+      123.2%、ue_served_median_mbps 34.7%、serving_cell_prb_utilization 23.6%、
+      cell_served_mbps 14.4%。首传 BLER 实测 0.3677，是 10% 目标的 3.7 倍——
+      占用率只有 0.175，OLLA 拿不到足够 ACK/NACK（olla_db_mean 才 -4.07）。
+      **本场景当前只能当「还跑得通」的哨兵，不能下任何性能或 BLER 结论。**
+      要让它可用：加长 duration_s 到 20 s 以上，或提高到达率把占用率抬到 0.3 以上。
