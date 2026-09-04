@@ -370,24 +370,43 @@ def experiment_grant_decode_sinr() -> dict:
 
 
 def experiment_table3_migration() -> dict:
-    """Breaking migration: system link tables reject Table 1/2 at the boundary."""
+    """Table 1/2 的边界在哪一层——**这条边界搬过一次家，别按记忆写。**
+
+    早先 ``build_link_tables(table=1/2)`` 在**建表入口**就拒。#23 给表 1/2 补了
+    有限码长解析 BLER 之后建表合法了，边界因此下移到**仿真入口**：体验路径没有
+    表 1/2 的 TBS/BLER profile，``simulate()`` 显式硬失败。
+    这个函数就是把「现在到底在哪一层拒」钉死，避免又变成凭记忆断言。
+    """
     h = np.ones((1, 4, 2, 2), dtype=complex)
+    built = {}
+    for table in (1, 2):
+        tabs = sy.build_link_tables([h], [10.0], table=table)
+        assert int(tabs[0].mcs_table) == table
+        built[str(table)] = int(tabs[0].mcs_table)
+    accepted = sy.build_link_tables([h], [10.0], table=3)
+    assert int(accepted[0].mcs_table) == 3
+    # 建表放行，仿真拒——且报错必须点名收到的表号，不能让人对着下游报错猜。
     rejected = {}
     for table in (1, 2):
+        tabs = sy.build_link_tables([h], [10.0], table=table, num_snapshots=2)
         try:
-            sy.build_link_tables([h], [10.0], table=table)
+            sy.simulate(tabs,
+                        sys_cfg=sy.SystemConfig(duration_s=0.01),
+                        traffic=sy.TrafficConfig(model="full_buffer"),
+                        kpi=sy.KpiConfig(warmup_s=0.0))
         except ValueError as exc:
             rejected[str(table)] = str(exc)
-    accepted = sy.build_link_tables([h], [10.0], table=3)
     assert set(rejected) == {"1", "2"}
-    assert int(accepted[0].mcs_table) == 3
+    assert all(f"table={t}" in msg for t, msg in rejected.items())
     return {
         "question": "旧 build_link_tables(table=1/2) 调用怎样迁移",
+        "built_tables": built,
         "rejected": rejected,
         "accepted_table": int(accepted[0].mcs_table),
         "migration": (
-            "系统/体验调用改用 table=3；Table 1/2 只保留给显式链路级分析。"
-            "失败前移到建表入口，避免先产生一张看似可用的错口径系统表。"),
+            "建表这一层现在放行表 1/2（#23 的有限码长解析 BLER），拒绝下移到仿真入口："
+            "系统级只支持预置表 3，表 1/2 只服务显式链路级分析（sr_throughput）。"
+            "系统/体验调用一律改用 table=3。"),
     }
 
 
