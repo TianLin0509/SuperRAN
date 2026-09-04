@@ -2709,21 +2709,30 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
         ["来源", "擅长", "项目中的角色", "边界"],
         [
             ("SuperRAN InternalSim", "38.901 风格 CDL/TDL、多小区几何、导频估计", "默认 first-party 物理源", "阵列/干扰模型仍含明确工程近似"),
-            ("Sionna RT", "场景网格、材料、射线与确定性路径", "规划中的可选 direct RT 源", "当前 adapter 未实现；依赖和资产质量都要单独验收"),
+            ("Sionna RT", "场景网格、材料、射线与确定性路径", "已可用的可选 direct RT 源（channel_source=sionna_rt）", "装不上就硬失败不回退；static 不许多轮、非 static 不许多时隙；依赖和资产质量仍要单独验收"),
             ("SuperRAN 系统层", "合同、硬件默认、算法、TTI、统计门", "编排与证据层", "不把统计 source 冒充确定性 RT"),
         ],
     )
     body += """
 <h3>Direct Sionna RT adapter 的验收边界</h3>
-<p>Sionna 的 <code>Paths.cfr()</code> 会按设备速度计算路径 Doppler，但调用方必须同时设置
-<code>Receiver.velocity</code> 和物理采样率。未来 direct adapter 必须使用完整 UE 速度向量、
-以平均 OFDM-symbol 周期的倒数作为采样率，并让 RB 网格围绕载波中心对称；在这些合同和逐径
-落盘尚未实现前，能力保持 unavailable。调用语义可在
+<p>adapter 已经落地：<code>channel_source=sionna_rt</code> 时走
+<code>superran/sionna_rt.py</code>，自己按 <code>[time, rb, bs_port, ue_port]</code> 合成，
+不调 Sionna 的 <code>Paths.cfr()</code>（与它的对拍相对误差 4e-4，量级等于 Sionna 内部
+float32 的相位精度）。Doppler 用完整 UE 速度向量、逐径投影一次，<strong>不做径向压缩再投影</strong>。
+调用语义可在
 <a href="https://nvlabs.github.io/sionna/rt/api/paths.html" target="_blank" rel="noreferrer">Sionna RT Paths API</a>
 与<a href="https://nvlabs.github.io/sionna/rt/tutorials/Mobility.html" target="_blank" rel="noreferrer">官方 Mobility 教程</a>复核。</p>
-<p>未来 direct Sionna adapter 若先生成 14-symbol 网格，应让它服务导频/估计与真实 symbol 级
-Doppler，再取中间 symbol 形成一个 slot，绝不能对复信道做 symbol 平均。当前 first-party source
-则直接输出并保留完整 slot snapshot 轴，由 <code>sample_interval_s</code> 给出时间间隔。</p>
+<p><strong>没有 symbol 级中间层。</strong>适配层直接按 slot 生成：时间轴是
+<code>num_slots_per_sample</code> 个点、间隔 <code>sample_interval_s</code>、<strong>从 0 起算</strong>，
+与 first-party source 逐字一致。没有"先算 14 个 symbol 再抽中间那个"这一步，也不对复信道做
+symbol 平均。样本之间的差异只来自父类挪 UE 位置后重追的几何——<strong>不叠加轮次时间原点</strong>，
+否则移动 UE 的相位会被算两遍（几何一次、Doppler 一次）。</p>
+<p><strong>两条尚未闭合的边界，写在这里而不是藏在代码里。</strong>其一，
+<code>mobility_mode=static</code> 下 RT 产不出独立的小尺度实现（没有 CDL 的
+<code>rng_small</code> 随机源），所以 static + 多轮直接报错，而不是把重复矩阵当独立样本；
+其二，非 static + <code>num_slots_per_sample&gt;1</code> 时父类的轨迹时钟每轮只前移一个
+<code>sample_interval_s</code>、样本内部却横跨 <code>n_time</code> 个，窗口会重叠——这个合同
+要改父类、跨两个引擎，未定案前 RT 拒绝该组合。</p>
 """
     body += callout(
         "good", "标准表错误现在会阻断生成",

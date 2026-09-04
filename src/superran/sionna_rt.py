@@ -206,7 +206,6 @@ def synthesize_channel(
     n_rb: int,
     subcarrier_spacing_hz: float,
     sample_interval_s: float,
-    time_offset_s: float = 0.0,
     normalize: bool = True,
 ) -> np.ndarray:
     """把射线集合合成为 ``[time, rb, bs_port, ue_port]`` 信道张量。
@@ -239,12 +238,23 @@ def synthesize_channel(
     freq = (np.arange(int(n_rb), dtype=np.float64) - (int(n_rb) - 1.0) / 2.0) * 12.0 * float(
         subcarrier_spacing_hz
     )
-    # **时间轴要接着上一个样本往下走，不能每个样本都从 t=0 重来。**
-    # 从 0 重来时，静止 UE 的第 2、3、4… 个样本与第 1 个逐位相同：样本数涨了，
-    # 信道实现数没涨。跨快照变化、多用户分集、CSI 老化、协方差、rank/MCS
-    # 分布全都会被这批重复矩阵做假。
-    times = (float(time_offset_s)
-             + np.arange(int(n_time), dtype=np.float64) * float(sample_interval_s))
+    # **样本内部的时间轴从 0 起算，与 CDL 路径逐字一致**（native.py 的
+    # ``times = np.arange(n_time) * interval``）。
+    #
+    # 曾经试过让第 k 个样本从 ``k x sample_interval_s`` 起算，想以此让静止 UE 的
+    # 多个样本不再逐位重复。那是错的，错在两处：
+    #   1. **移动 UE 的相位会被算两遍。** 父类已经把 UE 位置推进了
+    #      ``round x dt``，RT 在新位置重追的径里已经含这段几何相位；再叠加
+    #      ``round x dt`` 的 Doppler 相位，等效 Doppler 接近翻倍，相干时间偏短，
+    #      CSI 老化被系统性夸大。实测 Munich depth=0 单径：几何相位步进
+    #      0.094718 rad、额外 Doppler 0.095166 rad、最终 0.189884 rad。
+    #   2. **它把 static 改成了连续轨迹**，与 CLAUDE.md 的跨引擎合同冲突——
+    #      ``static`` 只固定几何位置，各样本的小尺度实现应当**独立**。
+    #
+    # 静止 UE 多样本重复这个问题，正确的解法不是偷偷改时间轴，而是在入口
+    # 拒绝这种配置（见 ``_assert_samples_are_distinct``）：RT 是确定性引擎，
+    # 它**产不出**独立实现，那就不要假装产得出。
+    times = np.arange(int(n_time), dtype=np.float64) * float(sample_interval_s)
     absolute_freq = float(carrier_freq_hz) + freq
 
     h = np.zeros((int(n_time), int(n_rb), n_bs, n_ue), dtype=np.complex128)
@@ -675,8 +685,6 @@ class SionnaRTSource(InternalSimSource):
             ),
             sample_interval_s=float(
                 _cfg_num(self.cfg, "sample_interval_s", 5e-3)),
-            time_offset_s=float(self._sample_round) * float(
-                _cfg_num(self.cfg, "sample_interval_s", 5e-3)),
         )
         gain_sum = float(np.sum(np.abs(rays.gains) ** 2))
         self._sample_diag.append(
@@ -711,30 +719,66 @@ class SionnaRTSource(InternalSimSource):
         return info
 
     def _assert_samples_are_distinct(self) -> None:
-        """配置注定产出逐位重复的样本时，当场报错。
+        """配置注定产出逐位重复的矩阵时，当场报错。
 
-        射线追踪是确定性的：UE 不动、又没有多普勒，那么第 2 个样本与第 1 个
-        **必然逐位相同**。这不是 bug，是物理——但把这批重复矩阵当成 N 个独立
-        实现就是在给样本量和时间相关性证据造假。所以这里硬拦：要么让它动
-        （``mobility_mode`` 或 ``ue_speed_kmh``），要么别要多余的样本。
+        射线追踪没有随机数：给定几何，输出完全确定。所以有三种配置**必然**
+        产出重复矩阵，而它们看起来都完全正常——跑得通、有结果、meta 也自洽。
+        把这批重复当成独立实现，就是在给样本量、置信区间和时间相关性证据造假。
+
+        1. ``static`` + 多轮。``mobility_mode='static'`` 时父类不挪 UE 位置，
+           样本内部时间轴又从 0 起算，于是同一个 UE 的第 2 轮与第 1 轮**逐位
+           相同**——与 ``ue_speed_kmh`` 无关，给多普勒也救不回来，因为两轮的
+           时间轴是同一段 ``[0, n_time x dt)``。CDL 靠 ``rng_small`` 每轮重画
+           小尺度实现，RT 没有这个随机源。
+        2. 样本内部多时隙 + 零多普勒。``num_slots_per_sample>1`` 而
+           ``ue_speed_kmh=0`` 时所有径的 Doppler 都是 0，时间相位恒为 1，
+           一个样本里的 N 个 slot 逐位相同。
+        3. 非 static + 样本内部多时隙。父类每轮只把位置前移**一个**
+           ``sample_interval_s``，而一个样本内部横跨 ``n_time`` 个间隔，于是
+           相邻两轮的窗口在物理时间上重叠（n_time=8 时重叠 7/8，16 个输出只有
+           9 个独特时刻），下游 ``system.py`` 还会把它们直接展平拼接当独立快照。
+           这个窗口合同要改的是父类的轨迹时钟，跨引擎、要维护者定案，
+           **不在本 PR 范围内**；在它定案之前 RT 不产出这种数据。
         """
         rounds = int(self.num_samples) // max(int(self.num_ues), 1)
-        if rounds <= 1:
-            return
+        n_time = max(int(_cfg_num(self.cfg, "num_slots_per_sample", 1)), 1)
         moves = (str(_cfg_num(self.cfg, "mobility_mode", "static")).strip().lower()
                  != "static")
         speed_kmh = float(_cfg_num(self.cfg, "ue_speed_kmh", 3.0))
-        if moves or speed_kmh > 0.0:
-            return
-        raise ValueError(
-            "Sionna RT 是确定性的：UE 位置不变（mobility_mode='static'）且没有"
-            f"多普勒（ue_speed_kmh=0）时，每个 UE 的 {rounds} 轮样本会逐位相同，"
-            "它们不是 %d 个独立信道实现。"
-            "要么给 ue_speed_kmh 一个正值（静止落点 + 多普勒谱，38.901 的常规口径），"
-            "要么设 mobility_mode 让 UE 真的走，要么把 num_samples 降到 "
-            "num_ues 以内。**不会静默产出重复矩阵。**"
-            % int(self.num_samples)
-        )
+
+        if not moves and rounds > 1:
+            raise ValueError(
+                f"Sionna RT 是确定性引擎：mobility_mode='static' 时 UE 几何固定，"
+                f"样本内部时间轴又从 0 起算，因此每个 UE 的 {rounds} 轮样本会**逐位"
+                f"相同**，它们不是 {int(self.num_samples)} 个独立信道实现"
+                f"（给 ue_speed_kmh 也没用：两轮走的是同一段时间轴）。"
+                "CLAUDE.md 的跨引擎合同要求 static 各样本小尺度实现独立，"
+                "而 RT 没有 CDL 那个 rng_small 随机源。"
+                "要么设 mobility_mode 让 UE 真的走（连续轨迹是 RT 唯一能提供的"
+                "样本间差异），要么把 num_samples 降到 num_ues 以内。"
+                "**不会静默产出重复矩阵。**"
+            )
+
+        if n_time > 1 and speed_kmh <= 0.0:
+            raise ValueError(
+                f"num_slots_per_sample={n_time} 而 ue_speed_kmh=0：所有径的 Doppler "
+                "都是 0，时间相位恒为 1，一个样本里的这 %d 个 slot 会逐位相同。"
+                "要么给 ue_speed_kmh 一个正值，要么把 num_slots_per_sample 设回 1。"
+                % n_time
+            )
+
+        if moves and n_time > 1:
+            raise ValueError(
+                f"mobility_mode={str(_cfg_num(self.cfg, 'mobility_mode', 'static'))!r} "
+                f"且 num_slots_per_sample={n_time}：父类每轮只把 UE 位置前移一个 "
+                "sample_interval_s，而一个样本内部横跨 %d 个间隔，相邻两轮的时间"
+                "窗口会重叠（下游 system.py 直接展平拼接，重叠时刻会被当成独立"
+                "快照，虚增有效样本并破坏时间单调）。"
+                "这个窗口合同要改父类的轨迹时钟、跨 internal_sim 与 RT 两个引擎，"
+                "需要维护者定案，本 PR 不动它。"
+                "在它定案之前：num_slots_per_sample=1 与非 static 组合是安全的。"
+                % n_time
+            )
 
     def iter_samples(self) -> Iterator[ChannelSample]:
         self._assert_samples_are_distinct()
@@ -767,8 +811,9 @@ class SionnaRTSource(InternalSimSource):
                     "rt_engine": _engine_version(),
                     "rt_max_depth": int(_cfg_num(self.cfg, "rt_max_depth", 3)),
                     "rt_sample_round": int(self._sample_round),
-                    "rt_time_offset_s": float(self._sample_round) * float(
-                        _cfg_num(self.cfg, "sample_interval_s", 5e-3)),
+                    # 样本内部时间轴恒从 0 起算（与 CDL 一致）；样本之间的差异
+                    # 只来自父类挪 UE 位置后 RT 重追的几何，不叠加额外相位。
+                    "rt_sample_time_origin": "per_sample_zero",
                     "rt_diffuse_reflection": bool(
                         self.cfg.get("rt_diffuse_reflection", False)
                     ),

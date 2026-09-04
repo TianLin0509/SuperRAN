@@ -620,31 +620,116 @@ def test_zero_is_a_legal_config_value_and_survives_to_the_solver():
             f"{key} 仍在用 cfg.get(...) or default 的写法")
 
 
-def test_deterministic_duplicate_samples_are_refused_at_the_entry():
-    """棘轮：静止 + 零多普勒时多要的样本必然逐位重复，入口就要拒。
+def test_sample_internal_time_axis_starts_at_zero_like_the_cdl_path():
+    """棘轮：样本内部时间轴必须从 0 起算，不许再有"轮次时间原点"。
 
-    射线追踪是确定性的。把这批重复矩阵当成 N 个独立实现，会给样本量和
-    时间相关性证据造假。
+    这条直接钉合成输出，不看配置。曾经的写法让第 k 个样本从
+    ``k x sample_interval_s`` 起算，于是**移动 UE 的相位被算了两遍**：父类已经
+    把 UE 位置推进了 ``round x dt``，RT 在新位置重追的径里已经含这段几何相位，
+    再叠加同样时长的 Doppler 相位，等效 Doppler 接近翻倍。
+
+    可判定的不变量：``t=0`` 时 Doppler 项恒为 ``exp(0)=1``，所以**第 0 个 slot
+    的值不能依赖 doppler_hz**。任何非零时间原点都会立刻破坏它。
     """
-    cfg = {"scene": "munich", "num_ues": 2, "num_samples": 4,
-           "mobility_mode": "static", "ue_speed_kmh": 0.0}
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    quiet = _synth(_one_ray(n_pol_ue=1, n_pol_bs=1, doppler_hz=0.0), spec, n_time=3)
+    fast = _synth(_one_ray(n_pol_ue=1, n_pol_bs=1, doppler_hz=137.0), spec, n_time=3)
+    np.testing.assert_allclose(fast[0], quiet[0], rtol=0, atol=1e-12)
+    # 后续 slot 必须真的因 Doppler 而不同，否则上面那条是空断言
+    assert not np.allclose(fast[2], quiet[2], atol=1e-9)
+
+    # 结构上也不许把轮次再接回合成：签名里没有时间原点参数，
+    # 合成调用点也不许再引用 _sample_round。
+    import inspect
+    assert "time_offset" not in inspect.signature(srt.synthesize_channel).parameters
+    body = inspect.getsource(srt.SionnaRTSource._small_scale_channel)
+    assert "_sample_round" not in body, "合成调用点又把轮次接回时间轴了"
+
+
+def test_doppler_phase_advances_exactly_once_per_slot():
+    """棘轮：时间相位每个 slot 只推进 ``2 pi f_d dt``，一次。
+
+    相位双算的直接判据。单径、标量阵列，相位差可以解析算出来。
+    """
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    f_d, dt = 211.0, 5e-3
+    h = _synth(_one_ray(n_pol_ue=1, n_pol_bs=1, doppler_hz=f_d), spec,
+               n_time=4, sample_interval_s=dt)
+    for k in range(1, 4):
+        step = np.angle(h[k, 0, 0, 0] / h[0, 0, 0, 0])
+        want = (2.0 * np.pi * f_d * k * dt + np.pi) % (2.0 * np.pi) - np.pi
+        assert abs(step - want) < 1e-9, (k, step, want)
+
+
+def test_static_multi_round_is_refused_even_with_doppler():
+    """棘轮：static + 多轮**必然**逐位重复，给多普勒也救不回来。
+
+    上一版守卫只在 ``ue_speed_kmh=0`` 时才拦，漏掉了 static + 速度>0：两轮
+    走的是同一段时间轴 ``[0, n_time x dt)``、同一份几何，输出逐位相同。
+    CDL 靠 ``rng_small`` 每轮重画小尺度实现，RT 没有这个随机源——
+    CLAUDE.md 要求 static 各样本独立，RT 就该承认自己做不到，而不是伪造。
+    """
+    base = {"scene": "munich", "num_ues": 2, "num_samples": 4,
+            "mobility_mode": "static"}
+    for speed in (0.0, 3.0, 120.0):
+        with pytest.raises(ValueError, match="逐位相同"):
+            srt.SionnaRTSource({**base, "ue_speed_kmh": speed})._assert_samples_are_distinct()
+
+    # 先证明"逐位相同"这句话是真的：同几何同时间轴，合成输出确实一样
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    rays = _one_ray(n_pol_ue=1, n_pol_bs=1, doppler_hz=88.0)
+    a = _synth(rays, spec, n_time=2)
+    b = _synth(rays, spec, n_time=2)
+    assert a.tobytes() == b.tobytes()
+
+    # 出路：让它真的走，或者别要多余的轮次
+    for relief in ({"mobility_mode": "linear", "ue_speed_kmh": 3.0},
+                   {"num_samples": 2, "ue_speed_kmh": 3.0}):
+        srt.SionnaRTSource({**base, **relief})._assert_samples_are_distinct()
+
+
+def test_multislot_duplicates_and_window_overlap_are_refused():
+    """棘轮：单轮内部的多时隙重复与跨轮窗口重叠，都要在入口拒。
+
+    两条互相独立的反例：
+
+    * ``num_slots_per_sample>1`` + ``ue_speed_kmh=0`` —— Doppler 全为 0，
+      时间相位恒为 1，一个样本里的 N 个 slot 逐位相同。旧守卫在
+      ``rounds<=1`` 时直接 return，完全漏掉这条。
+    * 非 static + ``num_slots_per_sample>1`` —— 父类每轮只把位置前移**一个**
+      ``sample_interval_s``，样本内部却横跨 ``n_time`` 个间隔，相邻两轮窗口
+      重叠（n_time=8 时重叠 7/8），而 system.py 会直接展平当独立快照。
+    """
+    dup = {"scene": "munich", "num_ues": 2, "num_samples": 2,
+           "mobility_mode": "static", "ue_speed_kmh": 0.0,
+           "num_slots_per_sample": 8}
     with pytest.raises(ValueError, match="逐位相同"):
-        list(srt.SionnaRTSource(cfg).iter_samples())
-    # 三条出路各自都能解开：给多普勒 / 让它动 / 降样本数
-    for relief in ({"ue_speed_kmh": 3.0},
-                   {"mobility_mode": "linear"},
-                   {"num_samples": 2}):
-        src = srt.SionnaRTSource({**cfg, **relief})
-        src._assert_samples_are_distinct()   # 不抛就算过
+        srt.SionnaRTSource(dup)._assert_samples_are_distinct()
+
+    overlap = {"scene": "munich", "num_ues": 2, "num_samples": 6,
+               "mobility_mode": "linear", "ue_speed_kmh": 30.0,
+               "num_slots_per_sample": 8}
+    with pytest.raises(ValueError, match="窗口会重叠"):
+        srt.SionnaRTSource(overlap)._assert_samples_are_distinct()
+
+    # 证明"零多普勒时 slot 逐位相同"不是猜的
+    spec = srt.array_spec_from_config(_scalar_cfg(), 1, 1)
+    h = _synth(_one_ray(n_pol_ue=1, n_pol_bs=1, doppler_hz=0.0), spec, n_time=8)
+    assert all(h[k].tobytes() == h[0].tobytes() for k in range(8))
+
+    # 合法组合不许误伤
+    for ok in ({"num_slots_per_sample": 1, "mobility_mode": "linear",
+                "ue_speed_kmh": 30.0, "num_samples": 6},
+               {"num_slots_per_sample": 8, "mobility_mode": "static",
+                "ue_speed_kmh": 3.0, "num_samples": 2}):
+        srt.SionnaRTSource({"scene": "munich", "num_ues": 2, **ok})._assert_samples_are_distinct()
 
 
-def test_sample_round_advances_before_the_parent_builds_the_sample():
-    """棘轮：轮次必须在父类算这个样本**之前**设好。
+def test_sample_round_is_labelled_before_the_parent_builds_the_sample():
+    """轮次标签必须在父类算这个样本**之前**设好。
 
-    写成 ``for i, s in enumerate(super().iter_samples())`` 时，生成器在循环体
-    执行前就已经把样本算完了：信道用的是上一轮的时间原点，meta 里却记着
-    这一轮。数字自洽，物理不对——实测样本 0 与样本 2 逐位相同而 meta 显示
-    round 0 / 1。这里用一个假父类把顺序钉死。
+    时间原点撤掉之后 ``_sample_round`` 只进 meta，不再影响信道；但标签错位
+    一样会让人把第 k 轮的诊断读成第 k-1 轮的。用假父类把顺序钉死。
     """
     seen: list[int] = []
 
