@@ -2031,11 +2031,14 @@ def sr_system_sim(
     **“容量仿真”是这条路径的一个话务配置**：``traffic_model="full_buffer"``。
     缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU），
     这就是容量口径。调度、AMC、HARQ、解调 SINR 聚合全部照体验模式的定义走，
-    没有任何为它开的特例。代价是 busy period 永不结束，**28.552 的体验速率在
-    这个配置下照常有值**——在飞 busy period 的窗内段进统计，buffer 没排空就没有
-    尾巴可掐。另一个口径是 ITU-R M.2412 / TR 38.913 的 ``ue_served_p5_mbps``
-    （每 UE 已服务净荷 ÷ 观测窗长的 5% 分位，即 cell-edge user throughput），
-    满缓冲下两者收敛。只有明确需要 burst 传完的键报 ``None``：完成时延分位数、
+    没有任何为它开的特例。代价是 busy period 永不结束，于是 **TS 28.552 的标准
+    样本一个都不会形成**（样本只在 "DRB DL buffer emptied" 事件上形成，
+    TS 128 552 V19.5.0 p54），``drb_throughput_rel19_mbps`` /
+    ``cell_experienced_mbps`` 报 ``None``——定义使然，不是缺陷。满缓冲看工程口径：
+    ITU-R M.2412 / TR 38.913 的 ``ue_served_p5_mbps``（每 UE 已服务净荷 ÷ 观测
+    窗长的 5% 分位，即 cell-edge user throughput）与 ``active_window_goodput_mbps``
+    （在飞 busy period 的窗内段 goodput）。两者算法不同，满缓冲下应当收敛。
+    其余需要 burst 真的传完的键同样报 ``None``：完成时延分位数、
     ``pdb_miss_ratio``、含头速率、``cell_experienced_completed_only_mbps``。
     小区总吞吐看 ``cell_served_mbps`` 与 ``serving_cell_prb_utilization``。
 

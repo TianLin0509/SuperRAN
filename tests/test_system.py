@@ -1010,8 +1010,7 @@ check(_large.cell["mu_share"] > 0
 _mcs_blocked = sysm.simulate(
     _mu_tables,
     sys_cfg=sysm.SystemConfig(
-        evaluation_mode="experience", duration_s=0.1, seed=51,
-        tdd_pattern="DDDSU"),
+        duration_s=0.1, seed=51, tdd_pattern="DDDSU"),
     traffic=sysm.TrafficConfig(
         model="mixed", small_ue_share=0.0,
         file_bytes=500_000, arrival_rate_hz=20.0),
@@ -1026,8 +1025,7 @@ check(_mcs_blocked.cell["mu_share"] == 0
 _pf_blocked = sysm.simulate(
     _mu_tables,
     sys_cfg=sysm.SystemConfig(
-        evaluation_mode="experience", duration_s=0.1, seed=51,
-        tdd_pattern="DDDSU"),
+        duration_s=0.1, seed=51, tdd_pattern="DDDSU"),
     traffic=sysm.TrafficConfig(
         model="mixed", small_ue_share=0.0,
         file_bytes=500_000, arrival_rate_hz=20.0),
@@ -2433,25 +2431,30 @@ for _analytic_table in (1, 2):
         table=_analytic_table, num_snapshots=2)
     check(_analytic_tabs[0].mcs_table == _analytic_table,
           f"build_link_tables table={_analytic_table} 走同表解析 BLER")
-    _analytic_run = sysm.simulate(
-        _analytic_tabs,
-        sys_cfg=sysm.SystemConfig(
-            evaluation_mode="capacity", duration_s=0.01, tdd_pattern="DDDSU"),
-        traffic=sysm.TrafficConfig(model="full_buffer"),
-        sched=sysm.SchedulerConfig(olla_enabled=False))
-    check(any("有限码长解析 BLER" in note for note in _analytic_run.notes),
-          f"capacity table={_analytic_table} 显式标注解析、未标定边界")
+    # #23 引入的表 1/2 有限码长解析 BLER **仍然存在且仍然被显式标注**，
+    # 只是消费者从（已下线的）容量主循环收回到链路级。标注不许退化成静默。
+    _analytic_probe = la.harq_retransmission_bler(
+        10, 8.0, combining="cc", table=_analytic_table)
+    check(_analytic_probe["bler_source"] == "finite_blocklength_analytic"
+          and _analytic_probe["curve_tx_mode"] == "analytic",
+          f"链路级 table={_analytic_table} 显式标注解析 BLER，不冒充预置曲线")
+    check(la.harq_retransmission_bler(
+              10, 8.0, combining="cc", table=3)["bler_source"]
+          != "finite_blocklength_analytic",
+          "表 3 仍走预置 NewTx 曲线，不与解析模型交叉借表")
+    # 系统级只有一条路径，而它没有表 1/2 的 TBS/BLER profile：必须显式硬失败，
+    # 且报错要指到「系统级只支持表 3」，不能让人对着下游 experience_v2 的话猜。
     try:
         sysm.simulate(
             _analytic_tabs,
-            sys_cfg=sysm.SystemConfig(
-                evaluation_mode="experience", duration_s=0.01,
-                tdd_pattern="DDDSU"),
-            traffic=sysm.TrafficConfig(model="full_buffer"))
-        check(False, f"experience_v2 不应接受 table={_analytic_table}")
+            sys_cfg=sysm.SystemConfig(duration_s=0.01, tdd_pattern="DDDSU"),
+            traffic=sysm.TrafficConfig(model="full_buffer"),
+            kpi=sysm.KpiConfig(warmup_s=0.0))
+        check(False, f"系统级不应接受 table={_analytic_table}")
     except ValueError as _exc:
-        check("experience_v2 当前只支持 MCS table 3" in str(_exc),
-              f"experience_v2 table={_analytic_table} 不静默借用错误 TBLER profile")
+        check("系统级仿真只支持预置 MCS table 3" in str(_exc)
+              and f"table={_analytic_table}" in str(_exc),
+              f"系统级 table={_analytic_table} 硬失败且报错点名收到的表号")
 
 
 # ---------------------------------------------------------------------------

@@ -62,16 +62,24 @@ FIFO 到达对象，小 burst 按 fractional slot 折算。
 | 口径 | 键 | 量什么 | full_buffer 下 |
 |---|---|---|---|
 | ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | 每 UE 已服务净荷 ÷ 观测窗长，跨 UE 取分布；5% 分位 = cell-edge user throughput | **照常有值，这是满缓冲评估的主指标** |
-| TS 28.552 busy-period | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | 一个 burst 在传的时候有多快（首传 → 窗内最后一个 ACK） | **有值**：在飞 busy period 的窗内段照常统计，没有尾巴可掐 |
+| TS 28.552 busy-period（**标准**） | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | 一个 burst 传完时有多快（首传 → 倒数第二个 ACK） | **报 `None`**：样本只在 buffer 排空事件上形成，满缓冲下该事件不发生 |
+| 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 还在传的 burst 落在测量窗内那段的 goodput | **有值**，与 ITU 口径收敛 |
 
-轻载 FTP3 实测：`ue_served_mean_mbps=1.85` vs `cell_experienced_mbps=46.96`，
-同一次仿真差 25 倍——UE 全时段平均 vs 它的 burst 在飞时的速率，本来就不是一个量。
-满缓冲下两者收敛（UE 一直活跃），实测 7.05 vs 7.03。
+preset `sys_single_cell_experience_ftp3` 实测：`ue_served_mean_mbps=24.52` vs
+`cell_experienced_mbps=173.05`，同一次仿真差 7.1 倍——UE 全时段平均 vs 它的 burst
+在传时的速率，本来就不是一个量。满缓冲下 ITU 与工程口径收敛（UE 一直活跃），
+`sys_single_cell_capacity` 实测 61.868 vs 61.968，差 0.16%。
 
-**在飞 busy period 也进统计**：只数已排空的会把"慢到没传完"的 burst 系统性丢掉。
+**在飞 busy period 要报，但另起字段**（`active_window_goodput_mbps`），
+绝不混进标准字段。理由是右删失：只数已排空的会把"慢到没传完"的 burst 系统性丢掉，
 这不是 full_buffer 特有的——普通过载同样中招（8 UE / ftp3 20 Hz × 500 kB / 1 s，
-旧口径直接返回 `None`）。样本构成看 `drb_throughput_completed_bursts` /
-`_inflight_bursts` / `_inflight_share`。**掐尾只在 buffer 排空时才有尾巴可掐。**
+标准字段直接返回 `None`）。**偏差方向不固定**，实测乐观（11.59 → 8.78）与悲观
+（126.0 → 131.9）两种都见过。样本构成看 `drb_throughput_completed_bursts` /
+`_inflight_bursts` / `_inflight_share`。
+
+**已被反例推翻**：曾说"在飞段末 ACK 必是满 slot、没有尾巴可掐"。错——首传 100 B
+装进 1000 B TB → NACK，等待期间新到 1 B，重传 ACK 时队列仍非空且带 900 B padding。
+所以在飞段只能按 goodput（有用字节 ÷ 经过时间）报，是工程口径。
 
 full_buffer 下留 `None` 的只有明确需要 burst 传完的：
 `cell_experienced_completed_only_mbps`、`cell_head_inclusive_experienced_mbps`、

@@ -289,11 +289,12 @@ sys_capacity_full_buffer:
     **"容量仿真"就是这个场景**：它不是另一条仿真分支，只是把话务开到最大。
     缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU），
     调度、AMC、HARQ、解调 SINR 聚合全部照体验口径走。
-    两个体验速率口径都有值：ITU 口径 ue_served_p5_mbps 与 28.552 口径
-    drb_throughput_rel19_mbps（在飞 busy period 的窗内段照常统计），
-    满缓冲下两者收敛。只有需要 burst 真的传完的键报 None（完成时延、PDB、
+    满缓冲下 TS 28.552 的标准样本一个都不形成（样本只在 buffer 排空事件上形成），
+    drb_throughput_rel19_mbps / cell_experienced_mbps 报 None——定义使然，不是缺陷。
+    看工程口径：ITU 的 ue_served_p5_mbps 与 active_window_goodput_mbps，
+    两者算法不同但应收敛。其余需要 burst 真的传完的键同样报 None（完成时延、PDB、
     含头速率）。结果里引用 cell_served_mbps、ue_served_p5_mbps、
-    drb_throughput_rel19_mbps、PRB 利用率与 Jain 公平度。
+    active_window_goodput_mbps、PRB 利用率与 Jain 公平度。
   answers:
     - 这个小区的吞吐上界是多少
     - PF 在满负载下的公平性如何

@@ -216,9 +216,10 @@ def _traffic() -> Family:
                           "只是话务配置点：缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、"
                           "每 TTI 一个 SU（或一对 MU）。调度、AMC、HARQ、解调 SINR "
                           "聚合全部照体验口径走。代价是 busy period 永不结束，"
-                          "两个体验速率口径都有值：28.552 的 drb_throughput_rel19_mbps"
-                          "（在飞 busy period 的窗内段进统计）与 ITU 口径的 "
-                          "ue_served_p5_mbps，满缓冲下两者收敛。",
+                          "28.552 的标准样本因此一个都不形成，"
+                          "drb_throughput_rel19_mbps 报 None；改看工程口径的 "
+                          "active_window_goodput_mbps 与 ITU 口径的 "
+                          "ue_served_p5_mbps，两者算法不同但满缓冲下收敛。",
                    when="测小区容量、对标 ITU 的平均小区谱效",
                    cost="最省"),
             Option("cbr", "CBR（恒定速率）",

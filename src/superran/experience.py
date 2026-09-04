@@ -7,10 +7,13 @@
 这个话务配置点：缓冲区永不空 ⇒ :func:`_build_su_plan` 的按需 RBG 反查恒等于
 全带宽、每 TTI 一个 SU（或一对 MU）。调度、AMC、HARQ、解调 SINR 聚合全部照
 本模块的定义走，**没有为它开的任何特例分支**。代价是 busy period 永不结束，
-但**体验速率照常算得出来**：在飞 busy period 的窗内段进统计（buffer 没排空就
-没有尾巴可掐）。两个口径——28.552 的 ``drb_throughput_rel19_mbps`` 与 ITU-R
-M.2412 / TR 38.913 的 ``ue_served_p5_mbps``——在满缓冲下收敛。只有明确需要
-burst 真的传完的键报 ``None``。
+**标准与工程两套 KPI 因此分家**：TS 28.552 的样本只在 "DRB DL buffer emptied"
+事件上形成（TS 128 552 V19.5.0 p54），满缓冲下一个都不会形成，所以
+``drb_throughput_rel19_mbps`` / ``cell_experienced_mbps`` 报 ``None``——**这是
+定义使然，不是缺陷**。满缓冲要看的是工程口径：ITU-R M.2412 / TR 38.913 的
+``ue_served_p5_mbps``（每 UE 已服务净荷 ÷ 观测窗长）与 ``active_window_goodput_mbps``
+（在飞 busy period 的窗内段 goodput）。这两条路径算法不同，满缓冲下应当收敛，
+实测 61.868 vs 61.968 Mbps，差 0.16%——**这正是拿来自查的交叉核对**。
 
 物理边界明确写在结果里：逐 RBG 频选与 RB 功控是两个独立开关；只要链路表
 带逐 RBG SINR，实际 grant 就按 bitmap 聚合并重选 MCS。当前聚合仍是 dB

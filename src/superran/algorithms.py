@@ -253,8 +253,9 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             caveat="历史的 trim（掐尾/掐头去尾）已随 legacy 容量路径下线。NACK 字节留在"
                    "队列，下一次仍按 NewTx 判错；当前没有 HARQ 软合并。小区体验速率是"
                    "用户均值而非求和。**full_buffer（容量口径）下 busy period 永不结束，"
-                   "本 KPI 照常有值——在飞 busy period 的窗内段进统计，"
-                   "没有尾巴可掐；另有 ITU 口径的 ue_served_p5_mbps。**",
+                   "buffer-emptied 事件不发生，本 KPI 报 None——这是 28.552 的定义"
+                   "使然。满缓冲改看工程口径 active_window_goodput_mbps 与 ITU 口径"
+                   "的 ue_served_p5_mbps。**",
             source="ETSI TS 28.552 V19.5.0；本项目 experience.py",
             alternatives=["fractional_slot", "exclude"],
         ),

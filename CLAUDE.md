@@ -1421,20 +1421,30 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 | 口径 | 键 | 分母是什么 | full_buffer 下 |
 |---|---|---|---|
 | ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | **观测窗长**（每 UE 已服务净荷 ÷ 窗长，跨 UE 取分布） | **照常有值——这就是满缓冲评估的主指标**，5% 分位即 cell-edge user throughput |
-| TS 28.552 busy-period | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | **busy period 时长**（首传 → 窗内最后一个 ACK） | **同样有值**：在飞 busy period 的窗内段照常统计 |
+| TS 28.552 busy-period（**标准**） | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | **已排空的 busy period 时长**（首传 → 倒数第二个 ACK） | **报 `None`**：样本只在 "DRB DL buffer emptied" 事件上形成（TS 128 552 V19.5.0 p54），满缓冲下该事件不发生 |
+| 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 在飞 busy period 落在测量窗内那一段的 goodput | **有值**，且与 ITU 口径收敛 |
 
-它们**不是同一个数的两种精度**。轻载 FTP3 实测：`ue_served_mean_mbps=1.85` 而
-`cell_experienced_mbps=46.96`，同一次仿真差 25 倍——前者是 UE 全时段平均，
-后者是它的 burst 在飞时的速率。满缓冲下两者收敛（UE 一直活跃），实测 7.05 vs 7.03。
+它们**不是同一个数的两种精度**。preset `sys_single_cell_experience_ftp3` 实测：
+`ue_served_mean_mbps=24.52` 而 `cell_experienced_mbps=173.05`，同一次仿真差 7.1 倍
+——前者是 UE 全时段平均，后者是它的 burst 在传时的速率。满缓冲下 ITU 口径与工程
+口径收敛（UE 一直活跃），preset `sys_single_cell_capacity` 实测 61.868 vs 61.968，
+差 0.16%；**两者算法完全不同，这个吻合就是拿来自查的**。
 
-**在飞 busy period 必须进统计。** 只数已排空的 busy period 会把"慢到没传完"的
-burst 系统性丢掉，这**不是 full_buffer 特有的**：普通有限话务过载下同样中招——
-实测 8 UE / ftp3 20 Hz × 500 kB / 1 s，旧口径 `drb_throughput_rel19_mbps` 直接
-返回 `None`（0 个 burst 传完）；5 Hz × 500 kB 那档旧值 11.59 是拿 9 个 burst 里
-唯一传完的那 1 个算出来的，比含在飞段的 8.78 高 32%。轻载（36/36 传完）零扰动。
-**掐尾只在 buffer 排空时才有尾巴可掐**：在飞段的最后一个 ACK 是满 slot，不掐。
-样本构成由 `drb_throughput_completed_bursts` / `_inflight_bursts` / `_inflight_share`
-如实上报。
+**标准字段绝不能混进在飞样本。** 在飞段确实要报，但另起字段
+（`active_window_goodput_mbps`，`throughput_kind = "engineering_active_window"`，
+名字里不许出现 `rel19`）。理由是右删失：只数已排空的 busy period 会把"慢到没传完"
+的 burst 系统性丢掉，这**不是 full_buffer 特有的**——8 UE / ftp3 20 Hz × 500 kB / 1 s
+的普通过载下，标准字段同样返回 `None`（0 个 burst 传完）。
+**偏差方向不固定**：实测既见过只数已完成偏乐观（11.59 → 含在飞 8.78），
+也见过偏悲观（126.0 → 131.9），取决于慢 burst 属于差信道还是好信道用户，
+所以**不许声称"只数已完成一定偏乐观"**。样本构成由
+`drb_throughput_completed_bursts` / `_inflight_bursts` / `_inflight_share` 如实上报。
+
+**已被反例推翻的说法（勿重蹈）**：我曾断言"在飞段的最后一个 ACK 必是满 slot，
+没有尾巴可掐，所以可以按标准口径处理"。错。反例：首传 100 B payload 装进 1000 B TB
+→ NACK；等待期间新到 1 B；重传 ACK 时队列仍非空，而这个 ACK 带 900 B padding。
+**1 个字节就能改变标准 KPI 的有无，且样本建立在重度 padding 的 slot 上。**
+所以在飞段只能是 goodput（有用字节 ÷ 经过时间），是工程口径，不是 28.552。
 
 full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst 真的传完**：
 `cell_experienced_completed_only_mbps`、`cell_head_inclusive_experienced_mbps`
