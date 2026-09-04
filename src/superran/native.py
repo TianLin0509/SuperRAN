@@ -1024,6 +1024,36 @@ def _spatial_panel_response(
     return result / math.sqrt(max(result.size, 1))
 
 
+def fixed_subarray_response(
+    zenith_rad: float,
+    *,
+    elements_per_rf_port: int,
+    ae_vertical_spacing_lambda: float,
+    fixed_downtilt_deg: float,
+) -> complex:
+    """Complex pattern of one fixed vertical sub-array, seen from ``zenith_rad``.
+
+    The 1-to-M feed network applies a frozen progressive phase that points the
+    sub-array ``fixed_downtilt_deg`` below the horizon.  The scalar returned
+    here is that fixed beam evaluated in the arrival/departure direction; the
+    remaining RF-port array factor is separable and handled by
+    :func:`_spatial_panel_response` with the port phase-centre spacing.
+
+    Returns ``1`` for ``elements_per_rf_port <= 1`` (no feed network).
+    """
+    m = int(elements_per_rf_port)
+    if m <= 1:
+        return complex(1.0)
+    spacing = float(ae_vertical_spacing_lambda)
+    tilt = -math.radians(float(fixed_downtilt_deg))
+    offsets = np.arange(m, dtype=np.float64) - (m - 1.0) / 2.0
+    feed = np.exp(2j * np.pi * spacing * offsets * math.sin(tilt)) / math.sqrt(m)
+    element_response = np.exp(
+        2j * np.pi * spacing * offsets * math.sin(np.pi / 2.0 - float(zenith_rad))
+    )
+    return complex(np.vdot(feed, element_response))
+
+
 # ---------------------------------------------------------------------------
 # First-party statistical channel source
 # ---------------------------------------------------------------------------
@@ -1332,20 +1362,16 @@ class InternalSimSource:
                 )
                 feed_count = int(bs_subarray.get("elements_per_rf_port", 1) or 1)
                 if feed_count > 1:
-                    element_spacing = float(
-                        bs_subarray.get("ae_vertical_spacing_lambda", 0.67) or 0.67
+                    bs_space = bs_space * fixed_subarray_response(
+                        zod,
+                        elements_per_rf_port=feed_count,
+                        ae_vertical_spacing_lambda=float(
+                            bs_subarray.get("ae_vertical_spacing_lambda", 0.67) or 0.67
+                        ),
+                        fixed_downtilt_deg=float(
+                            bs_subarray.get("fixed_downtilt_deg", 0.0) or 0.0
+                        ),
                     )
-                    tilt = -math.radians(
-                        float(bs_subarray.get("fixed_downtilt_deg", 0.0) or 0.0)
-                    )
-                    offsets = np.arange(feed_count, dtype=np.float64) - (feed_count - 1.0) / 2.0
-                    feed = np.exp(
-                        2j * np.pi * element_spacing * offsets * math.sin(tilt)
-                    ) / math.sqrt(feed_count)
-                    element_response = np.exp(
-                        2j * np.pi * element_spacing * offsets * math.sin(np.pi / 2.0 - zod)
-                    )
-                    bs_space = bs_space * np.vdot(feed, element_response)
                 ue_space = _spatial_panel_response(
                     ue_shape[0], ue_shape[1], aoa, zoa,
                     horizontal_spacing=0.5, vertical_spacing=0.5,
@@ -1383,6 +1409,56 @@ class InternalSimSource:
         # Unit average coefficient power keeps link-level SNR semantics stable.
         h /= math.sqrt(max(float(np.mean(np.abs(h) ** 2)), _EPS))
         return h.astype(np.complex64)
+
+    def _small_scale_channel(
+        self,
+        profile: ChannelProfile,
+        rng: np.random.Generator,
+        *,
+        n_time: int,
+        n_rb: int,
+        n_bs: int,
+        n_ue: int,
+        doppler_hz: float,
+        realization_index: int,
+        link_aod_rad: float,
+        link_aoa_rad: float,
+        link_zod_rad: float,
+        link_zoa_rad: float,
+        cell: Cell,
+        ue_position: np.ndarray,
+        is_los: bool,
+        role: str,
+    ) -> np.ndarray:
+        """One BS-UE link's small-scale channel, shape ``[time, rb, bs, ue]``.
+
+        This is the **only** seam where the channel-generation engine is
+        chosen.  Everything upstream of it — site layout, UE placement, LOS
+        draw, path loss, shadow fading, serving selection, the pre-beam
+        S/N/I budget — and everything downstream — estimation noise, SSB,
+        TDD pairing, metadata — is shared.  An alternative engine therefore
+        changes the channel matrix and nothing else, which is what makes a
+        CDL-versus-ray-tracing comparison attributable.
+
+        ``role`` is ``"serving"`` or ``"interferer"``; ``profile`` is the
+        statistical CDL/TDL profile and is ignored by engines that derive
+        multipath from geometry instead.
+        """
+        del cell, ue_position, is_los, role
+        return self._channel(
+            profile,
+            rng,
+            n_time=n_time,
+            n_rb=n_rb,
+            n_bs=n_bs,
+            n_ue=n_ue,
+            doppler_hz=doppler_hz,
+            realization_index=realization_index,
+            link_aod_rad=link_aod_rad,
+            link_aoa_rad=link_aoa_rad,
+            link_zod_rad=link_zod_rad,
+            link_zoa_rad=link_zoa_rad,
+        )
 
     def iter_samples(self) -> Iterator[ChannelSample]:
         sites = self._build_sites()
@@ -1527,11 +1603,15 @@ class InternalSimSource:
             is_los = bool(los_all[serving])
             effective_model = self._effective_model(configured_model, is_los)
             profile = get_channel_profile(effective_model)
-            h_dl = self._channel(profile, rng_small, n_time=n_time, n_rb=n_rb,
-                                 n_bs=n_bs, n_ue=n_ue, doppler_hz=doppler,
-                                 realization_index=global_index,
-                                 link_aod_rad=link_aod, link_aoa_rad=link_aoa,
-                                 link_zod_rad=link_zod, link_zoa_rad=link_zoa)
+            h_dl = self._small_scale_channel(
+                profile, rng_small, n_time=n_time, n_rb=n_rb,
+                n_bs=n_bs, n_ue=n_ue, doppler_hz=doppler,
+                realization_index=global_index,
+                link_aod_rad=link_aod, link_aoa_rad=link_aoa,
+                link_zod_rad=link_zod, link_zoa_rad=link_zoa,
+                cell=serving_cell, ue_position=position, is_los=is_los,
+                role="serving",
+            )
 
             est_mode = str(self.cfg.get("channel_est_mode", "ls_linear"))
             if est_mode == "ideal":
@@ -1588,7 +1668,7 @@ class InternalSimSource:
                     cross_rng = np.random.default_rng(
                         np.random.SeedSequence([self._seed, 401, global_index, k])
                     )
-                    cross = self._channel(
+                    cross = self._small_scale_channel(
                         get_channel_profile(site_models[k]),
                         cross_rng,
                         n_time=n_time,
@@ -1601,6 +1681,10 @@ class InternalSimSource:
                         link_aoa_rad=cross_aoa,
                         link_zod_rad=cross_zod,
                         link_zoa_rad=cross_zoa,
+                        cell=sites[k],
+                        ue_position=position,
+                        is_los=bool(los_all[k]),
+                        role="interferer",
                     )
                     rows.append((cross * scale).astype(np.complex64))
                     if len(rows) >= max_cells:

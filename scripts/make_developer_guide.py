@@ -2196,7 +2196,7 @@ def overview_page(modules: list[ModuleDoc], tools: list[SymbolDoc], tests: list[
 <h2>一句话定位</h2>
 <p><strong>SuperRAN 是给 Agent 使用的无线仿真实验编排与证据平台。</strong>
 它把本仓 first-party 统计信道物理内核包装成稳定的数据合同、MCP 工具、系统仿真和三道证据门；
-Sionna RT / QuaDRiGa 只允许作为显式可选 direct adapter。
+Sionna RT 是唯一的可选 direct adapter（QuaDRiGa 路线已明确不做并删除）。
 它的目标不是“能画一条曲线”，而是让配置、真值、估计、随机数、统计和结论都能回溯；
 交互配置 Mock 与 KPI 工作台分别承载运行前确认和运行后解释。</p>
 """
@@ -2592,7 +2592,7 @@ def hardware_page() -> Page:
         "<p>两者都采用 <code>r=p·N_H·N_V+h·N_V+v</code>（0-based），"
         "即先极化块、再水平列、垂直行最快，且 v=0 是物理顶部。64T 的关键端口是"
         " 1/5/33，256T 是 1/9/129。该顺序已同时贯通 InternalSim、Sionna RT、"
-        "QuaDRiGa、Type-I/DFT 码本与系统链路表；历史 64T 顺序只经显式置换读取。</p>",
+        "Type-I/DFT 码本与系统链路表；历史 64T 顺序只经显式置换读取。</p>",
     )
     body += """
 <h2>272 不是标准表写错</h2>
@@ -2709,21 +2709,32 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
         ["来源", "擅长", "项目中的角色", "边界"],
         [
             ("SuperRAN InternalSim", "38.901 风格 CDL/TDL、多小区几何、导频估计", "默认 first-party 物理源", "阵列/干扰模型仍含明确工程近似"),
-            ("Sionna RT", "场景网格、材料、射线与确定性路径", "规划中的可选 direct RT 源", "当前 adapter 未实现；依赖和资产质量都要单独验收"),
+            ("Sionna RT", "场景网格、材料、射线与确定性路径", "已可用的可选 direct RT 源（source=sionna_rt）", "装不上就硬失败不回退；确定性重复与跨轮窗口重叠会硬失败，单窗口移动多时隙可用；依赖和资产质量仍要单独验收"),
             ("SuperRAN 系统层", "合同、硬件默认、算法、TTI、统计门", "编排与证据层", "不把统计 source 冒充确定性 RT"),
         ],
     )
     body += """
 <h3>Direct Sionna RT adapter 的验收边界</h3>
-<p>Sionna 的 <code>Paths.cfr()</code> 会按设备速度计算路径 Doppler，但调用方必须同时设置
-<code>Receiver.velocity</code> 和物理采样率。未来 direct adapter 必须使用完整 UE 速度向量、
-以平均 OFDM-symbol 周期的倒数作为采样率，并让 RB 网格围绕载波中心对称；在这些合同和逐径
-落盘尚未实现前，能力保持 unavailable。调用语义可在
+<p>adapter 已经落地：<code>source=sionna_rt</code> 时走（<strong>配置键是 <code>source</code>；写成旧错键 <code>channel_source</code> 会立即硬失败并提示迁移，不会静默跑成统计信道</strong>）
+<code>superran/sionna_rt.py</code>，自己按 <code>[time, rb, bs_port, ue_port]</code> 合成，
+不调 Sionna 的 <code>Paths.cfr()</code>（与它的对拍相对误差 4e-4，量级等于 Sionna 内部
+float32 的相位精度）。Doppler 用完整 UE 速度向量、逐径投影一次，<strong>不做径向压缩再投影</strong>。
+调用语义可在
 <a href="https://nvlabs.github.io/sionna/rt/api/paths.html" target="_blank" rel="noreferrer">Sionna RT Paths API</a>
 与<a href="https://nvlabs.github.io/sionna/rt/tutorials/Mobility.html" target="_blank" rel="noreferrer">官方 Mobility 教程</a>复核。</p>
-<p>未来 direct Sionna adapter 若先生成 14-symbol 网格，应让它服务导频/估计与真实 symbol 级
-Doppler，再取中间 symbol 形成一个 slot，绝不能对复信道做 symbol 平均。当前 first-party source
-则直接输出并保留完整 slot snapshot 轴，由 <code>sample_interval_s</code> 给出时间间隔。</p>
+<p><strong>没有 symbol 级中间层。</strong>适配层直接按 slot 生成：时间轴是
+<code>num_slots_per_sample</code> 个点、间隔 <code>sample_interval_s</code>、<strong>从 0 起算</strong>，
+与 first-party source 逐字一致。没有"先算 14 个 symbol 再抽中间那个"这一步，也不对复信道做
+symbol 平均。样本之间的差异只来自父类挪 UE 位置后重追的几何——<strong>不叠加轮次时间原点</strong>，
+否则移动 UE 的相位会被算两遍（几何一次、Doppler 一次）。</p>
+<p><strong>三条尚未闭合的边界，写在这里而不是藏在代码里。</strong>其一，
+父类实际不挪 UE 时（<code>static</code>，或非 static 但速度为 0），RT 没有 CDL 的
+<code>rng_small</code> 随机源，所以多轮直接报错；其二，速度为 0 时
+<code>num_slots_per_sample&gt;1</code> 会让样本内各 slot 逐位相同，也直接报错；其三，
+只有在 UE 真正移动、<strong>每个 UE 又超过一轮</strong>且
+<code>num_slots_per_sample&gt;1</code> 时，父类每轮只前移一个 <code>sample_interval_s</code>，
+跨轮窗口才会重叠。这个合同要改父类、跨两个引擎；未定案前 RT 只拒绝这种多轮组合，
+单窗口（<code>num_samples&lt;=num_ues</code>）的移动多时隙是合法配置。</p>
 """
     body += callout(
         "good", "标准表错误现在会阻断生成",
@@ -2759,12 +2770,63 @@ OSM里看见标签但三角化失败不能算已建模。<code>calibration_statu
 <h2>Paths 到 CFR 的物理时间轴</h2>
 """ + F_CHANNEL + F_MAX_DOPPLER
     body += """
-<p>Sionna 路径对象携带时延、复幅度、出发/到达角和材料交互；CFR 还需要完整 UE 速度向量与
-物理采样率。当前适配器按平均 OFDM-symbol 周期设置采样，频率网格围绕载波中心；随后只把
-中间 symbol 作为一个 slot snapshot 落盘。若未设置 velocity 或沿用 1 Hz 默认采样，14 个 symbol
-会变成静态复制。当前 ChannelSample 只落 CFR，没有持久化 Sionna 的原始 Paths；因此 RT 数据调用
+<p>Sionna 路径对象携带时延、复幅度、出发/到达角和材料交互。本仓的直连适配层
+<code>src/superran/sionna_rt.py</code> 把它们拆成引擎无关的 <code>RayPaths</code>，再逐径合成
+<code>H += g·exp(j2π f_d t)·exp(−j2π (f_c + f) τ)·a_BS·conj(a_UE)</code>。载波项不能省：CDL 的时延
+是合成的、每簇另有随机相位，而 RT 的径长差是真实的，径间相对相位就来自这一项。锚点是与
+Sionna 自己的 <code>Paths.cfr()</code> 对拍，单端口单极化下相对误差小于 2e-3。
+当前 ChannelSample 只落 CFR，没有持久化 Sionna 的原始 Paths；因此 RT 数据调用
 <code>Dataset.paths()</code> 会明确抛 <code>NotImplementedError</code>，而不是套一张 CDL 表伪造角度。
 PDP、协方差、PMI 与几何量仍可从现有合同计算。这是当前数据合同的硬边界，不以空数组占位。</p>
+<h2>换引擎只换信道矩阵</h2>
+<p>默认信道仍是 38.901 统计信道；要走射线追踪必须在配置里显式写 <code>source: sionna_rt</code>
+并给一个 <code>scene</code>。适配层唯一覆写的是 <code>InternalSimSource._small_scale_channel</code>
+这个接缝——以上的站点布局、撒点、LOS、路损、阴影衰落、服务小区选择、预波束 S/N/I 预算，
+以下的估计噪声、SSB、TDD 成对与元数据全部共用。所以同一套几何下 CDL 与 RT 的
+<code>pathloss_dB</code>/<code>snr_dB</code>/<code>sir_dB</code>/<code>sinr_dB</code> 逐位相同，
+KPI 差异可归因到信道矩阵本身。RT 自己算出的路损与时延扩展只写进 <code>meta.rt_pathloss_db</code>
+与 <code>meta.rt_delay_spread_ns</code> 作旁证，不驱动链路预算。</p>
+<p><b>1 驱 3 / 1 驱 6 一个字都没变。</b>BS 端口阵因子与固定子阵方向图调的是 CDL 路径用的同两个
+函数，不是另写一份；64T 的 8×4×2、256T 的 16×8×2、垂直 0.67λ 与 <code>pol_h_v + top_to_bottom</code>
+照旧。两处容易踩的坑：Sionna 自带的 <code>cross</code> 极化是 [−45°, +45°]，与本仓配置的
+[+45°, −45°] 顺序相反，直接用会把两个极化端口块整体对调；内置场景的坐标原点未必在城区里，
+站点必须平移到包围盒中心，否则随机撒点会大面积落进全遮挡区。服务链路一条径都追不到时
+适配层直接抛"覆盖空洞"并打印坐标，绝不退回 TDL/CDL；干扰小区零径则返回零信道，因为那是
+真实的"该小区没有干扰"。</p>
+<h2>配置从公开入口走到引擎，中途不许被静默改掉</h2>
+<p>2026-09-04 的双席审核在这条链上抓到四个"静默"缺陷，四个都已修掉并各配一条棘轮。
+它们的共同点是<b>失败时看起来完全正常</b>：跑得通、有结果、meta 也自洽，只有物理是错的。</p>
+"""
+    body += table(
+        ["环节", "曾经的静默行为", "现在的合同"],
+        [
+            ("场景名传递",
+             "<code>scene</code> 只展开成 scenario/osm_path，名字本身停在 SuperRAN-only 配置里，"
+             "适配层拿不到就默认 munich —— etoile / florence / san_francisco 与本地城市全跑成慕尼黑，结果仍标 sionna_rt",
+             "<code>plan.translate()</code> 把名字一并写进引擎配置；认不出的场景名<b>当场报错</b>，不退回默认场景"),
+            ("本地城市资产",
+             "适配层读 <code>scene_file</code>，而 <code>prepare_scene()</code> 返回的键一直是 <code>osm_path</code>，"
+             "于是所有本地城市场景恒被判成「资产缺失」",
+             "优先用上层已解析好的 <code>cfg['osm_path']</code>，没有才自己准备一次，读的也是 <code>osm_path</code>"),
+            ("样本时间轴",
+             "曾用第 k 轮的 <code>k × sample_interval_s</code> 作时间原点，父类挪位置产生的几何相位又叠一次 Doppler，"
+             "移动相位被算两遍；static 多轮则会重复同一段时间轴",
+             "每个样本内部恒从 <code>t=0</code> 起算，与 CDL 一致；几何不动的多轮、零 Doppler 多时隙、"
+             "以及确有多轮的移动多时隙重叠都在入口<b>硬失败</b>"),
+            ("合法零值",
+             "<code>cfg.get(k, d) or d</code> 把 <code>rt_max_depth=0</code>（LOS-only 负向对照）悄悄换成 3，"
+             "对照里含三阶反射而 meta 还写着 3",
+             "统一走 <code>_cfg_num()</code>，<b>只有缺省或 None 才用默认值</b>"),
+        ],
+    )
+    body += callout(
+        "warn", "轮次现在只是诊断标签，不再进入物理时间轴",
+        "<p>写成 <code>for i, s in enumerate(super().iter_samples())</code> 是错的：生成器在循环体执行前"
+        "就已经把样本算完了；若循环体里才更新标签，H 不会改变，但 meta 会把第 k 轮错标成第 k−1 轮。"
+        "物理时间轴固定为 <code>arange(n_time) × sample_interval_s</code>、每样本从 0 起算；"
+        "移动样本之间的差异只来自父类先挪位置后重新追踪的几何。</p>",
+    )
+    body += """
 <h2>InternalSim 的快速 probe 为什么能快、又为什么不能多算</h2>
 """ + F_PROBE_SNR + F_SINR_COMBINE
     body += """
@@ -2787,7 +2849,7 @@ SNR/SINR；历史导入数据若恰落在旧 ±50 dB 边界才会标记为不可
         "<p>它只覆盖 8.64 MHz，并非对 100 MHz 稀疏抽样。即使 shape 看起来像普通数据集，也不能拿去算 "
         "PDP、频选 rank 或吞吐；<code>not_available</code> 是硬边界清单，不是建议项。</p>",
     )
-    body += "<p class=source-row>场景资产：" + source_ref("src/superran/scenes.py", "def prepare_scene") + " · 资产合同：" + source_ref("src/superran/scene_assets.py", "def scene_tree_fingerprint") + " · 快速探测：" + source_ref("src/superran/scenario.py", "def probe") + " · RT 适配：" + source_ref("src/superran/channelhub.py", "sionna_rt") + "</p>"
+    body += "<p class=source-row>场景资产：" + source_ref("src/superran/scenes.py", "def prepare_scene") + " · 资产合同：" + source_ref("src/superran/scene_assets.py", "def scene_tree_fingerprint") + " · 快速探测：" + source_ref("src/superran/scenario.py", "def probe") + " · RT 适配：" + source_ref("src/superran/sionna_rt.py", "def synthesize_channel") + "</p>"
     return Page(
         "raytracing", "射线追踪、场景资产与快速探测", "物理内核", "RAY TRACING",
         "Sionna RT 场景如何准备、形成时变 CFR，以及 InternalSim probe 的严格可用边界。", body,
@@ -3831,7 +3893,7 @@ def calibration_page() -> Page:
     )
     body += """
 <h2>跨引擎对标如何避免“显著但不重要”</h2>
-<p><code>cross_engine_compare()</code> 对 internal_sim、Sionna/QuaDRiGa 等独立来源的同配置结果计算
+<p><code>cross_engine_compare()</code> 对 internal_sim 与 sionna_rt 这类独立来源的同配置结果计算
 两样本 KS 距离与 5% 临界值，同时报告中位数差。样本很大时极小差异也可能统计显著，所以 D、样本量、
 中位数差和工程容差必须一起解释，不能只给一个 p-value 式结论。</p>
 """
@@ -5842,7 +5904,7 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         ["本轮补齐的能力簇", "此前隐藏在哪里", "现在的独立章节", "关键审计边界"],
         [
             ("Agent 决策与说明书闭环", "decisions / plan / algorithms / algo_defs* / spec / bridge", '<a href="#/agentloop">决策引擎、算法目录与说明书闭环</a>', "确定性关键词路由；单一 resolved config；loopback 白名单回传"),
-            ("射线追踪与场景探测", "scenes / scenario / channelhub", '<a href="#/raytracing">射线追踪、场景资产与快速探测</a>', "channel_generation_mode 判真；资产只读；probe 不可算 PDP/SE"),
+            ("射线追踪与场景探测", "scenes / scenario / sionna_rt", '<a href="#/raytracing">射线追踪、场景资产与快速探测</a>', "channel_generation_mode 判真；资产只读；probe 不可算 PDP/SE；RT 只换信道矩阵"),
             ("参考信号与物理基线", "physical / hardware / csi_aging", '<a href="#/referencesignals">参考信号、TDD 与波束扫描</a>', "38.104 RB 表；SRS 周期；CSI-RS DFT 不等于 PMI"),
             ("BLER 与有效 SINR", "linkadapt / bler_curves / bler_data_20b", '<a href="#/bler">BLER：MCS 表、曲线与 HARQ 复现</a>', "MIESM/EESM 尚未进入体验链；预置曲线不是 3GPP 曲线"),
             ("外部算法证据合同", "analysis / results / deliver", '<a href="#/externalresults">预注册、外部算法与结果合同</a>', "MCP 不执行外部代码；摘要与有序 sample_ids 先于统计"),
@@ -5902,7 +5964,7 @@ def tests_page(tests: list[dict[str, Any]], modules: list[ModuleDoc]) -> Page:
         ("扇区服务选择", "azimuth_deg 不进 path gain，三扇区同功率、按列表先后胜出", "110° 水平阵子图给相对 sector gain；pathloss 保持纯传播量", "boresight 反例"),
         ("SRS 时序", "样本 idx 直接当 slot；可在 DL/guard slot 合成 SRS", "idx 映射到第 n 个满足 TDD+T_SRS+offset 的真实机会；无交集硬失败", "paired 3→13 slot toy"),
         ("SRS 带宽与跳频", "历史 helper 的行表与 n_RRC 语义曾漂移", "本仓冻结产品 C_SRS=63/B_SRS=1/b_hop=0 与 17-hop 顺序；非产品 hopping 硬拒绝", "17 跳覆盖 272 RB + 非标反例"),
-        ("小载波 SRS 默认值", "Sionna/QuaDRiGa 固定 C_SRS=3；4 RB toy carrier 在历史 hopping 回看时映射到 RB[8,12) 并崩溃", "四种 source 均按实际载波自动选最宽合法 C_SRS；显式非法资源仍硬失败", "跨 backend 86 passed / 1 conditional skip"),
+        ("小载波 SRS 默认值", "历史外部实现固定 C_SRS=3；4 RB toy carrier 在 hopping 回看时映射到 RB[8,12) 并崩溃", "本仓按实际载波自动选最宽合法 C_SRS；显式非法资源仍硬失败", "跨 backend 86 passed / 1 conditional skip"),
         ("CDL 标准表校准", "历史 A/B/C 角度错、D/E 行数短；运行时 monkey patch 还会随 dataclass 漂移", "spec38901 成为本仓唯一运行表；native 直接读取，不修改外部注册表", "A/B/C/D/E 分别 23/23/24/14/15 行，逐字段 0 mismatch"),
         ("CDL ray 与 LOS", "每簇只生成一个 rank-1 方向，忽略 20-ray spread/XPR；D/E 又二次混 K；显式 UMa_LOS 仍随机出 NLOS", "20-ray 偏移/角耦合/逐 ray Jones+Doppler；D/E K 只用表功率；显式 LOS 强制 LOS/CDL-D", "CDL 定向 19/19 + LOS 反例"),
         ("配置/实际剖面", "摘要只突出 configured CDL-D，但 NLOS 链路实际由 CDL-C 生成，24-component 结果容易被误读成 D", "新增 configured_channel_model；repr、摘要与 E2E 同时展示 effective_channel_model_counts", "NLOS configured D→effective C 反例"),

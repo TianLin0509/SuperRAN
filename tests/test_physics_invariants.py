@@ -19,12 +19,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from superran import beamforming as bf  # noqa: E402
 from superran import csi_aging as ca  # noqa: E402
 from superran import experience as ex  # noqa: E402
+from superran import generate as gen  # noqa: E402
 from superran import interference as itf  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import linklevel as ll  # noqa: E402
 from superran import measure  # noqa: E402
 from superran import mumimo as mu  # noqa: E402
 from superran import rng as rg  # noqa: E402
+from superran import sionna_rt as srt  # noqa: E402
 from superran import system as sy  # noqa: E402
 
 FAILED: list[str] = []
@@ -500,6 +502,36 @@ def test_mu_admission_gates_are_explicit_and_reversible() -> None:
 
 
 test_mu_admission_gates_are_explicit_and_reversible()
+
+
+# ---------------------------------------------------------------------------
+section("9  Sionna RT 入口不能静默选错引擎，也不能误伤单窗口时间轴")
+
+
+def test_sionna_rt_source_key_and_single_window_contract() -> None:
+    """审核发现的两条边界必须在物理不变量层形成棘轮。"""
+    try:
+        gen.generate({"channel_source": "sionna_rt"}, num_samples=1)
+    except ValueError as exc:
+        check("channel_source" in str(exc) and "source" in str(exc)
+              and "internal_sim" in str(exc),
+              "错误 channel_source 键被硬拒绝，不再静默生成统计信道")
+    else:
+        check(False, "错误 channel_source 键必须硬失败")
+
+    try:
+        srt.SionnaRTSource({
+            "scene": "munich", "num_ues": 1, "num_samples": 1,
+            "num_slots_per_sample": 2, "mobility_mode": "linear",
+            "ue_speed_kmh": 30.0,
+        })._assert_samples_are_distinct()
+    except ValueError as exc:
+        check(False, f"单窗口移动多时隙没有跨轮重叠，不应拒绝（{exc}）")
+    else:
+        check(True, "单窗口移动多时隙合法，不被跨轮守卫误伤")
+
+
+test_sionna_rt_source_key_and_single_window_contract()
 
 
 print("\n" + "=" * 70)

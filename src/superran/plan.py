@@ -104,6 +104,11 @@ def translate(params: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
             # 用户显式给过的值优先，场景只补没给的
             if k in ("scenario", "osm_path", "scene_preset") or k not in ch:
                 ch[k] = v
+        # **scene 名字本身也要进引擎配置。** 只展开成 scenario/osm_path 是不够的：
+        # 射线追踪引擎要靠这个名字选 Sionna 自带场景（etoile / florence /
+        # san_francisco …），拿不到就只能退默认。以前它停在 own 里，于是
+        # 任何非 munich 的请求都被静默跑成 munich，而结果仍标 sionna_rt。
+        ch["scene"] = str(scene)
     return ch, own
 
 

@@ -652,3 +652,12 @@ def test_replication_result_delivers_the_scheduler_identity() -> None:
     assert scale.get("effective_edf_share") is not None
     # 配置回显也要在同一个交付对象里
     assert out["config"]["scheduler"]["edf_mixed_weight"] == 0.5
+
+
+if __name__ == "__main__":
+    # run_test_matrix.py 用 `python tests/<file>.py` 跑每个文件。没有这个入口，
+    # pytest 式文件会「什么都不做地退出 0」，在矩阵里表现为假通过。
+    # 见 .agents/TESTING.md 的坑 2。
+    import pytest
+
+    raise SystemExit(pytest.main([__file__, "-q"]))

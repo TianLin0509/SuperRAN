@@ -262,16 +262,47 @@ multicell_19site:
 # 真实城市场景还会自动完成资产准备（修 PLY 头）。
 # 场景清单用 sr_list_scenes 查，或直接在 overrides 里换 scene。
 
+# 射线追踪下 channel_model 这个键**不参与信道生成**，多径来自建筑几何。
+# 判断一份数据是不是真射线追踪，看 meta.channel_generation_mode == sionna_rt，
+# 不要看 channel_model。
+#
+# UE 位置为什么写死：慕尼黑老城很密，随机撒点会有相当比例落在完全被遮挡的
+# 位置上，服务链路一条径都追不到——那时适配层会硬报「覆盖空洞」而不是悄悄
+# 退回统计信道。下面这 6 个点是按 tx_height_m=45 实测扫出来的（每点至少 3 条
+# 径），换站高、换场景、换 rt_scene_offset_m 都要重新扫。
+# 想跑随机撒点就把 custom_ue_positions 删掉，并接受会遇到覆盖空洞。
 rt_munich:
   group: 射线追踪
   label: 射线追踪 · 慕尼黑老城
   summary: Sionna 自带场景，开箱即用。真实建筑几何下的反射与绕射。
+    站点自动平移到场景包围盒中心（原点在城区外，摆那儿覆盖极差）。
   typical_for: [site-specific 验证, 波束管理, 定位]
+  verify: summary.sample_meta.channel_generation_mode 必须是 sionna_rt；
+    rt_num_paths_serving >= 1；rt_array_model 应为
+    superran-effective-subarray-shared-with-cdl（说明 1 驱 3 没被绕过）。
+  caveat: >-
+    大尺度链路预算仍走 38.901 公式，射线追踪只换信道矩阵。RT 自己算出的路损与
+    时延扩展写在 meta 的 rt_pathloss_db / rt_delay_spread_ns 里作旁证，不驱动
+    SNR/SIR/SINR。
   config:
     source: sionna_rt
     scene: munich
     channel_model: TDL-C
-    num_ues: 10
+    num_ues: 6
+    num_sites: 1
+    sectors_per_site: 3
+    tx_height_m: 45.0
+    ue_height_m: 1.5
+    custom_ue_positions:
+      - [44.29, 53.47, 1.5]
+      - [-58.96, -120.07, 1.5]
+      - [-120.74, 66.53, 1.5]
+      - [-1.96, 114.2, 1.5]
+      - [-47.86, 92.64, 1.5]
+      - [-12.04, -80.36, 1.5]
+    rt_max_depth: 4
+    rt_samples_per_src: 1000000
+    carrier_freq_hz: 2600000000.0
     num_bs_tx_ant: 64
     num_bs_rx_ant: 64
     num_ue_tx_ant: 4
@@ -290,6 +321,8 @@ rt_shanghai_lujiazui:
   config:
     source: sionna_rt
     scene: shanghai_lujiazui
+    rt_max_depth: 4
+    rt_samples_per_src: 1000000
     channel_model: TDL-C
     num_ues: 12
     num_bs_tx_ant: 64
@@ -310,6 +343,8 @@ rt_shenzhen_futian:
   config:
     source: sionna_rt
     scene: shenzhen_futian
+    rt_max_depth: 4
+    rt_samples_per_src: 1000000
     channel_model: TDL-C
     num_ues: 12
     num_bs_tx_ant: 64
