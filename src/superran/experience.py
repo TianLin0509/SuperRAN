@@ -381,14 +381,23 @@ class DrbQueue:
         """记录一次空口发送。**发送即从队列扣 payload，与 ACK 无关。**
 
         ``is_retx=True`` 的那次不带新数据——它的字节在首传时就已经离开
-        buffer——所以只累加 ``tx_attempts``（资源占用的证据），不动队列、
-        不产生 TxEvent、不推进 busy period。
+        buffer——所以**对 DRB 队列完全是个空操作**：不动队列、不产生 TxEvent、
+        不推进 busy period，也**不碰任何 busy period 的计数器**。
+
+        为什么连 ``tx_attempts`` 都不能加：发送即扣减之后，一个 TB 的重传往往
+        落在**它自己那个 busy period 已经关闭之后**（那次首传正好把 buffer 清空）。
+        这时 ``self.active`` 指向的是**下一个** busy period，给它加 ``tx_attempts``
+        等于把上一个包的重传记到下一个包头上。后果不是记多了一次，而是
+        ``burst_metrics`` 的 ``len(events)==1 and tx_attempts==1`` 这道小包闸门被
+        它顶开，那个 burst 的吞吐直接变成 ``None`` ——**从话统里整个消失**。
+        被丢掉的又恰好是"期间有重传"的那些（也就是慢的那些），于是误码越多
+        体验速率反而越高。实测过：首传全错 62.47 Mbps > 首传全对 57.57 Mbps。
+
+        重传占的资源不靠这里记——它在 ``retx_count``、allocation 明细和 PRB
+        利用率里都有，那几处才是它该出现的地方。
         """
         b = self.active
-        if b is None or payload_bytes <= 0:
-            return 0
-        if is_retx:
-            b.tx_attempts += 1
+        if is_retx or b is None or payload_bytes <= 0:
             return 0
         if b.first_tx_tti < 0:
             b.first_tx_tti = int(tti)

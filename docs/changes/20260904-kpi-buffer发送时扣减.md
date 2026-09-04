@@ -21,8 +21,8 @@ DRB busy period 的**记账时刻**，也就是体验速率 KPI 的分子分母�
 
 对应到代码：`transmit(..., is_retx=False)` 在**发送时**扣队列，busy period 在
 "清空 buffer 的那一次发送"结束（`last_tx_tti`），`TxEvent` 只记首传。
-重传走 `is_retx=True`：只累加 `tx_attempts`（资源占用的证据），
-**不动队列、不产生 TxEvent、不推进 busy period**。
+重传走 `is_retx=True`：对 DRB 队列是**纯空操作**——不动队列、不产生 TxEvent、
+不推进 busy period，**连 `tx_attempts` 都不加**（原因见下面「补」那一节）。
 
 `BusyPeriod` 的字段随语义改名（`bytes_acked→bytes_sent`、`last_ack_tti→last_tx_tti`、
 `ack_events→tx_events`），旧名保留为只读属性别名；`AckEvent` 保留为 `TxEvent` 的别名。
@@ -54,8 +54,8 @@ t3028  发 20497 B  ACK    队列  38311 →  17814
 
 - 合同 1：`transmit(2, 120, 100, ack=False)` 返回 100 且队列归零，busy period
   在 `last_tx_tti=2` 结束——NACK 不阻止记账。
-- 合同 2：`transmit(..., is_retx=True)` 返回 0、队列不动、`tx_attempts` 加 1 但
-  `tx_events` 不增。
+- 合同 2：`transmit(..., is_retx=True)` 返回 0，队列、`tx_events` 与
+  `tx_attempts` 全都不动。
 - 合同 3（端到端，`tdd_pattern="D"`，强制首传全错）：
 
   | 轨迹 | `cell_served_mbps` | `residual_bler` |
@@ -83,6 +83,36 @@ test_results（`__main__` 入口，退出码 0）；test_scheduler_p0 19、test_
 test_linkadapt 4、test_carrier 33、test_power_control 13、test_mcp_server 1、
 test_developer_guide 11 passed。ruff 回到 develop 基线的 2 处。
 
+## 2026-09-04 补：重传对 DRB 队列必须是**纯**空操作
+
+第一版把重传写成「只累加 `tx_attempts`，其余不动」。**这仍然错。**
+
+发送即扣减之后，一个 TB 的重传经常落在**它自己那个 busy period 已经关闭之后**
+（那次首传正好把 buffer 清空）。这时 `self.active` 指的是**下一个** busy period，
+给它加 `tx_attempts` 等于把上一个包的重传记到下一个包头上。
+
+后果不是「多记一次」，而是 `burst_metrics` 里
+`len(events) == 1 and tx_attempts == 1` 这道小包闸门被顶开——那个 burst 的吞吐
+变成 `None`，**从话统里整个消失**。被丢掉的又恰好是「期间有重传」的慢样本，
+于是**误码越多体验速率反而越高**。实测过：首传全错 62.47 Mbps > 首传全对
+57.57 Mbps。
+
+改成 `if is_retx or b is None or payload_bytes <= 0: return 0` —— 重传对 DRB
+队列完全无副作用。它占的资源在 `retx_count`、allocation 明细和 PRB 利用率里
+都有，那几处才是它该出现的地方。
+
+修好之后单调性恢复（单进程、2 MB 文件）：
+
+| 首传误块率 | 体验速率中位 | 完成时延 p50 |
+|---|---|---|
+| 0% | 144.2 Mbps | 112.5 ms |
+| 30% | 102.3 Mbps | 157.5 ms |
+| 100% | 72.1 Mbps | 225.0 ms |
+
+棘轮：`tests/test_system.py` 第 18b 节，单元级（重传不碰下一个 busy period）
++ 行为学（误码只能让体验速率变差，不可能变好）。红态实测 3 条同时变红，
+其中「新的小 burst 没有从话统里消失」直接报 `吞吐=None`。
+
 ## 没证明什么
 
 - **没有量化这次口径改动让各条历史 KPI 变了多少。** 只做了机制级的最小反例，
@@ -96,9 +126,13 @@ test_developer_guide 11 passed。ruff 回到 develop 基线的 2 处。
 - **删掉了两道硬校验**（`scheduler_finalize` 与 `_build_su_plan` 里的"队列必须 ≥
   冻结 payload"）。它们在新口径下恒不成立，但删掉也意味着少了一道防线；
   重传身份的其余校验（mcs / n_prb / rank / tb_bytes）都还在。
+- **没有量化「burst 从话统里消失」这个 bug 在历史结果里影响了多少**。它只在
+  「重传落在上一个 busy period 关闭之后」时触发，触发率取决于话务的包间隔与
+  BLER，本次只证明了机制与单调性恢复。
 - 没有改 `legacy_v1` 的 `trim` 口径（那是历史复现路径，另一套记账）。
-- 没有改 capacity 路径的 `_Traffic.serve`——它同样是"ACK 才扣"，但 capacity 是全带
-  单 grant 模型，**本次没有量化它的同类偏差**。
+- 没有改 capacity 路径的 `_Traffic.serve`——它同样是"ACK 才扣"。单进程下那是自洽的，
+  所以本 PR 不动它；**它在多进程放开之后才出问题**，由后一个 PR
+  （HARQ 多进程）一并改成同一个口径。
 
 ## 影响哪些 KPI
 

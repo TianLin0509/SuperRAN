@@ -2674,9 +2674,9 @@ check(_bd_after_first == 200 and _bd_retx == 0
       and _bd_q2.queued_bytes == 200,
       f"重传返回 0 且不动 buffer（首传后 {_bd_after_first} B，重传后 "
       f"{_bd_q2.queued_bytes} B）")
-check(_bd_q2.active is not None and _bd_q2.active.tx_attempts == 2
+check(_bd_q2.active is not None and _bd_q2.active.tx_attempts == 1
       and len(_bd_q2.active.tx_events) == 1,
-      "重传只累加 tx_attempts（资源占用的证据），不产生 TxEvent")
+      "重传对 DRB 队列是纯空操作：连 tx_attempts 都不加（原因见 18b 节）")
 
 # 合同 3：重传插队 → 掐头去尾时间被拉长 → 速率下降。
 # 同一条链路、同一份话务，只把首传 BLER 从 0 抬到 1（强制每个 TB 都要重传）。
@@ -2736,6 +2736,81 @@ check(abs(_bd_dirty["cell_served_mbps"] - _bd_lost["cell_served_mbps"]) < 1e-9,
 check(_bd_lost["residual_bler"] > 0.99 and _bd_dirty["residual_bler"] < 1e-9,
       f"传丢的部分只体现在 residual_bler（{_bd_dirty['residual_bler']:.3f} → "
       f"{_bd_lost['residual_bler']:.3f}），不从已发送字节里扣回去")
+
+
+# --- 18b 重传对 DRB 队列必须是纯空操作（含 busy period 的计数器）----------
+# **棘轮。** 让 is_retx 的那次去碰 `b.tx_attempts` 就会全红。
+#
+# 发送即扣减之后，一个 TB 的重传经常落在**它自己那个 busy period 已经关闭之后**
+# （那次首传正好把 buffer 清空）。这时 `self.active` 指的是**下一个** busy
+# period，给它加 tx_attempts 等于把上一个包的重传记到下一个包头上。后果不是
+# 多记一次，而是 burst_metrics 的「len(events)==1 and tx_attempts==1」这道小包
+# 闸门被顶开，那个 burst 的吞吐变成 None、**从话统里整个消失**；被丢掉的又恰好
+# 是「期间有重传」的慢样本，于是误码越多体验速率反而越高。
+_rt_cls = sysm.TrafficClassConfig("small", 1.0, 100, 1.0, pdb_ms=10.0,
+                                  is_small=True)
+_rt_q = expm.DrbQueue(0, _rt_cls)
+_rt_q.arrive(0, 100)
+_rt_q.transmit(2, 120, 100, ack=False)          # 首传 NACK，buffer 清空，busy 关闭
+check(_rt_q.active is None and len(_rt_q.done) == 1,
+      "首传清空 buffer 后 busy period 立刻关闭（不等 ACK）")
+_rt_q.arrive(4, 250)                            # 新包 → 新 busy period
+_rt_ret = _rt_q.transmit(6, 120, 100, ack=True, is_retx=True)   # 旧 TB 的重传
+_rt_new = _rt_q.active
+check(_rt_ret == 0 and _rt_new.tx_attempts == 0
+      and len(_rt_new.tx_events) == 0 and _rt_new.bytes_sent == 0,
+      f"上一个包的重传不碰下一个 busy period 的任何计数器"
+      f"（tx_attempts={_rt_new.tx_attempts}）")
+_rt_q.transmit(7, 1000, 250, ack=True)          # 新包一次发完
+_rt_burst = _rt_q.done[-1]
+_rt_m = expm.burst_metrics(_rt_burst, 0.5, "fractional_slot")
+check(_rt_m.throughput_mbps is not None
+      and _rt_m.throughput_kind == "rel19_fractional_slot",
+      f"新的小 burst 仍走 fractional-slot 口径、没有从话统里消失"
+      f"（吞吐={_rt_m.throughput_mbps}）")
+
+# 端到端：**误码只能让体验速率变差，不可能变好。**
+# 这条是上面那个 bug 最直接的行为学判据——它变红过（首传全错 62.47 Mbps >
+# 首传全对 57.57 Mbps），修好之后单调性恢复。
+_rt_n = 40
+_rt_point = sysm.UeLinkTable(
+    ue=0, sinr_db=np.full((_rt_n, 4), 18.0), mcs=np.full((_rt_n, 4), 16),
+    se=np.full((_rt_n, 4), la.MCS_TABLE_3[16].se),
+    best_rank=np.ones(_rt_n, dtype=int),
+    best_se=np.full(_rt_n, la.MCS_TABLE_3[16].se), geo_sinr_db=18.0,
+    outage=np.zeros(_rt_n, dtype=bool), mcs_table=3, target_bler=0.1,
+    sinr_rbg_db=np.full((_rt_n, 4, 17), 18.0),
+    sinr_tx_db=np.full((_rt_n, 4), 18.0),
+    sinr_tx_rbg_db=np.full((_rt_n, 4, 17), 18.0))
+_rt_old_bler = expm._bler_lookup
+_rt_runs = {}
+try:
+    for _rt_p in (0.0, 0.3, 1.0):
+        expm._bler_lookup = lambda _m, _s, _v=_rt_p: _v
+        _rt_runs[_rt_p] = sysm.simulate(
+            [_rt_point],
+            sys_cfg=sysm.SystemConfig(evaluation_mode="experience",
+                                      duration_s=3.0, tdd_pattern="DDDSU"),
+            traffic=sysm.TrafficConfig(model="ftp3", file_bytes=2_000_000,
+                                       arrival_rate_hz=0.8),
+            sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+            kpi=sysm.KpiConfig(warmup_tti=0), rng=rg.RngBook(3, 0)).cell
+finally:
+    expm._bler_lookup = _rt_old_bler
+_rt_rate = [_rt_runs[p]["ue_experienced_median_mbps"] for p in (0.0, 0.3, 1.0)]
+_rt_delay = [_rt_runs[p]["completion_delay_ms_p50"] for p in (0.0, 0.3, 1.0)]
+print(f"  首传误块 0/30%/100%：体验中位 "
+      f"{_rt_rate[0]:.1f}/{_rt_rate[1]:.1f}/{_rt_rate[2]:.1f} Mbps，"
+      f"完成时延 p50 {_rt_delay[0]:.1f}/{_rt_delay[1]:.1f}/{_rt_delay[2]:.1f} ms")
+check(_rt_rate[0] > _rt_rate[1] > _rt_rate[2],
+      f"误码越多体验速率越低，单调（{_rt_rate[0]:.1f} > {_rt_rate[1]:.1f} > "
+      f"{_rt_rate[2]:.1f} Mbps）——重传占资源、拉长掐头去尾时间")
+check(_rt_delay[0] < _rt_delay[1] < _rt_delay[2],
+      f"完成时延同向变长（{_rt_delay[0]:.1f} < {_rt_delay[1]:.1f} < "
+      f"{_rt_delay[2]:.1f} ms）")
+check(abs(_rt_runs[0.0]["cell_served_mbps"]
+          - _rt_runs[1.0]["cell_served_mbps"]) < 1e-9,
+      "已发送字节不随误码变化——发送即计入，KPI 不看这个 TB 对不对")
 
 print("\n" + "=" * 70)
 if FAILED:
