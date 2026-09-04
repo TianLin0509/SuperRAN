@@ -3060,7 +3060,13 @@ def simulate_experience(
                 if accounting == "scheduled_tbs":
                     credit = tb_bytes
                 elif accounting == "acked_goodput":
-                    credit = sent
+                    # **这个口径的合同就是「NACK 给 0」**（见 SchedulerConfig
+                    # 的注释：研究型口径，NACK 时给 0 会反向抬高坏链路用户
+                    # 优先级，所以不作为默认）。buffer 改成发送时扣减之后
+                    # ``sent`` 在 NACK 时也是正数，直接拿它当 credit 会把这条
+                    # 合同悄悄改掉——PF 会把没送达的字节也算成该用户已获得的
+                    # 服务，坏链路用户的 r_avg 涨得更快、优先级掉得更快。
+                    credit = sent if ack else 0
                 else:
                     credit = lookup.tbs_bytes_for_indices(
                         slot, mcs, rank, tuple(range(int(sys_cfg.num_rbg))))
