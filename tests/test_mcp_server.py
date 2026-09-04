@@ -82,9 +82,11 @@ async def main() -> None:
                     sim_schema = sim_tool.input_schema or {}
             sim_props = sim_schema.get("properties", {})
             mu_tuning = {
-                "mu_corr_threshold", "mu_olla_step_up_db", "mu_olla_step_down_db"}
+                "mu_corr_threshold", "min_pairing_mcs", "pf_gain_threshold",
+                "orthogonalization_mode", "mu_olla_step_up_db",
+                "mu_olla_step_down_db"}
             check(sim_tool is not None and mu_tuning.issubset(sim_props),
-                  "系统仿真 MCP 公开 MU 相关性门限与 MU-OLLA 独立步长")
+                  "系统仿真 MCP 公开 MU 准入门、正交化模式与独立 OLLA 步长")
             discrete = {"seed", "num_replications", "pf_window_tti",
                         "file_bytes", "small_file_bytes"}
             check(all(sim_props.get(k, {}).get("type") == "integer" for k in discrete),
@@ -156,6 +158,19 @@ async def main() -> None:
             check(mcs_default.get("table") == 3
                   and mcs_default.get("source") == mcs3.get("source"),
                   "sr_mcs_info默认查预置256QAM表3")
+            mcs1 = _payload(await session.call_tool(
+                "sr_mcs_info", {
+                    "table": 1, "show_bler_anchors": True,
+                    "reference_thresholds": {"0": -6.0},
+                    "eesm_sinr_db_list": [0.0, 5.0, 10.0],
+                    "eesm_beta": 10.0,
+                }
+            ))
+            check(mcs1.get("bler_anchors", {}).get("rows", [{}])[0].get(
+                      "diff_to_reference_db") is not None
+                  and isinstance(mcs1.get("eesm", {}).get(
+                      "effective_sinr_db"), float),
+                  "MCP 暴露外部门限差值与显式 EESM 压缩，不落盘参考曲线")
 
             print("\n" + "=" * 68 + "\n2  sr_capabilities\n" + "=" * 68)
             caps = _payload(await session.call_tool("sr_capabilities", {}))

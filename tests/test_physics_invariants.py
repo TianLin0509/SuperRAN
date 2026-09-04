@@ -449,6 +449,59 @@ check(abs(legacy.cell["offered_mbps"] - 1.0) < 1e-9,
       "D/S/U 每个 TTI 都维护业务到达，DDDSU 不再漏掉 U 时隙的 20% CBR")
 
 
+def test_s_slot_fraction_single_source_of_truth() -> None:
+    """报告占比和调度承载必须读取同一个显式 S 时隙系数。"""
+    default = sy.SystemConfig(tdd_pattern="DDDSU")
+    custom = sy.SystemConfig(tdd_pattern="DDDSU", s_slot_dl_fraction=0.82)
+    assert abs(default.s_slot_dl_fraction - sy.S_SLOT_DL_FRACTION) < 1e-12
+    assert abs(default.dl_ratio - (3 + sy.S_SLOT_DL_FRACTION) / 5) < 1e-12
+    assert abs(custom.dl_ratio - (3 + 0.82) / 5) < 1e-12
+    assert abs(sy.infer_s_slot_fraction("DDDSU") - 10 / 14) < 1e-12
+    assert abs(sy.infer_s_slot_fraction("DDDDDDDSUU") - 6 / 14) < 1e-12
+
+
+test_s_slot_fraction_single_source_of_truth()
+
+
+def test_bler_factory_and_eesm_are_explicit() -> None:
+    """BLER 后端选择和频选 SINR 压缩都必须是显式、可审计输入。"""
+    model = la.make_bler_model(
+        1, config={"c": 2.5, "implementation_loss_db": 1.5})
+    assert isinstance(model, la.BlerModel)
+    assert model.c == 2.5 and model.implementation_loss_db == 1.5
+    assert isinstance(la.make_bler_model(3), la.CurveBlerModel)
+    assert la.eesm_compress(
+        np.array([0.0, 5.0, 10.0]), beta=np.array([1.0, 10.0])).shape == (2,)
+
+
+test_bler_factory_and_eesm_are_explicit()
+
+
+def test_mu_admission_gates_are_explicit_and_reversible() -> None:
+    """低 MCS、PF 增益和 Schmidt 缺口都不能被静默吞掉。"""
+    h_eff = np.zeros((3, 1, 1, 3), dtype=np.complex128)
+    h_eff[0, 0, 0, 0] = 1.0
+    h_eff[1, 0, 0, 1] = 0.9
+    h_eff[2, 0, 0, 2] = 0.8
+    gated = mu.pair_users(
+        h_eff, criterion="all", mcs_indices=np.array([3, 10, 10]),
+        min_pairing_mcs=4)
+    assert gated.users == [1, 2] and gated.dropped_by_mcs == [0]
+    legacy = mu.pair_users(
+        h_eff, criterion="all", mcs_indices=np.array([3, 10, 10]),
+        min_pairing_mcs=0)
+    assert legacy.users == [0, 1, 2]
+    try:
+        mu.pair_users(h_eff, orthogonalization_mode="schmidt")
+    except NotImplementedError as exc:
+        assert "TODO" in str(exc) and "Schmidt" in str(exc)
+    else:
+        raise AssertionError("schmidt 未实现时必须硬失败")
+
+
+test_mu_admission_gates_are_explicit_and_reversible()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")
