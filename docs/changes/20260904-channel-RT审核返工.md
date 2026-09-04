@@ -65,7 +65,7 @@ RT 是确定性引擎、没有 CDL 的 `rng_small` 随机源，它**产不出**�
 |---|---|
 | `static` + 多轮，**任意速度** | 几何固定、两轮走的又是同一段 `[0, n_time×dt)`，输出逐位相同。给多普勒救不回来 |
 | `num_slots_per_sample>1` + `ue_speed_kmh=0` | 所有径 Doppler 为 0，时间相位恒为 1，样本内部 N 个 slot 逐位相同。旧守卫在 `rounds<=1` 时直接 return，完全漏掉 |
-| 非 static + `num_slots_per_sample>1` | 父类每轮只前移**一个** `sample_interval_s`，样本却横跨 `n_time` 个间隔，相邻两轮窗口重叠（n_time=8 时重叠 7/8，16 个输出只有 9 个独特时刻），而 `system.py:1564-1574` 会直接展平当独立快照 |
+| 真正移动 + 每 UE 多轮 + `num_slots_per_sample>1` | 父类每轮只前移**一个** `sample_interval_s`，样本却横跨 `n_time` 个间隔，相邻两轮窗口重叠（n_time=8 时重叠 7/8，16 个输出只有 9 个独特时刻），而 `system.py:1564-1574` 会直接展平当独立快照；单窗口移动多时隙合法 |
 
 三条都在 `iter_samples` 入口硬失败，错误信息各自给出出路。
 
@@ -230,7 +230,7 @@ meta 键：新增 `rt_sample_round`（诊断标签）与
 
 ## 需要维护者决定
 
-1. **父类轨迹时钟的窗口合同。** 非 static + `num_slots_per_sample>1` 时，
+1. **父类轨迹时钟的窗口合同。** 真正移动 + 每 UE 多轮 + `num_slots_per_sample>1` 时，
    位置每轮前移一个 `dt` 而样本横跨 `n_time` 个 `dt`。建议改成按完整 sample
    跨度前移（`travel = speed × dt × n_time × round`）。这会同时改 internal_sim
    与 RT 的语义——虽然仓库里现有 preset 和落盘 artifact 的
@@ -255,3 +255,15 @@ meta 键：新增 `rt_sample_round`（诊断标签）与
 棘轮同时进入 `tests/test_sionna_rt_source.py` 与
 `tests/test_physics_invariants.py`：错误键必须硬失败，单窗口移动多时隙必须放行，
 主手册与 `CLAUDE.md` 不得恢复旧合同。
+
+## 双席再审后的文档合同收口
+
+独立物理席与集成席都确认实现反例已经正确，但抓到用户文档仍有两处
+与真实行为相反：一是还说 `channel_source` 会被静默忽略，二是把所有
+移动多时隙都写成非法。现已同步修正 README、紧凑手册、详细手册与生成页：
+
+- 旧错键会立即硬失败并提示迁移，不再描述成静默回落。
+- 只在「真正移动 + 每 UE 多轮 + 多时隙」时存在跨轮窗口重叠；
+  `num_samples<=num_ues` 的单窗口移动多时隙明确标为合法。
+- 两条文档语义棘轮分开编写：分别恢复旧错键说法和过度拒绝说法时，
+  会各自独立变红。

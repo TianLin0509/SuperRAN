@@ -697,9 +697,10 @@ def test_multislot_duplicates_and_window_overlap_are_refused():
     * ``num_slots_per_sample>1`` + ``ue_speed_kmh=0`` —— Doppler 全为 0，
       时间相位恒为 1，一个样本里的 N 个 slot 逐位相同。旧守卫在
       ``rounds<=1`` 时直接 return，完全漏掉这条。
-    * 非 static + ``num_slots_per_sample>1`` —— 父类每轮只把位置前移**一个**
-      ``sample_interval_s``，样本内部却横跨 ``n_time`` 个间隔，相邻两轮窗口
-      重叠（n_time=8 时重叠 7/8），而 system.py 会直接展平当独立快照。
+    * 真正移动 + 每 UE 多轮 + ``num_slots_per_sample>1`` ——
+      父类每轮只把位置前移**一个** ``sample_interval_s``，样本内部却横跨
+      ``n_time`` 个间隔，相邻两轮窗口重叠（n_time=8 时重叠 7/8），而
+      system.py 会直接展平当独立快照。单窗口移动多时隙不在此拒绝范围。
     """
     dup = {"scene": "munich", "num_ues": 2, "num_samples": 2,
            "mobility_mode": "static", "ue_speed_kmh": 0.0,
@@ -887,6 +888,31 @@ def test_primary_docs_use_the_current_rt_time_and_capability_contract():
     assert "第 k 轮从 <code>k × sample_interval_s</code> 起算" not in compact
     assert "修好之后同一 UE 相邻两轮实测 NMSE 约 −18 dB" not in compact
     assert "每个样本内部恒从 <code>t=0</code> 起算" in compact
+
+
+def test_primary_docs_say_legacy_channel_source_is_a_hard_error():
+    """用户手册不能再说旧错键会被静默忽略。"""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    compact = (ROOT / "scripts" / "make_developer_guide.py").read_text(
+        encoding="utf-8")
+    for doc in (readme, compact):
+        assert "写错的键会被忽略" not in doc
+        assert "channel_source</code> 会被静默忽略" not in doc
+        assert "channel_source" in doc and "硬失败" in doc
+
+
+def test_primary_docs_allow_single_window_moving_multislot():
+    """文档不能把只有一轮的移动多时隙误报成跨轮重叠。"""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    compact = (ROOT / "scripts" / "make_developer_guide.py").read_text(
+        encoding="utf-8")
+    details = (ROOT / "scripts" / "developer_guide_details.py").read_text(
+        encoding="utf-8")
+    assert "非 static 不许多时隙" not in compact
+    assert "非 static + <code>num_slots_per_sample&gt;1</code>" not in compact
+    for doc in (readme, compact, details):
+        assert "num_samples&lt;=num_ues" in doc or "num_samples<=num_ues" in doc
+        assert "单窗口" in doc and "合法配置" in doc
 
 
 if __name__ == "__main__":

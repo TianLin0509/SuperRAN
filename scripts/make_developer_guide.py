@@ -2709,13 +2709,13 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
         ["来源", "擅长", "项目中的角色", "边界"],
         [
             ("SuperRAN InternalSim", "38.901 风格 CDL/TDL、多小区几何、导频估计", "默认 first-party 物理源", "阵列/干扰模型仍含明确工程近似"),
-            ("Sionna RT", "场景网格、材料、射线与确定性路径", "已可用的可选 direct RT 源（source=sionna_rt）", "装不上就硬失败不回退；static 不许多轮、非 static 不许多时隙；依赖和资产质量仍要单独验收"),
+            ("Sionna RT", "场景网格、材料、射线与确定性路径", "已可用的可选 direct RT 源（source=sionna_rt）", "装不上就硬失败不回退；确定性重复与跨轮窗口重叠会硬失败，单窗口移动多时隙可用；依赖和资产质量仍要单独验收"),
             ("SuperRAN 系统层", "合同、硬件默认、算法、TTI、统计门", "编排与证据层", "不把统计 source 冒充确定性 RT"),
         ],
     )
     body += """
 <h3>Direct Sionna RT adapter 的验收边界</h3>
-<p>adapter 已经落地：<code>source=sionna_rt</code> 时走（<strong>配置键是 <code>source</code>，写成 <code>channel_source</code> 会被静默忽略、跑成统计信道</strong>——<code>generate.py:844</code> 读的是 <code>cfg.pop("source", "internal_sim")</code>）
+<p>adapter 已经落地：<code>source=sionna_rt</code> 时走（<strong>配置键是 <code>source</code>；写成旧错键 <code>channel_source</code> 会立即硬失败并提示迁移，不会静默跑成统计信道</strong>）
 <code>superran/sionna_rt.py</code>，自己按 <code>[time, rb, bs_port, ue_port]</code> 合成，
 不调 Sionna 的 <code>Paths.cfr()</code>（与它的对拍相对误差 4e-4，量级等于 Sionna 内部
 float32 的相位精度）。Doppler 用完整 UE 速度向量、逐径投影一次，<strong>不做径向压缩再投影</strong>。
@@ -2727,12 +2727,14 @@ float32 的相位精度）。Doppler 用完整 UE 速度向量、逐径投影一
 与 first-party source 逐字一致。没有"先算 14 个 symbol 再抽中间那个"这一步，也不对复信道做
 symbol 平均。样本之间的差异只来自父类挪 UE 位置后重追的几何——<strong>不叠加轮次时间原点</strong>，
 否则移动 UE 的相位会被算两遍（几何一次、Doppler 一次）。</p>
-<p><strong>两条尚未闭合的边界，写在这里而不是藏在代码里。</strong>其一，
-<code>mobility_mode=static</code> 下 RT 产不出独立的小尺度实现（没有 CDL 的
-<code>rng_small</code> 随机源），所以 static + 多轮直接报错，而不是把重复矩阵当独立样本；
-其二，非 static + <code>num_slots_per_sample&gt;1</code> 时父类的轨迹时钟每轮只前移一个
-<code>sample_interval_s</code>、样本内部却横跨 <code>n_time</code> 个，窗口会重叠——这个合同
-要改父类、跨两个引擎，未定案前 RT 拒绝该组合。</p>
+<p><strong>三条尚未闭合的边界，写在这里而不是藏在代码里。</strong>其一，
+父类实际不挪 UE 时（<code>static</code>，或非 static 但速度为 0），RT 没有 CDL 的
+<code>rng_small</code> 随机源，所以多轮直接报错；其二，速度为 0 时
+<code>num_slots_per_sample&gt;1</code> 会让样本内各 slot 逐位相同，也直接报错；其三，
+只有在 UE 真正移动、<strong>每个 UE 又超过一轮</strong>且
+<code>num_slots_per_sample&gt;1</code> 时，父类每轮只前移一个 <code>sample_interval_s</code>，
+跨轮窗口才会重叠。这个合同要改父类、跨两个引擎；未定案前 RT 只拒绝这种多轮组合，
+单窗口（<code>num_samples&lt;=num_ues</code>）的移动多时隙是合法配置。</p>
 """
     body += callout(
         "good", "标准表错误现在会阻断生成",

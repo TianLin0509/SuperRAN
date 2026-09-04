@@ -465,17 +465,19 @@ ph.project_interference(...)       # 干扰投影：不投影会高估干扰
 - **视距比例由几何决定**，不是选 CDL-D 就能得到视距信道——剖面类别与几何
   判定不符时会被自动替换。想调视距比例改站间距（实测 200m→0.46、800m→0.13）。
 - **射线追踪 direct adapter 已经可用**，配置键是 **`source=sionna_rt`**
-  （不是 `channel_source`——`generate.py` 读的是 `source`，写错的键会被忽略、
-  静默跑成 `internal_sim`）。装了 `sionna-rt` 才启用，装不上就硬失败、
+  （不是 `channel_source`——传入这个旧错键会立即硬失败，并提示改用
+  `source`；不会忽略后静默跑成 `internal_sim`）。装了 `sionna-rt` 才启用，装不上就硬失败、
   绝不退回统计信道。
 - **RT 数据集不支持 `ds.paths()`**。适配层把逐径几何合成成 CFR 之后就丢掉了，
   逐径角度/时延**没有落盘合同**；对 RT 数据集调 `paths()` 抛 `NotImplementedError`
   而不是返回一组与数据无关的 CDL 假角度。H / PDP / 协方差 / PMI / 几何量都正常。
-- **RT 的两条使用限制**（都在入口报错，不会静默产出重复数据）：几何不动时
+- **RT 的三类使用限制**（都在入口报错，不会静默产出重复数据）：几何不动时
   不允许多轮样本——`mobility_mode=static`，或 `linear` 但 `ue_speed_kmh=0`，
   父类都不挪位置，RT 是确定性引擎，多轮必然逐位相同（注意 `num_samples=3` /
-  `num_ues=2` 也算两轮）；真在移动时不允许 `num_slots_per_sample>1`，
-  因为跨轮时间窗口会重叠，该合同未定案。
+  `num_ues=2` 也算两轮）；零速时单个样本也不允许
+  `num_slots_per_sample>1`，因为样本内各 slot 会逐位相同；真在移动时，
+  **只有每个 UE 超过一轮**才拒绝 `num_slots_per_sample>1`，因为跨轮时间窗口
+  会重叠；单窗口（`num_samples<=num_ues`）的移动多时隙是合法配置。
 - **时延扩展的频域估计有固有误差**。可观测最大时延是 `1/(12·SCS)`，
   实测比值 0.8~1.0，仅作数量级检查。
 - **QuaDRiGa 不做**（2026-09-04 决定）。它需要 MATLAB/Octave 运行时，成本与收益不成比例；
