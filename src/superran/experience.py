@@ -270,30 +270,72 @@ class TbsLookup:
 
 
 @dataclass
-class AckEvent:
+class TxEvent:
+    """一次**首传**：把 payload 从 buffer 里搬走的那一次。
+
+    ``ack`` 只作诊断，不参与 KPI —— 现场口径按发送记账，不看这个 TB 对不对。
+    重传不产生 TxEvent：它不带新数据，只占资源。
+    """
+
     tti: int
     payload_bytes: int
     scheduled_bytes: int
     padding_bytes: int
+    ack: bool = True
+
+
+#: 历史别名。旧脚本读 ``AckEvent`` 时不至于 ImportError，但语义已经是"发送"。
+AckEvent = TxEvent
 
 
 @dataclass
 class BusyPeriod:
-    """一个 DRB buffer 从空到非空、再回到空的完整 busy period。"""
+    """一个 DRB buffer 从空到非空、再回到空的完整 busy period。
+
+    **buffer 在发送时扣减，不是在 ACK 时**（现场速率统计口径，用户
+    2026-09-04 确认）：数据一旦被组进 TB 发出去就离开 buffer，busy period
+    在"清空 buffer 的那一次**发送**"结束，KPI 当场可统计，**完全不看这个 TB
+    正确与否**。误码与重传对体验速率的影响体现在两处，都不是"等它传对"：
+
+    1. 重传要占资源（时频资源被吃掉，别人发不了）；
+    2. 重传优先级高于新传。发完这个包 buffer 还没空时，NACK 回来会插队，
+       把后面的数据往后推，于是掐头去尾时间被拉长、速率下降。
+
+    这条口径不只是 KPI 偏好——**多进程 HARQ 必须靠它才自洽**。按 ACK 扣减时，
+    被 NACK 的 TB 其字节仍留在队列里，同一个 UE 的另一个 HARQ 进程会把
+    **同一批字节**再组成一个新 TB 发一遍，然后原 TB 的重传发现队列已经不够
+    冻结的 payload 了。
+    """
 
     start_tti: int
     traffic_class: str
     pdb_ms: float
     bytes_arrived: int = 0
-    bytes_acked: int = 0
+    #: 已经离开 buffer 的字节（发送即算，与 ACK 无关）
+    bytes_sent: int = 0
     first_tx_tti: int = -1
-    last_ack_tti: int = -1
+    #: 清空 buffer 的那一次发送所在 TTI
+    last_tx_tti: int = -1
     tx_attempts: int = 0
-    ack_events: list[AckEvent] = field(default_factory=list)
+    #: 只记首传；重传不带新数据，不进这里
+    tx_events: list[TxEvent] = field(default_factory=list)
 
     @property
     def completed(self) -> bool:
-        return self.bytes_acked >= self.bytes_arrived > 0
+        return self.bytes_sent >= self.bytes_arrived > 0
+
+    # -- 历史字段名的只读别名（结果 JSON 与旧分析脚本还在用） --------------
+    @property
+    def bytes_acked(self) -> int:
+        return self.bytes_sent
+
+    @property
+    def last_ack_tti(self) -> int:
+        return self.last_tx_tti
+
+    @property
+    def ack_events(self) -> list[TxEvent]:
+        return self.tx_events
 
 
 @dataclass
@@ -335,36 +377,37 @@ class DrbQueue:
         self.items.append(ArrivalItem(int(tti), n, n))
 
     def transmit(self, tti: int, scheduled_bytes: int, payload_bytes: int,
-                 *, ack: bool) -> int:
-        """记录一次空口发送。只有 ACK 才从队列扣 payload。"""
+                 *, ack: bool, is_retx: bool = False) -> int:
+        """记录一次空口发送。**发送即从队列扣 payload，与 ACK 无关。**
+
+        ``is_retx=True`` 的那次不带新数据——它的字节在首传时就已经离开
+        buffer——所以只累加 ``tx_attempts``（资源占用的证据），不动队列、
+        不产生 TxEvent、不推进 busy period。
+        """
         b = self.active
         if b is None or payload_bytes <= 0:
+            return 0
+        if is_retx:
+            b.tx_attempts += 1
             return 0
         if b.first_tx_tti < 0:
             b.first_tx_tti = int(tti)
         b.tx_attempts += 1
-        # 首传等待属于到达对象，而不是整个 busy period。一次 TB 可以拼接多个
-        # FIFO 对象；即便 NACK，它们也已经发生过首传，不能等 ACK 后才记起点。
-        mark_left = min(int(payload_bytes), self.queued_bytes)
-        for item in self.items:
-            if mark_left <= 0:
-                break
-            covered = min(int(item.remaining_bytes), mark_left)
-            if covered > 0 and item.first_tx_tti < 0:
-                item.first_tx_tti = int(tti)
-            mark_left -= covered
-        if not ack:
-            return 0
         payload = min(int(payload_bytes), self.queued_bytes)
+        if payload <= 0:
+            return 0
         padding = max(0, int(scheduled_bytes) - payload)
         self.queued_bytes -= payload
-        b.bytes_acked += payload
-        b.last_ack_tti = int(tti)
-        b.ack_events.append(AckEvent(int(tti), payload, int(scheduled_bytes), padding))
+        b.bytes_sent += payload
+        b.last_tx_tti = int(tti)
+        b.tx_events.append(
+            TxEvent(int(tti), payload, int(scheduled_bytes), padding, bool(ack)))
         consume_left = payload
         while consume_left > 0 and self.items:
             item = self.items[0]
             take = min(int(item.remaining_bytes), consume_left)
+            if item.first_tx_tti < 0:
+                item.first_tx_tti = int(tti)
             item.remaining_bytes -= take
             consume_left -= take
             if item.remaining_bytes == 0:
@@ -419,12 +462,12 @@ def burst_metrics(burst: BusyPeriod, tti_ms: float,
     * 含头速率与上述吞吐使用完全相同的 payload numerator 和去尾规则，唯一差异是
       denominator 还包含从 busy-period 到达到首次调度的等待时间。
     """
-    if not burst.completed or burst.first_tx_tti < 0 or burst.last_ack_tti < 0:
+    if not burst.completed or burst.first_tx_tti < 0 or burst.last_tx_tti < 0:
         return BurstMetrics(None, None, None, None, None)
     wait = max(0, burst.first_tx_tti - burst.start_tti) * float(tti_ms)
-    completion = (burst.last_ack_tti - burst.start_tti + 1) * float(tti_ms)
+    completion = (burst.last_tx_tti - burst.start_tti + 1) * float(tti_ms)
     pdb_miss = completion > float(burst.pdb_ms) if burst.pdb_ms > 0 else None
-    events = burst.ack_events
+    events = burst.tx_events
     if len(events) >= 2:
         vol = int(sum(e.payload_bytes for e in events[:-1]))
         duration_tti = events[-2].tti - burst.first_tx_tti + 1
@@ -943,9 +986,9 @@ class ExperienceTraffic:
         return max(0, int(tti) - b.start_tti) * self.tti_ms if b is not None else 0.0
 
     def transmit(self, ue: int, tti: int, scheduled_bytes: int,
-                 payload_bytes: int, *, ack: bool) -> int:
+                 payload_bytes: int, *, ack: bool, is_retx: bool = False) -> int:
         return self.queues[int(ue)].transmit(
-            tti, scheduled_bytes, payload_bytes, ack=ack)
+            tti, scheduled_bytes, payload_bytes, ack=ack, is_retx=is_retx)
 
     @property
     def backlog_bytes(self) -> int:
@@ -1425,10 +1468,9 @@ def _build_su_plan(
         full_fits = remaining_fits = False
         full_potential = int(potential_of[u])
         if pending is not None:
-            if q < int(pending.payload_bytes):
-                raise RuntimeError(
-                    f"UE {u} HARQ 队列只剩 {q} B，小于冻结 payload "
-                    f"{pending.payload_bytes} B")
+            # **这里不能再拿队列长度去校验冻结 payload。** buffer 在首传时就已经
+            # 扣掉了这些字节，重传不带新数据，所以队列剩多少与它无关——
+            # 它只是来占资源、并且插在新传前面的。
             full_need = remaining_need = int(pending.n_rbg)
             full_fits = remaining_fits = True
             if remaining_need > remaining:
@@ -2935,7 +2977,10 @@ def simulate_experience(
                     mode_tx_by_ue[mode][u] += 1
                     mode_nack_by_ue[mode][u] += int(not ack)
                     mode_expected_bler_by_ue[mode][u] += bler
-                acked = tr.transmit(u, tti, tb_bytes, payload, ack=ack)
+                # **发送即扣 buffer。** 重传不带新数据（字节在首传时就走了），
+                # 只累加 tx_attempts 记下它确实占了资源，返回 0。
+                sent = tr.transmit(u, tti, tb_bytes, payload, ack=ack,
+                                   is_retx=is_retx)
                 if is_retx:
                     retx_count[u] += 1
                     retx_nack_count[u] += int(not ack)
@@ -2955,7 +3000,7 @@ def simulate_experience(
                 if accounting == "scheduled_tbs":
                     credit = tb_bytes
                 elif accounting == "acked_goodput":
-                    credit = acked
+                    credit = sent
                 else:
                     credit = lookup.tbs_bytes_for_indices(
                         slot, mcs, rank, tuple(range(int(sys_cfg.num_rbg))))
@@ -2963,12 +3008,12 @@ def simulate_experience(
                 sched_cnt[u] += 1
                 mcs_sum[u] += mcs
                 rank_sum[u] += rank
-                served[u] += acked
+                served[u] += sent
                 scheduled_tbs[u] += tb_bytes
                 attempted_payload[u] += payload
                 padding[u] += pad
                 if in_measurement:
-                    served_measured[u] += acked
+                    served_measured[u] += sent
                     scheduled_tbs_measured[u] += tb_bytes
                     attempted_payload_measured[u] += payload
                     padding_measured[u] += pad
@@ -3036,14 +3081,14 @@ def simulate_experience(
                     class_physical_rbg_share[cls] = (
                         class_physical_rbg_share.get(cls, 0.0)
                         + n_alloc / max(len(grant.users), 1))
-                    class_acked[cls] = class_acked.get(cls, 0) + acked
+                    class_acked[cls] = class_acked.get(cls, 0) + sent
                 pos = cand_pos[u]
                 alloc = Allocation(
                     tti=tti, snapshot=snap, ue=u, traffic_class=cls, slot=slot,
                     rbg_indices=indices, n_rbg=n_alloc, n_prb=grant_prb,
                     mcs=mcs, rank=rank,
                     scheduled_bytes=tb_bytes, payload_bytes=payload,
-                    acked_bytes=acked, padding_bytes=pad, pf_credit_bytes=int(credit),
+                    acked_bytes=sent, padding_bytes=pad, pf_credit_bytes=int(credit),
                     queue_bytes_before=int(queue_before),
                     required_rbg=int(grant.required_rbg[side]),
                     fits_in_fullband=bool(grant.fits_in_fullband[side]),

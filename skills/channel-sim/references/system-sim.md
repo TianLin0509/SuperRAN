@@ -44,7 +44,7 @@ sr_system_sim(
 | `evaluation_mode` | 版本 | 调度/资源 | 失败包 | KPI 边界 | 用途 |
 |---|---|---|---|---|---|
 | `capacity` | `legacy_v1` | 历史全带口径，单次选择一个 SU 或一对 MU（MU 读 pair 表，默认） | 每 TB 最多一次 IR/CC；同 MCS/RBG 数/rank/TBS；重传恒为 SU | `trim=none/tail/head_tail` | 复现旧结果、满缓冲容量、公平性 |
-| `experience` | `experience_v2` | TBS 反查最小 RBG，同 TTI 可排多个 UE，尾料可留空 | 每 TB 最多一次 IR/CC；失败字节留 FIFO，后续成为新 TB | DRB busy-period + FIFO 到达对象；小 burst 可按 fractional slot | 大小包混跑、等待/PDB、按需分配 |
+| `experience` | `experience_v2` | TBS 反查最小 RBG，同 TTI 可排多个 UE，尾料可留空 | 每 TB 最多一次 IR/CC；buffer 在发送时扣减，重传只占资源不带新数据，传丢的进 `residual_bler` | DRB busy-period + FIFO 到达对象；小 burst 可按 fractional slot | 大小包混跑、等待/PDB、按需分配 |
 
 两者是**两个评估 profile**，不是一个算法的快慢档。当前 `experience_v2` 支持
 两用户、每用户 rank2 的数据受限 SU/MU 自适应；矩阵运算集中在
@@ -271,9 +271,12 @@ RngRun，保证每次只比较负载倍率。
 
 `experience_v2` 忽略 `trim` 的数值作用，改用事件记录器：
 
-1. buffer 从空变非空创建 DRB busy period，之后到达的数据合并，直到 ACK 后重新为空。
-2. 大 burst 的标准吞吐时间从**第一次传输**开始，末端排除最终让 buffer 变空的 ACK piece；
-   从到达到首传的 queue wait 单独上报。
+1. buffer 从空变非空创建 DRB busy period，之后到达的数据合并，直到**发送**后重新为空。
+   **buffer 在发送时扣减，不是在 ACK 时**（现场口径，2026-09-04）：数据被组进 TB 发出去
+   就离开 buffer，busy period 在"清空 buffer 的那一次发送"结束，KPI 当场可统计，
+   **完全不看这个 TB 正确与否**。
+2. 大 burst 的标准吞吐时间从**第一次传输**开始，末端排除最终让 buffer 变空的那一段
+   发送；从到达到首传的 queue wait 单独上报。
 3. 如果所有 buffered data 在一次初传 TB 内送完，`small_burst_policy="fractional_slot"`
    用 `(TBVol-PaddingVol)/TBVol × slot` 折算有效时长；`exclude` 可显式保留旧式盲区。
 4. 每个 FTP/mixed 文件还是一个独立 FIFO arrival object，分别记录 first-schedule wait、
@@ -285,6 +288,30 @@ RngRun，保证每次只比较负载倍率。
 
 因此 `small_queue_wait_ms_p95` / `small_completion_delay_ms_p95` /
 `small_pdb_miss_ratio` 与 busy-period throughput 是不同层级的指标，不能互换。
+
+### 误码与重传是怎么影响速率的
+
+**不是靠"传丢的不算"**，而是两条：
+
+1. **重传占资源。** 重传走 `is_retx=True`：只累加 `tx_attempts`，不动队列、不产生
+   `TxEvent`、不推进 busy period。它吃掉的时频资源让自己后面的数据和别的 UE 都发不了。
+2. **重传优先级高于新传。** 发完这个包 buffer 还没空时，时间继续统计；NACK 回来时
+   如果 buffer 还没空，就得先重发误码的包，把后面的数据往后推，掐头去尾时间被拉长。
+
+传丢的部分不从已发送字节里扣回去，只进 `residual_bler`。最小反例
+（强制首传全错、`tdd_pattern="D"`）：
+
+| 轨迹 | `cell_served_mbps` | `residual_bler` |
+|---|---|---|
+| 首传全对 | 368.8 | 0.0 |
+| 首传全错、重传全对 | **184.4** | 0.0 |
+| 首传全错、重传也全错 | **184.4**（逐值相同） | 1.0 |
+
+第二行相对第一行掉一半 = 重传吃掉的资源。第三行与第二行**逐值相同** = KPI 不看对错。
+
+**这条口径不只是 KPI 偏好，多进程 HARQ 必须靠它才自洽**：按 ACK 扣减时，被 NACK 的
+TB 其字节仍留在队列里，同一个 UE 的另一个 HARQ 进程会把同一批字节再发一遍，
+原 TB 的重传随后就会发现队列不够冻结的 payload。
 
 ### 本小区 PRB 利用率与逐 TTI RBG 分布
 

@@ -631,8 +631,8 @@ check(_q.active is _first_obj and _q.active.bytes_arrived == 150,
       "非空期间的新文件并入同一个 DRB busy period")
 _q.transmit(2, 80, 60, ack=True)
 _q.transmit(4, 100, 90, ack=True)
-check(_q.active is None and len(_q.done) == 1 and _q.done[0].bytes_acked == 150,
-      "buffer 重新变空时才结束 busy period，ACK 字节完整")
+check(_q.active is None and len(_q.done) == 1 and _q.done[0].bytes_sent == 150,
+      "buffer 重新变空时才结束 busy period，发送字节完整")
 check(len(_q.done_items) == 2
       and expm.arrival_item_metrics(_q.done_items[0], 0.5, 10.0) == (1.0, 2.5, False)
       and expm.arrival_item_metrics(_q.done_items[1], 0.5, 10.0) == (1.5, 2.0, False),
@@ -640,11 +640,11 @@ check(len(_q.done_items) == 2
 
 # --- 28.552 large burst：首传起算，排除清空 buffer 的最后一段 ---
 _bp = expm.BusyPeriod(start_tti=0, traffic_class="large", pdb_ms=10,
-                      bytes_arrived=350, bytes_acked=350,
-                      first_tx_tti=2, last_ack_tti=7, tx_attempts=3,
-                      ack_events=[expm.AckEvent(2, 100, 100, 0),
-                                  expm.AckEvent(4, 200, 200, 0),
-                                  expm.AckEvent(7, 50, 100, 50)])
+                      bytes_arrived=350, bytes_sent=350,
+                      first_tx_tti=2, last_tx_tti=7, tx_attempts=3,
+                      tx_events=[expm.TxEvent(2, 100, 100, 0),
+                                 expm.TxEvent(4, 200, 200, 0),
+                                 expm.TxEvent(7, 50, 100, 50)])
 _bm = expm.burst_metrics(_bp, 0.5)
 check(abs((_bm.throughput_mbps or 0) - 1.6) < 1e-9,
       f"large burst 用首传→倒数第二 ACK 的 300 B/1.5 ms（实得 {_bm.throughput_mbps} Mbps）")
@@ -655,9 +655,9 @@ check(_bm.queue_wait_ms == 1.0 and _bm.completion_delay_ms == 4.0,
 
 # --- Rel-19 小 burst：有效时间按 payload/TBVol 折成 slot 的一部分 ---
 _sp = expm.BusyPeriod(start_tti=3, traffic_class="small", pdb_ms=1,
-                      bytes_arrived=250, bytes_acked=250,
-                      first_tx_tti=3, last_ack_tti=3, tx_attempts=1,
-                      ack_events=[expm.AckEvent(3, 250, 1000, 750)])
+                      bytes_arrived=250, bytes_sent=250,
+                      first_tx_tti=3, last_tx_tti=3, tx_attempts=1,
+                      tx_events=[expm.TxEvent(3, 250, 1000, 750)])
 _sm = expm.burst_metrics(_sp, 0.5, "fractional_slot")
 check(abs((_sm.throughput_mbps or 0) - 16.0) < 1e-9
       and _sm.head_inclusive_throughput_mbps == _sm.throughput_mbps
@@ -665,8 +665,8 @@ check(abs((_sm.throughput_mbps or 0) - 16.0) < 1e-9
       f"小 burst 250/1000 TB 折成 0.125 ms，吞吐 16 Mbps（实得 {_sm.throughput_mbps}）")
 _sp_wait = expm.BusyPeriod(
     start_tti=1, traffic_class="small", pdb_ms=10,
-    bytes_arrived=250, bytes_acked=250, first_tx_tti=3, last_ack_tti=3,
-    tx_attempts=1, ack_events=[expm.AckEvent(3, 250, 1000, 750)])
+    bytes_arrived=250, bytes_sent=250, first_tx_tti=3, last_tx_tti=3,
+    tx_attempts=1, tx_events=[expm.TxEvent(3, 250, 1000, 750)])
 _sm_wait = expm.burst_metrics(_sp_wait, 0.5, "fractional_slot")
 check(abs((_sm_wait.head_inclusive_throughput_mbps or 0) - (2000 / 0.001125 / 1e6)) < 1e-9,
       "单 TB 小包含头速率 = payload / (首包时延 + fractional-slot airtime)")
@@ -843,11 +843,18 @@ for _combining in ("cc", "ir"):
         sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
         kpi=sysm.KpiConfig(warmup_tti=0),
     )
+# **IR 的好处不再体现在 served bytes 上。** 现场速率统计口径是"发送即计入、
+# 不看这个 TB 对不对"，所以两个合并方案的 cell_served_mbps 逐值相同
+# （都是 184.424）——它们发出去的首传一样多。IR 更好体现在**残留误块**上：
+# 重传失败率 0.0 vs 0.025。拿吞吐去比 IR/CC 在新口径下是个空断言。
 check(_harq_real["ir"].cell["retx_bler"]
       < _harq_real["cc"].cell["retx_bler"]
-      and _harq_real["ir"].cell["cell_served_mbps"]
-      > _harq_real["cc"].cell["cell_served_mbps"],
-      "真实 MCS20/16 dB 系统轨迹满足 IR 重传 BLER < CC，且 ACK 吞吐更高")
+      and _harq_real["ir"].cell["residual_bler"]
+      < _harq_real["cc"].cell["residual_bler"],
+      "真实 MCS20/16 dB 系统轨迹满足 IR 重传 BLER < CC，残留误块也更低")
+check(abs(_harq_real["ir"].cell["cell_served_mbps"]
+          - _harq_real["cc"].cell["cell_served_mbps"]) < 1e-9,
+      "两个合并方案的已发送字节逐值相同——发送即计入，与 TB 对错无关")
 
 # 服务小区 PRB 利用率是内生 KPI：full-buffer 必须 100%，无到达必须 0%。
 _load_cfg = sysm.SystemConfig(
@@ -2634,6 +2641,101 @@ check(_corr_arm.cell["mu_pair_rejection_reasons"].get(
 # 历史标量口径的反向对照（"配对完全不压 MCS"）随该路径一起删除——那条路径
 # 现在根本构造不出来。它想守住的性质由上面 _su_arm / _mu_arm 的正向断言覆盖：
 # pair 表口径下 MU 的首传 MCS 必须低于 SU，且 MU 专用 OLLA 确实在动。
+
+
+# --- 18 现场速率统计口径：buffer 在发送时扣减，不看 TB 对不对 --------------
+# **棘轮。** 把 DrbQueue.transmit 换回"只有 ACK 才扣队列"会让这一节全红。
+# 用户 2026-09-04 给的三条合同：
+#   1) 发出一个包后 buffer 空了，KPI 当场可统计，**完全不管这个包正确与否**；
+#   2) 误码与重传对速率的影响主要是**重传占资源**；
+#   3) 重传优先级高：发完还没空时 NACK 回来会插队，**拉长掐头去尾时间**。
+sect("18  速率统计口径：发送即扣 buffer")
+
+_bd_cls = sysm.TrafficClassConfig("small", 1.0, 100, 1.0, pdb_ms=10.0, is_small=True)
+
+# 合同 1：最后一个 TB 被 NACK，busy period 照样在**发送**那一刻结束
+_bd_q = expm.DrbQueue(0, _bd_cls)
+_bd_q.arrive(0, 100)
+_bd_sent = _bd_q.transmit(2, 120, 100, ack=False)      # 首传就 NACK
+check(_bd_sent == 100 and _bd_q.queued_bytes == 0,
+      f"NACK 的首传照样把 payload 从 buffer 扣掉（实得 sent={_bd_sent}、"
+      f"剩余={_bd_q.queued_bytes}）")
+check(_bd_q.active is None and len(_bd_q.done) == 1
+      and _bd_q.done[0].last_tx_tti == 2 and _bd_q.done[0].bytes_sent == 100,
+      "busy period 在清空 buffer 的那次**发送**结束，不等 ACK")
+
+# 合同 2：重传不带新数据，只占资源
+_bd_q2 = expm.DrbQueue(0, _bd_cls)
+_bd_q2.arrive(0, 300)
+_bd_q2.transmit(1, 100, 100, ack=False)                 # 首传 NACK
+_bd_after_first = _bd_q2.queued_bytes
+_bd_retx = _bd_q2.transmit(3, 100, 100, ack=True, is_retx=True)
+check(_bd_after_first == 200 and _bd_retx == 0
+      and _bd_q2.queued_bytes == 200,
+      f"重传返回 0 且不动 buffer（首传后 {_bd_after_first} B，重传后 "
+      f"{_bd_q2.queued_bytes} B）")
+check(_bd_q2.active is not None and _bd_q2.active.tx_attempts == 2
+      and len(_bd_q2.active.tx_events) == 1,
+      "重传只累加 tx_attempts（资源占用的证据），不产生 TxEvent")
+
+# 合同 3：重传插队 → 掐头去尾时间被拉长 → 速率下降。
+# 同一条链路、同一份话务，只把首传 BLER 从 0 抬到 1（强制每个 TB 都要重传）。
+_bd_point = sysm.UeLinkTable(
+    ue=0, sinr_db=np.array([[16.0]]), mcs=np.array([[20]]),
+    se=np.array([[la.MCS_TABLE_3[20].se]]),
+    best_rank=np.array([1], dtype=int), best_se=np.array([la.MCS_TABLE_3[20].se]),
+    geo_sinr_db=16.0, outage=np.array([False]), mcs_table=3, target_bler=0.1)
+# 三条轨迹：首传全对 / 首传全错但重传全对 / 首传与重传都全错。
+_bd_old_bler = expm._bler_lookup
+_bd_old_retx = la.harq_retransmission_bler
+_bd_runs = {}
+
+
+def _bd_retx_bler(mcs, sinr, *, combining="ir", table=3, _v=1.0):
+    return {"bler": float(_v), "lookup_mcs": int(mcs),
+            "lookup_sinr_db": float(sinr), "combining": str(combining),
+            "table": int(table)}
+
+
+try:
+    for _bd_name, _bd_first, _bd_retx_p in (
+            ("no_error", 0.0, 0.0), ("retx_ok", 1.0, 0.0),
+            ("retx_fail", 1.0, 1.0)):
+        expm._bler_lookup = lambda _m, _s, _v=_bd_first: _v
+        la.harq_retransmission_bler = (
+            lambda m, s, _p=_bd_retx_p, **kw: _bd_retx_bler(m, s, _v=_p, **kw))
+        _bd_runs[_bd_name] = sysm.simulate(
+            [_bd_point],
+            sys_cfg=sysm.SystemConfig(evaluation_mode="experience",
+                                      duration_s=1.0, tdd_pattern="D",
+                                      seed=230823),
+            traffic=sysm.TrafficConfig(model="full_buffer"),
+            sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+            kpi=sysm.KpiConfig(warmup_tti=0))
+finally:
+    expm._bler_lookup = _bd_old_bler
+    la.harq_retransmission_bler = _bd_old_retx
+_bd_clean = _bd_runs["no_error"].cell
+_bd_dirty = _bd_runs["retx_ok"].cell
+_bd_lost = _bd_runs["retx_fail"].cell
+print(f"  首传全对 {_bd_clean['cell_served_mbps']:.1f} Mbps / 首传全错重传全对 "
+      f"{_bd_dirty['cell_served_mbps']:.1f} Mbps / 首传重传都错 "
+      f"{_bd_lost['cell_served_mbps']:.1f} Mbps"
+      f"（重传次数 {_bd_dirty.get('retx_attempts')}）")
+check(_bd_dirty["retx_attempts"] > 0 and _bd_clean["retx_attempts"] == 0,
+      "强制 NACK 轨迹确实产生重传，对照轨迹一次都没有")
+# 合同 2：误码影响速率的方式是"重传占资源"，不是"传丢的不算"
+check(_bd_dirty["cell_served_mbps"] < 0.6 * _bd_clean["cell_served_mbps"],
+      f"重传吃掉资源让吞吐掉到不足六成（{_bd_clean['cell_served_mbps']:.1f} → "
+      f"{_bd_dirty['cell_served_mbps']:.1f} Mbps）——这就是误码影响速率的方式")
+# 合同 1：正确与否完全不进已发送字节
+check(abs(_bd_dirty["cell_served_mbps"] - _bd_lost["cell_served_mbps"]) < 1e-9,
+      f"重传全对与重传全丢的已发送字节逐值相同"
+      f"（{_bd_dirty['cell_served_mbps']:.4f} vs "
+      f"{_bd_lost['cell_served_mbps']:.4f}）——KPI 不看 TB 对不对")
+check(_bd_lost["residual_bler"] > 0.99 and _bd_dirty["residual_bler"] < 1e-9,
+      f"传丢的部分只体现在 residual_bler（{_bd_dirty['residual_bler']:.3f} → "
+      f"{_bd_lost['residual_bler']:.3f}），不从已发送字节里扣回去")
 
 print("\n" + "=" * 70)
 if FAILED:
