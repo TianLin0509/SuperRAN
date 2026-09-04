@@ -13,6 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from superran import amc_policy as ap  # noqa: E402
+from superran import experience as exp_mod  # noqa: E402
 from superran.experience import TbsLookup  # noqa: E402
 from superran.scheduler_finalize import (  # noqa: E402
     CandidateGrant,
@@ -238,6 +240,97 @@ def test_end_to_end_directional_validation_experiments() -> None:
         row["partner_ue"]: row["useful_bytes_per_rbg"]
         for row in decision["evaluations"]}
     assert densities[2] > densities[1]
+
+
+# ---------------------------------------------------------------------------
+# HARQ 重传的资源身份：冻结的是 PRB 数，不是 RBG 个数
+# ---------------------------------------------------------------------------
+# 51 RB 的 Type-0 分组是 (8,8,8,8,8,8,3)，尾组只有 3 PRB。以前 _HarqTb 只冻结
+# RBG **个数**，重传按优先级顺序取前 n 个 RBG，于是首传落在 3 PRB 尾组、重传
+# 落到 8 PRB 普通组时，同 MCS/rank/个数 算出来的 TBS 是原来的 2.7 倍——一个
+# TB 在重传时变了大小。等长分组（绝大多数配置）看不到这个 bug。
+_UNEVEN_SIZES = (8, 8, 8, 8, 8, 8, 3)
+
+
+def _uneven_lookup() -> TbsLookup:
+    return TbsLookup.build(len(_UNEVEN_SIZES), 8, 0.7,
+                           rbg_prb_sizes=_UNEVEN_SIZES)
+
+
+def test_uneven_rbg_makes_group_count_a_useless_tbs_identity():
+    """先证明这个坑真的存在：同 MCS/rank、同样 1 个 RBG，TBS 差 2 倍以上。"""
+    lookup = _uneven_lookup()
+    tail = int(lookup.tbs_bytes_for_indices("D", 23, 2, (6,)))    # 3 PRB
+    head = int(lookup.tbs_bytes_for_indices("D", 23, 2, (0,)))    # 8 PRB
+    assert head > 2 * tail, (tail, head)
+
+
+def test_retx_indices_matches_the_frozen_prb_count_not_the_group_count():
+    lookup = _uneven_lookup()
+    # 优先级顺序把 8 PRB 的组排在前面，尾组排最后。
+    ordered = (0, 1, 2, 3, 4, 5, 6)
+    # 冻结 3 PRB（首传用了尾组）：必须挑回尾组，而不是顺手拿第一个 8 PRB 组。
+    assert exp_mod._retx_indices(ordered, lookup, 3) == (6,)
+    # 冻结 11 PRB = 8 + 3：允许跨组，但 PRB 总数必须精确命中。
+    assert exp_mod._retx_indices(ordered, lookup, 11) == (0, 6)
+    # 凑不出精确的 PRB 数就返回 None，让调用方把重传推迟，而不是换个大小发。
+    assert exp_mod._retx_indices((0, 1, 2), lookup, 3) is None
+    assert exp_mod._retx_indices(ordered, lookup, 0) is None
+
+
+def test_retx_indices_is_bit_identical_to_head_slice_when_groups_are_equal():
+    """等长分组下必须与旧的 ``ordered[:n]`` 逐位一致，不能顺带改了主流配置。"""
+    lookup = TbsLookup.build(17, 16, 0.7)
+    ordered = tuple(range(17))
+    for n in range(1, 18):
+        assert exp_mod._retx_indices(ordered, lookup, 16 * n) == ordered[:n]
+
+
+def _retx_su_plan(*, frequency_aware: bool, cursor: int):
+    """构造一个"首传占了 3 PRB 尾组、重传时优先级把 8 PRB 组排前面"的 TTI。"""
+    lookup = _uneven_lookup()
+    n_rbg = len(_UNEVEN_SIZES)
+    frozen_tbs = int(lookup.tbs_bytes_for_indices("D", 23, 2, (6,)))
+    pending = exp_mod._HarqTb(
+        mcs=23, rank=2, n_rbg=1, n_prb=3,
+        tb_bytes=frozen_tbs, payload_bytes=frozen_tbs,
+        slot="D", first_tti=0, first_mode="SU",
+        feedback=ap.FirstTxFeedback(
+            ue=0, ack=False, mcs=23, rank=2, realized_se=0.0,
+            tx_tti=0, effective_tti=1, use_mu_olla=False),
+        state="retx_ready")
+    # 逐 RBG SINR 让 8 PRB 的组看起来更好，频选一定先拿它们。
+    per_rbg = np.array([30.0, 29.0, 28.0, 27.0, 26.0, 25.0, 5.0])
+    table = SimpleNamespace(
+        sinr_db=np.full((1, 4), 25.0),
+        sinr_tx_db=np.full((1, 4), 25.0),
+        sinr_rbg_db=np.tile(per_rbg, (1, 4, 1)),
+        sinr_tx_rbg_db=np.tile(per_rbg, (1, 4, 1)),
+        outage=None)
+    return exp_mod._build_su_plan(
+        [0], queue_bytes={0: frozen_tbs}, lookup=lookup, slot="D",
+        num_rbg=n_rbg, rank_of={0: 2}, mcs_of={0: 23},
+        base_tx_sinr_of={0: 25.0}, mcs_without_olla_of={0: 23},
+        true_sinr_of={0: 25.0}, potential_of={0: frozen_tbs},
+        blocked_data=False, cursor=cursor, tables=[table], snap=0,
+        su_olla_db=np.zeros(1), olla_enabled=False,
+        frequency_aware=frequency_aware, harq_pending={0: pending})
+
+
+@pytest.mark.parametrize(
+    ("frequency_aware", "cursor"), [(False, 0), (True, 0)])
+def test_retransmission_reproduces_the_frozen_tbs_on_an_uneven_carrier(
+        frequency_aware, cursor):
+    """棘轮：把 _retx_indices 换回 ordered[:n] 会让这里抛
+    「HARQ 重传的同 MCS/RBG/rank 未复现原 TBS」。"""
+    lookup = _uneven_lookup()
+    plan = _retx_su_plan(frequency_aware=frequency_aware, cursor=cursor)
+    assert len(plan.grants) == 1
+    grant = plan.grants[0]
+    prb = sum(_UNEVEN_SIZES[i] for i in grant.rbg_indices)
+    assert prb == 3, (grant.rbg_indices, prb)
+    assert int(grant.tbs_bytes[0]) == int(
+        lookup.tbs_bytes_for_indices("D", 23, 2, (6,)))
 
 
 if __name__ == "__main__":

@@ -649,6 +649,10 @@ class _HarqTb:
     mcs: int
     rank: int
     n_rbg: int
+    # 冻结的**PRB 数**。Type-0 分组在 51 RB 这类带宽下首尾组不足名义 P
+    # （(8,8,8,8,8,8,3)），只冻结 RBG 个数不足以复现 TBS：重传落到
+    # 8 PRB 组时 TBS 会是首传落在 3 PRB 尾组时的 2.7 倍。
+    n_prb: int
     tb_bytes: int
     payload_bytes: int
     slot: str
@@ -1317,6 +1321,36 @@ def _frequency_pool_audit(
     )
 
 
+def _retx_indices(ordered: Sequence[int], lookup: TbsLookup,
+                  n_prb: int) -> tuple[int, ...] | None:
+    """按优先级顺序挑出**PRB 数正好等于** ``n_prb`` 的一组 RBG。
+
+    重传必须复现首传的 TBS，而 TBS 只取决于 RE 数，也就是 PRB 数——不是 RBG
+    个数。等长分组下（``rbg_prb_sizes`` 全相同，绝大多数配置）本函数按顺序取
+    前 k 个，与旧的 ``ordered[:n]`` 逐位一致；只有首尾组不足名义 P 的载波
+    （51 RB → ``(8,...,8,3)``）才会走到跳过分支。
+
+    凑不出恰好 ``n_prb``（例如尾组这一 TTI 被别人占了）时返回 ``None``，
+    调用方把这次重传推迟到下一个同类型时隙——**不允许**退而求其次用别的
+    PRB 数，那等于让重传的 TB 变了大小。
+    """
+    sizes = lookup.rbg_prb_sizes
+    target = int(n_prb)
+    if target <= 0:
+        return None
+    picked: list[int] = []
+    total = 0
+    for idx in ordered:
+        width = int(sizes[int(idx)])
+        if total + width > target:
+            continue
+        picked.append(int(idx))
+        total += width
+        if total == target:
+            return tuple(picked)
+    return None
+
+
 def _build_su_plan(
     ordered_users: Sequence[int], *, queue_bytes: dict[int, int],
     lookup: TbsLookup, slot: str, num_rbg: int,
@@ -1366,7 +1400,9 @@ def _build_su_plan(
                 score = np.asarray(base_rows[snap, rank - 1], dtype=float)
                 ordered = sfreq.quality_order(
                     tuple(available), score, cursor=cursor)
-                indices = tuple(ordered[:n])
+                indices = _retx_indices(ordered, lookup, int(pending.n_prb))
+                if indices is None:
+                    continue
                 frequency_score_gain = float(
                     np.mean(score[np.asarray(indices, dtype=int)])
                     - np.mean(score[np.asarray(tuple(available), dtype=int)]))
@@ -1375,8 +1411,12 @@ def _build_su_plan(
                 true_sinr = _subset_db(
                     tables[u].sinr_rbg_db[snap, rank - 1], indices)
             else:
-                indices = tuple(sfreq.rotated_order(
-                    tuple(available), cursor=cursor, total_rbg=num_rbg)[:n])
+                indices = _retx_indices(
+                    sfreq.rotated_order(
+                        tuple(available), cursor=cursor, total_rbg=num_rbg),
+                    lookup, int(pending.n_prb))
+                if indices is None:
+                    continue
                 base_rows = (tables[u].sinr_tx_db
                              if tables[u].sinr_tx_db is not None
                              else tables[u].sinr_db)
@@ -1384,6 +1424,8 @@ def _build_su_plan(
                 true_sinr = _granted_true_sinr_db(
                     tables[u], snap, rank, indices,
                     float(tables[u].sinr_db[snap, rank - 1]))
+            n = len(indices)
+            full_need = remaining_need = n
             no_olla_mcs = _select_mcs(base_tx, lookup)
             current_tbs = int(
                 lookup.tbs_bytes_for_indices(slot, mcs, rank, indices))
@@ -2797,13 +2839,15 @@ def simulate_experience(
                     if pending_tb.state != "retx_ready":
                         raise RuntimeError(
                             "尚未收到反馈的 HARQ TB 不得进入发送路径")
-                    identity = (mcs, n_alloc, rank, tb_bytes)
+                    # 比 PRB 数而不是 RBG 个数：TBS 只由 RE 数决定，而不等长
+                    # 分组下同样是 1 个 RBG 可以是 8 PRB 也可以是 3 PRB。
+                    identity = (mcs, grant_prb, rank, tb_bytes)
                     expected_identity = (
-                        int(pending_tb.mcs), int(pending_tb.n_rbg),
+                        int(pending_tb.mcs), int(pending_tb.n_prb),
                         int(pending_tb.rank), int(pending_tb.tb_bytes))
                     if identity != expected_identity:
                         raise RuntimeError(
-                            "HARQ 重传身份被改写："
+                            "HARQ 重传身份被改写（mcs, n_prb, rank, tb_bytes）："
                             f"actual={identity}, expected={expected_identity}")
                     payload = int(pending_tb.payload_bytes)
                 else:
@@ -2926,7 +2970,7 @@ def simulate_experience(
                     # outcome 在发送时抽样，但只能由下一轮顶部的 due-event
                     # 路径交给 OLLA 与 RankController。
                     harq_pending[u] = _HarqTb(
-                        mcs=mcs, rank=rank, n_rbg=n_alloc,
+                        mcs=mcs, rank=rank, n_rbg=n_alloc, n_prb=grant_prb,
                         tb_bytes=tb_bytes, payload_bytes=payload,
                         slot=slot, first_tti=tti,
                         first_mode=str(grant.mode),
