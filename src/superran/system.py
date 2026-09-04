@@ -14,7 +14,8 @@
 ``TrafficConfig(model="full_buffer")``。缓冲区永不空 ⇒ 按需 RBG 反查恒等于
 全带宽、每 TTI 一个 SU（或一对 MU）。调度、AMC、HARQ、解调 SINR 聚合一律
 照体验口径走，**没有为它开的任何特例**。代价是 busy period 永不结束，
-28.552 的体验速率因此按定义无定义，如实报 ``None``。
+28.552 的 busy-period 吞吐因此无边界可用，如实报 ``None``；用户体验速率改走
+ITU-R M.2412 / TR 38.913 口径（``ue_served_p5_mbps``），任何话务下都有定义。
 
 架构上分两相，这是能跑十万 TTI 的关键：
 
@@ -149,8 +150,10 @@ class TrafficConfig:
     ``full_buffer`` 是"话务开到最大"这个配置点，也就是过去所说的**容量仿真**：
     缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU）。
     调度、AMC、HARQ、解调 SINR 聚合全部沿用体验模式的定义，没有任何特例。
-    代价是 busy period 永不结束，**28.552 的体验速率在这个配置下按定义无定义**，
-    如实报 ``None``；容量口径看 ``cell_served_mbps`` 与 PRB 利用率。
+    代价是 busy period 永不结束，**28.552 的 busy-period 吞吐在这个配置下无边界
+    可用**，如实报 ``None``。**用户体验速率仍然有定义**，走 ITU-R M.2412 /
+    TR 38.913 口径 ``ue_served_p5_mbps``（每 UE 已服务净荷 ÷ 观测窗长的 5% 分位，
+    即 cell-edge user throughput）；小区总吞吐看 ``cell_served_mbps`` 与 PRB 利用率。
     """
 
     model: TrafficModel = "ftp3"
@@ -299,8 +302,9 @@ class TrafficConfig:
             d |= {"cbr_mbps": self.cbr_mbps}
         elif self.model == "full_buffer":
             d |= {"note": ("话务开到最大（旧称容量仿真）：缓冲区永不空，按需 RBG "
-                           "反查恒等于全带宽。体验类 KPI 按定义无定义、报 None；"
-                           "容量口径看 cell_served_mbps 与 PRB 利用率。")}
+                           "反查恒等于全带宽。28.552 的 busy-period 吞吐无边界可用、"
+                           "报 None；用户体验速率走 ITU 口径 ue_served_p5_mbps，"
+                           "小区总吞吐看 cell_served_mbps 与 PRB 利用率。")}
         elif self.model in ("mixed", "cdf"):
             d |= {
                 "classes": [c.as_dict() for c in self.resolved_classes()],
@@ -2605,8 +2609,9 @@ def simulate(
     全带宽、每 TTI 一个 SU（或一对 MU），这正是容量口径。解调 SINR 仍按本次实际
     授予的那几个 RBG 聚合——full buffer 下"那几个"天然就是全部，所以不需要、
     也不允许为它开任何特例分支。代价是 busy period 永不结束，因此 28.552 的
-    体验速率在该配置下**按定义无定义**，如实报 ``None``；容量口径看
-    ``cell_served_mbps`` 与 PRB 利用率。
+    **busy-period 吞吐**在该配置下无边界可用，如实报 ``None``。**用户体验速率
+    仍然有定义**，走 ITU-R M.2412 / TR 38.913 口径 ``ue_served_p5_mbps``；
+    小区总吞吐看 ``cell_served_mbps`` 与 PRB 利用率。
 
     ``rng`` 是 :class:`rng.RngBook`，**按用途分流**：话务到达、HARQ 误码抽样、
     调度器决胜各拿一条互相独立的流。不给的话从 ``sys_cfg.seed`` 构造

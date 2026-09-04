@@ -1406,10 +1406,25 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 想让容量工况跑快一点的诱惑（比如满缓冲时跳过频选搜索）**明确否决**——那会重新造出
 一条只在特定话务下成立的路径，也就是这次合并要消灭的东西。
 
-代价必须说清楚：busy period 永不结束 ⇒ **28.552 的体验速率在 full_buffer 下按定义
-无定义**，`cell_experienced_mbps` / `drb_throughput_rel19_mbps` / `pdb_miss_ratio`
-一律报 `None`（不是 0），`notes` 里明说。容量口径看 `cell_served_mbps`、
-`serving_cell_prb_utilization`、`avg_mcs_first_tx`、`bler_first_tx`。
+### 「用户体验速率」有两个口径，别混
+
+这是最容易说错的一处：**不能笼统说「full_buffer 下体验速率无定义」**。
+
+| 口径 | 键 | 分母是什么 | full_buffer 下 |
+|---|---|---|---|
+| ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | **观测窗长**（每 UE 已服务净荷 ÷ 窗长，跨 UE 取分布） | **照常有值——这就是满缓冲评估的主指标**，5% 分位即 cell-edge user throughput |
+| TS 28.552 busy-period | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | **busy period 时长**（buffer 空→非空→空） | 无边界可用，报 `None`（不是 0） |
+
+它们**不是同一个数的两种精度**。轻载 FTP3 实测：`ue_served_mean_mbps=1.85` 而
+`cell_experienced_mbps=46.96`，同一次仿真差 25 倍——前者是 UE 全时段平均，
+后者是它的 burst 在飞时的速率。完成时延与 `pdb_miss_ratio` 同样依赖 burst 边界，
+full_buffer 下一并报 `None`。
+
+`ue_served_*` **无条件计算，不按话务模型分支**——任何话务下它都有意义，
+这也是它不构成「为 full_buffer 开特例」的原因。
+
+容量工况还要看 `cell_served_mbps`、`serving_cell_prb_utilization`、
+`avg_mcs_first_tx`、`bler_first_tx`。
 
 随容量分支一起下线的配置，给了都硬失败、不静默降级：
 `evaluation_mode`、`traffic_model="bimodal"`（连同 `p_small_rbg`/`p_full_rbg`/

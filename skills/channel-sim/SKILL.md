@@ -163,8 +163,11 @@ RBG 数、rank 与 TBS，最多一次 IR/CC 重传；失败字节留在 FIFO，�
 
 **"容量仿真"= `traffic_model="full_buffer"`，是这条路径上的一个话务配置，不是另一
 条分支。** 缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU）。
-代价是 busy period 永不结束，**体验速率按定义无定义、报 `None`（不是 0）**；容量口径
-看 `cell_served_mbps` 与 `serving_cell_prb_utilization`。要体验速率就用
+代价是 busy period 永不结束，**28.552 的 busy-period 吞吐**（`cell_experienced_mbps` /
+`drb_throughput_rel19_mbps` / 完成时延 / PDB）无边界可用，报 `None`（不是 0）。
+**用户体验速率仍然有定义**，走 ITU-R M.2412 / TR 38.913 口径：`ue_served_p5_mbps`
+是 cell-edge user throughput（每 UE 已服务净荷 ÷ 观测窗长的 5% 分位）。
+小区总吞吐看 `cell_served_mbps` 与 `serving_cell_prb_utilization`。要体验速率就用
 `traffic_model="mixed"`（推荐，大小文件 UE 同场竞争）/ `ftp3` / `cdf`。
 
 `experience_v2` 当前只接受 `preset_20b_256qam / MCS table 3` 预置表。Table 1/2

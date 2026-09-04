@@ -2003,8 +2003,10 @@ def sr_system_sim(
     缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU），
     这就是容量口径。调度、AMC、HARQ、解调 SINR 聚合全部照体验模式的定义走，
     没有任何为它开的特例。代价是 busy period 永不结束，**28.552 的体验速率在
-    这个配置下按定义无定义、如实报 ``None``**；容量口径看 ``cell_served_mbps``
-    与 ``serving_cell_prb_utilization``。
+    这个配置下无边界可用、如实报 ``None``**。**用户体验速率仍然有定义**，走
+    ITU-R M.2412 / TR 38.913 口径：``ue_served_p5_mbps`` 是 cell-edge user
+    throughput（每 UE 已服务净荷 ÷ 观测窗长的 5% 分位）。小区总吞吐看
+    ``cell_served_mbps`` 与 ``serving_cell_prb_utilization``。
 
     **``mu_accounting`` 决定 MU 的代价怎么记账**：``pair_table``（唯一支持的
     口径）MCS 从 pair 表的 ``CorrLoss + powerLoss`` 平移出来、TBS 按该 MCS 全带
@@ -2092,8 +2094,8 @@ def sr_system_sim(
         ``cdf``（两份 value,cdf 文件驱动包大小与包间隔 renewal process）/
         ``mixed``（推荐：大小 UE 混跑，包长与到达率外生定义）/
         ``full_buffer``（**这就是"容量仿真"**：话务开到最大、缓冲区永不空，
-        按需 RBG 退化成全带宽。体验速率按定义无定义、报 ``None``，
-        容量口径看 ``cell_served_mbps``）/ ``cbr``
+        按需 RBG 退化成全带宽。28.552 的 busy-period 吞吐报 ``None``，
+        用户体验速率走 ITU 口径 ``ue_served_p5_mbps``）/ ``cbr``
     arrival_rate_hz : 每用户每秒到达几个文件。控制负载——太高会积压，
         ``notes`` 会拦。
     packet_size_cdf / interarrival_cdf : UTF-8 两列经验 CDF，cdf 支持 0..1 或

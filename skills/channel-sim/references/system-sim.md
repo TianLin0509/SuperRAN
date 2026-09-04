@@ -57,9 +57,16 @@ FIFO 到达对象，小 burst 按 fractional slot 折算。
 "全部可用 RBG"，于是每 TTI 就是一个 SU（或一对 MU）拿全带宽。调度、AMC、HARQ、
 解调 SINR 聚合（按本次实际授予的那几个 RBG 算）**没有任何为它开的特例分支**。
 
-**代价要说清楚：`full_buffer` 下 busy period 永不结束，28.552 的体验速率按定义
-无定义。** `cell_experienced_mbps` / `drb_throughput_rel19_mbps` / `pdb_miss_ratio`
-一律返回 `None`（不是 0），`notes` 里明说。要体验速率就别用 full_buffer。
+**两个体验速率口径，不是同一个数的两种精度：**
+
+| 口径 | 键 | 量什么 | full_buffer 下 |
+|---|---|---|---|
+| ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | 每 UE 已服务净荷 ÷ 观测窗长，跨 UE 取分布；5% 分位 = cell-edge user throughput | **照常有值，这是满缓冲评估的主指标** |
+| TS 28.552 busy-period | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | 一个 burst 从首传到发完有多快，需要 buffer 排空来划边界 | **无边界可用，报 `None`（不是 0）** |
+
+轻载 FTP3 实测：`ue_served_mean_mbps=1.85` vs `cell_experienced_mbps=46.96`，
+同一次仿真差 25 倍——UE 全时段平均 vs 它的 burst 在飞时的速率，本来就不是一个量。
+`pdb_miss_ratio` 与完成时延同样依赖 burst 边界，full_buffer 下一并报 `None`。
 
 当前支持两用户、每用户 rank2 的数据受限 SU/MU 自适应；矩阵运算集中在
 `build_link_tables` 建表相，TTI 主循环只查 pair 表。逐 TTI 的 FIFO 与 RBG 分配是
@@ -226,7 +233,7 @@ SCS、BWP 起点与 RBG configuration 若存在也必须匹配；任何错配立
 | `ftp3` | 3GPP FTP Model 3，泊松到达的固定大小文件 | **默认**，评价体验速率的标准话务 |
 | `mixed` | 一部分 UE 发 1500 B 小文件，另一部分 UE 发大文件；包长和到达率都是外生量 | **experience_v2 推荐**，验证“小包不再偷走整个 TTI” |
 | `cdf` | 两份 `value,cdf` 文件分别驱动包大小与逐 UE renewal 包间隔 | 接现场话务 CDF；外部曲线未接入前只能用明确标注的 synthetic 输入 |
-| `full_buffer` | **这就是「容量仿真」**：话务开到最大、缓冲区永不空，按需 RBG 退化成全带宽 | 只看容量上限与调度公平性。**体验速率按定义无定义、报 `None`** |
+| `full_buffer` | **这就是「容量仿真」**：话务开到最大、缓冲区永不空，按需 RBG 退化成全带宽 | 容量上限、调度公平性、**ITU 口径的用户体验速率 `ue_served_p5_mbps`**；28.552 的 busy-period 吞吐无边界可用，报 `None` |
 | `cbr` | 恒定比特率 | 固定码率业务 |
 
 `ftp3` 的负载由 `file_bytes × 8 × arrival_rate_hz` 决定，

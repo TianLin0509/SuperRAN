@@ -13,8 +13,10 @@
 - **系统级** 删除 legacy 容量分支（system.py −958 行），容量口径改为 full_buffer 话务 —
   [详情](docs/changes/20260903-system-容量与体验模式合并.md)
 
-代价说清楚：`full_buffer` 下 DRB busy period 永不结束，28.552 的体验速率按定义
-无定义，报 `None`（旧路径报 0，那是在假装测到了）。同一组链路表上小区吞吐有约
+代价说清楚：`full_buffer` 下 DRB busy period 永不结束，28.552 的 **busy-period
+吞吐**无边界可用，报 `None`（旧路径报 0，那是在假装测到了）。**用户体验速率仍然
+有定义**，走 ITU-R M.2412 / TR 38.913 口径：新增 `ue_served_p5_mbps`（cell-edge
+user throughput）/ `_median_` / `_mean_`，无条件计算、任何话务下都有意义。同一组链路表上小区吞吐有约
 0.6% 的**系统性**平移（TB 级 SINR 压缩口径从全带值换成授予子带 dB 均值），
 B05 基准的两条判据仍成立但效应量缩约一半。**引用过旧绝对数的报告不可与新结果
 拼在同一张趋势图里。** 9 个系统级 preset 的实测锚点全部作废且尚未重测。

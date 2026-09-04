@@ -656,7 +656,7 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
     ("traffic_model", "系统话务", "select",
      ["ftp3", "mixed", "cdf", "full_buffer", "cbr"],
      "推荐 mixed；full_buffer 就是「容量仿真」：话务开到最大、缓冲区永不空，"
-     "体验速率按定义无定义、报 None"),
+     "28.552 busy-period 吞吐报 None；用户体验速率走 ITU 口径 ue_served_p5_mbps"),
     ("small_ue_share", "小业务 UE 占比", "number", (0.0, 1.0, 0.05),
      "mixed 模式；业务类先定义 bytes/arrival，再由 TBS 决定实际 RBG"),
     ("small_file_bytes", "小包 bytes", "number", (64, 100000, 64), "mixed 模式默认 1500 B"),

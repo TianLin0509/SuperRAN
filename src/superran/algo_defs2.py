@@ -216,7 +216,8 @@ def _traffic() -> Family:
                           "只是话务配置点：缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、"
                           "每 TTI 一个 SU（或一对 MU）。调度、AMC、HARQ、解调 SINR "
                           "聚合全部照体验口径走。代价是 busy period 永不结束，"
-                          "**体验速率按定义无定义、报 None**；看 cell_served_mbps。",
+                          "**28.552 的 busy-period 吞吐无边界可用、报 None**；"
+                          "用户体验速率走 ITU 口径 ue_served_p5_mbps，照常有值。",
                    when="测小区容量、对标 ITU 的平均小区谱效",
                    cost="最省"),
             Option("cbr", "CBR（恒定速率）",

@@ -467,9 +467,40 @@ check(abs(float(fb.cell["resource_utilization"]) - 1.0) < 1e-9,
       "满缓冲下 RBG 全部用满，没有留空的尾料")
 check(fb.cell["cell_experienced_mbps"] is None
       and fb.cell["drb_throughput_rel19_mbps"] is None,
-      "busy period 永不结束，体验速率报 None 而不是假装测到 0")
+      "busy period 永不结束，**28.552 的 busy-period 吞吐**报 None 而不是假装测到 0")
 check(float(fb.cell["cell_served_mbps"]) > 0.0,
       "容量口径仍然照常输出 cell_served_mbps")
+
+# **用户体验速率在 full buffer 下是有定义的，只是走另一个口径。**
+# ITU-R M.2412 / TR 38.913：每 UE 已服务净荷 / 观测窗长，5% 分位就是
+# cell-edge user throughput。把 ue_served_* 删掉或让它在 full buffer 下返回
+# None，这几条就会红——满缓冲评估的主指标不许消失。
+_fb_served = [float(row["served_mbps"]) for row in fb.users]
+check(all(np.isfinite(fb.cell[k]) and fb.cell[k] > 0 for k in
+          ("ue_served_mean_mbps", "ue_served_median_mbps", "ue_served_p5_mbps")),
+      "full buffer 下用户体验速率（ITU 口径）照常有值，不是 None")
+check(fb.cell["ue_served_p5_mbps"] <= fb.cell["ue_served_median_mbps"] + 1e-9
+      <= fb.cell["ue_served_mean_mbps"] + abs(fb.cell["ue_served_mean_mbps"]),
+      "5% 分位不高于中位；三个统计量来自同一个跨 UE 分布")
+check(abs(sum(_fb_served) - float(fb.cell["cell_served_mbps"])) < 1e-6,
+      "各 UE 已服务速率之和恰好等于小区吞吐——用户级与小区级同源")
+check(_fb_served[0] > _fb_served[-1],
+      "几何最好的 UE 拿到的用户吞吐高于最差的（PF 不抹平几何差异）")
+
+# 反向对照：同一条路径换成有限话务，两个口径给出**不同**的数。
+# 它们不是同一个量的两种精度——轻载下 UE 全时段平均远低于它 burst 在飞时的速率。
+_fin = sy.simulate(
+    tables,
+    sys_cfg=sy.SystemConfig(duration_s=0.4, tdd_pattern="DDDD"),
+    traffic=sy.TrafficConfig(model="ftp3", arrival_rate_hz=5.0, file_bytes=50_000),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False,
+                             frequency_selective="off"),
+    kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(94, 0))
+check(np.isfinite(_fin.cell["ue_served_mean_mbps"])
+      and _fin.cell["cell_experienced_mbps"] is not None,
+      "有限话务下两个口径同时有值")
+check(_fin.cell["ue_served_mean_mbps"] < _fin.cell["cell_experienced_mbps"],
+      "轻载下 UE 全时段平均低于 busy-period 吞吐——证明它们是两个定义，不可互换")
 
 
 print("\n" + "=" * 70)

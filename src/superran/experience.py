@@ -7,7 +7,8 @@
 这个话务配置点：缓冲区永不空 ⇒ :func:`_build_su_plan` 的按需 RBG 反查恒等于
 全带宽、每 TTI 一个 SU（或一对 MU）。调度、AMC、HARQ、解调 SINR 聚合全部照
 本模块的定义走，**没有为它开的任何特例分支**。代价是 busy period 永不结束，
-28.552 的体验速率因此按定义无定义，如实报 ``None``。
+28.552 的 busy-period 吞吐因此无边界可用，如实报 ``None``；用户体验速率改走
+ITU-R M.2412 / TR 38.913 口径（``ue_served_p5_mbps``），任何话务下都有定义。
 
 物理边界明确写在结果里：逐 RBG 频选与 RB 功控是两个独立开关；只要链路表
 带逐 RBG SINR，实际 grant 就按 bitmap 聚合并重选 MCS。当前聚合仍是 dB
@@ -3166,7 +3167,8 @@ def simulate_experience(
         ue_head_thp = float(np.mean(head_thp)) if head_thp else 0.0
         is_small_class = bool(q.traffic_class.is_small)
         # 无界话务（full buffer）没有外生到达对象，busy period 永不结束，
-        # 体验速率对它无定义——只有真实到达/未完成对象才让 UE 有资格进体验 KPI。
+        # **busy-period 口径**对它无定义——只有真实到达/未完成对象才让 UE 有资格
+        # 进这套 KPI。ITU 口径的 ue_served_* 不受此限，任何话务下都算。
         experience_eligible = bool(done_items or incomplete_items)
         if not is_small_class and experience_eligible:
             large_user_thp.append(ue_thp)
@@ -3453,7 +3455,25 @@ def simulate_experience(
         mu_prb_equiv / max(allocated_prb_equiv, _EPS))
     mu_paired_prb_utilization = float(
         mu_prb_equiv / max(available_prb_equiv, _EPS))
+    # **用户吞吐的分布：ITU-R M.2412 / TR 38.913 的"用户体验速率"口径。**
+    # 每 UE 在测量窗内 ACK 到的净荷字节 / 窗长，取跨 UE 的分布；5% 分位就是
+    # cell-edge user throughput。它和 busy-period 口径是**两个不同的定义**，
+    # 不是同一个数的两种精度：
+    #   * busy-period（下面的 cell_experienced_mbps / drb_throughput_rel19_mbps）
+    #     量的是"一个 burst 从首传到发完有多快"，需要 buffer 排空来划边界；
+    #   * 这里量的是"一个用户在一段时间里平均拿到多少"，只需要一个观测窗。
+    # 满缓冲评估用的正是后者——前者在 full buffer 下没有边界可用，后者照常成立。
+    # **无条件计算，不按话务模型分支**：任何话务下它都有意义。
+    user_served = [float(row["served_mbps"]) for row in users]
     cell = {
+        "ue_served_mean_mbps": _mean(user_served),
+        "ue_served_median_mbps": _pct(user_served, 50),
+        "ue_served_p5_mbps": _pct(user_served, 5),
+        "ue_served_throughput_definition": (
+            "per-UE ACKed payload bytes over the measurement window divided by "
+            "the window duration; the 5th percentile is the ITU-R M.2412 / "
+            "TR 38.913 cell-edge user throughput. Defined for every traffic "
+            "model including full buffer, where the busy-period KPIs are not."),
         "cell_experienced_mbps": _mean(user_exp) or 0.0,
         "cell_head_inclusive_experienced_mbps": _mean(user_head_exp) or 0.0,
         "cell_experienced_completed_only_mbps": (
@@ -3762,8 +3782,11 @@ def simulate_experience(
             weight=mixed_weight, epf_scale=mixed_epf_scale)
 
     if tr.unbounded:
-        # full buffer 没有 busy-period 边界，体验速率无定义；报 None 而不是
-        # 0.0——zero-inclusive 口径是为"有外生到达但被饿死"的 UE 设计的。
+        # **只有 busy-period 口径的那几个键无定义**：full buffer 下 buffer 永不
+        # 排空，burst 没有边界。这不影响 ue_served_* ——那是另一个定义
+        # （每 UE 已服务字节 / 观测窗长），满缓冲评估用的就是它，照常输出。
+        # 报 None 而不是 0.0：zero-inclusive 口径是为"有外生到达但被饿死"的
+        # UE 设计的，把"测不了"写成 0 会被当成"测到了 0 Mbps"。
         for _k in ("cell_experienced_mbps",
                    "cell_head_inclusive_experienced_mbps",
                    "cell_experienced_completed_only_mbps",
@@ -3896,9 +3919,15 @@ def simulate_experience(
     if n_snap < 4:
         notes.append(f"**信道快照只有 {n_snap} 个**，时间起伏被严重低估，PF 多用户分集不足。")
     if tr.unbounded:
-        notes.append("**话务无界（full buffer）**：busy period 永不结束，"
-                     "体验速率无定义，体验类 KPI 报 None（不是 0）；"
-                     "容量口径请看 cell_served_mbps。")
+        notes.append(
+            "**话务无界（full buffer）**：buffer 永不排空，burst 没有边界，"
+            "因此 **28.552 的 busy-period 吞吐**（cell_experienced_mbps / "
+            "drb_throughput_rel19_mbps / 完成时延 / PDB）无定义，报 None（不是 0）。"
+            "**用户体验速率仍然有定义**，只是走另一个口径：ue_served_p5_mbps "
+            "是 ITU-R M.2412 / TR 38.913 的 cell-edge user throughput（每 UE "
+            "已服务净荷 / 观测窗长的 5% 分位），ue_served_mean/median_mbps 是同一"
+            "分布的均值与中位；小区总吞吐看 cell_served_mbps。"
+            "**这两个口径不是同一个数的两种精度，不可互相顶替。**")
     if measured_bursts < 20 and not tr.unbounded:
         notes.append(f"只有 {measured_bursts} 个 busy period 进入体验 KPI，样本太少；"
                      "加长 duration_s 或调高到达率。")
