@@ -449,6 +449,20 @@ check(abs(legacy.cell["offered_mbps"] - 1.0) < 1e-9,
       "D/S/U 每个 TTI 都维护业务到达，DDDSU 不再漏掉 U 时隙的 20% CBR")
 
 
+def test_s_slot_fraction_single_source_of_truth() -> None:
+    """报告占比和调度承载必须读取同一个显式 S 时隙系数。"""
+    default = sy.SystemConfig(tdd_pattern="DDDSU")
+    custom = sy.SystemConfig(tdd_pattern="DDDSU", s_slot_dl_fraction=0.82)
+    assert abs(default.s_slot_dl_fraction - sy.S_SLOT_DL_FRACTION) < 1e-12
+    assert abs(default.dl_ratio - (3 + sy.S_SLOT_DL_FRACTION) / 5) < 1e-12
+    assert abs(custom.dl_ratio - (3 + 0.82) / 5) < 1e-12
+    assert abs(sy.infer_s_slot_fraction("DDDSU") - 10 / 14) < 1e-12
+    assert abs(sy.infer_s_slot_fraction("DDDDDDDSUU") - 6 / 14) < 1e-12
+
+
+test_s_slot_fraction_single_source_of_truth()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

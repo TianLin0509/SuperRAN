@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import time
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
@@ -53,9 +54,36 @@ def _finite_real(value: Any) -> bool:
         and np.isfinite(float(value))
     )
 
-#: S 时隙折合成多少个下行 TTI。大部分符号是下行，但有 GP 与上行符号。
-#: **主循环与 dl_ratio 必须用同一个数**，否则实际调度的下行比报告的多。
+#: S 时隙折合成多少个下行 TTI 的兼容默认值。0.7 是符号占比近似；
+#: 另一类按可用 RE 标定的系数不是同一口径，必须由用户显式覆盖。
+#: **主循环与 dl_ratio 必须用同一个配置值**，否则实际调度的下行比报告的多。
 S_SLOT_DL_FRACTION = 0.7
+
+# D/S/U 字符本身不包含 DwPTS/GP/UpPTS 的符号配比，不能从任意字符串凭空反推。
+# 这里只登记已经明确给出特殊时隙格式的产品图案；未知图案要求用户显式配置。
+_S_SLOT_FRACTION_BY_PATTERN = {
+    "DDDSU": 10.0 / 14.0,
+    "DDDDDDDSUU": 6.0 / 14.0,
+}
+
+
+def infer_s_slot_fraction(tdd_pattern: str) -> float:
+    """返回已登记 TDD 图案的 S 时隙下行符号占比建议值。
+
+    ``tdd_pattern`` 只标出整时隙类型，并没有携带特殊时隙内部的
+    DwPTS/GP/UpPTS 配置。因此本函数只认已经有物理定义的产品图案，不对未知图案
+    猜测；返回值也只是建议，不会覆盖 :class:`SystemConfig` 的显式配置。
+    """
+    pattern = str(tdd_pattern).strip().upper()
+    if not pattern or any(slot not in "DSU" for slot in pattern):
+        raise ValueError("tdd_pattern 只允许 D/S/U 且不能为空")
+    try:
+        return float(_S_SLOT_FRACTION_BY_PATTERN[pattern])
+    except KeyError as exc:
+        raise ValueError(
+            f"TDD 图案 {pattern!r} 没有已登记的特殊时隙符号配置；"
+            "请显式设置 s_slot_dl_fraction，不能只凭 D/S/U 字符猜测"
+        ) from exc
 
 EvaluationMode = Literal["capacity", "experience"]
 TrafficModel = Literal["full_buffer", "ftp3", "cbr", "bimodal", "mixed", "cdf"]
@@ -888,7 +916,10 @@ class SystemConfig:
     # Type-0 首尾 RBG 可能不足名义 P。None 保持历史等长行为；显式 tuple
     # 则是每组真实 PRB 数，TBS、功控和利用率全部以它为准。
     rbg_prb_sizes: tuple[int, ...] | None = None
-    tdd_pattern: str = "DDDSU"           # 只统计 D 时隙
+    tdd_pattern: str = "DDDSU"
+    # S 时隙相对完整 D 时隙的下行承载比例。默认保留 0.7 兼容旧结果；
+    # 报告 dl_ratio、capacity RE 预算与 experience TBS 查表共用这一份值。
+    s_slot_dl_fraction: float = S_SLOT_DL_FRACTION
     # 每个 TB 最多一次重传。IR：半谱效等效 MCS（默认）；CC：SINR +10log10(2)。
     harq_combining: HarqCombining = "ir"
     # ACK/NACK 要等上行时隙才回得来：TB 在 D/S 发出，反馈在其后第一个 U 上报，
@@ -955,6 +986,24 @@ class SystemConfig:
             raise ValueError("tdd_pattern 只允许 D/S/U 且不能为空")
         if not any(slot in "DS" for slot in pattern):
             raise ValueError("下行系统仿真的 tdd_pattern 至少需要一个 D 或 S 时隙")
+        if (isinstance(self.s_slot_dl_fraction, (bool, np.bool_))
+                or not _finite_real(self.s_slot_dl_fraction)
+                or not 0.0 < float(self.s_slot_dl_fraction) <= 1.0):
+            raise ValueError("s_slot_dl_fraction 必须是 (0,1] 内的有限数")
+        if "S" in pattern:
+            try:
+                suggested = infer_s_slot_fraction(pattern)
+            except ValueError:
+                suggested = None
+            if (suggested is not None
+                    and abs(float(self.s_slot_dl_fraction) - suggested) > 0.15):
+                warnings.warn(
+                    f"TDD 图案 {pattern} 的已登记 S 时隙建议值为 "
+                    f"{suggested:.3f}，当前 s_slot_dl_fraction="
+                    f"{float(self.s_slot_dl_fraction):.3f}；请确认符号/RE 折算口径",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         if str(self.harq_combining).lower() not in ("ir", "cc"):
             raise ValueError("harq_combining 只支持 ir / cc")
         if not isinstance(self.harq_feedback_delay, (bool, np.bool_)):
@@ -1000,9 +1049,10 @@ class SystemConfig:
 
     @property
     def dl_ratio(self) -> float:
-        """TDD 图案里下行时隙占比。S 时隙按 0.7 个下行折算（大部分符号是 D）。"""
+        """TDD 图案里的下行承载占比，S 时隙读取显式配置。"""
         p = self.tdd_pattern.upper() or "D"
-        return (p.count("D") + S_SLOT_DL_FRACTION * p.count("S")) / len(p)
+        return (p.count("D")
+                + float(self.s_slot_dl_fraction) * p.count("S")) / len(p)
 
     def as_dict(self) -> dict[str, Any]:
         return {"evaluation_mode": self.evaluation_mode,
@@ -1015,6 +1065,7 @@ class SystemConfig:
                 "rbg_boundaries": [list(pair) for pair in self.rbg_boundaries],
                 "num_rb": self.num_rb,
                 "tdd_pattern": self.tdd_pattern,
+                "s_slot_dl_fraction": float(self.s_slot_dl_fraction),
                 "harq_combining": str(self.harq_combining).lower(),
                 "harq_feedback_delay": bool(self.harq_feedback_delay),
                 "harq_feedback_offsets_tti": list(
@@ -2937,7 +2988,8 @@ def simulate(
 
         run = ex.simulate_experience(
             tables, sys_cfg=sys_cfg, traffic_cfg=traffic, sched=sched, kpi=kpi,
-            book=book, s_slot_fraction=S_SLOT_DL_FRACTION, progress=progress)
+            book=book, s_slot_fraction=float(sys_cfg.s_slot_dl_fraction),
+            progress=progress)
         return SystemResult(
             config={"system": sys_cfg.as_dict(), "traffic": traffic.as_dict(),
                     "scheduler": sched.as_dict(), "kpi": kpi.as_dict(),
@@ -2979,8 +3031,10 @@ def simulate(
                             "are reported in the CSI section)"),
                         "power_constraint": sys_cfg.power_constraint,
                         "crn_event_mapping": "harq and scheduler tie-break indexed by [TTI,UE]",
-                        "tbs_resources": ("38.214 TBS quantization with preset MCS table 3; "
-                                          "12 data symbols/RB and S-slot 0.7 scaling"),
+                        "tbs_resources": (
+                            "38.214 TBS quantization with preset MCS table 3; "
+                            "12 data symbols/RB and S-slot "
+                            f"{float(sys_cfg.s_slot_dl_fraction):g} scaling"),
                         "type1": ("single-panel Type-I-style beam-column subset; "
                                   "greedy multi-layer approximation"),
                     }},
@@ -3007,10 +3061,12 @@ def simulate(
     n_rb = sys_cfg.num_rb
     # 每 TTI 可用 RE：RB × 12 子载波 × 12 个数据符号（扣 DM-RS 与控制开销）
     re_per_tti = n_rb * 12 * 12
-    # **S 时隙不是满下行。** 主循环把 D 和 S 一视同仁地当整个下行 TTI 调度，
-    # 而 SystemConfig.dl_ratio 报告时又把 S 折成 0.7——同一个量两套口径，
-    # 于是"实际调度的下行"比"报告的下行"多。现在按同一个系数折 RE。
-    _re_of = {"D": re_per_tti, "S": int(re_per_tti * S_SLOT_DL_FRACTION)}
+    # **S 时隙不是满下行。** 主循环与 SystemConfig.dl_ratio 必须读取同一个显式
+    # 折算系数；否则"实际调度的下行"与"报告的下行"会悄悄变成两套口径。
+    _re_of = {
+        "D": re_per_tti,
+        "S": int(re_per_tti * float(sys_cfg.s_slot_dl_fraction)),
+    }
     snap_every = max(1, int(round(sys_cfg.snapshot_update_ms / sys_cfg.tti_ms)))
     n_snap = tables[0].sinr_db.shape[0]
 

@@ -464,17 +464,33 @@ _dd = sysm.SystemConfig(tdd_pattern="DDDD").dl_ratio
 _ds = sysm.SystemConfig(tdd_pattern="DDDS").dl_ratio
 check(abs(_dd - 1.0) < 1e-9 and abs(_ds - (3 + 0.7) / 4) < 1e-9,
       f"dl_ratio 用同一个常量（DDDD={_dd:.3f}, DDDS={_ds:.3f}）")
+check(abs(sysm.infer_s_slot_fraction("DDDSU") - 10 / 14) < 1e-12,
+      "DDDSU 的 S 时隙建议值来自 10/14 个下行符号")
+check(abs(sysm.infer_s_slot_fraction("DDDDDDDSUU") - 6 / 14) < 1e-12,
+      "DDDDDDDSUU 的 S 时隙建议值来自 6/14 个下行符号")
+_ds_custom = sysm.SystemConfig(
+    tdd_pattern="DDDS", s_slot_dl_fraction=0.82).dl_ratio
+check(abs(_ds_custom - (3 + 0.82) / 4) < 1e-12,
+      "dl_ratio 读取 SystemConfig.s_slot_dl_fraction，不再写死 0.7")
 # 纯 D 与含 S 的图案，实发字节必须有可分辨的差——否则说明 S 还是被当成满下行
 _tb_s = fake_tables(n_ue=6, n_snap=6, seed=17)
 _rd = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern="DDDD"),
                     traffic=sysm.TrafficConfig(model="full_buffer"))
 _rs = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern="SSSS"),
                     traffic=sysm.TrafficConfig(model="full_buffer"))
+_rs82 = sysm.simulate(
+    _tb_s,
+    sys_cfg=sysm.SystemConfig(
+        duration_s=1.0, tdd_pattern="SSSS", s_slot_dl_fraction=0.82),
+    traffic=sysm.TrafficConfig(model="full_buffer"))
 _bd = _rd.as_dict()["cell"]["cell_served_mbps"]
 _bs = _rs.as_dict()["cell"]["cell_served_mbps"]
+_bs82 = _rs82.as_dict()["cell"]["cell_served_mbps"]
 print(f"  全 D {_bd:.1f} Mbps vs 全 S {_bs:.1f} Mbps，比值 {_bs / max(_bd, 1e-9):.3f}")
 check(abs(_bs / max(_bd, 1e-9) - 0.7) < 0.06,
       f"全 S 图案的吞吐约为全 D 的 0.7 倍（实得 {_bs / max(_bd, 1e-9):.3f}）")
+check(abs(_bs82 / max(_bd, 1e-9) - 0.82) < 0.06,
+      f"自定义 0.82 后，全 S 调度承载约为全 D 的 0.82 倍（实得 {_bs82 / max(_bd, 1e-9):.3f}）")
 
 # --- bug C：p_idle_tti 是对标锚点不是仿真输入，偏离要告警 ---
 # **它从来不生成空闲 TTI**，改它只改报告里的解析式。不说清楚的话，

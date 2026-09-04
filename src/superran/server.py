@@ -1962,6 +1962,7 @@ def sr_system_sim(
     trim: str = "tail",
     small_burst_policy: str = "fractional_slot",
     tdd_pattern: str = "DDDSU",
+    s_slot_dl_fraction: float = 0.7,
     neighbor_prb_util: float = 0.3,
     neighbor_load_jitter: float = 0.05,
     csi_aging: bool | str = True,
@@ -2151,6 +2152,8 @@ def sr_system_sim(
         alpha=beta=1、gamma=0、w=1，严格退化成经典 PF；它不是未确认定义的 EPF。
     small_burst_policy : experience_v2 默认 ``fractional_slot``，按 28.552 Rel-19
         的 TB volume / padding volume 折算单时隙小 burst；``exclude`` 保留旧式盲区。
+    s_slot_dl_fraction : S 时隙相对完整 D 时隙的下行承载比例。默认 0.7 保持兼容；
+        报告 ``dl_ratio``、capacity RE 预算和 experience TBS 查表共用该值。
     mu_enabled : 是否允许 MU 配对。默认关，先看清 SU 基线。
     mu_corr_threshold : MU SUS 配对的归一化相关性上限，默认 0.7。
     olla_step_up_db / olla_step_down_db : 历史参数名；值是连续 MCS 档位步长，
@@ -2499,6 +2502,7 @@ def sr_system_sim(
         system_cfg = sysm.SystemConfig(
             evaluation_mode=mode, duration_s=float(duration_s),
             tdd_pattern=tdd_pattern, harq_combining=str(harq_combining),
+            s_slot_dl_fraction=float(s_slot_dl_fraction),
             harq_feedback_delay=_flag(harq_feedback_delay),
             seed=seed, snapshot_update_ms=snap_ms,
             power_constraint=str(power_constraint), rb_power_control=power_cfg,

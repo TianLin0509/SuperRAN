@@ -422,7 +422,10 @@ def derivations(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
 
     # --- 小区谱效的 TDD 归一 ---
     pat = str(cfg.get("tdd_pattern", "DDDSU")).upper() or "DDDSU"
-    dl_ratio = (pat.count("D") + 0.7 * pat.count("S")) / len(pat)
+    s_slot_fraction = float(cfg.get("s_slot_dl_fraction", 0.7))
+    if not 0.0 < s_slot_fraction <= 1.0:
+        raise ValueError("s_slot_dl_fraction 必须是 (0,1] 内的有限数")
+    dl_ratio = (pat.count("D") + s_slot_fraction * pat.count("S")) / len(pat)
     out.append({
         "key": "tdd_normalize",
         "name": "小区谱效的 TDD 归一",
@@ -433,10 +436,11 @@ def derivations(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
             ("TDD 图案", f"{pat}",
              f"{pat.count('D')} 个 D + {pat.count('S')} 个 S + "
              f"{pat.count('U')} 个 U，周期 {len(pat)} 个时隙"),
-            ("S 时隙折算", "按 0.7 个下行算",
-             "S 时隙大部分符号是下行，剩下给 GP 和上行导频"),
-            ("下行占比", "(D + 0.7×S) / 周期",
-             f"({pat.count('D')} + 0.7×{pat.count('S')}) / {len(pat)} = {dl_ratio:.4f}"),
+            ("S 时隙折算", f"按 {s_slot_fraction:g} 个下行算",
+             "该显式配置同时用于报告占比与调度 RE/TBS 预算"),
+            ("下行占比", "(D + α×S) / 周期",
+             f"({pat.count('D')} + {s_slot_fraction:g}×{pat.count('S')}) / "
+             f"{len(pat)} = {dl_ratio:.4f}"),
             ("归一", "仿真谱效 / 下行占比",
              f"仿真里一秒只有 {dl_ratio:.0%} 的时隙能发下行，"
              f"而 ITU 的参考值是按全下行定义的，所以要除以 {dl_ratio:.4f} 才可比"),

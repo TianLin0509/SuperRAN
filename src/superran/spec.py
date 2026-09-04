@@ -653,6 +653,8 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
     # --- 系统级仿真旋钮（sr_system_sim 用，不进 ChannelHub 的信道生成）---
     ("evaluation_mode", "系统评估模式", "select", ["capacity", "experience"],
      "capacity=历史全带调度；experience=DRB burst + 按需 RBG，多 UE/TTI"),
+    ("s_slot_dl_fraction", "S 时隙下行折算", "number", (0.01, 1.0, 0.01),
+     "默认 0.7 保持兼容；报告占比、capacity RE 与 experience TBS 共用该值"),
     ("replication_workers", "重复实验进程", "select", ["auto", "1", "2", "4", "8"],
      "auto 按 TTI×UE×重复数决定；短任务串行，长任务最多 4 进程；显式值会严格执行或报错"),
     ("traffic_model", "系统话务", "select",
@@ -797,6 +799,7 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
 #: 两处漂了的话页面显示的就不是实际会跑的值，而这种不一致没有任何提示。
 _SIM_DEFAULTS: dict[str, Any] = {
     "evaluation_mode": "capacity",
+    "s_slot_dl_fraction": 0.7,
     "replication_workers": "auto",
     "traffic_model": "ftp3",
     "small_ue_share": 0.5,
