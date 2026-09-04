@@ -503,6 +503,55 @@ def test_mu_admission_gates_are_explicit_and_reversible() -> None:
 
 test_mu_admission_gates_are_explicit_and_reversible()
 
+# ---------------------------------------------------------------------------
+section("9  两条主调度路径必须用同一个 PDSCH 开销口径（38.214 §5.1.3.2 步骤 1）")
+# **棘轮。** 把 system 的 _re_of 或 experience.TbsLookup 换回硬编码的
+# `PRB x 12 x 12`，下面几条会同时变红：那等于假设 DM-RS 与 PDCCH 都不占资源。
+# 判据不是"数值等于多少"，而是"改开销配置，两条路径的吞吐都必须跟着动"——
+# 硬编码的路径对配置免疫，比值会退化成 1.000。
+_oh_default = la.PdschOverhead()                                  # 126 RE/PRB
+_oh_free = la.PdschOverhead(dmrs_re_per_prb=0, pdcch_symbols=0)   # 144 RE/PRB
+_re_ratio = _oh_free.re_per_prb("D") / _oh_default.re_per_prb("D")
+check(abs(_re_ratio - 144.0 / 126.0) < 1e-12,
+      f"两组开销参数的每 PRB RE 之比 = 144/126（实得 {_re_ratio:.6f}）")
+
+# --- experience 侧：TbsLookup 必须消费传进去的开销 ---
+_lut_default = ex.TbsLookup.build(17, 16, sy.S_SLOT_DL_FRACTION)
+_lut_free = ex.TbsLookup.build(17, 16, sy.S_SLOT_DL_FRACTION, overhead=_oh_free)
+_tbs_ratio = (int(_lut_free.values[0, 12, 0, -1])
+              / int(_lut_default.values[0, 12, 0, -1]))
+check(abs(_tbs_ratio - _re_ratio) < 0.01,
+      f"TbsLookup 的 TBS 随开销口径同比变化（实得 {_tbs_ratio:.4f} vs "
+      f"RE 比 {_re_ratio:.4f}）")
+
+
+# --- legacy/capacity 侧：主循环的 _re_of 必须消费 sys_cfg.pdsch_overhead ---
+def _legacy_served(overhead):
+    return sy.simulate(
+        tables[:1],
+        sys_cfg=sy.SystemConfig(evaluation_mode="capacity", duration_s=0.05,
+                                tdd_pattern="DDDD", pdsch_overhead=overhead),
+        traffic=sy.TrafficConfig(model="full_buffer"),
+        sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+        kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(92, 0),
+    ).cell["cell_served_mbps"]
+
+
+_served_default = _legacy_served(None)
+_served_free = _legacy_served(_oh_free)
+_served_ratio = _served_free / max(_served_default, 1e-12)
+print(f"  legacy 主循环：126 RE/PRB -> {_served_default:.2f} Mbps，"
+      f"144 RE/PRB -> {_served_free:.2f} Mbps，比值 {_served_ratio:.4f}")
+check(_served_ratio > 1.05,
+      f"legacy 主循环确实读了 sys_cfg.pdsch_overhead（比值 {_served_ratio:.4f}；"
+      "硬编码 12x12 时会退化成 1.000）")
+check(abs(_served_ratio - _re_ratio) < 0.03,
+      f"legacy 吞吐随开销口径同比变化（实得 {_served_ratio:.4f} vs "
+      f"RE 比 {_re_ratio:.4f}）")
+check(_lut_default.overhead == _oh_default
+      and sy.SystemConfig().pdsch_overhead == _oh_default,
+      "两条路径的默认口径是同一个 PdschOverhead()，不会各自漂移")
+
 
 # ---------------------------------------------------------------------------
 section("9  Sionna RT 入口不能静默选错引擎，也不能误伤单窗口时间轴")

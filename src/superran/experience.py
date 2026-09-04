@@ -47,6 +47,10 @@ class TbsLookup:
     ``values`` 保留从 RBG0 开始的前缀表，兼容等长载波与旧 API；实际 grant
     会用 ``rbg_indices`` 把各组真实 PRB 数相加后查 TBS。这样 Configuration 2
     下 51 RB 的 ``[8,8,8,8,8,8,3]`` 尾组既不会丢，也不会被错算成 8 PRB。
+
+    每 PRB 的 RE 数由 ``overhead``（:class:`linkadapt.PdschOverhead`）决定，
+    已扣 DM-RS 与 PDCCH。``s_slot_fraction`` 现在只折算**符号数**，固定开销
+    随后只扣一次，因此 S/D 的 TBS 之比小于 ``s_slot_fraction``。
     """
 
     values: np.ndarray                 # int64 [2, 28, 4, num_rbg]，单位 byte
@@ -56,13 +60,16 @@ class TbsLookup:
     rbg_prb_sizes: tuple[int, ...]
     mcs_table: int = 3
     target_bler: float = 0.1
+    # DM-RS 与 PDCCH 开销口径；None 视作 la.PdschOverhead() 的默认值。
+    overhead: la.PdschOverhead = field(default_factory=la.PdschOverhead)
 
     @classmethod
     def build(cls, num_rbg: int, rb_per_rbg: int,
               s_slot_fraction: float = 0.7, *,
               rbg_prb_sizes: Sequence[int] | None = None,
               mcs_table: int = 3,
-              target_bler: float = 0.1) -> TbsLookup:
+              target_bler: float = 0.1,
+              overhead: la.PdschOverhead | None = None) -> TbsLookup:
         for name, value in (("num_rbg", num_rbg), ("rb_per_rbg", rb_per_rbg)):
             if (isinstance(value, (bool, np.bool_))
                     or not isinstance(value, (int, np.integer)) or int(value) < 1):
@@ -97,15 +104,21 @@ class TbsLookup:
             raise ValueError("experience_v2 的 TBS/BLER 反查只支持 MCS table 3")
         if not np.isfinite(target_bler) or not 0.0 < float(target_bler) < 1.0:
             raise ValueError("target_bler 必须是 (0,1) 内的有限数")
+        oh = la.PdschOverhead() if overhead is None else overhead
+        if not isinstance(oh, la.PdschOverhead):
+            raise ValueError("overhead 必须是 linkadapt.PdschOverhead")
         table = np.zeros((2, 28, 4, n_rbg), dtype=np.int64)
         prefix_prb = np.cumsum(np.asarray(sizes, dtype=np.int64))
-        for slot, frac in (("D", 1.0), ("S", float(s_slot_fraction))):
+        # S 时隙的缩减只走符号数（``oh.symbols``），DM-RS/PDCCH 随后只扣一次。
+        # 以前是 ``144 × frac`` 完全不扣开销，且 frac 与开销的语义混在一起。
+        for slot in ("D", "S"):
             si = _SLOT_INDEX[slot]
+            re_per_prb = oh.re_per_prb(slot, float(s_slot_fraction))
             for mcs in range(28):
                 obj = la.MCS_TABLES[int(mcs_table)][mcs]
                 for rank in range(1, 5):
                     for n in range(1, n_rbg + 1):
-                        n_re = int(int(prefix_prb[n - 1]) * 12 * 12 * frac)
+                        n_re = int(prefix_prb[n - 1]) * re_per_prb
                         table[si, mcs, rank - 1, n - 1] = (
                             la.transport_block_size(
                                 n_re, obj.rate, obj.q_m, layers=rank) // 8)
@@ -119,7 +132,7 @@ class TbsLookup:
                 f"n_rbg={int(bad[3]) + 1}->{int(bad[3]) + 2}")
         return cls(
             table, n_rbg, rb, float(s_slot_fraction), sizes,
-            int(mcs_table), float(target_bler)
+            int(mcs_table), float(target_bler), oh
         )
 
     def _tbs_for_prbs(self, slot: str, mcs: int, rank: int, num_prb: int) -> int:
@@ -131,9 +144,9 @@ class TbsLookup:
             or int(num_prb) < 1
         ):
             raise ValueError("num_prb 必须至少为 1")
-        frac = 1.0 if str(slot).upper() == "D" else self.s_slot_fraction
         obj = la.MCS_TABLES[self.mcs_table][int(mcs)]
-        n_re = int(int(num_prb) * 12 * 12 * frac)
+        n_re = self.overhead.re_per_grant(
+            int(num_prb), str(slot).upper(), self.s_slot_fraction)
         return int(la.transport_block_size(
             n_re, obj.rate, obj.q_m, layers=int(rank)) // 8)
 
@@ -2254,7 +2267,8 @@ def simulate_experience(
     lookup = TbsLookup.build(
         sys_cfg.num_rbg, sys_cfg.rb_per_rbg, s_slot_fraction,
         rbg_prb_sizes=rbg_sizes, mcs_table=mcs_table,
-        target_bler=link_target_bler)
+        target_bler=link_target_bler,
+        overhead=getattr(sys_cfg, "pdsch_overhead", None))
     frequency_mode = str(getattr(sched, "frequency_selective", "auto"))
     su_frequency_ready = all(
         getattr(table, "sinr_rbg_db", None) is not None

@@ -969,6 +969,11 @@ class SystemConfig:
     # 与上面的空间约束正交：逐 RB 连续功率倍率，默认关闭/均匀分配。
     rb_power_control: pc.RbPowerControlConfig = field(
         default_factory=pc.RbPowerControlConfig)
+    # PDSCH 拿不到的那部分 RE（DM-RS + PDCCH），定义见 linkadapt.PdschOverhead。
+    # None = 用默认口径：12 个 PDSCH 符号、单符号 DM-RS 6 RE/PRB、PDCCH 1 符号。
+    # 这里保持 None 默认而不是 default_factory，是为了不把 linkadapt 拉成
+    # system 的顶层依赖（本模块对它一直是懒加载）。
+    pdsch_overhead: Any | None = None
     seed: int = 0
 
     def __post_init__(self) -> None:
@@ -1040,6 +1045,13 @@ class SystemConfig:
             raise ValueError("power_constraint 只支持 ebf / pebf / nebf")
         if not isinstance(self.rb_power_control, pc.RbPowerControlConfig):
             raise ValueError("rb_power_control 必须是 RbPowerControlConfig")
+        from . import linkadapt as la  # noqa: PLC0415
+        if self.pdsch_overhead is None:
+            self.pdsch_overhead = la.PdschOverhead()
+        elif isinstance(self.pdsch_overhead, dict):
+            self.pdsch_overhead = la.PdschOverhead(**self.pdsch_overhead)
+        elif not isinstance(self.pdsch_overhead, la.PdschOverhead):
+            raise ValueError("pdsch_overhead 必须是 PdschOverhead 或它的字段字典")
         if (self.rb_power_control.enabled
                 and int(self.rb_power_control.num_rb)
                 != self.num_rb):
@@ -1109,6 +1121,8 @@ class SystemConfig:
                 "tb_error_unit": "one user grant in one TTI = one single-codeword TB",
                 "dl_slot_ratio": round(self.dl_ratio, 4),
                 "snapshot_update_ms": self.snapshot_update_ms,
+                "pdsch_overhead": (self.pdsch_overhead.as_dict()
+                                   if self.pdsch_overhead is not None else None),
                 "power_constraint": self.power_constraint,
                 "rb_power_control": self.rb_power_control.as_dict(),
                 "seed": self.seed}
@@ -3128,13 +3142,20 @@ def simulate(
                   num_rbg=sys_cfg.num_rbg)
 
     n_rb = sys_cfg.num_rb
-    # 每 TTI 可用 RE：RB × 12 子载波 × 12 个数据符号（扣 DM-RS 与控制开销）
-    re_per_tti = n_rb * 12 * 12
+    # 每 TTI 可用 RE 按 38.214 §5.1.3.2 步骤 1：
+    #     N_RE = min(156, 12·符号数 − N_DMRS − N_OTH) × PRB 数
+    # 参数全部来自 sys_cfg.pdsch_overhead（默认 12 符号 / DM-RS 6 / PDCCH 1 符号），
+    # 与 experience.TbsLookup 共用同一个换算，不能各算各的。
+    _oh = sys_cfg.pdsch_overhead
     # **S 时隙不是满下行。** 主循环与 SystemConfig.dl_ratio 必须读取同一个显式
-    # 折算系数；否则"实际调度的下行"与"报告的下行"会悄悄变成两套口径。
+    # 折算系数（sys_cfg.s_slot_dl_fraction），否则"实际调度的下行"与"报告的下行"
+    # 会悄悄变成两套口径。但那个系数只折**符号数**：DM-RS 与 PDCCH 是每时隙
+    # 固定开销，不随下行符号数缩水，所以 S 的可用 RE 比 D×fraction 更少，
+    # 两者之比不等于 s_slot_dl_fraction 本身。
+    re_per_tti = _oh.re_per_grant(n_rb, "D")
     _re_of = {
         "D": re_per_tti,
-        "S": int(re_per_tti * float(sys_cfg.s_slot_dl_fraction)),
+        "S": _oh.re_per_grant(n_rb, "S", float(sys_cfg.s_slot_dl_fraction)),
     }
     snap_every = max(1, int(round(sys_cfg.snapshot_update_ms / sys_cfg.tti_ms)))
     n_snap = tables[0].sinr_db.shape[0]

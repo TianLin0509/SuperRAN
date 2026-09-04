@@ -180,9 +180,13 @@ def test_tbs_plateau_on_one_prb_tail_keeps_exact_first_fit_inverse() -> None:
     meta = lookup.as_dict()
     assert meta["non_decreasing"] is True
     assert meta["strictly_increasing"] is False
-    row = lookup.row("D", 0, 1)
+    # 场景参数：要挑一条**真的出现平台**的 (MCS, rank)。273 RB 的尾组只有
+    # 1 PRB，扣掉 DM-RS+PDCCH 之后每 PRB 从 144 RE 降到 126 RE，量化台阶落点
+    # 跟着挪——(MCS0, rank1) 不再平台，(MCS0, rank2) 仍然平台。守的性质没变：
+    # 平台上 searchsorted(side="left") 必须返回**第一个**够用的 RBG 数。
+    row = lookup.row("D", 0, 2)
     assert row[-1] == row[-2]
-    need, fits = lookup.required_rbg("D", 0, 1, int(row[-1]))
+    need, fits = lookup.required_rbg("D", 0, 2, int(row[-1]))
     assert (need, fits) == (17, True)
 
 

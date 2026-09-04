@@ -489,6 +489,20 @@ check(abs(_bs / max(_bd, 1e-9) - 0.7) < 0.06,
       f"全 S 图案的吞吐约为全 D 的 0.7 倍（实得 {_bs / max(_bd, 1e-9):.3f}）")
 check(abs(_bs82 / max(_bd, 1e-9) - 0.82) < 0.06,
       f"自定义 0.82 后，全 S 调度承载约为全 D 的 0.82 倍（实得 {_bs82 / max(_bd, 1e-9):.3f}）")
+# **比值不再等于 S_SLOT_DL_FRACTION。** DM-RS 与 PDCCH 是每时隙固定开销，
+# 不随下行符号数缩水：S 时隙的符号数按 0.7 折算，固定开销却照扣一份，
+# 于是可用 RE 之比小于 0.7。期望值直接从口径本身算出来，不写死成常数——
+# 换 DM-RS/PDCCH 参数时这条断言应该跟着走，而不是需要人来改数字。
+_oh_ds = sysm.SystemConfig().pdsch_overhead
+_expect_ds = (_oh_ds.re_per_prb("S", sysm.S_SLOT_DL_FRACTION)
+              / _oh_ds.re_per_prb("D"))
+print(f"  全 D {_bd:.1f} Mbps vs 全 S {_bs:.1f} Mbps，比值 "
+      f"{_bs / max(_bd, 1e-9):.3f}（RE 口径预期 {_expect_ds:.3f}）")
+check(abs(_expect_ds - 78.0 / 126.0) < 1e-9,
+      f"默认口径下 S/D 每 PRB 的 RE 之比是 78/126（实得 {_expect_ds:.4f}）")
+check(abs(_bs / max(_bd, 1e-9) - _expect_ds) < 0.06,
+      f"全 S 图案的吞吐约为全 D 的 {_expect_ds:.3f} 倍"
+      f"（实得 {_bs / max(_bd, 1e-9):.3f}）")
 
 # --- bug C：p_idle_tti 是对标锚点不是仿真输入，偏离要告警 ---
 # **它从来不生成空闲 TTI**，改它只改报告里的解析式。不说清楚的话，
@@ -592,8 +606,12 @@ for _slot in ("D", "S"):
 check(_minimal, "searchsorted 对每个表项都返回最小够用 RBG")
 _m12 = _lut.row("D", 12, 2)
 _nonlinear = float(_m12[-1] / (17 * _m12[0]) - 1.0)
-check(abs(_nonlinear - 0.011193141224100867) < 1e-9,
-      f"MCS12/rank2 的 17 RBG TBS 比线性外推高 1.119%（实得 {_nonlinear:.3%}）")
+# 守的是"TBS 对 PRB 数**不是线性的**，不能用 bytes/bytes_per_rbg 反推 RBG 数"。
+# 扣掉 DM-RS+PDCCH 之后每 PRB 从 144 RE 变成 126 RE，落点换了一格量化台阶，
+# 偏差从 +1.119% 变成 -0.027%（符号变了，非线性本身还在）。
+check(abs(_nonlinear + 0.00026790156531053544) < 1e-9,
+      f"MCS12/rank2 的 17 RBG TBS 偏离线性外推 -0.027%（实得 {_nonlinear:.3%}）")
+check(abs(_nonlinear) > 1e-5, "TBS 量化的非线性没有被口径变化抹平")
 
 # --- busy period 是 buffer 空→非空→空；期间新 arrival 合并，不按 file 硬切 ---
 _cls = sysm.TrafficClassConfig("small", 1.0, 100, 1.0, pdb_ms=10.0, is_small=True)
@@ -1130,8 +1148,10 @@ _audit_tables = [
         sinr_tx_db=np.asarray([[0.0]]), sinr_db=np.asarray([[0.0]]))
     for _ in range(2)
 ]
+# 队列长度是**场景参数**：要落在"整条载波刚好装得下、剩余池装不下"的窗口里。
+# 扣开销后满带 TBS 从 2112 B 降到 1857 B，1_900 已经越过上沿，窗口整体下移。
 _audit_plan = expm._build_su_plan(
-    [0, 1], queue_bytes={0: 1_900, 1: 1_900}, lookup=_lookup,
+    [0, 1], queue_bytes={0: 1_700, 1: 1_700}, lookup=_lookup,
     slot="D", num_rbg=17, rank_of={0: 1, 1: 1}, mcs_of={0: 10, 1: 10},
     base_tx_sinr_of={0: 0.0, 1: 0.0},
     mcs_without_olla_of={0: 10, 1: 10},
@@ -1146,7 +1166,7 @@ check(_audit_second.fits_in_fullband == (True,)
       and _audit_second.fits_in_remaining_pool == (False,)
       and _audit_second.required_rbg == (1,)
       and _audit_second.required_rbg_from_remaining_pool == (16,)
-      and _audit_second.potential_fullband_bytes[0] >= 1_900,
+      and _audit_second.potential_fullband_bytes[0] >= 1_700,
       "频选审计拆清完整载波池与当前剩余池，不再让fits_in_fullband冒充remaining")
 _floor_plan = expm._build_mu_plan(
     _ordered, queue_bytes={u: 500_000 for u in _ordered}, lookup=_lookup,
