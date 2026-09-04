@@ -1515,7 +1515,7 @@ DETAIL_SPECS.update({
             ("换引擎可归因", "同一几何下 RT 与 CDL 的信道矩阵不同，而 pathloss/SNR/SIR/SINR/服务小区/UE 位置逐位相同。"),
             ("不静默回退", "把依赖探测打成缺 sionna 后，<code>require_source(\"sionna_rt\")</code> 硬报错而不是返回 internal_sim；引擎清单长度恒为 2（internal_sim 与 sionna_rt，QuaDRiGa 路线已删除）。"),
             ("场景不冒充", "公开入口请求 etoile/florence/san_francisco 或本地城市时，<code>meta.rt_scene</code> 必须等于请求值；拼错的名字硬失败而不是退回 munich。"),
-            ("样本不重复", "注定重复的三种配置在入口就被拒（static+多轮、多时隙+零多普勒、非 static+多时隙）；能跑起来的配置里，同一 UE 相邻两轮的差异只来自 RT 重追的几何。"),
+            ("样本不重复", "三类不可信配置在入口就被拒（父类实际不挪 UE + 多轮、多时隙 + 零多普勒、真正移动 + 每 UE 多轮 + 多时隙）；单窗口移动多时隙合法。能跑起来的多轮配置里，同一 UE 相邻两轮的差异只来自 RT 重追的几何。"),
             ("时间原点恒为 0", "第 0 个 slot 的值<strong>不依赖 <code>doppler_hz</code></strong>（t=0 时 Doppler 项恒为 1）；时间相位每个 slot 只推进 <code>2π f_d dt</code> 一次。"),
             ("合法零值不被吞", "<code>rt_max_depth=0</code> 必须真的只留 LOS：LOS 可见的 UE 从 8 条径降到 1 条，<code>meta.rt_max_depth</code> 记 0 而不是 3。"),
             ("能力边界", "PDP、SE、throughput、wideband precoding 和 NMSE 在 probe 响应中显式 not_available，而不是返回零或占位数组。"),

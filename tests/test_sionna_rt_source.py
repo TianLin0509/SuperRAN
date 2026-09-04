@@ -908,9 +908,15 @@ def test_primary_docs_allow_single_window_moving_multislot():
         encoding="utf-8")
     details = (ROOT / "scripts" / "developer_guide_details.py").read_text(
         encoding="utf-8")
-    assert "非 static 不许多时隙" not in compact
-    assert "非 static + <code>num_slots_per_sample&gt;1</code>" not in compact
+    stale_overbroad_contracts = (
+        "非 static 不许多时隙",
+        "非 static + <code>num_slots_per_sample&gt;1</code>",
+        "非 static+多时隙",
+        "真在移动时不允许 `num_slots_per_sample>1`",
+    )
     for doc in (readme, compact, details):
+        for stale in stale_overbroad_contracts:
+            assert stale not in doc
         assert "num_samples&lt;=num_ues" in doc or "num_samples<=num_ues" in doc
         assert "单窗口" in doc and "合法配置" in doc
 
