@@ -13,7 +13,8 @@
 | 让另一个 Agent 审核 | 把 Author 结尾自动生成的那段**原样转发**给新会话 |
 | 看现在什么状态 | 运行 `scripts\superran_board.ps1`，它会打开一张总览页 |
 | 同步到 GitHub | `读 .agents/SYNC.md 按它工作` |
-| 让公司 Agent 审阅 | 把 GitHub 下载的 zip + `.agents/COMPANY.md` 一起给它 |
+| 让公司 Agent 通审整个仓库 | 跑 `scripts\superran_company_zip.ps1`，把它打的 zip 发过去 |
+| 让公司 Agent 审一次改动 | 跑 `scripts\superran_review_pack.ps1 <分支名>`，把审核包发过去 |
 | 处理公司审来的意见 | 把它的 md 放进 `docs\inbox\`，然后说「处理 docs\inbox 里的公司审阅报告」 |
 | 把多条并行线合到一起 | `读 .agents/INTEGRATOR.md 按它工作` |
 
@@ -67,5 +68,6 @@ git config core.hooksPath .githooks
 - `RISK.md` — 风险分档（按文件路径写死，Agent 不许自己判断）
 - `SYNC.md` — 同步 GitHub 的流程
 - `INTEGRATOR.md` — 多条并行开发线合到一起时用（含解冲突与定位失败的方法）
-- `COMPANY.md` — 给公司内网 Agent 的审阅合同，**含保密红线**
+- `COMPANY.md` — 公司 Agent **通审整个仓库**的合同，**含保密红线**
+- `COMPANY_REVIEW.md` — 公司 Agent **审一次具体改动**的合同，打包时会自动放进审核包
 - `report.example.json` — 报告字段样例
