@@ -1116,12 +1116,19 @@ API的表行0映射MCS0、对应上报CQI1；真实上报**CQI=0是out-of-range*
 口径消融，两个域的结果不能混着比。
 
 **CQI 上报从 2026-09-04 起是运行时事件驱动的**（`SystemConfig.cqi_report`，
-默认 `CqiReportConfig(srs_period_tti=4, srs_delay_tti=3,
-ue_implementation_loss_db=1.5)`）。两条主循环都改成：每 `srs_period_tti` 个 TTI
-让 UE 上报一次，测的是 `tti − srs_period_tti − srs_delay_tti` 时刻的信道，
-IIR 在线更新，基站读的时候再按**当前快照**把瞬时 BF Gain 加回去。
+默认 `CqiReportConfig(cqi_period_tti=None, csi_delay_tti=3,
+ue_implementation_loss_db=1.5)`）。两条主循环都改成：每个上报周期让 UE 上报一次，
+测的是 `tti − 上报周期 − csi_delay_tti` 时刻的信道，IIR 在线更新，基站读的时候
+再按**当前快照**把瞬时 BF Gain 加回去。
 `CqiReportConfig(enabled=False)` 退回建表阶段一次性算好的 `sinr_tx_db`，
 **逐位一致**（4 组场景指纹已验）。
+
+**上报周期跟 CSI 报告周期，不跟上行 SRS 周期**（用户 2026-09-04 定）。
+SRS 是上行探测、服务于互易性预编码；CQI 来自 CSI-RS + CSI 报告，周期由
+`CsiConfig.csi_report_period_ms` 配（默认 20 ms，30 kHz 下 = **40 TTI**）。
+`cqi_period_tti=None`（默认）表示"从链路表带出来的 `csi_report_period_ms` 换算"；
+显式给整数只用于消融（`cqi_period_tti=1` 是理想 CQI 的上界）。
+结果里 `cqi_period_source` 会写明是 `csi_report_period_ms` 还是 `explicit_override`。
 
 **它和 `csi_aging` 是两个维度，不要合并**：`csi_aging` 管预编码权用的 `h_prec`
 有多陈旧；`cqi_report` 管 MCS 决策输入 `sinr_tx_db` 多久更新一次；误块抽签用的
@@ -1130,7 +1137,9 @@ IIR 在线更新，基站读的时候再按**当前快照**把瞬时 BF Gain 加
 三件必须知道的事：
 
 1. **离线那份 AMC 坐标系统性乐观**。同一夹具 OLLA 关掉时，离线预计算的首传
-   BLER 是 0.44（目标 0.1），理想 CQI（周期 1/时延 0/无损失）是 0.04。
+   BLER 是 **0.446**（目标 0.1），默认口径（40 TTI 周期 + 1.5 dB 实现损失）
+   是 **0.038**，理想 CQI（周期 1 / 时延 0 / 无损失）是 0.086。
+   顺带小区吞吐 384.7 → 411.9 Mbps：离线那份太激进，误块把重传资源吃掉了。
 2. **IIR 的 λ 是"每次上报"作用一次，不是"每毫秒"**。所以拉长 SRS 周期会同时
    拉长滤波器在时间上的记忆——周期 40 TTI 时实测 AMC 反而**更保守**
    （BLER 0.028），与"CQI 陈旧 → 更激进"的直觉相反。要让 λ 表示固定的时间

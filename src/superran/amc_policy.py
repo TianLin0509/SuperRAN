@@ -849,9 +849,13 @@ class RankController:
 # ---------------------------------------------------------------------------
 # 三、CQI 上报：运行时按 SRS 周期事件触发
 # ---------------------------------------------------------------------------
-#: 参照实现的 SRS 周期与处理时延（30 kHz、0.5 ms TTI）。
-SRS_PERIOD_TTI_DEFAULT = 4
-SRS_DELAY_TTI_DEFAULT = 3
+#: CQI 上报周期跟 **CSI 报告周期**（用户 2026-09-04 定），不跟上行 SRS 周期。
+#: SRS 是上行探测、服务于互易性预编码；CQI 来自 CSI-RS + CSI 报告，周期由
+#: ``CsiConfig.csi_report_period_ms`` 配（默认 20 ms）。``None`` 表示"从链路表
+#: 带出来的 csi_report_period_ms 换算成 TTI"，30 kHz 下 20 ms = 40 TTI。
+CQI_PERIOD_TTI_DEFAULT = None
+#: 处理时延：UE 测到、上报、基站能用上之间的空档，单位 TTI。
+CSI_DELAY_TTI_DEFAULT = 3
 
 
 @lru_cache(maxsize=64)
@@ -891,11 +895,13 @@ class CqiReportConfig:
     """
 
     enabled: bool = True
-    #: 两次 CQI 上报之间隔多少个 TTI。1 = 每个 TTI 都有新 CQI（理想上界）。
-    srs_period_tti: int = SRS_PERIOD_TTI_DEFAULT
-    #: SRS 发出到基站能用上之间的处理时延（TTI）。UE 测的是
-    #: ``tti - srs_period_tti - srs_delay_tti`` 时刻的信道，不是当前信道。
-    srs_delay_tti: int = SRS_DELAY_TTI_DEFAULT
+    #: 两次 CQI 上报之间隔多少个 TTI。``None`` = 跟链路表带出来的
+    #: ``csi_report_period_ms``（默认 20 ms，30 kHz 下 = 40 TTI）——**这是默认**。
+    #: 显式给整数只用于消融：1 = 每个 TTI 都有新 CQI（理想上界）。
+    cqi_period_tti: int | None = CQI_PERIOD_TTI_DEFAULT
+    #: 测量到基站能用上之间的处理时延（TTI）。UE 测的是
+    #: ``tti - 上报周期 - csi_delay_tti`` 时刻的信道，不是当前信道。
+    csi_delay_tti: int = CSI_DELAY_TTI_DEFAULT
     #: UE 端实现损失（dB），在 UE 测出 PMI-SINR 之后、量化成 CQI 之前扣掉。
     #: 这是 **UE 本振噪声 + 解调实现损失的等效惩罚**，不是信道的一部分；
     #: 1.5 dB 是工程默认，**未经现场设备数据标定**。
@@ -904,39 +910,69 @@ class CqiReportConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, (bool, np.bool_)):
             raise ValueError("enabled 必须是布尔值")
-        for name in ("srs_period_tti", "srs_delay_tti"):
-            value = getattr(self, name)
-            if (isinstance(value, (bool, np.bool_))
-                    or not isinstance(value, (int, np.integer))):
-                raise ValueError(f"{name} 必须是整数")
-        if int(self.srs_period_tti) < 1:
-            raise ValueError("srs_period_tti 必须至少为 1")
-        if int(self.srs_delay_tti) < 0:
-            raise ValueError("srs_delay_tti 必须非负")
+        if self.cqi_period_tti is not None:
+            if (isinstance(self.cqi_period_tti, (bool, np.bool_))
+                    or not isinstance(self.cqi_period_tti, (int, np.integer))):
+                raise ValueError("cqi_period_tti 必须是整数或 None")
+            if int(self.cqi_period_tti) < 1:
+                raise ValueError("cqi_period_tti 必须至少为 1")
+        if (isinstance(self.csi_delay_tti, (bool, np.bool_))
+                or not isinstance(self.csi_delay_tti, (int, np.integer))):
+            raise ValueError("csi_delay_tti 必须是整数")
+        if int(self.csi_delay_tti) < 0:
+            raise ValueError("csi_delay_tti 必须非负")
         if (isinstance(self.ue_implementation_loss_db, (bool, np.bool_))
                 or not math.isfinite(float(self.ue_implementation_loss_db))
                 or float(self.ue_implementation_loss_db) < 0.0):
             raise ValueError("ue_implementation_loss_db 必须是有限非负数")
 
-    def as_dict(self) -> dict[str, Any]:
+    def resolve_period_tti(self, csi_report_period_ms: float | None,
+                           tti_ms: float) -> int:
+        """把上报周期解析成 TTI 数。
+
+        ``cqi_period_tti`` 显式给了就用它；否则按链路表带出来的
+        ``csi_report_period_ms`` 换算——**CQI 跟 CSI 报告周期，不跟上行 SRS
+        周期**（用户 2026-09-04 定）。两者都拿不到时退回 1（每 TTI 都上报），
+        并且这种情况只可能出现在没有 CSI 配置的合成夹具上。
+        """
+        if self.cqi_period_tti is not None:
+            return int(self.cqi_period_tti)
+        if (csi_report_period_ms is None or not math.isfinite(
+                float(csi_report_period_ms)) or float(csi_report_period_ms) <= 0):
+            return 1
+        return max(1, int(round(float(csi_report_period_ms) / float(tti_ms))))
+
+    def as_dict(self, resolved_period_tti: int | None = None) -> dict[str, Any]:
+        period = (int(resolved_period_tti) if resolved_period_tti is not None
+                  else self.cqi_period_tti)
         return {"enabled": bool(self.enabled),
-                "srs_period_tti": int(self.srs_period_tti),
-                "srs_delay_tti": int(self.srs_delay_tti),
+                "cqi_period_tti": (None if self.cqi_period_tti is None
+                                   else int(self.cqi_period_tti)),
+                "cqi_period_tti_resolved": (None if period is None
+                                            else int(period)),
+                "cqi_period_source": ("explicit_override"
+                                      if self.cqi_period_tti is not None
+                                      else "csi_report_period_ms"),
+                "csi_delay_tti": int(self.csi_delay_tti),
                 "measurement_lag_tti": (
-                    int(self.srs_period_tti) + int(self.srs_delay_tti)),
+                    None if period is None
+                    else int(period) + int(self.csi_delay_tti)),
                 "ue_implementation_loss_db": float(
                     self.ue_implementation_loss_db),
                 "contract": (
-                    "UE reports CQI every srs_period_tti TTIs from the channel "
-                    "seen srs_period_tti+srs_delay_tti TTIs earlier, minus a UE "
-                    "implementation penalty; the IIR filter runs online at each "
-                    "report; the gNB adds its instantaneous BF gain at read time"
+                    "UE reports CQI once per CSI report period (from "
+                    "CsiConfig.csi_report_period_ms unless cqi_period_tti "
+                    "overrides it) from the channel seen period+csi_delay_tti "
+                    "TTIs earlier, minus a UE implementation penalty; the IIR "
+                    "filter runs online at each report; the gNB adds its "
+                    "instantaneous BF gain at read time"
                     if self.enabled
                     else "CQI chain precomputed per snapshot in build_link_tables")}
 
 
 def attach_runtime_cqi(tables: list[Any], config: CqiReportConfig | None, *,
-                       snap_every: int) -> tuple[list[Any], CqiReporter | None]:
+                       snap_every: int,
+                       tti_ms: float) -> tuple[list[Any], CqiReporter | None]:
     """为一次仿真准备运行时 CQI：返回（可写的链路表副本, reporter）。
 
     ``config`` 为 None / ``enabled=False`` / 链路表缺 ``pmi_sinr_db`` 时原样返回
@@ -964,7 +1000,9 @@ def attach_runtime_cqi(tables: list[Any], config: CqiReportConfig | None, *,
         private, config, snap_every=snap_every,
         cqi_filter_lambda=float(getattr(private[0], "cqi_filter_lambda", 1.0)),
         cqi_filter_domain=str(
-            getattr(private[0], "cqi_filter_domain", "cqi_index")))
+            getattr(private[0], "cqi_filter_domain", "cqi_index")),
+        period_tti=config.resolve_period_tti(
+            getattr(private[0], "csi_report_period_ms", None), float(tti_ms)))
     reporter.cold_start()
     return private, reporter
 
@@ -992,10 +1030,11 @@ class CqiReporter:
 
     def __init__(self, tables: list[Any], config: CqiReportConfig, *,
                  snap_every: int, cqi_filter_lambda: float,
-                 cqi_filter_domain: str) -> None:
+                 cqi_filter_domain: str, period_tti: int) -> None:
         from . import linkadapt as la  # noqa: PLC0415
 
         self.config = config
+        self.period_tti = max(1, int(period_tti))
         self._tables = list(tables)
         self._snap_every = max(1, int(snap_every))
         self._lam = float(cqi_filter_lambda)
@@ -1037,9 +1076,13 @@ class CqiReporter:
         self._update_count = np.zeros(n_ue, dtype=np.int64)
 
     # -- 内部：一次上报 ----------------------------------------------------
+    @property
+    def measurement_lag_tti(self) -> int:
+        """UE 测的信道比当前时刻早多少个 TTI：一个上报周期 + 处理时延。"""
+        return int(self.period_tti) + int(self.config.csi_delay_tti)
+
     def _measure_snapshot(self, tti: int) -> int:
-        lag = int(self.config.srs_period_tti) + int(self.config.srs_delay_tti)
-        meas_tti = max(0, int(tti) - lag)
+        meas_tti = max(0, int(tti) - self.measurement_lag_tti)
         return int((meas_tti // self._snap_every) % self._n_snap)
 
     def _quantise(self, value: float, edges: Any) -> int:
@@ -1093,7 +1136,7 @@ class CqiReporter:
         """
         for ue in range(len(self._tables)):
             self._report(ue, 0)
-            self._next_tti[ue] = int(self.config.srs_period_tti)
+            self._next_tti[ue] = int(self.period_tti)
 
     def step(self, tti: int) -> bool:
         """把本 TTI 到期的 UE 全部上报一遍；返回是否真的有人上报。
@@ -1101,7 +1144,7 @@ class CqiReporter:
         返回值给调用方省掉一次无谓的回写：十万 TTI 的主循环里，
         ``srs_period_tti=4`` 时四次里有三次什么都没变。
         """
-        period = int(self.config.srs_period_tti)
+        period = int(self.period_tti)
         due = np.nonzero(self._next_tti <= int(tti))[0]
         if due.size == 0:
             return False
@@ -1176,7 +1219,7 @@ class CqiReporter:
     def diagnostics(self, tti: int) -> dict[str, Any]:
         ages = [self.age_tti(u, tti) for u in range(len(self._tables))]
         return {
-            **self.config.as_dict(),
+            **self.config.as_dict(self.period_tti),
             "cqi_update_count": [int(x) for x in self._update_count],
             "cqi_age_tti": [int(x) for x in ages],
             "cqi_age_tti_max": int(max(ages)) if ages else 0,

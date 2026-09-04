@@ -2310,7 +2310,7 @@ check(_cqi_default_run.cell["cqi_update_count_mean"] is not None
 # 1) 上报节拍：次数随 TTI 线性增长，年龄峰值 = 周期 - 1
 _cqi_num_tti = sysm.SystemConfig(duration_s=3.0).num_tti
 for _per in (1, 4, 40):
-    _run_p = _cqi_run(ap.CqiReportConfig(srs_period_tti=_per))
+    _run_p = _cqi_run(ap.CqiReportConfig(cqi_period_tti=_per))
     _cnt_raw = _run_p.cell["cqi_update_count_mean"]
     _age_raw = _run_p.cell["cqi_age_tti_max"]
     if _cnt_raw is None or _age_raw is None:
@@ -2330,15 +2330,32 @@ check(_cqi_off.cell["cqi_update_count_mean"] is None
       "关闭运行时上报时两个新鲜度诊断是 None——离线预计算没有『上报时刻』")
 check(_cqi_off.config["system"]["cqi_report"]["enabled"] is False,
       "CQI 上报口径随结果显式上报")
+# 默认周期跟 **CSI 报告周期**，不跟上行 SRS 周期（用户 2026-09-04 定）
+_cqi_default_cfg = ap.CqiReportConfig()
+check(_cqi_default_cfg.cqi_period_tti is None
+      and _cqi_default_cfg.resolve_period_tti(20.0, 0.5) == 40
+      and _cqi_default_cfg.resolve_period_tti(5.0, 0.5) == 10,
+      "默认上报周期由 csi_report_period_ms 换算：20 ms / 0.5 ms = 40 TTI")
+check(_cqi_tabs[0].csi_report_period_ms == 20.0,
+      f"链路表把建表时的 CSI 报告周期带出来（实得 "
+      f"{_cqi_tabs[0].csi_report_period_ms}）")
+_cqi_auto = _cqi_run(ap.CqiReportConfig(), duration_s=3.0)
+check(_cqi_auto.cell["cqi_age_tti_max"] == 39
+      and _cqi_auto.config["system"]["cqi_report"]["cqi_period_source"]
+      == "csi_report_period_ms",
+      f"不给 cqi_period_tti 时实际按 40 TTI 上报（年龄峰值 "
+      f"{_cqi_auto.cell['cqi_age_tti_max']}）")
+check(ap.CqiReportConfig(cqi_period_tti=4).resolve_period_tti(20.0, 0.5) == 4,
+      "显式给 cqi_period_tti 时覆盖 CSI 报告周期，只用于消融")
 
 # 3) 决策坐标的准确度：OLLA 关掉才能看见 AMC 坐标本身准不准
 _cqi_target = 0.1
 _bler_off = {}
 for _label, _cfg in (
         ("offline", ap.CqiReportConfig(enabled=False)),
-        ("ideal", ap.CqiReportConfig(srs_period_tti=1, srs_delay_tti=0,
+        ("ideal", ap.CqiReportConfig(cqi_period_tti=1, csi_delay_tti=0,
                                      ue_implementation_loss_db=0.0)),
-        ("stale_no_loss", ap.CqiReportConfig(srs_period_tti=4, srs_delay_tti=3,
+        ("stale_no_loss", ap.CqiReportConfig(cqi_period_tti=4, csi_delay_tti=3,
                                              ue_implementation_loss_db=0.0)),
         ("default", ap.CqiReportConfig()),
 ):
@@ -2366,7 +2383,7 @@ check(_bler_off["default"] < _bler_off["stale_no_loss"],
 # 4) 长周期下**不是**更激进而是更保守——IIR 的时间常数随周期一起变长。
 #    这条与任务书的猜测相反，实测如此，显式钉住免得以后当成 bug 修。
 _bler_long = float(_cqi_run(
-    ap.CqiReportConfig(srs_period_tti=40, srs_delay_tti=3,
+    ap.CqiReportConfig(cqi_period_tti=40, csi_delay_tti=3,
                        ue_implementation_loss_db=0.0), olla=False
 ).cell["bler_first_tx"])
 print(f"  周期 40 TTI（OLLA 关）首传 BLER {_bler_long:.4f}，"
@@ -2377,8 +2394,11 @@ check(_bler_long < _bler_off["stale_no_loss"],
 
 # 5) 不许偷看未来：上报测的是 srs_period + srs_delay 个 TTI **之前**的信道
 _probe = ap.CqiReporter(
-    _cqi_tabs, ap.CqiReportConfig(srs_period_tti=4, srs_delay_tti=3),
-    snap_every=10, cqi_filter_lambda=0.25, cqi_filter_domain="cqi_index")
+    _cqi_tabs, ap.CqiReportConfig(cqi_period_tti=4, csi_delay_tti=3),
+    snap_every=10, cqi_filter_lambda=0.25, cqi_filter_domain="cqi_index",
+    period_tti=4)
+check(_probe.measurement_lag_tti == 7,
+      f"测量滞后 = 上报周期 + 处理时延 = 4+3（实得 {_probe.measurement_lag_tti}）")
 check(_probe._measure_snapshot(0) == 0 and _probe._measure_snapshot(7) == 0
       and _probe._measure_snapshot(17) == 1,
       "测量快照 = (max(0, tti-7) // snap_every) % n_snap，冷启动钳到 0")

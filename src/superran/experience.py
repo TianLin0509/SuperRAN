@@ -2430,7 +2430,8 @@ def simulate_experience(
     # 回写进 sinr_tx_db / sinr_tx_rbg_db，本文件二十多处读点一行不用改；
     # 关闭时 tables 原样、reporter 为 None，与本机制出现之前逐位一致。
     tables, cqi_reporter = ap.attach_runtime_cqi(
-        tables, getattr(sys_cfg, "cqi_report", None), snap_every=snap_every)
+        tables, getattr(sys_cfg, "cqi_report", None), snap_every=snap_every,
+        tti_ms=float(sys_cfg.tti_ms))
     _cqi_last_snap = -1
     r_avg = np.full(n_ue, 1e-6, dtype=float)
     olla_db = np.zeros(n_ue, dtype=float)
