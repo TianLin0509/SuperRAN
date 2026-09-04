@@ -35,6 +35,21 @@ class KpiSpec:
 
 
 CELL_KPIS = (
+    # **用户体验速率有两个口径，页面上都要给。** ITU-R M.2412 / TR 38.913 的
+    # 分母是观测窗长；TS 28.552 的分母是 busy period。满缓冲下两者收敛，
+    # 有限话务下相差可达一个数量级，任何一个单独出现都会被误读成另一个。
+    KpiSpec("ue_served_p5_mbps", "5% 边缘用户吞吐（ITU 口径）", "Mbps",
+            tags=("experience", "fairness", "capacity")),
+    KpiSpec("ue_served_median_mbps", "用户吞吐中位（ITU 口径）", "Mbps",
+            tags=("experience", "capacity")),
+    KpiSpec("ue_served_mean_mbps", "用户吞吐均值（ITU 口径）", "Mbps",
+            tags=("experience", "capacity")),
+    KpiSpec("drb_throughput_rel19_mbps", "DRB busy-period 吞吐（28.552）", "Mbps",
+            tags=("experience",)),
+    # 样本构成：在飞 busy period 占比高时，结果更接近"正在传多快"而不是
+    # "一个 burst 端到端多快"，判读时必须看得见。
+    KpiSpec("drb_throughput_inflight_share", "吞吐样本中在飞 burst 占比",
+            percent=True, tags=("experience", "reliability")),
     KpiSpec("cell_experienced_mbps", "掐头去尾体验速率", "Mbps",
             tags=("experience", "fairness")),
     KpiSpec("cell_head_inclusive_experienced_mbps", "含头体验速率", "Mbps",

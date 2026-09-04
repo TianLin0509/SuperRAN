@@ -437,8 +437,15 @@ def inflight_burst_metrics(burst: BusyPeriod, tti_ms: float,
     if int(burst.start_tti) >= int(warmup_tti):
         wait = max(0, burst.first_tx_tti - burst.start_tti) * float(tti_ms)
         head_thp = vol * 8.0 / ((wait + duration_ms) / 1000.0) / 1e6
+    # **分类要与已完成 burst 用同一个判据**，否则大包视图会继续带着这个删失：
+    # >=2 个窗内 ACK 就是"大 burst 在传"，和 rel19_large_burst 归同一视图；
+    # 只有 1 个 ACK 的在飞段样本太短，只进总量不进大包视图。
+    # 单 TB 就发完的小 burst 不可能"在飞"（那说明 buffer 已排空），所以
+    # 这里永远不会产生 fractional_slot 类。
+    kind = ("rel19_large_burst_inflight" if len(events) >= 2
+            else "rel19_inflight_burst")
     # 完成时延与 PDB 需要对象真的传完，在飞的 burst 给不出，保持 None。
-    return BurstMetrics(thp, "rel19_inflight_burst", None, None, None, head_thp)
+    return BurstMetrics(thp, kind, None, None, None, head_thp)
 
 
 def burst_metrics(burst: BusyPeriod, tti_ms: float,
@@ -1059,14 +1066,6 @@ def _bler_lookup(mcs: int, sinr_db: float) -> float:
 
 def _finite(values: Iterable[float]) -> list[float]:
     return [float(x) for x in values if np.isfinite(x)]
-
-
-def _nan_safe(fn, values, *args) -> float:
-    """对可能全是 nan 的序列做聚合；空或全 nan 时返回 nan 而不是抛 warning。"""
-    arr = np.asarray(list(values), dtype=float)
-    if arr.size == 0 or not np.any(np.isfinite(arr)):
-        return float("nan")
-    return float(fn(arr, *args))
 
 
 def _pct(values: Iterable[float], q: float) -> float | None:
@@ -3191,11 +3190,12 @@ def simulate_experience(
         shead = [m.head_inclusive_throughput_mbps for m in metrics
                  if m.throughput_kind == "rel19_fractional_slot"
                  and m.head_inclusive_throughput_mbps is not None]
+        _large_kinds = ("rel19_large_burst", "rel19_large_burst_inflight")
         lvals = [m.throughput_mbps for m in metrics
-                 if m.throughput_kind == "rel19_large_burst"
+                 if m.throughput_kind in _large_kinds
                  and m.throughput_mbps is not None]
         lhead = [m.head_inclusive_throughput_mbps for m in metrics
-                 if m.throughput_kind == "rel19_large_burst"
+                 if m.throughput_kind in _large_kinds
                  and m.head_inclusive_throughput_mbps is not None]
         all_wait.extend(float(x) for x in waits)
         all_completion.extend(float(x) for x in completes)
@@ -3508,6 +3508,11 @@ def simulate_experience(
             for n_rbg, count in enumerate(tti_occupied_rbg_counts)
         ],
     }
+    # **和建表相共用同一份 _nan_safe，不各写一套。** 两份实现曾经短暂并存，
+    # 契约还不一样（一个先滤非有限值再聚合，一个交给 nan* 函数自己处理），
+    # 那正是同名不同义的漂移。函数内 import 是为了不破坏服务端的 lazy 策略。
+    from .system import _nan_safe  # noqa: PLC0415
+
     serving_cell_prb_utilization = float(
         allocated_prb_equiv / max(available_prb_equiv, _EPS))
     mu_paired_prb_share_of_used = float(
