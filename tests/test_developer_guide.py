@@ -553,6 +553,8 @@ def test_public_docs_and_source_do_not_expose_restricted_provenance_labels() -> 
         ROOT / "scripts",
         ROOT / "skills",
         ROOT / "presets",
+        # 2026-09-04 补上：.agents/ 原本不在扫描范围，受限标签曾经从这里漏进公开仓库
+        ROOT / ".agents",
     ]
     files = [
         ROOT / "README.md", ROOT / "INSTALL_AGENT.md",

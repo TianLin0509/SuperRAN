@@ -1,11 +1,11 @@
-﻿# 给公司 Agent 打包一份 SuperRAN。
+﻿# 给内网 Agent 打包一份 SuperRAN。
 #
 # 用法： powershell -File C:\Vibe\Wireless\SuperRAN\scripts\superran_company_zip.ps1
 #
 # 做三件事：
 #   1. 从 GitHub 下载最新的 main 分支快照
 #   2. 把 SHA 写进文件名——GitHub 的 zip 里没有 git 信息，文件名是最省事的版本标记
-#   3. 打印出你要发给公司 Agent 的那句话
+#   3. 打印出你要发给内网 Agent 的那句话
 #
 # 只读远端，不改本地任何分支或文件。
 
@@ -32,7 +32,7 @@ try {
     $zip = Join-Path $OutDir "SuperRAN-$date-$short.zip"
 
     Write-Host "正在下载 $short ..." -ForegroundColor DarkGray
-    # 按 SHA 下载：解压后的目录名就是完整 SHA，公司 Agent 一眼能看出基线
+    # 按 SHA 下载：解压后的目录名就是完整 SHA，内网 Agent 一眼能看出基线
     Invoke-WebRequest -Uri "https://github.com/TianLin0509/SuperRAN/archive/$sha.zip" `
                       -OutFile $zip -UseBasicParsing
 
@@ -43,11 +43,11 @@ try {
     Write-Host ""
     Write-Host "绝对路径：$zip"
     Write-Host ""
-    Write-Host "────────── 把下面这段连同 zip 一起发给公司 Agent ──────────" -ForegroundColor Cyan
+    Write-Host "────────── 把下面这段连同 zip 一起发给内网 Agent ──────────" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "这是 SuperRAN 的源码快照（版本 $short）。"
     Write-Host "先读里面的 .agents/COMPANY.md，按它的规矩工作。"
-    Write-Host "任务：拿我们公司的真实实现做参照，找出 SuperRAN 哪里实现得不对，"
+    Write-Host "任务：拿参照实现做基准，找出 SuperRAN 哪里实现得不对，"
     Write-Host "     按 COMPANY.md 里的模板写成一份 Markdown 报告给我。"
     Write-Host ""
     Write-Host "──────────────────────────────────────────────────────────" -ForegroundColor Cyan
@@ -57,7 +57,7 @@ try {
     $mainRepo = $mainRepo -replace '/', '\'
     Write-Host "它给你 md 之后，复制到这里：" -ForegroundColor DarkGray
     Write-Host "  $mainRepo\docs\inbox\"
-    Write-Host "然后对本地 Agent 说：处理 docs\inbox 里的公司审阅报告" -ForegroundColor DarkGray
+    Write-Host "然后对本地 Agent 说：处理 docs\inbox 里的内网审阅报告" -ForegroundColor DarkGray
 }
 finally {
     Pop-Location

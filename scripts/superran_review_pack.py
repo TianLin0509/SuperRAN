@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""把一次改动打包成「审核包」，带进公司给内网 Agent 审。
+"""把一次改动打包成「审核包」，带进内网给内网 Agent 审。
 
     python scripts/superran_review_pack.py <分支名或SHA> [--base develop]
 
-公司 Agent 不能联网，也跑不了这个仓库。所以包里要自带：改动说明、完整 diff、
+内网 Agent 不能联网，也跑不了这个仓库。所以包里要自带：改动说明、完整 diff、
 改动后的完整文件（让它能读上下文）、实现者报告，以及审核合同本身。
 
 生成的 docs/index.html 有 3.7 MB 且是机器生成的，diff 里排除掉——
@@ -207,15 +207,15 @@ def main() -> int:
     size_mb = zip_path.stat().st_size / 1024 / 1024
     print(f"\n打包完成（{size_mb:.1f} MB，{len(changed)} 个改动文件）\n")
     print(f"绝对路径：{zip_path}\n")
-    print("────────── 把下面这段连同 zip 一起发给公司 Agent ──────────\n")
+    print("────────── 把下面这段连同 zip 一起发给内网 Agent ──────────\n")
     print(f"这是 SuperRAN 一次改动的审核包（版本 {short}）。")
     print("先读里面的 00-开始读这里.md，按它的规矩工作。")
-    print("任务：拿我们公司的真实实现做参照，判断这次改动在物理上对不对，")
+    print("任务：拿参照实现做基准，判断这次改动在物理上对不对，")
     print("     按合同里的模板写一份 Markdown 审核报告给我。")
     print("\n──────────────────────────────────────────────────────────\n")
     main_repo = git("worktree", "list", "--porcelain").splitlines()[0][9:]
     print(f"它给你 md 之后，复制到：{Path(main_repo) / 'docs' / 'inbox'}")
-    print("然后对本地 Agent 说：处理 docs\\inbox 里的公司审核报告")
+    print("然后对本地 Agent 说：处理 docs\\inbox 里的内网审核报告")
     if not report:
         print("\n注意：没找到这个分支的 Author 报告，包里缺 04。"
               "确认实现者是否已经出过报告。")
