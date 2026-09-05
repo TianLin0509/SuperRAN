@@ -1,44 +1,65 @@
 #!/bin/sh
-# 拒绝在主工作区提交。主工作区是“最终版本”，不是干活的地方。
+# ─────────────────────────────────────────────────────────────────────────────
+# 拒绝在「主工作目录」提交。
 #
-# 生效方式（每台机器装一次，worktree 会自动继承）：
-#     git config core.hooksPath .githooks
+# 为什么：主工作目录是这个项目的「最终版本」，不是干活的地方。
+#         多个 agent 同时在同一个目录动手 = 互相覆盖，而且谁都不知道被覆盖了。
+#         各干各的（每人一个 worktree）是防覆盖的第一半，pre-push 管另一半。
 #
-# 临时绕过（你自己确实要在主工作区提交时）：
-#     git commit --no-verify
-# 或   SUPERRAN_ALLOW_MAIN_COMMIT=1 git commit
+# 怎么办：去开自己的 worktree，一个任务一个。具体命令见下面的报错提示，
+#         它会读 .agents/project.json，把这个项目真实的路径和主干名印出来。
+#
+# 放行：HUB_ALLOW_MAIN_COMMIT=1 —— 只给合并脚本和紧急修复用。
+#
+# 本文件是通用的，正常情况下不需要按项目修改：项目差异全部读 .agents/project.json
+#   trunk         主干分支名
+#   worktreeRoot  worktree 放哪
+#   worktreeHint  开完 worktree 还要做什么（可选，例如「先设 PYTHONPATH」）
+# ─────────────────────────────────────────────────────────────────────────────
 
-if [ "$SUPERRAN_ALLOW_MAIN_COMMIT" = "1" ]; then
-    exit 0
-fi
+[ "$HUB_ALLOW_MAIN_COMMIT" = "1" ] && exit 0
 
-here=$(git rev-parse --show-toplevel 2>/dev/null)
-main=$(git worktree list --porcelain 2>/dev/null | head -1 | sed 's/^worktree //')
+main_wt=$(git worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')
+this_wt=$(git rev-parse --show-toplevel 2>/dev/null)
 
-# 路径大小写与分隔符在 Windows 上会不一致，统一成小写正斜杠再比
-norm() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '\\' '/'; }
+[ -z "$main_wt" ] || [ -z "$this_wt" ] && exit 0
 
-if [ -n "$here" ] && [ -n "$main" ] && [ "$(norm "$here")" = "$(norm "$main")" ]; then
-    cat >&2 <<'MSG'
+norm() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr '\134' '/'; }
 
-  ┌────────────────────────────────────────────────────────────────┐
-  │  拒绝提交：这里是主工作区，不是干活的地方                      │
-  └────────────────────────────────────────────────────────────────┘
+[ "$(norm "$main_wt")" = "$(norm "$this_wt")" ] || exit 0
 
-  主工作区只保存“已经合并好的最终版本”。多个 Agent 同时在这里改文件会
-  互相覆盖，而且不会报错。
+# 到这里说明确实在主工作目录。读项目配置，把提示写具体。
+cfg=$(python -c "
+import json, sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')   # 不加这句，配置里的中文会让本段崩掉、钩子静默走兜底
+try:
+    c = json.load(open('.agents/project.json', encoding='utf-8'))
+except Exception:
+    sys.exit(0)
+print(c.get('trunk') or 'master')
+print(c.get('worktreeRoot') or 'C:/Worktrees')
+print(c.get('worktreeHint') or '')
+" 2>/dev/null)
 
-  请去建自己的工作区再干活：
+trunk=$(printf '%s\n' "$cfg" | sed -n '1p')
+wtroot=$(printf '%s\n' "$cfg" | sed -n '2p')
+hint=$(printf '%s\n' "$cfg" | sed -n '3p')
+[ -n "$trunk" ]  || trunk="master"
+[ -n "$wtroot" ] || wtroot="C:/Worktrees"
 
-      git worktree add -b <分支名> C:/Vibe/Worktrees/SuperRAN/<任务>-<日期>-<你的席位> develop
-
-  规则见 .agents/AUTHOR.md。
-
-  合并回主线走 GitHub PR，不要在这里直接提交
-  （develop 有分支保护，本来也直推不上去）。
-
-MSG
-    exit 1
-fi
-
-exit 0
+echo "" >&2
+echo "  ✗ 这里是主工作目录，不能直接提交。" >&2
+echo "" >&2
+echo "    $this_wt 是这个项目的最终版本。" >&2
+echo "    在这里提交，等于绕过验证直接改成品，也是多 agent 互相覆盖的主要来源。" >&2
+echo "" >&2
+echo "  请开一个属于本任务的 worktree：" >&2
+echo "" >&2
+echo "    git worktree add $wtroot/<日期>-<任务>-<席位> -b <分支名> $trunk" >&2
+[ -n "$hint" ] && { echo "" >&2; echo "    $hint" >&2; }
+echo "" >&2
+echo "  然后把改动挪过去再提交。" >&2
+echo "  （合并脚本走 HUB_ALLOW_MAIN_COMMIT=1 放行，不受此限制。）" >&2
+echo "" >&2
+exit 1
