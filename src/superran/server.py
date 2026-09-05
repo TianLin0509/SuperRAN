@@ -253,7 +253,6 @@ def _carrier_grid(config: dict[str, Any], *, num_rb: int) -> dict[str, Any]:
 
 def _system_adaptation_contract(
     *,
-    mode: str,
     target_bler: float,
     olla_step_up_db: float,
     olla_step_down_db: float | None,
@@ -312,10 +311,7 @@ def _system_adaptation_contract(
                 "internal row14 / reported CQI15 requests MCS28; current MCS0..27 "
                 "curve profile clips to 27"
             ),
-            "scope": (
-                "experience_v2 fixed preset table"
-                if mode == "experience" else "capacity legacy table"
-            ),
+            "scope": "experience_v2 fixed preset table",
             "bler_abstraction": (
                 "one user grant per TTI is one independent single-codeword TB; "
                 "codeword SINR is averaged in dB across RBGs and rank streams; "
@@ -1920,7 +1916,6 @@ async def sr_await_config(timeout_s: float = 90.0, spec_id: str | None = None) -
 @tool()
 def sr_system_sim(
     dataset_id: str,
-    evaluation_mode: str = "capacity",
     duration_s: float = 5.0,
     traffic_model: str = "ftp3",
     file_bytes: int = 500_000,
@@ -1986,7 +1981,6 @@ def sr_system_sim(
     orthogonalization_mode: str = "select",
     mu_olla_step_up_db: float = 0.01,
     mu_olla_step_down_db: float | None = None,
-    trim: str = "tail",
     small_burst_policy: str = "fractional_slot",
     tdd_pattern: str = "DDDSU",
     s_slot_dl_fraction: float = 0.7,
@@ -2017,22 +2011,22 @@ def sr_system_sim(
     tti_trace_max_points: int = 256,
     kpi_focus: list[str] | None = None,
     kpi_intent: str = "",
+    serving_cell: int | None = None,
 ) -> dict[str, Any]:
     """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI，全部带置信区间。**
 
     这是和链路级完全不同的一层。链路级问"这个信道能跑多快"，
     系统级问"**这个小区里的用户实际体验到多快**"——把话务到达与结束、
-    调度器的多用户取舍与缓冲区排空全算进去。两种模式都把一个用户在一个 TTI
-    的 grant 视为一个独立单码字 TB；最多一次重传，发送 MCS/RBG/rank/TBS 不变。
+    调度器的多用户取舍与缓冲区排空全算进去。一个用户在一个 TTI 的 grant 视为
+    一个独立单码字 TB；最多一次重传，发送 MCS/RBG/rank/TBS 不变。
     默认 IR 以“原 MCS 半谱效对应的等效 MCS”查 NewTx 曲线；CC 以原 MCS、SINR
     +10log10(2) dB 查同一 NewTx 曲线。
 
-    ``capacity`` 保留历史 ``legacy_v1`` 的全带/trim 口径以复现旧结果；
-    ``experience`` 的 ``experience_v2`` 才使用 28.552 Rel-19 DRB busy-period：
-    起点是首传、排队等待另报、末段 ACK piece 排除，并为单时隙小 burst 提供
-    TBVol/PaddingVol 的 fractional-slot 口径；另报“首包时延”（每个 arrival object
-    从生成到首次调度）与“含头速率”（相同 payload/去尾规则，只把首包时延加回分母）。
-    两套结果不可混为同一指标。
+    **只有一条评估路径**（``experience_v2``），没有模式开关。KPI 用 28.552
+    Rel-19 DRB busy-period：起点是首传、排队等待另报、清空 buffer 的末段发送排除，
+    并为单时隙小 burst 提供 TBVol/PaddingVol 的 fractional-slot 口径；另报
+    “首包时延”（每个 arrival object 从生成到首次调度）与“含头速率”（相同
+    payload/去尾规则，只把首包时延加回分母）。
 
     **``mu_accounting`` 决定 MU 的代价怎么记账**（用户 2026-09-02 定：capacity
     的误码与重传要与 experience 基本一致）。``pair_table``（默认）与
@@ -2118,17 +2112,29 @@ def sr_system_sim(
         在 ChannelHub 修复多时隙 SIR/SINR 聚合前，优先用
         ``num_slots_per_sample=1`` 且 ``num_samples/num_ues>=8``，既保留时间序列，
         又避免门 1 的 IoT 自洽性失败。
-    duration_s : 仿真时长，3~20 秒。40000 TTI 实测 0.2 秒跑完。
-    evaluation_mode : ``capacity`` 保留 legacy_v1 的全带调度口径；
-        ``experience`` 使用 experience_v2：DRB busy-period、按需 RBG、多 UE/TTI、
-        scheduled-TBS PF 与 Rel-19 小 burst KPI。两者是两个评估 profile，
-        不是一个算法的精度开关。
+    duration_s : 仿真时长，3~20 秒。逐 TTI 的 FIFO 与 RBG 分配是主要开销。
+    serving_cell : 多小区数据集里只取这个 serving cell 的 UE 做单小区调度。
+        **3GPP TR 36.814 的标准撒点密度是每扇区 10 个 UE**，7 站 21 扇区就要撒
+        210 个；而本仿真器一次只调度一个小区，所以必须能挑出属于某个小区的那批。
+        不给（默认）时，多小区数据集仍按原来那样硬失败。
+        挑哪个小区是**物理选择**：拓扑没有 wrap-around，边缘站的邻区不完整、
+        干扰被低估，应当挑被邻区包围最完整的中心站小区；结果里的
+        ``serving_cell_selection`` 会回报实际选中的小区、它有几个 UE，以及
+        **判断依据**：该小区 UE 的几何 SIR 中位与 IoT 中位
+        （``IoT = SIR/(SIR-SINR)``，与结果里的 ``iot_db_median`` 同一公式）。
+        算不出来时给 ``selected_interference_note`` 说明原因，不留哑 ``None``。
+        实测同一份 210 UE 数据集只换 ``serving_cell``：中心站（SIR 中位 4.22 dB）
+        与边缘站（16.25 dB）相比，后者把 ``cell_served_mbps`` 高估 28.8%、
+        把 ``ue_served_p5_mbps`` 高估 156%。
+        与 ``rb_power_control_enabled`` 同开会硬失败：逐 RB 功控的几何量直接来自
+        数据集、不随样本筛选走，混用会得到一个半对半错的资源池。
     traffic_model : ``ftp3``（3GPP FTP Model 3，评价体验速率的标准话务）/
         ``cdf``（两份 value,cdf 文件驱动包大小与包间隔 renewal process）/
-        ``mixed``（experience_v2 推荐：大小 UE 混跑，包长与到达率外生定义）/
-        ``bimodal``（**现网话务两头高中间低**：绝大部分是只占 1 个 RBG 的小包
-        和占满全带宽的大包，两者的体验速率分开报）/
-        ``full_buffer``（**体验速率在这个模型下没有意义**，缓冲区永不空）/ ``cbr``
+        ``mixed``（推荐：大小 UE 混跑，包长与到达率外生定义）/
+        ``full_buffer``（**这就是"容量仿真"**：话务开到最大、缓冲区永不空，
+        调度器始终有足量数据填满全部 RBG。TS 28.552 的样本只在 buffer 排空事件上形成，满缓冲下
+        不发生 ⇒ ``drb_throughput_rel19_mbps`` 报 ``None``；看工程口径
+        ``ue_served_p5_mbps`` 与 ``active_window_goodput_mbps``；两者分母趋同但发送字节分子同源）/ ``cbr``
     arrival_rate_hz : 每用户每秒到达几个文件。控制负载——太高会积压，
         ``notes`` 会拦。
     packet_size_cdf / interarrival_cdf : UTF-8 两列经验 CDF，cdf 支持 0..1 或
@@ -2145,8 +2151,8 @@ def sr_system_sim(
         也可选 ``packet_size`` 或 ``balanced``。
     load_calibration_formal_refinements : probe 后首轮正式均值仍未达标时，最多再用
         正式 ``num_replications`` 反馈校正几轮；默认 2，完整轨迹会返回。
-    pf_accounting : ``auto`` 会在 legacy_v1 使用历史 best_se，在 experience_v2
-        使用实际 scheduled TBS。``acked_goodput`` 只供研究，不是默认 PF 口径。
+    pf_accounting : ``auto`` 解析成实际 scheduled TBS。``acked_goodput`` 与
+        ``legacy_fullband`` 只供研究，不是默认 PF 口径。
     frequency_selective : ``auto`` 在逐 RBG 字段完整时启用，``on`` 缺字段硬失败，
         ``off`` 是宽带/顺序 RBG 基线。它与 RB 功控开关相互独立。
     max_layers_per_rbg / max_logical_prb_per_tti : P0 资源账本的空间层和逻辑
@@ -2161,7 +2167,7 @@ def sr_system_sim(
         ``qos_pf_edf``。后两个是包长感知：``edf`` 用 ``TBS/Buffer``，优先调度
         最快能传完的用户，**牺牲长期公平性换小包时延**；``qos_pf_edf`` 是它与
         ``qos_pf`` 的 蓝本原式加权混合。两者都需要有限队列，
-        ``full_buffer`` 与 ``evaluation_mode='capacity'`` 会硬失败。
+        搭 ``full_buffer`` 会硬失败——容量口径请用 ``pf`` / ``max_ci``。
     edf_mixed_weight : ``qos_pf_edf`` 里 EDF 的权重 w ∈ [0,1]。0 严格退化成
         ``qos_pf``，1 严格退化成 ``edf``。
     edf_mixed_epf_scale : 蓝本的 ``thp_filter`` 配平系数，默认 1.0。两个
@@ -2290,11 +2296,6 @@ def sr_system_sim(
     from . import system as sysm  # noqa: PLC0415
 
     ds = _load(dataset_id)
-    mode = str(evaluation_mode).strip().lower()
-    if mode not in ("capacity", "experience"):
-        return {"error": "evaluation_mode 只支持 capacity / experience"}
-    if target_prb_utilization is not None and mode != "experience":
-        return {"error": "target_prb_utilization 只支持 experience 模式"}
     if traffic_profiles is not None and not isinstance(traffic_profiles, list):
         return {"error": "traffic_profiles 必须是对象数组"}
     if traffic_profiles and str(traffic_model) not in ("mixed", "cdf"):
@@ -2380,16 +2381,122 @@ def sr_system_sim(
                 f"UE {ue} 的时间快照跨越多个 serving cell {cells}；"
                 "当前系统仿真没有实现切换，拒绝混表。")}
         serving_cell_ids_by_ue.append(int(cells[0]))
+    try:
+        sir = [float(x) for x in np.asarray(ds.scalar("sir_dB"))]
+    except Exception:  # noqa: BLE001
+        sir = None
+
+    # --- 按 serving cell 挑出单小区的那批 UE ------------------------------
+    serving_cell_selection: dict[str, Any] | None = None
+    if serving_cell is not None:
+        if (isinstance(serving_cell, bool)
+                or not isinstance(serving_cell, (int, np.integer))):
+            return {"error": "serving_cell 必须是整数小区编号或 None"}
+        # _flag 在下面才定义；这里内联同一判据（"off"/"false"/"0" 等字符串
+        # 直接 bool() 会是真值，开关会无声失灵）。
+        _rbpc_raw = rb_power_control_enabled
+        _rbpc_on = (_rbpc_raw.strip().lower() not in
+                    ("off", "false", "0", "no", "")
+                    if isinstance(_rbpc_raw, str) else bool(_rbpc_raw))
+        if _rbpc_on:
+            return {"error": (
+                "serving_cell 筛选不能与 rb_power_control_enabled 同开："
+                "逐 RB 功控的几何量（DownlinkPowerGeometry）直接来自数据集、"
+                "不随样本筛选走，混用会得到一个半对半错的资源池。"
+                "请先关掉 RB 功控，或生成本来就只含单个 serving cell 的数据集。")}
+        target_cell = int(serving_cell)
+        selected_ues = [ue for ue, cell in enumerate(serving_cell_ids_by_ue)
+                        if cell == target_cell]
+        if not selected_ues:
+            return {"error": (
+                f"serving_cell={target_cell} 在数据集里没有任何 UE；可选小区与 UE 数："
+                + str({c: serving_cell_ids_by_ue.count(c)
+                       for c in sorted(set(serving_cell_ids_by_ue))}))}
+        if len(selected_ues) < 2:
+            return {"error": (
+                f"serving_cell={target_cell} 只有 {len(selected_ues)} 个 UE，"
+                "调度是多用户之间的取舍，单用户小区测不出调度器。"
+                "请提高撒点密度（3GPP TR 36.814 用每扇区 10 个 UE）后重新生成。")}
+        # **保持轮转不变式**：样本 i 必须属于 UE i % n_ue，下游 group_samples_by_ue
+        # 依赖它。按 (snapshot, 选中 UE) 的顺序重排，新样本 j -> 新 UE j % k。
+        total_samples = len(h_users)
+        n_snapshots = total_samples // int(n_ue)
+        order = [ue + snap * int(n_ue)
+                 for snap in range(n_snapshots)
+                 for ue in selected_ues]
+        h_users = [h_users[i] for i in order]
+        h_est_users = [h_est_users[i] for i in order]
+        sinr = np.asarray(sinr)[order]
+        if sir is not None:
+            sir = [sir[i] for i in order]
+        # **选小区是物理选择，得给出判断依据**：这个小区被邻区包围得多完整。
+        # 依据就是几何 SIR 与由它推出的 IoT（IoT = SIR/(SIR-SINR)，与仿真里
+        # cell["iot_db_median"] 同一个公式、同一批样本）。
+        # 早先这里去查数据集里的 iot_dl_dB 标量，**多小区数据集根本没有这个
+        # measurement**，于是恒 None 且被裸 except 吞掉——看起来像"选中小区没有
+        # 干扰信息"，其实只是查错了地方。拿不到就明说拿不到，不留哑 None。
+        _sel_sir_median = None
+        _iot_median = None
+        _iot_note = None
+        if sir is None:
+            _iot_note = "数据集没有 sir_dB，无法给出选中小区的几何干扰画像"
+        else:
+            from . import interference as itf  # noqa: PLC0415
+
+            _sel_sir = np.asarray(sir, dtype=float)   # 已按 order 重排
+            _sel_sinr = np.asarray(sinr, dtype=float)
+            _ok = np.isfinite(_sel_sir) & np.isfinite(_sel_sinr)
+            if not _ok.any():
+                _iot_note = "选中小区的 sir_dB / sinr_dB 全部非有限"
+            else:
+                _sel_sir_median = round(float(np.median(_sel_sir[_ok])), 3)
+                _iot_vals = np.asarray(
+                    itf.iot_db(_sel_sinr[_ok], _sel_sir[_ok]), dtype=float)
+                _iot_finite = _iot_vals[np.isfinite(_iot_vals)]
+                if _iot_finite.size:
+                    _iot_median = round(float(np.median(_iot_finite)), 3)
+                    if _iot_finite.size < _iot_vals.size:
+                        _iot_note = (
+                            f"{int(_iot_vals.size - _iot_finite.size)}/"
+                            f"{int(_iot_vals.size)} 个样本 SIR<=SINR，"
+                            "IoT 为 inf，已从中位里剔除")
+                else:
+                    _iot_note = "选中小区所有样本 SIR<=SINR，IoT 无有限值"
+        serving_cell_selection = {
+            "requested": target_cell,
+            "ues_in_cell": len(selected_ues),
+            "ues_in_dataset": int(n_ue),
+            "cells_in_dataset": len(set(serving_cell_ids_by_ue)),
+            "ue_count_by_cell": {
+                str(c): serving_cell_ids_by_ue.count(c)
+                for c in sorted(set(serving_cell_ids_by_ue))},
+            "selected_geometric_sir_db_median": _sel_sir_median,
+            "selected_iot_db_median": _iot_median,
+            "selected_interference_note": _iot_note,
+            "selection_criterion": (
+                "geometric SIR/IoT of the selected cell's UEs; a lower SIR (higher "
+                "IoT) means the cell is more completely surrounded by neighbours. "
+                "Edge cells of a drop without wrap-around under-estimate "
+                "inter-cell interference."),
+            "sample_layout": (
+                "re-interleaved as (snapshot, selected UE) so that sample i still "
+                "belongs to UE i % num_ues, which group_samples_by_ue relies on"),
+            "note": (
+                "single-cell scheduling over one cell of a multi-cell drop; "
+                "inter-cell interference enters through the geometric SINR/SIR of "
+                "the drop plus the analytic neighbour load, not through the "
+                "discarded UEs of other cells"),
+        }
+        n_ue = len(selected_ues)
+        serving_cell_ids_by_ue = [target_cell] * n_ue
+
     distinct_serving_cells = sorted(set(serving_cell_ids_by_ue))
     if len(distinct_serving_cells) != 1:
         return {"error": (
             "当前 SystemResult 是单小区调度结果，不能把不同 serving cell 的 UE "
             f"放进同一 272-RB 资源池（实得 {distinct_serving_cells}）。"
-            "请按 serving cell 筛选后分别运行；联合调度属于下一阶段。")}
-    try:
-        sir = [float(x) for x in np.asarray(ds.scalar("sir_dB"))]
-    except Exception:  # noqa: BLE001
-        sir = None
+            "请用 serving_cell=<小区编号> 挑出其中一个小区，"
+            "或生成本来就只含单个 serving cell 的数据集；联合调度属于下一阶段。")}
     # **快照间隔由配置算出来，不能拍脑袋。** ChannelHub 的多时隙输出是连续的
     # SRS/CSI-RS 机会（默认 5 ms），不是连续 TTI——当成 TTI 会让所有时间相关的
     # 结论差 10 倍，见 CLAUDE.md「多时隙的快照间隔是 5 ms」。
@@ -2451,7 +2558,7 @@ def sr_system_sim(
             csi_report_period_ms=float(csi_report_period_ms),
             cqi_filter_lambda=float(cqi_filter_lambda),
             cqi_filter_domain=str(cqi_filter_domain),
-            periodic_trace_history=(mode == "experience" and float(warmup_s) > 0))
+            periodic_trace_history=float(warmup_s) > 0)
     except ValueError as exc:
         return {"error": str(exc)}
     # **h_est 的物理来源必须与 SRS 语义一致。** 系统仿真把 h_est 当基站侧
@@ -2526,7 +2633,7 @@ def sr_system_sim(
             max_backoff_times=int(rank_max_backoff_times),
             probe_enabled=_flag(rank_probe_enabled))
         system_cfg = sysm.SystemConfig(
-            evaluation_mode=mode, duration_s=float(duration_s),
+            duration_s=float(duration_s),
             tdd_pattern=tdd_pattern, harq_combining=str(harq_combining),
             s_slot_dl_fraction=float(s_slot_dl_fraction),
             harq_feedback_delay=_flag(harq_feedback_delay),
@@ -2567,7 +2674,7 @@ def sr_system_sim(
             olla_speedup=float(olla_speedup),
             olla_warmup_speedup=float(olla_warmup_speedup))
         kpi_cfg = sysm.KpiConfig(
-            trim=trim, small_burst_policy=small_burst_policy,
+            small_burst_policy=small_burst_policy,
             warmup_s=float(warmup_s),
             tti_trace_mode=str(tti_trace_mode),
             tti_trace_max_points=tti_trace_max_points)
@@ -2670,7 +2777,6 @@ def sr_system_sim(
         return {"error": str(exc)}
     out = res.as_dict()
     out.update(_system_adaptation_contract(
-        mode=mode,
         target_bler=float(target_bler),
         olla_step_up_db=float(olla_step_up_db),
         olla_step_down_db=olla_step_down_db,
@@ -2847,6 +2953,8 @@ def sr_system_sim(
             "生成信道时的版本一致；正式结论建议用当前版本重新生成。"
         )
     out["num_samples"] = len(h_users)
+    if serving_cell_selection is not None:
+        out["serving_cell_selection"] = serving_cell_selection
     out["summary"] = res.text()
     out["timing"] = {
         "build_tables_s": round(build_s, 3),
@@ -2868,19 +2976,18 @@ def sr_system_sim(
                    "它复用 gates.py 的配对检验并给出明确判决。"
                    "用户级明细在 users 里。")
     serializable = _jsonable(out)
-    if mode == "experience":
-        try:
-            from . import kpi_view as _kpi_view  # noqa: PLC0415
+    try:
+        from . import kpi_view as _kpi_view  # noqa: PLC0415
 
-            serializable["kpi_view"] = _kpi_view.write_kpi_report(
-                serializable, dataset_id=dataset_id,
-                kpi_focus=kpi_focus, kpi_intent=str(kpi_intent))
-        except Exception as exc:  # noqa: BLE001
-            # 页面是呈现层；失败不能吞掉已经完成的仿真，但降级必须显式可见。
-            serializable["kpi_view"] = {
-                "error": f"KPI 页面生成失败：{exc}",
-                "notice": "仿真数值仍完整返回；请先修复页面生成错误再交付结果。",
-            }
+        serializable["kpi_view"] = _kpi_view.write_kpi_report(
+            serializable, dataset_id=dataset_id,
+            kpi_focus=kpi_focus, kpi_intent=str(kpi_intent))
+    except Exception as exc:  # noqa: BLE001
+        # 页面是呈现层；失败不能吞掉已经完成的仿真，但降级必须显式可见。
+        serializable["kpi_view"] = {
+            "error": f"KPI 页面生成失败：{exc}",
+            "notice": "仿真数值仍完整返回；请先修复页面生成错误再交付结果。",
+        }
     return serializable
 
 

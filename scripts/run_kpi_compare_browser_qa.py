@@ -54,7 +54,7 @@ def _result(
         num_replications=8,
         master_seed=20260824,
         sys_cfg=sy.SystemConfig(
-            evaluation_mode="experience", duration_s=0.8, tdd_pattern="DDDSU"),
+            duration_s=0.8, tdd_pattern="DDDSU"),
         traffic=sy.TrafficConfig(
             model="mixed",
             file_bytes=220_000,

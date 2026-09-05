@@ -228,7 +228,6 @@ def scheduler(*, mu_enabled: bool, accounting: str = "scheduled_tbs",
 
 def system_config(power: str = "ebf", duration_s: float = 5.0) -> sy.SystemConfig:
     return sy.SystemConfig(
-        evaluation_mode="experience",
         duration_s=float(duration_s),
         tdd_pattern="DDDSU",
         seed=MASTER_SEED,
@@ -332,7 +331,7 @@ def arm_description(
 ) -> dict[str, Any]:
     resolved_traffic = traffic_cfg or traffic()
     config = {
-        "evaluation_mode": "experience", "duration_s": FORMAL_DURATION_S,
+        "duration_s": FORMAL_DURATION_S,
         "warmup_s": FORMAL_WARMUP_S,
         "tdd_pattern": "DDDSU", "snapshot_update_ms": 5.0,
         "num_rbg": 17, "rb_per_rbg": 16,
@@ -803,7 +802,7 @@ def run_pf_sentinel(_ds: Any) -> dict[str, Any]:
     """Deterministic reverse control where the PF accounting effect is observable."""
     tables = _pf_sentinel_tables()
     cfg = sy.SystemConfig(
-        evaluation_mode="experience", duration_s=1.0,
+        duration_s=1.0,
         tdd_pattern="DDDSU", seed=9)
     tr = sy.TrafficConfig(
         model="mixed", small_ue_share=0.5,

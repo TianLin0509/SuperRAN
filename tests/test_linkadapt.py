@@ -219,8 +219,8 @@ def main() -> None:
     check(la.re_per_slot(273, n_symbols=14, n_dmrs_per_prb=0) == 273 * 156,
           "每 PRB 的 RE 数封顶 156（标准明写）")
 
-    # --- PdschOverhead：两条主调度路径共用的开销口径 -----------------------
-    # **棘轮。** 把 system._re_of / TbsLookup 换回 `PRB × 12 × 12` 会让这里变红：
+    # --- PdschOverhead：链路工具与唯一系统路径共用的开销口径 ---------------
+    # **棘轮。** 把系统入口 / TbsLookup 换回 `PRB × 12 × 12` 会让这里变红：
     # 那等于假设 DM-RS 与 PDCCH 都不占资源，TBS 系统性偏大约 12.5%。
     _oh = la.PdschOverhead()
     check((_oh.pdsch_symbols, _oh.dmrs_re_per_prb, _oh.pdcch_symbols) == (12, 6, 1),

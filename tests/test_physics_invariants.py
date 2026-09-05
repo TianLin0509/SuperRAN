@@ -379,7 +379,7 @@ for u, mcs in enumerate((8, 10, 12, 14)):
         geo_sinr_db=8.0 + u, outage=np.zeros(2, dtype=bool),
         iot_db=3.0, sir_db=12.0, se_gnb=se_u.copy(), best_se_gnb=se_u[:, 0].copy()))
 
-cfg = sy.SystemConfig(evaluation_mode="experience", duration_s=0.2,
+cfg = sy.SystemConfig(duration_s=0.2,
                       tdd_pattern="DDDSU", seed=9)
 tr = sy.TrafficConfig(model="mixed", small_ue_share=1.0,
                       small_file_bytes=500, small_arrival_rate_hz=250.0)
@@ -422,7 +422,7 @@ check(np.array_equal(ta.cqi_index_per_snapshot[0], tb.cqi_index_per_snapshot[0])
 
 # 过载观测窗：超过 deadline 仍未完成的是确定 miss；未到 deadline 的才右删失。
 over_cfg = sy.SystemConfig(
-    evaluation_mode="experience", duration_s=0.25, tdd_pattern="DDDSU")
+    duration_s=0.25, tdd_pattern="DDDSU")
 over = sy.simulate(
     tables[:1], sys_cfg=over_cfg,
     traffic=sy.TrafficConfig(model="cbr", cbr_mbps=1000.0),
@@ -434,21 +434,258 @@ check(over.cell["deadline_missed_incomplete_arrival_objects"] > 0
       and over.cell["pdb_decidable_arrival_objects"]
       > over.cell["completed_arrival_objects"],
       "PDB 分母纳入已超时未完成对象，并把未到 deadline 的对象单列右删失")
+# **过载 ≠ 饿死，但标准 KPI 不该替它编一个数。** 这个 UE 一个 burst 都没传完
+# （measured=0），TS 28.552 的样本在 buffer emptied 事件上形成，因此标准字段
+# 没有样本——这是标准的定义，不是缺陷。它一直在被服务（约 33.6 Mbps）这件事，
+# 由**工程字段**如实给出：active_window_goodput_mbps 与 ue_served_mean_mbps。
+# 曾经把在飞段混进标准字段，等于让工程量顶标准的名字，已撤回。
 check(over.cell["ue_experience_eligible"] == 1
-      and over.cell["ue_experience_measured"] == 0
-      and over.cell["cell_experienced_mbps"] == 0.0,
-      "有到达但无完成 burst 的饿死 UE 以 0 留在体验分布中")
+      and over.cell["ue_experience_measured"] == 0,
+      "有到达但无完成 burst 的 UE 仍留在体验分布里，删失由 eligible/measured 之差暴露")
+check(over.cell["cell_experienced_mbps"] == 0.0,
+      "标准口径无样本：zero-inclusive 分布里该 UE 记 0，不替它编数")
+check(int(over.cell["drb_throughput_completed_bursts"]) == 0
+      and int(over.cell["drb_throughput_inflight_bursts"]) > 0,
+      "样本构成如实上报：0 个已完成、有在飞——标准 KPI 无样本这件事看得见")
+check(over.cell["active_window_goodput_mbps"] is not None
+      and abs(float(over.cell["active_window_goodput_mbps"])
+              - float(over.cell["cell_served_mbps"]))
+      <= 0.20 * float(over.cell["cell_served_mbps"]),
+      "工程字段给出它实际的速率（与 cell_served_mbps 同量级）")
 
-# legacy/capacity 路径也必须在 U 时隙维护外生到达；DDDSU 不能漏掉 20% CBR。
-legacy = sy.simulate(
+# **外生到达与时隙类型无关。** 话务进缓冲区是 UE 侧的事，和这个 TTI 是 D/S/U
+# 没有关系；只有"发不发得出去"才看时隙。历史上到达只在下行 TTI 走了一遍，
+# DDDSU 就静默少 20% 的 CBR——offered load 被打折，而结果里看不出来。
+cbr = sy.simulate(
     tables[:1],
-    sys_cfg=sy.SystemConfig(evaluation_mode="capacity", duration_s=0.05,
-                            tdd_pattern="DDDSU"),
+    sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="DDDSU"),
     traffic=sy.TrafficConfig(model="cbr", cbr_mbps=1.0),
     sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
     kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(92, 0))
-check(abs(legacy.cell["offered_mbps"] - 1.0) < 1e-9,
+check(abs(cbr.cell["offered_mbps"] - 1.0) < 1e-9,
       "D/S/U 每个 TTI 都维护业务到达，DDDSU 不再漏掉 U 时隙的 20% CBR")
+
+# **"容量仿真"必须是同一条路径上的一个话务配置，不是另一套语义。**
+# 把这条 revert 掉（恢复独立容量分支）就会红：满缓冲下按需 RBG 必须退化成
+# 全带宽、RBG 全部用满，且体验类 KPI 报 None 而不是 0。
+#
+# **注意下面这条 == 1.0 只在「频选关 + MU 关」成立**，它是退化解不是普遍规律。
+# 普遍规律在本节末尾那张 2x2 表里，别拿这一条去理解满缓冲。
+fb = sy.simulate(
+    tables,
+    sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="DDDD"),
+    traffic=sy.TrafficConfig(model="full_buffer"),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False,
+                             frequency_selective="off"),
+    kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(93, 0))
+check(fb.config["system"]["model_version"] == "experience_v2",
+      "full_buffer 走的就是体验路径，没有第二个 model_version")
+check(abs(float(fb.cell["scheduled_ues_per_busy_tti"]) - 1.0) < 1e-9,
+      "频选关+MU关时，满缓冲下按需 RBG 退化成全带宽：每忙 TTI 恰好 1 个 SU")
+check(abs(float(fb.cell["resource_utilization"]) - 1.0) < 1e-9,
+      "满缓冲下 RBG 全部用满，没有留空的尾料")
+check(float(fb.cell["cell_served_mbps"]) > 0.0,
+      "容量口径仍然照常输出 cell_served_mbps")
+
+# **标准与工程必须分字段。** TS 128 552 V19.5.0 p54：样本只在 DRB DL buffer
+# emptied 事件上形成。full buffer 下 buffer 永不排空 ⇒ 标准字段没有样本，报
+# None 是对的。把在飞段混回 drb_throughput_rel19_mbps 就会让下面第一条红。
+check(fb.cell["drb_throughput_rel19_mbps"] is None
+      and fb.cell["cell_experienced_mbps"] is None,
+      "full buffer 下标准 KPI 无样本、报 None——工程量不许顶标准的名字")
+check(int(fb.cell["drb_throughput_completed_bursts"]) == 0
+      and int(fb.cell["drb_throughput_inflight_bursts"]) == len(tables),
+      "样本构成如实上报：0 个已完成、每个 UE 一个在飞")
+# **但用户仍然拿得到数**，走两个工程字段，任何话务下都有值。
+_fb_active = fb.cell["active_window_goodput_mbps"]
+_fb_served_mean = float(fb.cell["ue_served_mean_mbps"])
+check(_fb_active is not None and float(_fb_active) > 0.0,
+      "full buffer 下工程口径 active_window_goodput_mbps 有值")
+# **这条验的是分母，不是分子——别再当成交叉验证。**
+# 两个数的分子是**同一份**发送净荷记账（experience.py 里 tr.transmit() 返回的
+# payload，一边累进 served_measured、一边塞进 TxEvent）。只有分母不同：
+# 一个除观测窗长，一个除首传到末次窗内发送的跨度。所以它能证明的只有
+# 「满缓冲下每个 UE 确实从头忙到尾，两个分母重合」——这是关于话务模型的陈述。
+# **净荷记账整体缩放时这条读数不变**（实测把记账放大 10%，小区吞吐错 10.6%，
+# 这条仍读 0.156%）。真正能抓记账缩放的是有限话务下的字节守恒
+# （到达 = 已发 + 积压，到达量由话务模型独立决定），见本节末尾。
+check(abs(float(_fb_active) - _fb_served_mean) <= 0.10 * _fb_served_mean,
+      "满缓冲下每个 UE 从头忙到尾，两个口径的分母重合（差 <10%）"
+      "——**这验的是分母，不验净荷记账**")
+
+# **用户体验速率在 full buffer 下是有定义的，只是走另一个口径。**
+# ITU-R M.2412 / TR 38.913：每 UE 已发送净荷 / 观测窗长，5% 分位就是
+# cell-edge user throughput。把 ue_served_* 删掉或让它在 full buffer 下返回
+# None，这几条就会红——满缓冲评估的主指标不许消失。
+_fb_served = [float(row["served_mbps"]) for row in fb.users]
+check(all(np.isfinite(fb.cell[k]) and fb.cell[k] > 0 for k in
+          ("ue_served_mean_mbps", "ue_served_median_mbps", "ue_served_p5_mbps")),
+      "full buffer 下用户体验速率（ITU 口径）照常有值，不是 None")
+check(fb.cell["ue_served_p5_mbps"] <= fb.cell["ue_served_median_mbps"] + 1e-9
+      <= fb.cell["ue_served_mean_mbps"] + abs(fb.cell["ue_served_mean_mbps"]),
+      "5% 分位不高于中位；三个统计量来自同一个跨 UE 分布")
+check(abs(sum(_fb_served) - float(fb.cell["cell_served_mbps"])) < 1e-6,
+      "各 UE 已服务速率之和恰好等于小区吞吐——用户级与小区级同源")
+check(_fb_served[0] > _fb_served[-1],
+      "几何最好的 UE 拿到的用户吞吐高于最差的（PF 不抹平几何差异）")
+
+# --- 满缓冲下"每忙 TTI 服务几个用户"的真实规律：一张 2x2 表 ------------------
+# **上面那条 == 1.0 是退化解，不是普遍规律。** 本 PR 早先把它写成了物理定律，
+# 而守卫它的断言恰好跑在「频选关 + MU 关」——两个会让它失败的开关都关掉了。
+# 真实规律是：**满缓冲保证的是 RBG 用满，不是只服务一个用户。**
+#   * 频选打开：调度器把"少几个但信道更好的 RBG"给第一个用户、余料给下一个；
+#   * MU 打开：一个 TTI 本来就配对两个用户（64T4R 立 64 根天线正是为了这个）。
+# 出厂默认是 frequency_selective="auto" + mu_enabled=False，在真实锚点数据集上
+# 实测每忙 TTI 1.07；开 MU 是 1.73、小区吞吐 +36%。
+# 这里用互补频选的合成信道把四个格子都钉住，谁把任何一格改回 1.0 都会红。
+_fsrng = np.random.default_rng(7)
+_fsH = []
+for _u in range(4):
+    _h = ((_fsrng.standard_normal((2, 272, 8, 2))
+           + 1j * _fsrng.standard_normal((2, 272, 8, 2))) / np.sqrt(2))
+    _g = np.full(272, 0.15)
+    _g[_u * 68:(_u + 1) * 68] = 1.0          # UE u 只在自己那 1/4 频段上强
+    _fsH.append((_h * _g[None, :, None, None]).astype(complex))
+_fsT = sy.build_link_tables(_fsH, [12.0] * 4, num_snapshots=2, mu_enabled=True)
+
+
+def _fs_arm(fs: str, mu: bool):
+    return sy.simulate(
+        _fsT,
+        sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="DDDD", num_rbg=17),
+        traffic=sy.TrafficConfig(model="full_buffer"),
+        sched=sy.SchedulerConfig(olla_enabled=False, mu_enabled=mu,
+                                 frequency_selective=fs),
+        kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(93, 0)).cell
+
+
+_a_ff, _a_sf = _fs_arm("off", False), _fs_arm("on", False)
+_a_fm, _a_sm = _fs_arm("off", True), _fs_arm("on", True)
+_ues = lambda c: float(c["scheduled_ues_per_busy_tti"])  # noqa: E731
+print(f"  满缓冲每忙 TTI 服务 UE 数：频选关/MU关 {_ues(_a_ff):.4f}、"
+      f"频选开/MU关 {_ues(_a_sf):.4f}、频选关/MU开 {_ues(_a_fm):.4f}、"
+      f"频选开/MU开 {_ues(_a_sm):.4f}")
+check(abs(_ues(_a_ff) - 1.0) < 1e-9,
+      "频选关+MU关：每忙 TTI 恰好 1 个（这是退化解）")
+check(_ues(_a_sf) > 1.0 + 1e-9,
+      f"**频选开就 >1**：调度器按 RBG 把带宽切给多个用户（实得 {_ues(_a_sf):.4f}）")
+check(abs(_ues(_a_fm) - 2.0) < 1e-9 and float(_a_fm["mu_share"]) > 0.0,
+      f"**MU 开就配对两个用户**（实得 {_ues(_a_fm):.4f}，"
+      f"MU 占比 {float(_a_fm['mu_share']):.2f}）")
+check(_ues(_a_sm) > _ues(_a_fm) + 1e-9,
+      f"频选与 MU 叠加还会更多（实得 {_ues(_a_sm):.4f}）")
+# **四种配置里真正不变的是这个**：满缓冲把 RBG 用满，没有留空的尾料。
+check(all(abs(float(c["resource_utilization"]) - 1.0) < 1e-9
+          for c in (_a_ff, _a_sf, _a_fm, _a_sm)),
+      "满缓冲下 RBG 全部用满——**这才是满缓冲真正保证的不变量**")
+
+# --- 满缓冲下字节守恒不适用，必须报 None 而不是 0.0 -------------------------
+# 它比的是「到达 = 已发 + 积压」，而满缓冲的 offered 是无界的种子字节。
+# 旧容量分支在这里算出 3.7e21（垃圾数冒充测量）；合并初版改成硬编码 0.0
+# （漂亮数冒充测量），**同一种错**，而且我还拿这个 0.0 当过"对账正确"的证据。
+# 旁边三个兄弟字段满缓冲下都报 None，这个也必须一致。
+check(_a_ff["accounting_error_pct"] is None,
+      "满缓冲下字节守恒不适用，accounting_error_pct 报 None 而不是 0.0")
+check(fb.diagnostics["byte_conservation"]["error_pct"] is None
+      and fb.diagnostics["byte_conservation"]["not_applicable_reason"] is not None,
+      "byte_conservation 同样报 None，并说明为什么不适用")
+
+# 反向对照：同一条路径换成有限话务，两个口径给出**不同**的数。
+# 它们不是同一个量的两种精度——轻载下 UE 全时段平均远低于它 burst 在飞时的速率。
+_fin = sy.simulate(
+    tables,
+    sys_cfg=sy.SystemConfig(duration_s=0.4, tdd_pattern="DDDD"),
+    traffic=sy.TrafficConfig(model="ftp3", arrival_rate_hz=5.0, file_bytes=50_000),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False,
+                             frequency_selective="off"),
+    kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(94, 0))
+check(np.isfinite(_fin.cell["ue_served_mean_mbps"])
+      and _fin.cell["cell_experienced_mbps"] is not None,
+      "有限话务下两个口径同时有值")
+check(_fin.cell["ue_served_mean_mbps"] < _fin.cell["cell_experienced_mbps"],
+      "轻载下 UE 全时段平均低于 busy-period 吞吐——证明它们是两个定义，不可互换")
+check(int(_fin.cell["drb_throughput_inflight_bursts"]) == 0
+      and abs(float(_fin.cell["drb_throughput_inflight_share"])) < 1e-9,
+      "轻载下 burst 都传完了，没有在飞样本——修复对良性场景零扰动")
+
+# **反向哨兵：只统计已完成 burst 会系统性偏乐观。** 过载下慢 burst 更不容易
+# 传完，把它们丢掉等于只留漂亮样本。构造一个大部分 burst 传不完的有限话务，
+# 断言"只看已完成"给出的数明显高于把在飞段也计入的数。
+_ovl = sy.simulate(
+    tables,
+    sys_cfg=sy.SystemConfig(duration_s=1.0, tdd_pattern="DDDD"),
+    traffic=sy.TrafficConfig(model="ftp3", arrival_rate_hz=5.0,
+                             file_bytes=500_000),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False,
+                             frequency_selective="off"),
+    kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(95, 0))
+check(int(_ovl.cell["drb_throughput_inflight_bursts"]) > 0
+      and int(_ovl.cell["drb_throughput_completed_bursts"]) > 0,
+      "过载场景里已完成与在飞 busy period 同时存在（哨兵前提成立）")
+# **只断言两个数不同，不断言方向。** 偏差方向随场景而定：慢 burst 更不容易传完
+# 会让 completed-only 偏乐观；但若在飞的恰好是刚起步的好信道用户，方向就反过来。
+# 实测两种都见过（中载 11.59→8.78；本例 126.0→131.9）。
+#
+# **纠正（审核 2026-09-04 指出）**：这两个数的差**不是**"含不含在飞样本"，
+# 在飞样本从来不进 drb_throughput_rel19_mbps——那正是本 PR 的核心约定。
+# 它们差的是**聚合权重**：
+#   * drb_throughput_rel19_mbps        = 所有已完成 burst 的**汇池均值**
+#   * cell_experienced_completed_only  = 每个 UE 先各自平均，再对 UE 取均值
+# 同一个样本集、两种加权，burst 数在 UE 之间不均时必然不等。
+# ---------------------------------------------------------------------------
+# **反例棘轮：没有 buffer-emptied 事件的在飞段不许冒充标准样本。**
+# #21 改成"发送即扣队列"后，重传对 DRB 队列是空操作；旧的"NACK 留队、重传
+# 清空"构造已经失效。新反例在同一个 busy period 里多放 1 B，只发送其中 100 B：
+#   * 没有那 1 B → buffer emptied → 形成标准小 burst 样本；
+#   * 有那 1 B   → 仍在飞 → 只能形成 engineering_active_window 样本。
+# 首传故意取 NACK，证明工程发送速率与标准样本边界都不等 ACK；末次失败只影响
+# residual_bler，不能把发送过的 100 B 放回队列。
+_TC = type("_Tc", (), {"name": "ratchet", "pdb_ms": 0.0})()
+
+
+def _one_byte_tail_queue(trailing_byte: bool) -> ex.DrbQueue:
+    q = ex.DrbQueue(ue=0, traffic_class=_TC)
+    q.arrive(0, 100)
+    if trailing_byte:
+        q.arrive(0, 1)
+    q.transmit(0, scheduled_bytes=1000, payload_bytes=100, ack=False)
+    return q
+
+
+_q_no, _q_yes = _one_byte_tail_queue(False), _one_byte_tail_queue(True)
+check(len(_q_no.done) == 1 and _q_no.active is None
+      and len(_q_yes.done) == 0 and _q_yes.active is not None,
+      "反例构造成立：1 B 尾随到达把 busy period 从「已完成」变成「在飞」")
+check(_q_yes.active.tx_events[-1].padding_bytes == 900
+      and not _q_yes.active.tx_events[-1].ack,
+      "在飞 busy period 的 NACK 首传带 900 B padding，但发送的 100 B 仍已记账")
+_m_yes = ex.active_window_goodput(_q_yes.active, 0.5, 0)
+check(_m_yes.throughput_kind == "engineering_active_window"
+      and "rel19" not in str(_m_yes.throughput_kind)
+      and _m_yes.throughput_mbps is not None,
+      "NACK 的在飞发送只形成工程样本，不冒充 TS 28.552 样本")
+check(ex.burst_metrics(_q_yes.active, 0.5).throughput_kind is None,
+      "没有 buffer-emptied 事件的在飞 busy period 不产生标准样本")
+check(ex.burst_metrics(_q_no.done[0], 0.5).throughput_kind == "rel19_fractional_slot",
+      "同样的 NACK 首传只要清空 buffer，就按发送时口径形成标准小 burst 样本")
+# 端到端：同一场景加 1 B，标准字段的样本数不许改变。
+_ratchet_cfg = dict(
+    sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="D"),
+    sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+    kpi=sy.KpiConfig(warmup_tti=0))
+_r_small = sy.simulate(
+    tables[:1], traffic=sy.TrafficConfig(model="cbr", cbr_mbps=1e-3),
+    rng=rg.RngBook(96, 0), **_ratchet_cfg)
+check(int(_r_small.cell["drb_throughput_completed_bursts"])
+      + int(_r_small.cell["drb_throughput_inflight_bursts"])
+      == int(_r_small.cell["drb_throughput_completed_bursts"])
+      + int(_r_small.cell["active_window_goodput_samples"]),
+      "在飞计数与工程样本数同源，标准样本数独立于它")
+
+check(_ovl.cell["cell_experienced_completed_only_mbps"] is not None
+      and abs(float(_ovl.cell["cell_experienced_completed_only_mbps"])
+              - float(_ovl.cell["drb_throughput_rel19_mbps"])) > 1e-9,
+      "汇池均值与逐用户均值不等——两者同一样本集、两种加权，不可混引")
 
 
 def test_s_slot_fraction_single_source_of_truth() -> None:
@@ -504,11 +741,10 @@ def test_mu_admission_gates_are_explicit_and_reversible() -> None:
 test_mu_admission_gates_are_explicit_and_reversible()
 
 # ---------------------------------------------------------------------------
-section("9  两条主调度路径必须用同一个 PDSCH 开销口径（38.214 §5.1.3.2 步骤 1）")
-# **棘轮。** 把 system 的 _re_of 或 experience.TbsLookup 换回硬编码的
-# `PRB x 12 x 12`，下面几条会同时变红：那等于假设 DM-RS 与 PDCCH 都不占资源。
-# 判据不是"数值等于多少"，而是"改开销配置，两条路径的吞吐都必须跟着动"——
-# 硬编码的路径对配置免疫，比值会退化成 1.000。
+section("9  唯一系统主循环必须消费同一个 PDSCH 开销口径（38.214 §5.1.3.2 步骤 1）")
+# **棘轮。** 把 experience.TbsLookup 或系统集成入口换回硬编码的 `PRB x 12 x 12`，
+# 下面几条会变红：那等于假设 DM-RS 与 PDCCH 都不占资源。判据不是"数值等于多少"，
+# 而是"改开销配置，TBS 表和真实系统吞吐都必须跟着动"；硬编码路径的比值会退化成 1.000。
 _oh_default = la.PdschOverhead()                                  # 126 RE/PRB
 _oh_free = la.PdschOverhead(dmrs_re_per_prb=0, pdcch_symbols=0)   # 144 RE/PRB
 _re_ratio = _oh_free.re_per_prb("D") / _oh_default.re_per_prb("D")
@@ -525,32 +761,32 @@ check(abs(_tbs_ratio - _re_ratio) < 0.01,
       f"RE 比 {_re_ratio:.4f}）")
 
 
-# --- legacy/capacity 侧：主循环的 _re_of 必须消费 sys_cfg.pdsch_overhead ---
-def _legacy_served(overhead):
+# --- 系统集成侧：唯一主循环必须消费 sys_cfg.pdsch_overhead ---
+def _system_served(overhead):
     return sy.simulate(
         tables[:1],
-        sys_cfg=sy.SystemConfig(evaluation_mode="capacity", duration_s=0.05,
-                                tdd_pattern="DDDD", pdsch_overhead=overhead),
+        sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="DDDD",
+                                pdsch_overhead=overhead),
         traffic=sy.TrafficConfig(model="full_buffer"),
         sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
         kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(92, 0),
     ).cell["cell_served_mbps"]
 
 
-_served_default = _legacy_served(None)
-_served_free = _legacy_served(_oh_free)
+_served_default = _system_served(None)
+_served_free = _system_served(_oh_free)
 _served_ratio = _served_free / max(_served_default, 1e-12)
-print(f"  legacy 主循环：126 RE/PRB -> {_served_default:.2f} Mbps，"
+print(f"  唯一系统主循环：126 RE/PRB -> {_served_default:.2f} Mbps，"
       f"144 RE/PRB -> {_served_free:.2f} Mbps，比值 {_served_ratio:.4f}")
 check(_served_ratio > 1.05,
-      f"legacy 主循环确实读了 sys_cfg.pdsch_overhead（比值 {_served_ratio:.4f}；"
+      f"唯一系统主循环确实读了 sys_cfg.pdsch_overhead（比值 {_served_ratio:.4f}；"
       "硬编码 12x12 时会退化成 1.000）")
 check(abs(_served_ratio - _re_ratio) < 0.03,
-      f"legacy 吞吐随开销口径同比变化（实得 {_served_ratio:.4f} vs "
+      f"系统吞吐随开销口径同比变化（实得 {_served_ratio:.4f} vs "
       f"RE 比 {_re_ratio:.4f}）")
 check(_lut_default.overhead == _oh_default
       and sy.SystemConfig().pdsch_overhead == _oh_default,
-      "两条路径的默认口径是同一个 PdschOverhead()，不会各自漂移")
+      "TBS 表与系统入口的默认口径是同一个 PdschOverhead()，不会各自漂移")
 
 
 # ---------------------------------------------------------------------------

@@ -355,7 +355,7 @@ TEMPLATE = r"""<!doctype html>
     <article class="module"><span class="verdict">VERIFIED ENVELOPE</span><h3>5. TBS、业务与体验 KPI</h3><ul><li>D/S × 28 MCS × rank 1..4 × 17 RBG 的 3808 项表。</li><li>大包用 DRB busy period；小包用 FIFO arrival object 等待/完成/PDB。</li><li>右删失样本显式报告，不让饿死用户从统计里消失。</li></ul><a href="../src/superran/experience.py">experience.py</a></article>
     <article class="module"><span class="verdict">VERIFIED ENVELOPE</span><h3>6. PF 与 SU/MU 计划器</h3><ul><li>每个 DL TTI 只排序一次，随后构造全 SU 与允许 MU 两份计划。</li><li>只比较业务可用字节，padding 不计收益。</li><li>SU 能清空所有队列时强制 SU，剩余 RBG 留空。</li></ul><a href="../src/superran/system.py">system.py</a></article>
     <article class="module"><span class="verdict">VERIFIED ENVELOPE</span><h3>7. RNG、统计与门禁</h3><ul><li>channel/traffic/HARQ/scheduler/neighbor-load 分流。</li><li>CRN 按 master + replication + stream key 派生。</li><li>Gate 3 用配对 Wilcoxon；效应小于 CI 时硬判 inconclusive。</li></ul><a href="../src/superran/gates.py">gates.py</a></article>
-    <article class="module"><span class="verdict">VERIFIED ENVELOPE</span><h3>8. Server/spec 接口</h3><ul><li>功率模式、CSI report、warm-up、PF 口径、MU 相关性门限与 MU-OLLA 步长进入公开配置。</li><li>capacity 与 experience 结果显式版本化。</li><li>链路表与运行配置的功率模式不一致时直接拒绝。</li></ul><a href="../src/superran/server.py">server.py</a> · <a href="../src/superran/spec.py">spec.py</a></article>
+    <article class="module"><span class="verdict">VERIFIED ENVELOPE</span><h3>8. Server/spec 接口</h3><ul><li>功率模式、CSI report、warm-up、PF 口径、MU 相关性门限与 MU-OLLA 步长进入公开配置。</li><li>系统级结果显式版本化（model_version 恒为 experience_v2）。</li><li>链路表与运行配置的功率模式不一致时直接拒绝。</li></ul><a href="../src/superran/server.py">server.py</a> · <a href="../src/superran/spec.py">spec.py</a></article>
   </div>
 </section>
 

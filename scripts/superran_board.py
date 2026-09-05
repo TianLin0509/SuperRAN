@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import html
 import subprocess
 import sys
 import webbrowser

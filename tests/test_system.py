@@ -4,7 +4,6 @@
 """
 from __future__ import annotations
 
-import inspect as _inspect
 import sys
 import tempfile
 from copy import deepcopy
@@ -38,6 +37,27 @@ def check(cond: bool, label: str) -> None:
 
 def sect(t: str) -> None:
     print("\n" + "=" * 70 + f"\n{t}\n" + "=" * 70)
+
+
+class pytest_raises:
+    """极小的 raises 上下文；这个文件是脚本式测试，不引 pytest。"""
+
+    def __init__(self, *exc_types):
+        self.exc_types = exc_types or (Exception,)
+        self.raised = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            print(f"  FAIL  应当抛出 {self.exc_types} 却没有")
+            FAILED.append(f"应当抛出 {self.exc_types} 却没有")
+            return False
+        if issubclass(exc_type, self.exc_types):
+            self.raised = exc
+            return True
+        return False
 
 
 def fake_tables(n_ue=8, n_snap=8, sinr_lo=0.0, sinr_hi=25.0, seed=0,
@@ -82,27 +102,36 @@ print(f"  到达 {_c['offered_mbps']:.1f} Mbps / 发出 {_c['cell_served_mbps']:
 check(_c["accounting_error_pct"] < 1.0,
       f"字节对得上账（误差 {_c['accounting_error_pct']}%）")
 check(_c["cell_served_mbps"] <= _c["offered_mbps"] + 1e-6, "发出去的不可能多于到达的")
-check(_c["offered_bytes"] == _c["served_bytes"] + _c["backlog_bytes"],
-      "整数原始字节严格守恒，不靠 Mbps 舍入容差")
+_w = _r.diagnostics["measurement_window"]
+check(int(_w["balance_error_bytes"]) == 0,
+      "测量窗内整数原始字节严格守恒，不靠 Mbps 舍入容差")
 
 # ---------------------------------------------------------------------------
-sect("3  体验速率的三种口径")
+sect("3  体验速率：28.552 DRB busy-period 是唯一口径")
 
-_res = {}
-for _t in ("none", "tail", "head_tail"):
-    _rr = sysm.simulate(_T, sys_cfg=sysm.SystemConfig(duration_s=5.0, seed=2),
-                        traffic=sysm.TrafficConfig(model="ftp3", file_bytes=200_000,
-                                                   arrival_rate_hz=2.0),
-                        kpi=sysm.KpiConfig(trim=_t))
-    _res[_t] = _rr.cell["ue_experienced_median_mbps"]
-    print(f"  trim={_t:<10} 用户中位体验速率 {_res[_t]:8.2f} Mbps")
-check(_res["none"] > 0 and _res["tail"] > 0, "三种口径都算得出数")
-# 掐尾把"只发了一点点就清空缓冲"的那个 TTI 去掉，分子分母同减，
-# 结果通常更低——但方向不是恒定的，所以只断言三者确实不同。
+# legacy 的 trim（none/tail/head_tail）随容量路径一起下线。现在只剩一个口径，
+# 但它是分层的：busy-period 吞吐、含头速率、到达对象的等待与完成时延各报各的。
+_rr = sysm.simulate(_T, sys_cfg=sysm.SystemConfig(duration_s=5.0, seed=2),
+                    traffic=sysm.TrafficConfig(model="ftp3", file_bytes=200_000,
+                                               arrival_rate_hz=2.0))
+_res = {
+    "rel19": _rr.cell["drb_throughput_rel19_mbps"],
+    "head_inclusive": _rr.cell["drb_throughput_head_inclusive_mbps"],
+    "median": _rr.cell["ue_experienced_median_mbps"],
+}
+for _k, _v in _res.items():
+    print(f"  {_k:<16} {_v:8.2f} Mbps")
+check(all(v > 0 for v in _res.values()), "三个分层口径都算得出数")
+check(_res["head_inclusive"] <= _res["rel19"] + 1e-9,
+      "含头速率把首包等待加进分母，只可能更低")
 check(len({round(v, 3) for v in _res.values()}) >= 2,
-      f"不同口径给出不同的数（实得 {_res}）——口径必须跟着结果走")
-check(_rr.config["kpi"]["trim"] == "head_tail"
-      and "掐头去尾" in _rr.config["kpi"]["trim_note"], "口径与它的解释一起返回")
+      f"三个分层口径给出不同的数（实得 {_res}）——口径必须跟着结果走")
+check("busy-period" in _rr.config["kpi"]["throughput_note"]
+      and "full_buffer" in _rr.config["kpi"]["throughput_note"],
+      "口径与它的解释一起返回，并说明 full_buffer 下报 None")
+# legacy 的 trim 旋钮随容量路径下线：给了就硬失败，不静默忽略。
+with pytest_raises(TypeError):
+    sysm.KpiConfig(trim="tail")
 
 # ---------------------------------------------------------------------------
 sect("4  调度器：PF vs max-C/I vs 轮询")
@@ -123,10 +152,24 @@ check(_out["pf"][1] > _out["max_ci"][1],
       f"PF 比 max-C/I 公平（{_out['pf'][1]:.3f} vs {_out['max_ci'][1]:.3f}）")
 check(_out["rr"][1] > _out["max_ci"][1], "轮询也比 max-C/I 公平")
 
-# full buffer 下"体验速率"没有意义——缓冲区永不空，没有 burst 边界
+# full buffer 下 buffer 永不排空 ⇒ 每个 UE 恰好一个永不结束的 busy period。
+# TS 128 552 V19.5.0 p54：样本只在 "DRB DL buffer emptied" 事件上形成，
+# **所以标准 KPI 在这里没有样本**——这是标准的定义，不是实现缺陷。
+# 需要数的用户看两个工程字段：ue_served_*（ITU 口径）与 active_window_goodput。
 _fb = sysm.simulate(_T, sys_cfg=sysm.SystemConfig(duration_s=2.0),
                     traffic=sysm.TrafficConfig(model="full_buffer"))
-check(_fb.cell["measured_bursts"] == 0, "full buffer 下没有 burst 可测，体验速率为空")
+check(_fb.cell["drb_throughput_completed_bursts"] == 0
+      and _fb.cell["drb_throughput_inflight_bursts"] == len(_T),
+      "full buffer 下每个 UE 恰好一个在飞 busy period，没有已完成的")
+check(_fb.cell["measured_bursts"] == 0,
+      f"标准样本数为 0（实得 {_fb.cell['measured_bursts']}）——在飞段不算标准样本")
+check(_fb.cell["drb_throughput_rel19_mbps"] is None
+      and _fb.cell["cell_experienced_mbps"] is None,
+      "标准 KPI 报 None：工程量不许顶 TS 28.552 的名字")
+check(_fb.cell["active_window_goodput_mbps"] is not None
+      and _fb.cell["active_window_goodput_mbps"] > 0
+      and _fb.cell["ue_served_p5_mbps"] > 0,
+      "两个工程字段照常有值，用户拿得到数")
 
 # ---------------------------------------------------------------------------
 sect("5  负载与告警")
@@ -148,7 +191,8 @@ _flat = sysm.build_link_tables(
     [10.0] * 4)
 _fr = sysm.simulate(_flat, sys_cfg=sysm.SystemConfig(duration_s=1.0),
                     traffic=sysm.TrafficConfig(model="ftp3", file_bytes=50_000,
-                                               arrival_rate_hz=5.0))
+                                               arrival_rate_hz=5.0),
+                    kpi=sysm.KpiConfig(warmup_s=0.0))
 check(any("快照" in n for n in _fr.notes), "信道快照不足时明确告警")
 
 # ---------------------------------------------------------------------------
@@ -280,41 +324,33 @@ _eff_loaded = np.asarray(_g_loaded["effective_geo_sinr_db"])
 _eff_full = np.asarray(_g_full["effective_geo_sinr_db"])
 check(np.all(_eff_loaded > _eff_full)
       and _g_loaded["neighbor_load"]["prb_utilization"] == 0.3,
-      "capacity MU/SU 标量与链路表复用同一邻区负载工作点，不再拿 full-buffer 比值回乘")
+      "measure_mu_gain 与链路表复用同一邻区负载工作点，不再拿 full-buffer 比值回乘")
 
 _g_bad = sysm.measure_mu_gain(_hm[:1], [15.0], max_mu_users=4)
 check(_g_bad["measured"] is False, "单用户时 MU 增益明确标成未测得")
 check(bool(_g_bad.get("errors")), "MU 配对失败返回可审计错误，而不是静默吞掉")
 check("禁止用于仿真" in _g_bad["note"], "诊断占位 1.0 不冒充可用 MU 增益")
 
-# **标量比值口径已于 2026-09-04 废除**。它只把 TBS 乘 mu_se_ratio/K，配对代价
-# 不进误块抽签——"包变小但不更容易错"。保留成兜底只会让这种乐观静默发生，
-# 所以现在在**配置构造**这一层就硬失败，而不是等到跑完给一段 notes。
-try:
-    sysm.SchedulerConfig(mu_enabled=True, mu_accounting="se_ratio_legacy")
-    check(False, "se_ratio_legacy 必须在 SchedulerConfig 构造时就被拒绝")
-except ValueError as _exc_legacy:
-    check("已于 2026-09-04 废除" in str(_exc_legacy)
-          and "pair_table" in str(_exc_legacy),
-          f"se_ratio_legacy 被拒且错误信息指向 pair 表口径（{_exc_legacy}）")
-check("mu_se_ratio" not in
-      {k for k in __import__("inspect").signature(sysm.simulate).parameters},
-      "simulate() 不再接受 mu_se_ratio 标量入口")
-# 开了 MU 就必须有 pair 表：这是删掉兜底之后唯一还剩的 MU 路径。
+# **标量比值口径 se_ratio_legacy 已于 2026-09-04 废除**（#17），它的另一个宿主
+# legacy 容量主循环也随本 PR 一起下线。它只把 TBS 乘 mu_se_ratio/K，配对代价
+# 不进误块抽签——「包变小但不更容易错」。保留成兜底只会让这种乐观静默发生，
+# 所以在**配置构造**这一层就硬失败，而不是等跑完给一段 notes。
 _T_legacy_ebf = fake_tables(power_constraint="ebf")
-try:
-    sysm.simulate(
-        _T_legacy_ebf,
-        sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=12,
-                                  power_constraint="ebf"),
-        traffic=sysm.TrafficConfig(model="full_buffer"),
-        sched=sysm.SchedulerConfig(mu_enabled=True))
-    check(False, "开了 MU 却没有 pair 表时必须硬失败")
-except ValueError as _exc_nopair:
-    check("pair" in str(_exc_nopair),
-          f"缺 pair 表时报错指向 build_link_tables(mu_enabled=True)（{_exc_nopair}）")
+with pytest_raises(ValueError) as _exc_se:
+    sysm.SchedulerConfig(mu_enabled=True, mu_accounting="se_ratio_legacy")
+check("se_ratio_legacy" in str(_exc_se.raised),
+      "标量 MU 记账口径已下线，错误信息点名它")
+with pytest_raises(ValueError) as _exc_pfa:
+    sysm.SchedulerConfig(pf_accounting="legacy_best_se")
+check("legacy_best_se" in str(_exc_pfa.raised),
+      "legacy PF 记账口径已下线，错误信息点名它")
+# pair 表就是按两用户 × rank2 建的，别的维度不属于合法域
+with pytest_raises(ValueError):
+    sysm.SchedulerConfig(mu_enabled=True, max_mu_users=4)
+with pytest_raises(ValueError):
+    sysm.SchedulerConfig(mu_enabled=True, mu_rank_per_user=1)
 
-# --- capacity 的 pair_table 口径：缺 pair 表要硬失败，不静默降级 ---------
+# --- 开 MU 走 pair_table 但没建 pair 表要硬失败，不静默降级 -------------
 try:
     sysm.simulate(
         _T_legacy_ebf,
@@ -322,12 +358,13 @@ try:
                                   power_constraint="ebf"),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(mu_enabled=True,
-                                   mu_accounting="pair_table"))
+                                   mu_accounting="pair_table"),
+        kpi=sysm.KpiConfig(warmup_s=0.0))
 except ValueError as _exc:
     check("pair graph" in str(_exc) and "完整" in str(_exc),
-          "capacity 开 MU 走 pair_table 但没建 pair 表时硬失败")
+          "开 MU 走 pair_table 但没建 pair 表时硬失败")
 else:
-    check(False, "capacity 缺 pair 表却没有报错")
+    check(False, "缺 pair 表却没有报错")
 
 # ---------------------------------------------------------------------------
 sect("10  健壮性回归：这些都是真踩到过的")
@@ -348,24 +385,24 @@ for _v, _want in ((float("nan"), 0), (float("-inf"), 0), (float("inf"), 27)):
     check(_la2.select_mcs(_v, table=3).index == _want,
           f"select_mcs({_v}) -> MCS {_want}")
 
-# **RBG 尺寸分布必须跟着配置的 num_rbg 走。**
-# 早先 draw_rbg 签名给了默认 17、调用处又不传，num_rbg=8 的配置照样抽 1~17，
-# 实测平均 9.03 个 RBG 却只有 8 个可用、满带宽占比从 0.30 变成 0.586。
+# **实际 RBG 占用必须跟着配置的 num_rbg 走，且由真实 TBS 反查决定。**
+# 退役的 bimodal 是反过来的：先抽"占几个 RBG"再乘写死的谱效折成字节，
+# 于是 num_rbg=8 的配置照样抽出 1~17 个 RBG。现在这个方向不可能再出现。
 _tb8 = sysm.build_link_tables([np.ones((2, 8, 8, 2), dtype=complex)] * 4, [20.0] * 4)
 _r8 = sysm.simulate(_tb8, sys_cfg=sysm.SystemConfig(duration_s=3.0, num_rbg=8, seed=2),
-                    traffic=sysm.TrafficConfig(model="bimodal", arrival_rate_hz=6.0))
-_h8 = _r8.cell["rbg_size_hist"]
-print(f"  num_rbg=8：1RBG {_h8['p_1rbg']:.2f} 满带宽 {_h8['p_full']:.2f} "
-      f"平均 {_h8['mean_rbg']:.2f}")
+                    traffic=sysm.TrafficConfig(model="ftp3", file_bytes=20_000,
+                                               arrival_rate_hz=6.0),
+                    kpi=sysm.KpiConfig(warmup_s=0.0))
+_h8 = _r8.cell["actual_rbg_size_hist"]
+print(f"  num_rbg=8：实际 grant 平均 {_h8['mean_rbg']:.2f} 个 RBG，"
+      f"满带宽占比 {_h8['p_full']:.2f}，样本 {_h8['n']}")
 check(_h8["mean_rbg"] <= 8.0, f"RBG 尺寸不超过 num_rbg（实得均值 {_h8['mean_rbg']}）")
-check(0.15 < _h8["p_full"] < 0.5, f"满带宽占比回到 0.30 附近（实得 {_h8['p_full']}）")
-
-# **PF 度量必须和实发口径一致。** MU 下实发被限到 rank≤2，
-# 记 rank4 的谱效会让 PF 以为给足了，公平性判据整个偏掉。
-_src = _inspect.getsource(sysm.simulate)
-check("r = min(r, mu.MU_MAX_RANK)" in _src
-      and "actual_inst_se[u] = mcs_obj.se * r" in _src,
-      "PF 更新按实发 MCS 与 MU rank≤2 记瞬时服务量")
+check(_h8["scope"] == "nonzero_grant_size_not_tti_total",
+      "这是实际 grant 的分布，不是话务侧反推出来的目标 RBG 数")
+with pytest_raises(ValueError) as _exc_bim:
+    sysm.TrafficConfig(model="bimodal", arrival_rate_hz=6.0)
+check("cdf" in str(_exc_bim.raised),
+      "bimodal 已下线，错误信息指向 cdf/mixed 的迁移路径")
 
 # 形状不一致要当场报错，不能静默广播出错误结果
 try:
@@ -378,7 +415,8 @@ except ValueError as _e:
 # 全员覆盖外不能崩，且要说清楚
 _tz = sysm.build_link_tables([np.ones((2, 8, 8, 2), dtype=complex)] * 3, [-40.0] * 3)
 _rz = sysm.simulate(_tz, sys_cfg=sysm.SystemConfig(duration_s=1.0),
-                    traffic=sysm.TrafficConfig(model="ftp3", arrival_rate_hz=5.0))
+                    traffic=sysm.TrafficConfig(model="ftp3", arrival_rate_hz=5.0),
+                    kpi=sysm.KpiConfig(warmup_s=0.0))
 check(_rz.cell["outage_ue"] == 3, "全员覆盖外时如实报 3 个")
 check(np.isfinite(_rz.cell["cell_served_mbps"]), "吞吐是有限值不是 nan")
 check(any("覆盖外" in n for n in _rz.notes), "notes 里点明覆盖外")
@@ -424,12 +462,12 @@ sect("11  2026-08-07 自审修掉的三个口径 bug")
 # ---------------------------------------------------------------------------
 import inspect as _insp  # noqa: E402
 
-_src = _insp.getsource(sysm.simulate)
+_src = _insp.getsource(expm.simulate_experience)
 
 # --- bug A：重传必须保留实发 MCS，等效低档只能作为 BLER lookup_mcs ---
 check("harq_retransmission_bler" in _src
-      and "m, sinr, combining=sys_cfg.harq_combining" in _src,
-      "legacy 重传以冻结的实发 MCS 调预置 CC/IR 抽象")
+      and "mcs, sinr, combining=harq_combining" in _src,
+      "重传以冻结的实发 MCS 调预置 CC/IR 抽象")
 check('_bler_lookup(m, sinr, "retx")' not in _src
       and 'get_curve(int(mcs), "retx")' not in _src,
       "legacy 系统路径不再直接消费原始 ReTx 曲线")
@@ -453,11 +491,14 @@ check(expm._bler_lookup(15, float("nan")) == 1.0
 check(abs(expm._bler_lookup(15, float("inf"))
           - sysm._bler_lookup(15, float("inf"))) < 1e-12
       and expm._bler_lookup(15, float("inf")) < 1.0,
-      "experience_v2 的 +Inf SINR 与 legacy 一致钳到预置曲线高 SINR 尾部")
+      "+Inf SINR 与建表相一致钳到预置曲线高 SINR 尾部")
 
 # --- bug B：S 时隙的 RE 与 dl_ratio 必须用同一个系数 ---
 check(abs(sysm.S_SLOT_DL_FRACTION - 0.7) < 1e-9, "S 时隙折合系数 0.7")
-check("_re_of[_slot]" in _src, "主循环按时隙类型取 RE，不是所有时隙一个数")
+_slot_lut = expm.TbsLookup.build(17, 16, sysm.S_SLOT_DL_FRACTION)
+check(int(_slot_lut.values[1, 12, 1, -1])
+      < int(_slot_lut.values[0, 12, 1, -1]),
+      "TBS 按 D/S 时隙各自的可用 RE 计算，不是所有时隙一个数")
 _dd = sysm.SystemConfig(tdd_pattern="DDDD").dl_ratio
 _ds = sysm.SystemConfig(tdd_pattern="DDDS").dl_ratio
 check(abs(_dd - 1.0) < 1e-9 and abs(_ds - (3 + 0.7) / 4) < 1e-9,
@@ -473,14 +514,18 @@ check(abs(_ds_custom - (3 + 0.82) / 4) < 1e-12,
 # 纯 D 与含 S 的图案，实发字节必须有可分辨的差——否则说明 S 还是被当成满下行
 _tb_s = fake_tables(n_ue=6, n_snap=6, seed=17)
 _rd = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern="DDDD"),
-                    traffic=sysm.TrafficConfig(model="full_buffer"))
+                    traffic=sysm.TrafficConfig(model="full_buffer"),
+                    kpi=sysm.KpiConfig(warmup_s=0.0))
 _rs = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern="SSSS"),
-                    traffic=sysm.TrafficConfig(model="full_buffer"))
+                    traffic=sysm.TrafficConfig(model="full_buffer"),
+                    kpi=sysm.KpiConfig(warmup_s=0.0))
+# S 时隙折算是可配置的（PR #23）：换成 0.82 后承载应当按比例跟着变。
 _rs82 = sysm.simulate(
     _tb_s,
     sys_cfg=sysm.SystemConfig(
         duration_s=1.0, tdd_pattern="SSSS", s_slot_dl_fraction=0.82),
-    traffic=sysm.TrafficConfig(model="full_buffer"))
+    traffic=sysm.TrafficConfig(model="full_buffer"),
+    kpi=sysm.KpiConfig(warmup_s=0.0))
 _bd = _rd.as_dict()["cell"]["cell_served_mbps"]
 _bs = _rs.as_dict()["cell"]["cell_served_mbps"]
 _bs82 = _rs82.as_dict()["cell"]["cell_served_mbps"]
@@ -512,18 +557,11 @@ check(abs(_bs82 / max(_bd, 1e-9) - _expect_ds82) < 0.06,
       f"自定义系数 0.82 后承载约为全 D 的 {_expect_ds82:.3f} 倍"
       f"（实得 {_bs82 / max(_bd, 1e-9):.3f}）——系数确实被主循环读到了")
 
-# --- bug C：p_idle_tti 是对标锚点不是仿真输入，偏离要告警 ---
-# **它从来不生成空闲 TTI**，改它只改报告里的解析式。不说清楚的话，
-# 用户会以为设了 30% 就真是 30%。
-_c0 = sysm.TrafficConfig(model="bimodal", p_idle_tti=0.30)
-_c1 = sysm.TrafficConfig(model="bimodal", p_idle_tti=0.90)
-_r0 = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, seed=3), traffic=_c0)
-_r1 = sysm.simulate(_tb_s, sys_cfg=sysm.SystemConfig(duration_s=1.0, seed=3), traffic=_c1)
-check(abs(_r0.as_dict()["cell"]["occupancy"]
-          - _r1.as_dict()["cell"]["occupancy"]) < 1e-12,
-      "p_idle_tti 改了 0.30→0.90，实际占用率**逐位不变**（它确实不驱动仿真）")
-check(_c0.expected_prb_util() != _c1.expected_prb_util(),
-      "但它确实改变了报告里的 expected_prb_util —— 这正是容易被误读的地方")
+# --- bug C：p_idle_tti / expected_prb_util 这类"对标锚点不驱动仿真"的旋钮，
+# 随 bimodal 一起下线。空闲 TTI 由到达率与信道决定，如实测出来。
+check(not hasattr(sysm.TrafficConfig(), "p_idle_tti")
+      and not hasattr(sysm.TrafficConfig(), "expected_prb_util"),
+      "不驱动仿真的 p_idle_tti / expected_prb_util 已随 bimodal 下线")
 # --- bug D：IoT 有效率必须按**样本**算，不是按用户 ---
 # 一个用户 8 个快照里 4 个算不出 IoT，nanmedian 照样给有限值 → 该用户算"有效"
 # → 小区级报 100% → 正确的多时隙告警从不触发，反而触发"检查站间距"那条，
@@ -541,7 +579,8 @@ print(f"  逐样本有效率 {np.mean(_sv):.0%}（构造成一半不可能）")
 check(np.mean(_sv) < 0.9, f"逐样本口径抓得住（实得 {np.mean(_sv):.0%}）")
 check(all(np.isfinite(t.iot_db) for t in _tb_iot),
       "而逐用户口径全都是有限值——正是它骗人的地方")
-_r_iot = sysm.simulate(_tb_iot, sys_cfg=sysm.SystemConfig(duration_s=1.0))
+_r_iot = sysm.simulate(_tb_iot, sys_cfg=sysm.SystemConfig(duration_s=1.0),
+                    kpi=sysm.KpiConfig(warmup_s=0.0))
 _d_iot = _r_iot.as_dict()
 check(_d_iot["cell"]["iot_sample_valid_share"] < 0.9
       and _d_iot["cell"]["iot_valid_ue_share"] > 0.9,
@@ -550,13 +589,6 @@ _ntxt = "".join(_d_iot["notes"])
 check("IoT 不可信" in _ntxt, "触发的是「IoT 不可信」而不是「检查站间距」")
 check("检查是不是站间距太大" not in _ntxt, "误导性的那条被抑制了")
 
-# p_idle_tti=0.30（意图 30% 空闲）而实测接近全空，差得远 → 必须告警
-_hint = "".join(_r0.as_dict()["notes"])
-check("不驱动仿真" in _hint,
-      "实测空闲率与 p_idle_tti 差得远时，notes 里明说它不驱动仿真")
-# **既有的那条 PRB 利用率告警曾经在给错建议**（让人去调 p_idle_tti 对齐现网）
-check("别指望调 p_idle_tti" in _hint or "p_idle_tti 或把中间段" not in _hint,
-      "PRB 利用率告警不再建议去调那个不起作用的旋钮")
 
 # ---------------------------------------------------------------------------
 sect("12  experience_v2：DRB busy-period、按需 RBG 与 Rel-19 小 burst")
@@ -590,7 +622,7 @@ _olla_link = sysm.UeLinkTable(
 _olla_closed_loop = sysm.simulate(
     [_olla_link],
     sys_cfg=sysm.SystemConfig(
-        evaluation_mode="experience", duration_s=1.0, tdd_pattern="D", seed=42),
+        duration_s=1.0, tdd_pattern="D", seed=42),
     traffic=sysm.TrafficConfig(model="full_buffer"),
     sched=sysm.SchedulerConfig(mu_enabled=False),
     kpi=sysm.KpiConfig(warmup_s=0.2))
@@ -683,7 +715,7 @@ check(_iwait == 2.0 and _icomp is None and _imiss is None,
       "未完成但已首传的 arrival 保留精确 queue-wait，不被完成条件删样")
 
 # --- 真正跑 experience_v2：一 TTI 多 UE、实际 RBG、scheduled-TBS PF、守恒 ---
-_ex_cfg = sysm.SystemConfig(evaluation_mode="experience", duration_s=0.8,
+_ex_cfg = sysm.SystemConfig(duration_s=0.8,
                             seed=41, tdd_pattern="DDDSU")
 _ex_tr = sysm.TrafficConfig(model="mixed", small_ue_share=1.0,
                             small_file_bytes=500, small_arrival_rate_hz=200.0,
@@ -783,7 +815,7 @@ try:
     _harq_run = sysm.simulate(
         _T[:1],
         sys_cfg=sysm.SystemConfig(
-            evaluation_mode="experience", duration_s=0.03,
+            duration_s=0.03,
             seed=9041, tdd_pattern="DS", harq_combining="ir"),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(
@@ -837,7 +869,7 @@ for _combining in ("cc", "ir"):
     _harq_real[_combining] = sysm.simulate(
         [_harq_point],
         sys_cfg=sysm.SystemConfig(
-            evaluation_mode="experience", duration_s=1.0,
+            duration_s=1.0,
             tdd_pattern="D", seed=230823, harq_combining=_combining),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
@@ -858,7 +890,7 @@ check(abs(_harq_real["ir"].cell["cell_served_mbps"]
 
 # 服务小区 PRB 利用率是内生 KPI：full-buffer 必须 100%，无到达必须 0%。
 _load_cfg = sysm.SystemConfig(
-    evaluation_mode="experience", duration_s=0.02, seed=410, tdd_pattern="DDDSU")
+    duration_s=0.02, seed=410, tdd_pattern="DDDSU")
 _load_sched = sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False)
 _load_kpi = sysm.KpiConfig(warmup_tti=0)
 _full_load = sysm.simulate(
@@ -902,7 +934,7 @@ for _u in range(2):
         iot_db=3.0, sir_db=12.0, se_gnb=_se.copy(),
         best_se_gnb=_se[:, 0].copy()))
 _pf_sentinel_cfg = sysm.SystemConfig(
-    evaluation_mode="experience", duration_s=1.0,
+    duration_s=1.0,
     # This counterexample isolates PF accounting.  Use the explicit no-delay
     # control so the single-HARQ-process wait window is not a second variable.
     tdd_pattern="D", harq_feedback_delay=False, seed=9)
@@ -933,9 +965,11 @@ check((_pf_wrong.cell["small_queue_wait_ms_mean"]
            < _pf_correct.cell["small_immediate_service_ratio"]),
       "反向哨兵：全带 PF 误记账显著拉长小包等待并降低到达 TTI 即时服务率")
 
-# legacy 路径保持独立；不允许跨模式参数静默退化。
-check(sysm.SystemConfig().as_dict()["model_version"] == "legacy_v1",
-      "默认 capacity 路径仍标 legacy_v1，历史结果可复现")
+# **只有一条路径**：model_version 不再随模式变，容量仿真也是 experience_v2。
+check(sysm.SystemConfig().as_dict()["model_version"] == "experience_v2",
+      "唯一评估路径，model_version 恒为 experience_v2")
+check("evaluation_mode" not in sysm.SystemConfig().as_dict(),
+      "评估模式开关已彻底删除，结果里也不再出现")
 check(sysm.SystemConfig().power_constraint == "nebf",
       "系统/TDD 默认空间约束为每天线 P/M 且用满总功率的 NEBF")
 try:
@@ -997,7 +1031,7 @@ except ValueError as _e:
     check("mu_csi_error_variance" in str(_e),
           "负 CSI 误差方差在启动仿真前硬失败")
 
-_mu_cfg = sysm.SystemConfig(evaluation_mode="experience", duration_s=0.5,
+_mu_cfg = sysm.SystemConfig(duration_s=0.5,
                             seed=51, tdd_pattern="DDDSU")
 _large = sysm.simulate(
     _mu_tables, sys_cfg=_mu_cfg,
@@ -1012,8 +1046,7 @@ check(_large.cell["mu_share"] > 0
 _mcs_blocked = sysm.simulate(
     _mu_tables,
     sys_cfg=sysm.SystemConfig(
-        evaluation_mode="experience", duration_s=0.1, seed=51,
-        tdd_pattern="DDDSU"),
+        duration_s=0.1, seed=51, tdd_pattern="DDDSU"),
     traffic=sysm.TrafficConfig(
         model="mixed", small_ue_share=0.0,
         file_bytes=500_000, arrival_rate_hz=20.0),
@@ -1028,8 +1061,7 @@ check(_mcs_blocked.cell["mu_share"] == 0
 _pf_blocked = sysm.simulate(
     _mu_tables,
     sys_cfg=sysm.SystemConfig(
-        evaluation_mode="experience", duration_s=0.1, seed=51,
-        tdd_pattern="DDDSU"),
+        duration_s=0.1, seed=51, tdd_pattern="DDDSU"),
     traffic=sysm.TrafficConfig(
         model="mixed", small_ue_share=0.0,
         file_bytes=500_000, arrival_rate_hz=20.0),
@@ -1219,7 +1251,7 @@ check(_olla_state["su_db"] != _olla_state["mu_db"]
       and "not pair-specific" in _olla_state["scope"],
       "SU/MU OLLA 是两组独立用户级状态，不按配对关系拆分")
 _target_cfg = sysm.SystemConfig(
-    evaluation_mode="experience", duration_s=0.02, seed=151, tdd_pattern="DDDSU")
+    duration_s=0.02, seed=151, tdd_pattern="DDDSU")
 _target_run = sysm.simulate(
     _mu_tables, sys_cfg=_target_cfg,
     traffic=sysm.TrafficConfig(model="mixed", small_ue_share=0.0,
@@ -1245,7 +1277,7 @@ check(_small.cell["mu_share"] == 0
       "SU 能在本 TTI 清完全部队列时强制 SU，尾部 RBG 留空")
 check(sysm.KpiConfig().resolve_warmup_tti(0.5) == 2000,
       "默认预启动 1 s 在 30 kHz SCS 下精确换算为 2000 TTI")
-_warm_cfg = sysm.SystemConfig(evaluation_mode="experience", duration_s=1.2,
+_warm_cfg = sysm.SystemConfig(duration_s=1.2,
                               seed=52, tdd_pattern="DDDSU")
 _warm = sysm.simulate(
     _mu_tables, sys_cfg=_warm_cfg,
@@ -1262,16 +1294,8 @@ check(_warm.cell["measurement_accounting_error_pct"] == 0.0
 check(all(a["tti"] >= 2000 for a in _warm.diagnostics["allocation_sample"]),
       "吞吐/BLER/资源 allocation 样本全部从预启动结束后开始")
 try:
-    sysm.simulate(_T, sys_cfg=sysm.SystemConfig(evaluation_mode="experience"),
-                  traffic=sysm.TrafficConfig(model="bimodal"),
-                  sched=sysm.SchedulerConfig(mu_enabled=False))
-    check(False, "experience_v2 拒绝按目标 RBG 反推包长")
-except ValueError as _e:
-    check("请用 mixed" in str(_e), f"experience_v2 拒绝因果倒置的 bimodal（{_e}）")
-
-try:
     sysm.simulate(
-        _T, sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.01),
+        _T, sys_cfg=sysm.SystemConfig(duration_s=0.01),
         traffic=_ex_tr,
         sched=sysm.SchedulerConfig(
             mu_enabled=False, olla_step_up_db=0.0, olla_step_down_db=0.0),
@@ -1296,8 +1320,8 @@ _expect_value_error(
     lambda: sysm.TrafficConfig(arrival_rate_hz=float("nan")),
     "arrival_rate_hz", "话务到达率 NaN 在配置入口被拒绝")
 _expect_value_error(
-    lambda: sysm.TrafficConfig(p_small_rbg=0.8, p_full_rbg=0.3),
-    "不能超过 1", "bimodal 概率和超过 1 被拒绝")
+    lambda: sysm.TrafficConfig(model="bimodal"),
+    "cdf", "因果倒置的 bimodal 在配置入口被拒绝，并给出迁移路径")
 _expect_value_error(
     lambda: sysm.TrafficConfig(small_priority=0),
     "small_priority", "业务优先级拒绝深层钳位为 1")
@@ -1483,7 +1507,7 @@ with tempfile.TemporaryDirectory() as _tmp:
     _cdf_run = sysm.simulate(
         _T[:2],
         sys_cfg=sysm.SystemConfig(
-            evaluation_mode="experience", duration_s=0.08, tdd_pattern="D"),
+            duration_s=0.08, tdd_pattern="D"),
         traffic=_profile_cfg,
         sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
         kpi=sysm.KpiConfig(warmup_tti=0))
@@ -1500,7 +1524,7 @@ with tempfile.TemporaryDirectory() as _tmp:
     _cdf_rep = sysm.simulate_replications(
         _T[:2], num_replications=2, master_seed=9,
         sys_cfg=sysm.SystemConfig(
-            evaluation_mode="experience", duration_s=0.08, tdd_pattern="D"),
+            duration_s=0.08, tdd_pattern="D"),
         traffic=_profile_cfg,
         sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
         kpi=sysm.KpiConfig(warmup_tti=0))
@@ -1511,7 +1535,7 @@ with tempfile.TemporaryDirectory() as _tmp:
     _offset_rep = sysm.simulate_replications(
         _T[:2], num_replications=1, master_seed=9, replication_start=5,
         sys_cfg=sysm.SystemConfig(
-            evaluation_mode="experience", duration_s=0.04, tdd_pattern="D"),
+            duration_s=0.04, tdd_pattern="D"),
         traffic=_profile_cfg,
         sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
         kpi=sysm.KpiConfig(warmup_tti=0))
@@ -1527,7 +1551,7 @@ with tempfile.TemporaryDirectory() as _tmp:
         max_iterations=7, probe_replications=2, num_replications=4,
         master_seed=9,
         sys_cfg=sysm.SystemConfig(
-            evaluation_mode="experience", duration_s=0.3, tdd_pattern="D"),
+            duration_s=0.3, tdd_pattern="D"),
         traffic=_calibration_cfg,
         sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
         kpi=sysm.KpiConfig(warmup_tti=0))
@@ -1545,20 +1569,21 @@ with tempfile.TemporaryDirectory() as _tmp:
           and _cal_dict["formal_replication_ids"]
           == _calibration.result.as_dict()["replications"],
           "probe 与正式反馈使用同 master seed 下互不重叠的 RngRun")
+    # 话务开到最大（full_buffer）没有可调的负载标量，双标量校准无从谈起。
     _expect_value_error(
         lambda: sysm.calibrate_traffic_to_prb(
             _T[:2], target_prb_utilization=0.30,
-            sys_cfg=sysm.SystemConfig(evaluation_mode="capacity"),
-            traffic=_calibration_cfg,
+            sys_cfg=sysm.SystemConfig(),
+            traffic=sysm.TrafficConfig(model="full_buffer"),
             sched=sysm.SchedulerConfig(mu_enabled=False)),
-        "只支持 evaluation_mode='experience'",
-        "容量评估不允许把目标 PRB 话务校准混进来")
+        "不支持双标量 PRB 校准",
+        "容量口径（full_buffer）不允许把目标 PRB 话务校准混进来")
     for _invalid_target in (0.0, 1.0, float("nan")):
         _expect_value_error(
             lambda _target=_invalid_target: sysm.calibrate_traffic_to_prb(
                 _T[:2], target_prb_utilization=_target,
                 sys_cfg=sysm.SystemConfig(
-                    evaluation_mode="experience", duration_s=0.05),
+                    duration_s=0.05),
                 traffic=_calibration_cfg,
                 sched=sysm.SchedulerConfig(mu_enabled=False)),
             "必须是 (0,1)",
@@ -1567,7 +1592,7 @@ with tempfile.TemporaryDirectory() as _tmp:
         lambda: sysm.calibrate_traffic_to_prb(
             _T[:2], target_prb_utilization=0.30, formal_refinements=-1,
             sys_cfg=sysm.SystemConfig(
-                evaluation_mode="experience", duration_s=0.05),
+                duration_s=0.05),
             traffic=_calibration_cfg,
             sched=sysm.SchedulerConfig(mu_enabled=False)),
         "formal_refinements 必须是非负整数",
@@ -1650,15 +1675,16 @@ check(_t15[0].sinr_rbg_db is not None and _t15[0].sinr_rbg_db.shape[2] == 7,
       f"51 RB -> 7 个 RBG（实得 {_t15[0].sinr_rbg_db.shape[2]}）")
 check(_grid15.rbg_prb_sizes == (8, 8, 8, 8, 8, 8, 3),
       f"51 RB 尾组 3 RB 不丢弃（实得 {_grid15.rbg_prb_sizes}）")
-_cfg15 = sysm.SystemConfig(evaluation_mode="capacity", duration_s=0.1,
+_cfg15 = sysm.SystemConfig(duration_s=0.1,
                            num_rbg=7, rb_per_rbg=8, scs_khz=30,
                            rbg_prb_sizes=_grid15.rbg_prb_sizes)
-_ok15 = sysm.simulate(_t15, sys_cfg=_cfg15,
+_kpi15 = sysm.KpiConfig(warmup_s=0.0)
+_ok15 = sysm.simulate(_t15, sys_cfg=_cfg15, kpi=_kpi15,
                       traffic=sysm.TrafficConfig(model="full_buffer"))
 check(_ok15.cell["cell_served_mbps"] > 0, "与带宽一致的配置能正常跑完")
 _t15[1].mcs_table = 1
 _expect_value_error(
-    lambda: sysm.simulate(_t15, sys_cfg=_cfg15,
+    lambda: sysm.simulate(_t15, sys_cfg=_cfg15, kpi=_kpi15,
                           traffic=sysm.TrafficConfig(model="full_buffer")),
     "MCS 表 / 目标 BLER 在 UE 之间不一致",
     "各 UE 的 MCS 表不一致时必须硬失败，不能一半用表 1 一半用表 3")
@@ -1674,7 +1700,7 @@ check(expm._select_mcs(-2.78, _lookup10) == 0
 # 默认 olla_step_down_db=None 的合同是"留空 = 按链路表 target_bler 自动反解"。
 # 公开入口必须自己兑现，不能指望调用方先解析（旧版在参数校验处 float(None)
 # 直接 TypeError，HEAD 之外任何直调都踩）。
-_sys_cfg_exp = sysm.SystemConfig(evaluation_mode="experience", duration_s=0.1,
+_sys_cfg_exp = sysm.SystemConfig(duration_s=0.1,
                                  num_rbg=7, rb_per_rbg=8, scs_khz=30,
                                  rbg_prb_sizes=_grid15.rbg_prb_sizes)
 _exp_run = expm.simulate_experience(
@@ -1720,7 +1746,6 @@ with tempfile.TemporaryDirectory() as _compare_tmp:
                 "config": {
                     "system": {
                         "model_version": "experience_v2",
-                        "evaluation_mode": "experience",
                         "duration_s": 0.8,
                         "tti_ms": 0.5,
                         "tdd_pattern": "DDDSU",
@@ -1835,7 +1860,7 @@ for _bad in ("", "X", "UU"):
     except ValueError:
         check(True, f"非法图案 {_bad!r} 被拒，不静默给一组偏移")
 
-_fb_cfg = sysm.SystemConfig(evaluation_mode="experience", duration_s=0.05,
+_fb_cfg = sysm.SystemConfig(duration_s=0.05,
                             tdd_pattern="DDDSU", seed=17)
 check(_fb_cfg.as_dict()["harq_feedback_offsets_tti"] == [5, 4, 3, 2, 6]
       and _fb_cfg.as_dict()["harq_feedback_delay"] is True,
@@ -1863,7 +1888,7 @@ _amc_runs = {}
 for _olla in (True, False):
     _amc_runs[_olla] = sysm.simulate(
         [_amc_table],
-        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.02,
+        sys_cfg=sysm.SystemConfig(duration_s=0.02,
                                   tdd_pattern="D", seed=5),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(
@@ -1908,19 +1933,19 @@ try:
     sysm._bler_lookup = lambda _mcs, _sinr: 0.0
     expm._bler_lookup = lambda _mcs, _sinr: 0.0
     ap.RankController.record_feedback = _spy_feedback
-    _feedback_runs = {}
-    for _feedback_mode in ("capacity", "experience"):
-        _feedback_runs[_feedback_mode] = sysm.simulate(
-            [_amc_table],
-            sys_cfg=sysm.SystemConfig(
-                evaluation_mode=_feedback_mode, duration_s=0.005,
-                tdd_pattern="DDDSU", harq_feedback_delay=True, seed=650),
-            traffic=sysm.TrafficConfig(model="full_buffer"),
-            sched=sysm.SchedulerConfig(
-                mu_enabled=False, olla_enabled=True,
-                rank=ap.RankConfig(fixed_rank=1)),
-            kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="full"),
-        )
+    # 反馈时序由 amc_policy 统一实现；只剩一条评估路径，跑一次即可。
+    _feedback_mode = "experience"
+    _feedback_runs = {_feedback_mode: sysm.simulate(
+        [_amc_table],
+        sys_cfg=sysm.SystemConfig(
+            duration_s=0.005,
+            tdd_pattern="DDDSU", harq_feedback_delay=True, seed=650),
+        traffic=sysm.TrafficConfig(model="full_buffer"),
+        sched=sysm.SchedulerConfig(
+            mu_enabled=False, olla_enabled=True,
+            rank=ap.RankConfig(fixed_rank=1)),
+        kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="full"),
+    )}
 finally:
     sysm._bler_lookup = _old_system_bler
     expm._bler_lookup = _old_experience_bler
@@ -1967,12 +1992,12 @@ try:
             }
 
         la.harq_retransmission_bler = _terminal_retx
-        for _terminal_mode in ("capacity", "experience"):
+        for _terminal_mode in ("experience",):
             _terminal_key = f"{_terminal_mode}/retx_{'ack' if _terminal_ack else 'nack'}"
             _terminal_runs[_terminal_key] = sysm.simulate(
                 [_amc_table],
                 sys_cfg=sysm.SystemConfig(
-                    evaluation_mode=_terminal_mode, duration_s=0.006,
+                    duration_s=0.006,
                     tdd_pattern="DDDSU", harq_feedback_delay=True, seed=651),
                 traffic=sysm.TrafficConfig(model="full_buffer"),
                 sched=sysm.SchedulerConfig(
@@ -2067,7 +2092,7 @@ _grant_table = sysm.UeLinkTable(
 )
 _grant_run = sysm.simulate(
     [_grant_table],
-    sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.05,
+    sys_cfg=sysm.SystemConfig(duration_s=0.05,
                               tdd_pattern="D", seed=77),
     traffic=sysm.TrafficConfig(model="cbr", cbr_mbps=1.0),
     sched=sysm.SchedulerConfig(
@@ -2118,7 +2143,7 @@ for _mode, _cfg in (("fixed2", ap.RankConfig(fixed_rank=2)),
                     ("legacy", ap.RankConfig(mode="link_table"))):
     _rank_runs[_mode] = sysm.simulate(
         _T[:4],
-        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.05,
+        sys_cfg=sysm.SystemConfig(duration_s=0.05,
                                   tdd_pattern="DDDSU", seed=909),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(mu_enabled=False, rank=_cfg),
@@ -2414,7 +2439,7 @@ _bler_runs = {}
 for _target, _tabs in _bler_tables.items():
     _bler_runs[_target] = sysm.simulate(
         _tabs,
-        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=1.0,
+        sys_cfg=sysm.SystemConfig(duration_s=1.0,
                                   tdd_pattern="DDDSU", seed=11),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(mu_enabled=False),
@@ -2444,34 +2469,39 @@ for _analytic_table in (1, 2):
         table=_analytic_table, num_snapshots=2)
     check(_analytic_tabs[0].mcs_table == _analytic_table,
           f"build_link_tables table={_analytic_table} 走同表解析 BLER")
-    _analytic_run = sysm.simulate(
-        _analytic_tabs,
-        sys_cfg=sysm.SystemConfig(
-            evaluation_mode="capacity", duration_s=0.01, tdd_pattern="DDDSU"),
-        traffic=sysm.TrafficConfig(model="full_buffer"),
-        sched=sysm.SchedulerConfig(olla_enabled=False))
-    check(any("有限码长解析 BLER" in note for note in _analytic_run.notes),
-          f"capacity table={_analytic_table} 显式标注解析、未标定边界")
+    # #23 引入的表 1/2 有限码长解析 BLER **仍然存在且仍然被显式标注**，
+    # 只是消费者从（已下线的）容量主循环收回到链路级。标注不许退化成静默。
+    _analytic_probe = la.harq_retransmission_bler(
+        10, 8.0, combining="cc", table=_analytic_table)
+    check(_analytic_probe["bler_source"] == "finite_blocklength_analytic"
+          and _analytic_probe["curve_tx_mode"] == "analytic",
+          f"链路级 table={_analytic_table} 显式标注解析 BLER，不冒充预置曲线")
+    check(la.harq_retransmission_bler(
+              10, 8.0, combining="cc", table=3)["bler_source"]
+          != "finite_blocklength_analytic",
+          "表 3 仍走预置 NewTx 曲线，不与解析模型交叉借表")
+    # 系统级只有一条路径，而它没有表 1/2 的 TBS/BLER profile：必须显式硬失败，
+    # 且报错要指到「系统级只支持表 3」，不能让人对着下游 experience_v2 的话猜。
     try:
         sysm.simulate(
             _analytic_tabs,
-            sys_cfg=sysm.SystemConfig(
-                evaluation_mode="experience", duration_s=0.01,
-                tdd_pattern="DDDSU"),
-            traffic=sysm.TrafficConfig(model="full_buffer"))
-        check(False, f"experience_v2 不应接受 table={_analytic_table}")
+            sys_cfg=sysm.SystemConfig(duration_s=0.01, tdd_pattern="DDDSU"),
+            traffic=sysm.TrafficConfig(model="full_buffer"),
+            kpi=sysm.KpiConfig(warmup_s=0.0))
+        check(False, f"系统级不应接受 table={_analytic_table}")
     except ValueError as _exc:
-        check("experience_v2 当前只支持 MCS table 3" in str(_exc),
-              f"experience_v2 table={_analytic_table} 不静默借用错误 TBLER profile")
+        check("系统级仿真只支持预置 MCS table 3" in str(_exc)
+              and f"table={_analytic_table}" in str(_exc),
+              f"系统级 table={_analytic_table} 硬失败且报错点名收到的表号")
 
 
 # ---------------------------------------------------------------------------
-sect("18  capacity 的 MU：代价必须同时进 MCS 决策与误块抽签")
+sect("18  MU：代价必须同时进 MCS 决策与误块抽签")
 
-# 用户 2026-09-02：capacity 的误码与重传要与 experience 基本一致。
-# 历史口径只把 TBS 乘一个标量比值——「包变小但不更容易错」，物理上说不通。
-# 这一节证明三件事：pair 表口径确实把配对代价压进了 MCS；误块抽签换成了
-# pair 真值；SU/MU 自适应在信道高度相关时会判 SU 赢。
+# 历史口径（se_ratio_legacy）只把 TBS 乘一个标量比值——「包变小但不更容易错」，
+# 物理上说不通，已随 legacy 容量路径下线。这一节证明三件事：pair 表口径确实
+# 把配对代价压进了 MCS；误块抽签换成了 pair 真值；SU/MU 自适应在信道高度
+# 相关时会判 SU 赢。话务用 full_buffer（容量口径），走的仍是同一条路径。
 
 _MU_SNAP = 6
 
@@ -2492,7 +2522,7 @@ def _mu_pair_tables(corr: float, seed: int = 20260902):
 def _mu_run(tables, *, mu_on: bool):
     return sysm.simulate(
         tables,
-        sys_cfg=sysm.SystemConfig(evaluation_mode="capacity", duration_s=0.6,
+        sys_cfg=sysm.SystemConfig(duration_s=0.6,
                                   tdd_pattern="DDDSU", seed=4242),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(mu_enabled=mu_on),
@@ -2522,7 +2552,8 @@ def _pair_graph_error(tables, needle):
             tables,
             sys_cfg=sysm.SystemConfig(duration_s=0.01, tdd_pattern="D", seed=19),
             traffic=sysm.TrafficConfig(model="full_buffer"),
-            sched=sysm.SchedulerConfig(mu_enabled=True, mu_accounting="pair_table"))
+            sched=sysm.SchedulerConfig(mu_enabled=True, mu_accounting="pair_table"),
+                    kpi=sysm.KpiConfig(warmup_s=0.0))
     except ValueError as exc:
         return needle in str(exc)
     return False
@@ -2532,7 +2563,7 @@ _T_missing_edge = deepcopy(_T_graph)
 del _T_missing_edge[1].mu_links[2]
 del _T_missing_edge[2].mu_links[1]
 check(_pair_graph_error(_T_missing_edge, "UE 1 缺边 [2]"),
-      "三 UE 即使各自仍有邻居，缺 1↔2 边也在 capacity 入口硬失败")
+      "三 UE 即使各自仍有邻居，缺 1↔2 边也在入口硬失败")
 _T_asymmetric = deepcopy(_T_graph)
 _T_asymmetric[2].mu_links[1] = deepcopy(_T_asymmetric[2].mu_links[1])
 check(_pair_graph_error(_T_asymmetric, "不对称"),
@@ -2543,7 +2574,7 @@ _T_bad_dim[1].mu_links[2].true_sinr_db = \
 check(_pair_graph_error(_T_bad_dim, "维度不一致"),
       "pair graph 的 snapshot×两用户维度在调度前硬校验")
 
-# capacity MU 准入必须查询叠加 SU+MU OLLA 后的实发 MCS。用一个阶跃 BLER
+# MU 准入必须查询叠加 SU+MU OLLA 后的实发 MCS。用一个阶跃 BLER
 # 反例：OLLA 前 MCS 全部可用，第一次 MU ACK 令 MU OLLA +3 档；下一次候选
 # 的实发 MCS 越过 0.5 门，必须拒配。旧实现仍用 OLLA 前 MCS，会继续放行。
 _olla_link = _T_indep[0].mu_links[1]
@@ -2565,22 +2596,24 @@ try:
     _olla_admission_run = sysm.simulate(
         _T_indep,
         sys_cfg=sysm.SystemConfig(
-            evaluation_mode="capacity", duration_s=0.01,
+            duration_s=0.01,
             tdd_pattern="DDDSU", seed=313),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(
             mu_enabled=True, mu_accounting="pair_table",
             mu_corr_threshold=1.0, mu_olla_step_up_db=3.0,
             olla_max_db=6.0),
-        rng=rg.RngBook(313, 0))
+        rng=rg.RngBook(313, 0),
+                    kpi=sysm.KpiConfig(warmup_s=0.0))
 finally:
     sysm._bler_lookup = _old_mu_admission_bler
+_olla_rejects = _olla_admission_run.cell["mu_candidate_scoring"]["rejection_reasons"]
 check(_olla_admission_run.cell["mu_share"] > 0
-      and _olla_admission_run.cell["mu_pair_rejects"] > 0,
-      "正 MU OLLA 令实发 MCS 的预测 BLER 越过 0.5 后，capacity 拒绝后续配对")
+      and sum(int(v) for v in _olla_rejects.values()) > 0,
+      f"正 MU OLLA 令实发 MCS 的预测 BLER 越过 0.5 后拒绝后续配对（{_olla_rejects}）")
 check(_olla_admission_run.cell["mu_pair_graph"]["status"] == "pass"
       and _olla_admission_run.cell["mu_pair_graph"]["pairs"] == 1,
-      "有效 pair graph 的完整性证据随 capacity 结果交付")
+      "有效 pair graph 的完整性证据随结果交付")
 
 _su_arm = _mu_run(_T_indep, mu_on=False)
 _mu_arm = _mu_run(_T_indep, mu_on=True)
@@ -2590,8 +2623,8 @@ print(f"  独立信道：SU 首传 MCS {_su_arm.cell['avg_mcs_first_tx']:.2f} �
 check(_mu_arm.cell["mu_share"] > 0.3, "独立信道下确实发生了配对")
 check(_mu_arm.cell["avg_mcs_first_tx"] < _su_arm.cell["avg_mcs_first_tx"],
       "pair 表口径下配对的代价进了 MCS 决策：MU 的首传 MCS 低于 SU")
-check(_mu_arm.cell["mu_accounting"] == "pair_table",
-      "capacity 默认走 pair_table 口径并随结果上报")
+check(_mu_arm.config["scheduler"]["mu_accounting"] == "pair_table",
+      "pair_table 是唯一的 MU 记账口径，并随结果上报")
 check(abs(_mu_arm.cell["mu_olla_mcs_mean"]) > 0
       or _mu_arm.cell["mu_share"] == 0.0,
       "MU 的 OLLA 是独立状态，配对发生时它会动")
@@ -2629,18 +2662,29 @@ check(bool(np.allclose(
 # 反向对照：高度相关时 SU/MU 自适应必须判 SU 赢，配对率坍塌。
 _T_corr = _mu_pair_tables(0.999)
 _corr_arm = _mu_run(_T_corr, mu_on=True)
+_corr_plan = _corr_arm.cell["su_mu_plan"]
+_corr_reject = _corr_arm.cell["mu_candidate_scoring"]["rejection_reasons"]
 print(f"  相关系数 0.999：MU 占比 {_corr_arm.cell['mu_share']:.0%}，"
-      f"相关性门否决 "
-      f"{_corr_arm.cell['mu_pair_rejection_reasons'].get('correlation_threshold', 0)} 次")
+      f"判定单发更划算 {_corr_plan['su_selected']} 个 TTI，"
+      f"拒配原因 {_corr_reject}")
 check(_corr_arm.cell["mu_share"] < 0.05,
       "信道几乎同向时 ZF 无处零陷，SU/MU 自适应判 SU 赢")
-check(_corr_arm.cell["mu_pair_rejection_reasons"].get(
-          "correlation_threshold", 0) > 0,
+# PR #23 的意图保留：**具体查相关性门**，不是笼统数一下总拒配数。
+# 容量路径的 mu_pair_rejection_reasons 随该分支下线，体验路径的同名证据在
+# mu_candidate_scoring.rejection_reasons 里。
+check(int(_corr_reject.get("correlation_threshold", 0)) > 0,
+      f"信道同向时正是相关性门在否决配对（实得 "
+      f"{_corr_reject.get('correlation_threshold', 0)} 次）")
+check(int(_corr_plan["su_selected"]) > 0
+      and sum(int(v) for v in _corr_reject.values()) > 0,
       "拒配对的原因被显式计数，不是静默不配")
 
-# 历史标量口径的反向对照（"配对完全不压 MCS"）随该路径一起删除——那条路径
-# 现在根本构造不出来。它想守住的性质由上面 _su_arm / _mu_arm 的正向断言覆盖：
-# pair 表口径下 MU 的首传 MCS 必须低于 SU，且 MU 专用 OLLA 确实在动。
+# 历史标量口径 se_ratio_legacy 已下线，给了就在配置入口硬失败——上面第 9 节验过。
+# 它那条反向对照（「配对完全不压 MCS」）随之删除，因为那条路径现在根本构造不出来。
+# 它想守住的性质由上面 _su_arm / _mu_arm 的正向断言覆盖：pair 表口径下 MU 的
+# 首传 MCS 必须低于 SU，且 MU 专用 OLLA 确实在动。
+check(sysm.SchedulerConfig().mu_accounting == "pair_table",
+      "MU 记账口径只剩 pair_table 一个合法值")
 
 
 # --- 18 现场速率统计口径：buffer 在发送时扣减，不看 TB 对不对 --------------
@@ -2706,8 +2750,7 @@ try:
             lambda m, s, _p=_bd_retx_p, **kw: _bd_retx_bler(m, s, _v=_p, **kw))
         _bd_runs[_bd_name] = sysm.simulate(
             [_bd_point],
-            sys_cfg=sysm.SystemConfig(evaluation_mode="experience",
-                                      duration_s=1.0, tdd_pattern="D",
+            sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern="D",
                                       seed=230823),
             traffic=sysm.TrafficConfig(model="full_buffer"),
             sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
@@ -2789,8 +2832,7 @@ try:
         expm._bler_lookup = lambda _m, _s, _v=_rt_p: _v
         _rt_runs[_rt_p] = sysm.simulate(
             [_rt_point],
-            sys_cfg=sysm.SystemConfig(evaluation_mode="experience",
-                                      duration_s=3.0, tdd_pattern="DDDSU"),
+            sys_cfg=sysm.SystemConfig(duration_s=3.0, tdd_pattern="DDDSU"),
             traffic=sysm.TrafficConfig(model="ftp3", file_bytes=2_000_000,
                                        arrival_rate_hz=0.8),
             sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),

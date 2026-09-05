@@ -1,14 +1,28 @@
-"""体验评估模式：DRB busy-period、按需 RBG 分配与 Rel-19 KPI。
+"""系统级 TTI 主循环：DRB busy-period、按需 RBG 分配与 Rel-19 KPI。
 
-这个模块只做系统级第二相（TTI 主循环），不碰信道矩阵。它和
-``system.simulate`` 的 legacy 路径并存：legacy 用来复现历史结果，本文实现的
+这个模块只做系统级第二相（TTI 主循环），不碰信道矩阵，是**唯一**的评估路径。
 ``experience_v2`` 用实际分配的 TBS 给 PF 记账，并允许一个 TTI 服务多个 UE。
+
+**"容量仿真"不是另一条分支**，而是 ``TrafficConfig(model="full_buffer")``
+这个话务配置点：缓冲区永不空 ⇒ 调度器始终有足量数据填满全部 RBG
+（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.11、开 MU 1.73）。
+调度、AMC、HARQ、解调 SINR 聚合全部照
+本模块的定义走，**没有为它开的任何特例分支**。代价是 busy period 永不结束，
+**标准与工程两套 KPI 因此分家**：TS 28.552 的样本只在 "DRB DL buffer emptied"
+事件上形成（TS 128 552 V19.5.0 p54），满缓冲下一个都不会形成，所以
+``drb_throughput_rel19_mbps`` / ``cell_experienced_mbps`` 报 ``None``——**这是
+定义使然，不是缺陷**。满缓冲要看的是工程口径：ITU-R M.2412 / TR 38.913 的
+``ue_served_p5_mbps``（每 UE 已发送净荷 ÷ 观测窗长）与 ``active_window_goodput_mbps``
+（在飞 busy period 的窗内段发送速率）。满缓冲下两者的分母趋同，实测
+53.350 vs 53.431 Mbps，差 0.15%；但它们的发送字节分子同源，接近只能检查
+分母边界，**不能证明字节记账正确**。有限话务的独立到达量守恒才约束分子。
 
 物理边界明确写在结果里：逐 RBG 频选与 RB 功控是两个独立开关；只要链路表
 带逐 RBG SINR，实际 grant 就按 bitmap 聚合并重选 MCS。当前聚合仍是 dB
 算术平均而非标定过的
 EESM/MIESM。每个单码字 TB 最多一次 IR/CC 重传：空口 MCS、RBG 数、rank 与
-TBS 保持不变，BLER 只由预置 NewTx 曲线推导；失败 payload 留队并成为后续新 TB。
+TBS 保持不变，BLER 只由预置 NewTx 曲线推导；payload 在首传发送时离开队列，
+末次失败只进 ``residual_bler``，不回队列。
 """
 from __future__ import annotations
 
@@ -460,11 +474,51 @@ class BurstMetrics:
     head_inclusive_throughput_mbps: float | None = None
 
 
+def active_window_goodput(burst: BusyPeriod, tti_ms: float,
+                          warmup_tti: int) -> BurstMetrics:
+    """还在飞的 busy period 在测量窗内那一段的**工程口径 goodput**。
+
+    **这不是 TS 28.552 的吞吐样本，名字里绝不能出现 rel19。** 标准的样本只在
+    "DRB DL buffer emptied" 事件上形成（TS 128 552 V19.5.0 p54），并排除清空
+    buffer 的最后一个 piece。buffer 没排空就没有该事件，也就没有标准样本。
+
+    那为什么还要报它：**过载与满缓冲下标准样本可能一个都没有**，此时用户仍然
+    需要知道"正在传的时候有多快"。所以另起一个字段、另起一个名字，
+    与标准字段并列上报，任何时候都不混进 ``drb_throughput_rel19_mbps``。
+
+    **不掐尾，是因为它本来就是工程发送速率（发送净荷 ÷ 经过时间），不是标准
+    busy-period 吞吐。** 在飞 busy period 还没有 buffer-emptied 事件，无法知道哪次
+    发送会成为标准口径要排除的最后一个 piece；因此不能把工程窗内段冒充标准样本。
+
+    含头速率只在**该 busy period 本身起始于测量窗内**时才给：起始于窗外的 burst，
+    它的排队等待发生在窗外，加进窗内分母是两个口径混用。
+    """
+    if burst.first_tx_tti < 0:
+        return BurstMetrics(None, None, None, None, None)
+    events = [e for e in burst.tx_events if e.tti >= int(warmup_tti)]
+    if not events:
+        return BurstMetrics(None, None, None, None, None)
+    vol = int(sum(e.payload_bytes for e in events))
+    start_tti = max(int(burst.first_tx_tti), int(warmup_tti))
+    duration_tti = int(events[-1].tti) - start_tti + 1
+    if vol <= 0 or duration_tti <= 0:
+        return BurstMetrics(None, None, None, None, None)
+    duration_ms = duration_tti * float(tti_ms)
+    thp = vol * 8.0 / (duration_ms / 1000.0) / 1e6
+    head_thp = None
+    if int(burst.start_tti) >= int(warmup_tti):
+        wait = max(0, burst.first_tx_tti - burst.start_tti) * float(tti_ms)
+        head_thp = vol * 8.0 / ((wait + duration_ms) / 1000.0) / 1e6
+    # 完成时延与 PDB 需要对象真的传完，在飞的 burst 给不出，保持 None。
+    # kind 刻意不含 rel19：大/小 burst 分视图是标准口径的，这个样本不进那里。
+    return BurstMetrics(thp, "engineering_active_window", None, None, None, head_thp)
+
+
 def burst_metrics(burst: BusyPeriod, tti_ms: float,
                   small_burst_policy: str = "fractional_slot") -> BurstMetrics:
     """按 28.552 Rel-19 与时延口径计算一个已完成 busy period。
 
-    * 大 burst：从首传开始，体积与时间都排除清空 buffer 的最后一个 ACK piece。
+    * 大 burst：从首传开始，体积与时间都排除清空 buffer 的最后一个发送 piece。
     * 单次首传即成功的小 burst：可选 fractional-slot，时间按
       ``slot × payload/TBVol`` 折算（TBVol−PaddingVol 就是 payload）。
     * 排队等待与完成时延从 arrival 开始，和 3GPP throughput 分开上报。
@@ -1031,7 +1085,7 @@ def _rank_se_estimates(
     ``r × MCS 谱效``。
 
     **资源消耗加权与最小 MCS 闸门不在这里做**，它们由 ``RankController``
-    统一施加——两条评估路径都喂同一个控制器，修正只应该有一份实现。因此这里
+    统一施加——系统级只有一条评估路径，这个控制器只有一份实现。因此这里
     把 MCS 一并返回。
 
     这与现场"用一份上报 RI 的 CQI 再按 ``10log10(RI/r)`` 外推"不是同一个近似：
@@ -2205,11 +2259,9 @@ def simulate_experience(
             raise ValueError("experience_v2 当前 MU 基线固定每用户 rank2")
         if str(getattr(sched, "mu_precoder", "zf")) not in ("zf", "rzf"):
             raise ValueError("experience_v2 的 MU precoder 只支持 zf / rzf")
-    if str(traffic_cfg.model) == "bimodal":
-        raise ValueError("experience_v2 不接受按目标 RBG 数反推包长的 bimodal；请用 mixed")
     if str(traffic_cfg.model) not in (
             "mixed", "cdf", "ftp3", "full_buffer", "cbr"):
-        raise ValueError(f"experience_v2 不支持话务 {traffic_cfg.model!r}")
+        raise ValueError(f"不支持的话务模型 {traffic_cfg.model!r}")
     if str(sched.algorithm) not in (
             "pf", "qos_pf", "rr", "max_ci", "edf", "qos_pf_edf"):
         raise ValueError(f"experience_v2 不支持调度器 {sched.algorithm!r}")
@@ -2221,7 +2273,7 @@ def simulate_experience(
         # 不做静默降级。
         raise ValueError(
             f"{sched.algorithm} 需要有限队列，不接受 full_buffer 话务；"
-            "容量口径请用 pf / max_ci，长期公平口径请用 qos_pf")
+            "容量口径（话务开到最大）请用 pf / max_ci，长期公平口径请用 qos_pf")
     if str(getattr(sched, "qos_priority_weighting", "none")) not in (
             "none", "inverse_priority"):
         raise ValueError("qos_priority_weighting 只支持 none / inverse_priority")
@@ -2237,8 +2289,8 @@ def simulate_experience(
     if accounting == "auto":
         accounting = "scheduled_tbs"
     if accounting not in ("scheduled_tbs", "acked_goodput", "legacy_fullband"):
-        raise ValueError("experience_v2 的 pf_accounting 只支持 scheduled_tbs / "
-                         "acked_goodput / legacy_fullband")
+        raise ValueError("pf_accounting 只支持 scheduled_tbs / acked_goodput / "
+                         "legacy_fullband")
 
     warmup = int(kpi.resolve_warmup_tti(sys_cfg.tti_ms))
     trace_mode = str(getattr(kpi, "tti_trace_mode", "sampled")).lower()
@@ -2987,7 +3039,7 @@ def simulate_experience(
                     mode_nack_by_ue[mode][u] += int(not ack)
                     mode_expected_bler_by_ue[mode][u] += bler
                 # **发送即扣 buffer。** 重传不带新数据（字节在首传时就走了），
-                # 只累加 tx_attempts 记下它确实占了资源，返回 0。
+                # 对 DRB 队列完全不记账；资源占用由 retx_count/allocation/PRB 账本记录。
                 sent = tr.transmit(u, tti, tb_bytes, payload, ack=ack,
                                    is_retx=is_retx)
                 if is_retx:
@@ -3266,6 +3318,8 @@ def simulate_experience(
     large_pdb_flags: list[bool] = []
     class_arrival_kpis: dict[str, dict[str, Any]] = {}
     measured_bursts = completed_bursts = 0
+    completed_burst_count = inflight_burst_count = 0
+    active_window_goodputs: list[float] = []
     completed_arrival_objects = 0
     queue_wait_observed_objects = 0
     queue_wait_right_censored_objects = 0
@@ -3275,9 +3329,23 @@ def simulate_experience(
     for u, q in enumerate(tr.queues):
         done = [b for b in q.done if b.start_tti >= warmup]
         metrics = [burst_metrics(b, sys_cfg.tti_ms, small_policy) for b in done]
+        # **标准样本只来自已排空的 busy period。** TS 128 552 V19.5.0 p54：
+        # 样本在 "DRB DL buffer emptied" 事件上形成。在飞的 busy period 不产生
+        # 标准样本，绝不能混进 drb_throughput_rel19_mbps —— 混了就等于让工程量
+        # 顶着标准的名字，跨实现对标和历史趋势都失去定义一致性。
         thp = [m.throughput_mbps for m in metrics if m.throughput_mbps is not None]
+        completed_burst_count += len(thp)
         head_thp = [m.head_inclusive_throughput_mbps for m in metrics
                     if m.head_inclusive_throughput_mbps is not None]
+        # 工程口径的在飞窗内 goodput 另存一路，另起名字上报。
+        active_metric = (
+            active_window_goodput(q.active, sys_cfg.tti_ms, warmup)
+            if q.active is not None else None)
+        ue_active_goodput = None
+        if active_metric is not None and active_metric.throughput_mbps is not None:
+            ue_active_goodput = float(active_metric.throughput_mbps)
+            active_window_goodputs.append(ue_active_goodput)
+            inflight_burst_count += 1
         busy_waits = [m.queue_wait_ms for m in metrics if m.queue_wait_ms is not None]
         busy_completes = [m.completion_delay_ms for m in metrics
                           if m.completion_delay_ms is not None]
@@ -3315,6 +3383,7 @@ def simulate_experience(
         shead = [m.head_inclusive_throughput_mbps for m in metrics
                  if m.throughput_kind == "rel19_fractional_slot"
                  and m.head_inclusive_throughput_mbps is not None]
+        # 大/小 burst 分视图是**标准口径**的，工程 goodput 不进这里。
         lvals = [m.throughput_mbps for m in metrics
                  if m.throughput_kind == "rel19_large_burst"
                  and m.throughput_mbps is not None]
@@ -3344,7 +3413,8 @@ def simulate_experience(
         ue_head_thp = float(np.mean(head_thp)) if head_thp else 0.0
         is_small_class = bool(q.traffic_class.is_small)
         # 无界话务（full buffer）没有外生到达对象，busy period 永不结束，
-        # 体验速率对它无定义——只有真实到达/未完成对象才让 UE 有资格进体验 KPI。
+        # **busy-period 口径**对它无定义——只有真实到达/未完成对象才让 UE 有资格
+        # 进这套 KPI。ITU 口径的 ue_served_* 不受此限，任何话务下都算。
         experience_eligible = bool(done_items or incomplete_items)
         if not is_small_class and experience_eligible:
             large_user_thp.append(ue_thp)
@@ -3384,7 +3454,12 @@ def simulate_experience(
             "head_inclusive_experienced_mbps": (
                 ue_head_thp if experience_eligible else None),
             "experience_kpi_eligible": experience_eligible,
+            # **"measured" 保持原义 = 有已完成 burst 的样本**，它是删失诊断：
+            # 和 experience_kpi_eligible 之差就是"有话务但一个 burst 都没传完"。
+            # 在飞样本进 experienced_mbps，但不许把这个诊断也填满。
             "experience_kpi_measured": bool(thp),
+            # 工程口径：在飞 busy period 在窗内那一段的 goodput。**不是标准样本。**
+            "active_window_goodput_mbps": ue_active_goodput,
             "large_burst_experienced_mbps": _mean(lvals),
             "large_burst_head_inclusive_mbps": _mean(lhead),
             "small_burst_fractional_mbps": _mean(svals),
@@ -3459,6 +3534,8 @@ def simulate_experience(
                 if bool(u["experience_kpi_eligible"])]
     user_head_exp = [float(u["head_inclusive_experienced_mbps"]) for u in users
                      if bool(u["experience_kpi_eligible"])]
+    # 标准样本本来就只来自已完成 busy period，所以 completed-only 与
+    # experienced_mbps 现在同源；保留这个键是为了旧消费者不断。
     user_exp_completed_only = [float(u["experienced_mbps"]) for u in users
                                if bool(u["experience_kpi_measured"])]
     offered = int(tr.offered_bytes)
@@ -3466,7 +3543,14 @@ def simulate_experience(
     backlog = int(tr.backlog_bytes)
     acked_total = int(np.sum(served))
     acked_total_measured = int(np.sum(served_measured))
-    acct_error = (0.0 if tr.unbounded else
+    # **满缓冲下这个检查不成立，必须报 None 而不是 0.0。**
+    # 它比的是「到达 = 已发 + 积压」，而 full buffer 的 offered 是无界的种子字节，
+    # 差值没有意义。旧容量分支在这里算出 3.7e21（把 1<<62 的种子算进了 offered），
+    # 那是**用垃圾数冒充测量**；合并初版改成硬编码 0.0，那是**用漂亮数冒充测量**，
+    # 同一种错。旁边三个兄弟字段（offered_bytes_measurement /
+    # backlog_bytes_at_measurement_start / measurement_accounting_error_pct）
+    # 满缓冲下都报 None，这个也必须一致。
+    acct_error = (None if tr.unbounded else
                   abs(acked_total + backlog - offered) / max(offered, 1) * 100.0)
     measurement_balance_error_bytes = (None if tr.unbounded else int(
         backlog_at_measurement_start + offered_measured
@@ -3625,13 +3709,36 @@ def simulate_experience(
             for n_rbg, count in enumerate(tti_occupied_rbg_counts)
         ],
     }
+    # **和建表相共用同一份 _nan_safe，不各写一套。** 两份实现曾经短暂并存，
+    # 契约还不一样（一个先滤非有限值再聚合，一个交给 nan* 函数自己处理），
+    # 那正是同名不同义的漂移。函数内 import 是为了不破坏服务端的 lazy 策略。
+    from .system import _nan_safe  # noqa: PLC0415
+
     serving_cell_prb_utilization = float(
         allocated_prb_equiv / max(available_prb_equiv, _EPS))
     mu_paired_prb_share_of_used = float(
         mu_prb_equiv / max(allocated_prb_equiv, _EPS))
     mu_paired_prb_utilization = float(
         mu_prb_equiv / max(available_prb_equiv, _EPS))
+    # **用户吞吐的分布：ITU-R M.2412 / TR 38.913 的"用户体验速率"口径。**
+    # 每 UE 在测量窗内发送的净荷字节 / 窗长，取跨 UE 的分布；5% 分位就是
+    # cell-edge user throughput。它和 busy-period 口径是**两个不同的定义**，
+    # 不是同一个数的两种精度：
+    #   * busy-period（下面的 cell_experienced_mbps / drb_throughput_rel19_mbps）
+    #     量的是"一个 burst 从首传到发完有多快"，需要 buffer 排空来划边界；
+    #   * 这里量的是"一个用户在一段时间里平均拿到多少"，只需要一个观测窗。
+    # 满缓冲评估用的正是后者——前者在 full buffer 下没有边界可用，后者照常成立。
+    # **无条件计算，不按话务模型分支**：任何话务下它都有意义。
+    user_served = [float(row["served_mbps"]) for row in users]
     cell = {
+        "ue_served_mean_mbps": _mean(user_served),
+        "ue_served_median_mbps": _pct(user_served, 50),
+        "ue_served_p5_mbps": _pct(user_served, 5),
+        "ue_served_throughput_definition": (
+            "per-UE transmitted payload bytes over the measurement window divided by "
+            "the window duration; the 5th percentile is the ITU-R M.2412 / "
+            "TR 38.913 cell-edge user throughput. Defined for every traffic "
+            "model including full buffer, where the busy-period KPIs are not."),
         "cell_experienced_mbps": _mean(user_exp) or 0.0,
         "cell_head_inclusive_experienced_mbps": _mean(user_head_exp) or 0.0,
         "cell_experienced_completed_only_mbps": (
@@ -3645,6 +3752,33 @@ def simulate_experience(
             len(user_exp_completed_only) / max(len(user_exp), 1)),
         "drb_throughput_rel19_mbps": _mean(all_thp),
         "drb_throughput_head_inclusive_mbps": _mean(all_head_thp),
+        # --- 工程口径，与上面的标准字段并列、绝不混入 ---------------------
+        # 过载与满缓冲下标准样本可能一个都没有（buffer 永不排空 ⇒ 无 emptied
+        # 事件）。此时仍需要知道"正在传的时候有多快"，所以另起字段另起名字。
+        "active_window_goodput_mbps": _mean(active_window_goodputs),
+        "active_window_goodput_samples": int(inflight_burst_count),
+        "active_window_goodput_definition": (
+            "ENGINEERING metric, NOT a TS 28.552 sample: transmitted payload of the "
+            "still-in-flight busy period within the measurement window divided by "
+            "the elapsed time from its first transmission (or window start) to its "
+            "last in-window new transmission. No tail trimming because the buffer-"
+            "emptied event has not happened, so the standard final piece is not yet "
+            "known. Reported alongside drb_throughput_rel19_mbps, never merged "
+            "into it."),
+        # **标准样本的统计有效性必须可见。** 过载时已完成 busy period 会变得很少
+        # 甚至为 0，此时 drb_throughput_rel19_mbps 是少数样本的均值或 None。
+        "drb_throughput_completed_bursts": int(completed_burst_count),
+        "drb_throughput_inflight_bursts": int(inflight_burst_count),
+        "drb_throughput_inflight_share": float(
+            inflight_burst_count
+            / max(completed_burst_count + inflight_burst_count, 1)),
+        "drb_throughput_sample_scope": (
+            "TS 128 552 V19.5.0 p54: samples form on the DRB DL buffer-emptied "
+            "event only, with the buffer-clearing final piece excluded. "
+            "Still-in-flight busy periods produce NO standard sample; they are "
+            "reported separately as active_window_goodput_mbps. "
+            "drb_throughput_inflight_share high means the standard KPI rests on "
+            "few samples."),
         "large_burst_drb_throughput_mbps": _mean(large_thp),
         "large_burst_head_inclusive_mbps": _mean(large_head_thp),
         "large_flow_drb_throughput_p5_mbps": _pct(large_user_thp, 5),
@@ -3784,7 +3918,8 @@ def simulate_experience(
         "warmup_tti": warmup,
         "backlog_bytes": backlog,
         "backlog_bursts": int(sum(q.active is not None for q in tr.queues)),
-        "accounting_error_pct": round(float(acct_error), 6),
+        "accounting_error_pct": (
+            None if acct_error is None else round(float(acct_error), 6)),
         "outage_ue": int(sum(1 for t in tables
                               if t.outage is not None and bool(t.outage.all()))),
         "outage_skips": int(outage_skips),
@@ -3796,6 +3931,29 @@ def simulate_experience(
         "olla_mcs_p5": float(np.percentile(olla_db, 5)),
         "olla_mcs_p95": float(np.percentile(olla_db, 95)),
         "olla_domain": "continuous_mcs_index",
+        "olla_target_bler": round(
+            float(sched.olla_step_up_db)
+            / (float(sched.olla_step_up_db) + float(sched.olla_step_down_db)), 4),
+        # **IoT = (I+N)/N**：干扰主导还是噪声主导。密集城区常 >20 dB。
+        # 它是链路表的纯函数，和话务模型无关，所以任何配置下都该报。
+        "iot_db_median": _nan_safe(np.nanmedian, [t.iot_db for t in tables]),
+        "iot_db_p5": _nan_safe(np.nanpercentile, [t.iot_db for t in tables], 5),
+        "iot_db_p95": _nan_safe(np.nanpercentile, [t.iot_db for t in tables], 95),
+        # **有效率必须按样本算，不是按用户。** 逐用户的 nanmedian 会把
+        # "8 个快照里 4 个算不出来"的用户也算成有效，于是小区级恒报 100%，
+        # 正确的多时隙告警从不触发。两个口径都报出来，差异才可见。
+        "iot_sample_valid_share": (
+            float(np.mean([t.iot_sample_valid for t in tables])) if tables else 0.0),
+        "iot_valid_ue_share": float(np.mean(
+            [bool(np.isfinite(t.iot_db)) for t in tables])) if tables else 0.0,
+        "high_iot_ue_share": float(np.mean([
+            (t.iot_db >= 20.0) if np.isfinite(t.iot_db) else False
+            for t in tables])) if tables else 0.0,
+        # **边缘用户 MCS**：现场经验通常 < 5，比平均 MCS 更能暴露覆盖问题。
+        "edge_mcs_p5": _nan_safe(
+            np.nanpercentile,
+            [float(row["avg_mcs"]) for row in users
+             if int(row.get("sched_tti", 0) or 0) > 0], 5),
         "mu_share": float(mu_tti / max(busy_tti, 1)),
         "mu_rbg_share": float(mu_rbg / max(allocated_rbg, 1)),
         "mu_paired_prb_share_of_used": mu_paired_prb_share_of_used,
@@ -3926,13 +4084,21 @@ def simulate_experience(
             weight=mixed_weight, epf_scale=mixed_epf_scale)
 
     if tr.unbounded:
-        # full buffer 没有 busy-period 边界，体验速率无定义；报 None 而不是
-        # 0.0——zero-inclusive 口径是为"有外生到达但被饿死"的 UE 设计的。
+        # **TS 28.552 的样本在 buffer emptied 事件上形成**，而 full buffer 下
+        # buffer 永不排空 ⇒ 一个标准样本都没有。这不是实现缺陷，是标准的定义。
+        # 报 None 而不是 0.0：把"标准未定义"写成 0 会被当成"测到了 0 Mbps"。
+        #
+        # **需要一个数的用户看这两个工程字段**（任何话务下都有值）：
+        #   * ue_served_p5/median/mean_mbps —— ITU-R M.2412 / TR 38.913 口径，
+        #     每 UE 已发送净荷 ÷ 观测窗长，5% 分位即 cell-edge user throughput；
+        #   * active_window_goodput_mbps —— 在飞 busy period 窗内段的 goodput。
         for _k in ("cell_experienced_mbps",
                    "cell_head_inclusive_experienced_mbps",
                    "cell_experienced_completed_only_mbps",
                    "ue_experienced_mean_mbps", "ue_experienced_median_mbps",
-                   "ue_experienced_p5_mbps"):
+                   "ue_experienced_p5_mbps",
+                   "drb_throughput_rel19_mbps",
+                   "drb_throughput_head_inclusive_mbps"):
             cell[_k] = None
 
     notes: list[str] = [
@@ -3945,14 +4111,15 @@ def simulate_experience(
             "frequency_selective='off' 或逐 RBG 字段不可用的结果，不再由 RB 功控"
             "开关暗中决定。"
         ),
-        "TBS 量化算法走 38.214 §5.1.3.2，但 MCS 使用预置 20B profile；D 时隙按"
-        "每 RB 12 个数据符号、S 时隙按 0.7 倍 N_RE，未展开 DMRS/PTRS/CORESET。",
+        "TBS 量化算法走 38.214 §5.1.3.2，但 MCS 使用预置 20B profile；默认 D 时隙"
+        "每 PRB 为 12×12−6(DM-RS)−12(PDCCH 等效)=126 RE，S 时隙只折符号数后"
+        "再扣同一份固定开销。未展开 PTRS 与 RB 级 CORESET 账本。",
         ("HARQ 每个单码字 TB 最多一次重传，重传保持初传 MCS、RBG 数、rank 与 TBS；"
          f"当前合并={harq_combining.upper()}。CC 用同一 NewTx 曲线并把码字 "
          "SINR 抬升 10log10(2)=3.0103 dB；IR 用原 MCS 一半谱效映射等效低档 MCS，"
          "在不变 SINR 上查该 NewTx 曲线。等效 MCS 只用于 BLER 查表，不改写空口 MCS。"
-         "重传失败后结束本次 HARQ，payload 留在 DRB 队列并在后续作为新 TB。"),
-        f"PF 平均量口径是 **{accounting}**；ACKed bytes 另作为 KPI 统计。",
+         "payload 在首传发送时离开队列；末次失败只进 residual_bler，不回队列。"),
+        f"PF 平均量口径是 **{accounting}**；发送净荷另作为 KPI 统计。",
         (f"Rank 策略={rank_cfg.mode}"
          + (f"（固定 rank{min(int(rank_cfg.fixed_rank), rank_ctl.max_rank)}）"
             if rank_cfg.mode == "fixed"
@@ -4060,16 +4227,26 @@ def simulate_experience(
     if n_snap < 4:
         notes.append(f"**信道快照只有 {n_snap} 个**，时间起伏被严重低估，PF 多用户分集不足。")
     if tr.unbounded:
-        notes.append("**话务无界（full buffer）**：busy period 永不结束，"
-                     "体验速率无定义，体验类 KPI 报 None（不是 0）；"
-                     "容量口径请看 cell_served_mbps。")
+        notes.append(
+            "**话务无界（full buffer）**：buffer 永不排空，burst 没有边界，"
+            "因此 **28.552 的 busy-period 吞吐**（cell_experienced_mbps / "
+            "drb_throughput_rel19_mbps / 完成时延 / PDB）无定义，报 None（不是 0）。"
+            "**用户体验速率仍然有定义**，只是走另一个口径：ue_served_p5_mbps "
+            "是 ITU-R M.2412 / TR 38.913 的 cell-edge user throughput（每 UE "
+            "已发送净荷 / 观测窗长的 5% 分位），ue_served_mean/median_mbps 是同一"
+            "分布的均值与中位；另一个工程口径是 active_window_goodput_mbps"
+            "（在飞 busy period 落在测量窗内那段的发送速率）。满缓冲下两者的分母"
+            "趋同所以数值应接近，但发送字节分子同源，只能检查分母边界，不能验证"
+            "字节记账；"
+            "小区总吞吐看 cell_served_mbps。"
+            "**标准与工程不是同一个数的两种精度，不可互相顶替。**")
     if measured_bursts < 20 and not tr.unbounded:
         notes.append(f"只有 {measured_bursts} 个 busy period 进入体验 KPI，样本太少；"
                      "加长 duration_s 或调高到达率。")
     if not tr.unbounded and backlog > 0.15 * max(offered, 1):
         notes.append(f"**队列积压 {backlog * 8 / 1e6:.1f} Mb**"
                      f"（占到达量 {backlog / max(offered, 1):.0%}），系统未收敛。")
-    if acct_error > 1.0:
+    if acct_error is not None and acct_error > 1.0:
         notes.append(f"**字节对不上账（差 {acct_error:.3f}%）**："
                      "arrived 必须等于 acked + queued + in_flight + dropped。")
     if measurement_acct_error is not None and measurement_acct_error > 1.0:
@@ -4078,6 +4255,39 @@ def simulate_experience(
             "start_backlog + arrived_in_window 必须等于 acked_in_window + end_backlog。")
     if cell["serving_cell_prb_utilization"] > 0.98:
         notes.append("**本小区 PRB 利用率超过 98%**，当前结果更接近容量上限而非稳态体验。")
+    # **判据必须是逐样本有效率。** 逐用户的那个恒等于 1（nanmedian 会把半数 nan
+    # 的用户也算成有效），于是这条正确的告警从不触发，反而触发下面那条"检查
+    # 站间距"——把用户支使去查一个根本没问题的配置。
+    _iot_ok = float(cell.get("iot_sample_valid_share", 1.0))
+    if _iot_ok < 0.9:
+        notes.append(
+            f"**IoT 不可信：只有 {_iot_ok:.0%} 的样本算得出来**"
+            f"（逐用户口径会报 {cell['iot_valid_ue_share']:.0%}，那个数会骗人）。"
+            "根因是生成时 num_slots_per_sample > 1——那时 sinr_dB 是各 slot 的 dB "
+            "均值、sir_dB 只取最后一个 slot，两者不同口径，会出现 SIR < SINR 这种"
+            "物理上不可能的值。**别去查站间距和邻区负载，配置没问题，是这个量本身"
+            "在多时隙下不成立。** 要看 IoT 就用 num_slots_per_sample=1 单独生成一批"
+            "——但那批做不了系统级仿真（PF 拿不到时间分集、CSI 老化恒为 0）。")
+    elif (np.isfinite(cell["iot_db_median"]) and cell["iot_db_median"] < 3):
+        notes.append(
+            f"**IoT 中位只有 {cell['iot_db_median']:.1f} dB**，几乎是噪声受限。"
+            "密集城区实际常在 20 dB 以上——检查是不是站间距太大、"
+            "或者邻区负载 prb_utilization 设得过低。")
+    if np.isfinite(cell["edge_mcs_p5"]) and cell["edge_mcs_p5"] > 8:
+        notes.append(
+            f"**5% 边缘用户的 MCS 是 {cell['edge_mcs_p5']:.1f}，偏高**"
+            "（现场经验通常 <5）。多半是撒点没覆盖到真正的边缘，"
+            "或者邻区负载设得太低、干扰被低估了。")
+    if cell["outage_ue"]:
+        notes.append(
+            f"**{cell['outage_ue']} 个用户全程处于覆盖外**"
+            "（用户级 SINR 够不到 MCS 0 的门限），已从调度中剔除。"
+            "他们没有发射，所以**不进 BLER 统计**；"
+            "但他们**以 0 进 ue_served_* 分布**——只要有一个覆盖外用户，"
+            "ue_served_p5_mbps 就从「最差被服务用户的速率」变成「覆盖底噪」，"
+            "方向偏低，而这个键是按 ITU-R M.2412 的 cell-edge user throughput 交付的。"
+            "按标准密度撒点的多小区场景最容易出覆盖洞，引用 p5 前先看这个计数。"
+            "——覆盖外本身也是结论：这些点位需要补站或降配。")
     diagnostics = {
         "rank_policy": rank_ctl.diagnostics(),
         "harq_feedback": {
@@ -4252,7 +4462,12 @@ def simulate_experience(
             "queued": backlog,
             "in_flight": 0,
             "dropped": 0,
-            "error_pct": round(float(acct_error), 6),
+            # arrived 无界时这条守恒式本身不成立，报 None 而不是 0.0。
+            "error_pct": (
+                None if acct_error is None else round(float(acct_error), 6)),
+            "not_applicable_reason": (
+                "full buffer: offered bytes are an unbounded seed, so "
+                "arrived = acked + queued has no meaning" if tr.unbounded else None),
         },
         "queue_wait_observation": {
             "observed_first_tx": int(queue_wait_observed_objects),

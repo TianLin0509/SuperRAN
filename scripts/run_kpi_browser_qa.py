@@ -248,7 +248,6 @@ def main() -> None:
         ),
     )
     system = sy.SystemConfig(
-        evaluation_mode="experience",
         duration_s=1.2,
         tdd_pattern="DDDSU",
         seed=20260809,

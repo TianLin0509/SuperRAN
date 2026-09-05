@@ -39,7 +39,6 @@ sys_dense_urban_loaded:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 3.0
@@ -47,19 +46,16 @@ sys_dense_urban_loaded:
     csi_aging: true
     srs_period_ms: 10.0
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_9625340c
     n_replications: 8
     # 格式一律是 [均值, 95% 区间半宽占均值的百分比]。**半宽和数值不可分割**——
     # 单独引用均值就是在假装这次实验的分辨率无限高。
-    avg_mcs: [6.44, 4.1]
-    bler_first_tx: [0.214, 3.1]
-    cell_served_mbps: [87.12, 7.3]
-    occupancy: [0.922, 2.9]
-    olla_db_mean: [-3.82, 5.2]
-    cell_experienced_mbps: [32.72, 23.3]      # 半宽 23%，只能看量级
-    ue_experienced_p5_mbps: [11.53, 22.4]     # 同上
     note: >-
       2026-08-07 实测，8 次重复。**IoT 故意不记**：这个数据集
       num_slots_per_sample=8，而多时隙下 sinr_dB 是各 slot 的 dB 均值、
@@ -89,7 +85,6 @@ sys_dense_urban_light:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 1.0
@@ -97,16 +92,14 @@ sys_dense_urban_light:
     csi_aging: true
     srs_period_ms: 10.0
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_9625340c
     n_replications: 8
-    avg_mcs: [7.84, 7.8]
-    bler_first_tx: [0.289, 5.0]
-    cell_experienced_mbps: [106.26, 12.1]
-    cell_served_mbps: [32.80, 17.0]
-    occupancy: [0.351, 18.1]
-    ue_experienced_p5_mbps: [40.95, 37.6]     # 半宽 38%，这一项分辨不出来
     note: >-
       2026-08-07 实测，8 次重复。与 sys_dense_urban_loaded 同一批信道。
       **注意方向**：轻载的体验速率(106) 高于满载(33)，而承载吞吐(33) 低于满载(87)
@@ -137,7 +130,6 @@ sys_urban_macro_field_csi:
     num_slots_per_sample: 8
     ue_speed_kmh: 30.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 2.0
@@ -145,18 +137,14 @@ sys_urban_macro_field_csi:
     csi_aging: true
     srs_period_ms: 10.0
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_984082de
     n_replications: 8
-    avg_mcs: [7.99, 5.4]
-    avg_rank: [1.759, 2.2]
-    bler_first_tx: [0.358, 8.0]
-    cell_experienced_mbps: [119.62, 8.9]
-    cell_served_mbps: [61.15, 10.9]
-    ue_experienced_p5_mbps: [37.05, 10.5]
-    olla_db_mean: [-4.21, 8.2]
-    occupancy: [0.534, 8.5]
     note: >-
       2026-08-07 实测，8 次重复。**替换了 2026-08-04 的单次运行值，
       而且替换本身就是这项工作的价值证明**：旧的单次值 5% 边缘是 123.5，
@@ -182,7 +170,6 @@ sys_urban_macro_ideal_csi:
     num_slots_per_sample: 8
     ue_speed_kmh: 30.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 2.0
@@ -190,18 +177,14 @@ sys_urban_macro_ideal_csi:
     csi_aging: false
     srs_period_ms: 10.0
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_984082de
     n_replications: 8
-    avg_mcs: [10.36, 2.2]
-    avg_rank: [1.743, 2.5]
-    bler_first_tx: [0.122, 9.9]
-    cell_experienced_mbps: [252.78, 6.1]
-    cell_served_mbps: [61.67, 10.9]
-    ue_experienced_p5_mbps: [101.35, 11.0]
-    occupancy: [0.282, 10.2]
-    olla_db_mean: [-0.27, 58.9]   # 均值贴近 0，相对半宽必然爆掉，看绝对值
     note: >-
       2026-08-07 实测，8 次重复。**olla_db_mean 那 58.9% 不是这一项不可信**——
       均值只有 -0.27，相对半宽的分母太小，绝对半宽其实只有 0.16 dB。
@@ -216,10 +199,12 @@ sys_field_bimodal_traffic:
   group: 系统级 · 话务
   label: 现网话务画像 · 两头高中间低（30% 小包 / 30% 满包）
   summary: >-
-    用户给的现网口径：小包（1 个 RBG）约占 30%、满包（17 个 RBG）约占 30%、
-    中间 2~16 个 RBG 相对均匀，另有 30% 的 TTI 完全没调度。
-    这是 legacy_v1 按目标 RBG 数反推包长的历史画像；它的小包在 legacy trim 下
-    不可测。要研究真实大小文件竞争，请用 experience_v2 的 mixed 预设。
+    用户给的现网口径：小包约占 30%、满包约占 30%、中间相对均匀。
+    **口径已迁移**：退役的 bimodal 是"按占用 RBG 数"抽样再乘一个写死的
+    3.0 bit/s/Hz 折成字节；现在改成 cdf 驱动的**包长分布**，
+    一次传输实际占几个 RBG 由该用户当时的 MCS/rank 经 TBS 反查决定。
+    两份 CDF 由 scripts/make_field_bimodal_cdf.py 机械转写自原旋钮，
+    **不是新的现网测量**。小包不再是盲区：Rel-19 的 fractional-slot 口径可测。
   answers:
     - 现网话务下 PRB 利用率是多少
     - 大包用户和小包用户的体验差多少
@@ -230,21 +215,21 @@ sys_field_bimodal_traffic:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: capacity
     duration_s: 5.0
-    traffic_model: bimodal
+    traffic_model: cdf
+    packet_size_cdf: presets/traffic_cdf/field_bimodal_packet_size.csv
+    interarrival_cdf: presets/traffic_cdf/field_bimodal_interarrival.csv
     neighbor_prb_util: 0.3
     csi_aging: true
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_6e9715bc
     n_replications: 8
-    avg_mcs: [9.46, 4.8]
-    bler_first_tx: [0.883, 2.4]               # **不是笔误，见下**
-    cell_served_mbps: [0.94, 11.2]
-    occupancy: [0.107, 7.8]
-    olla_db_mean: [-2.05, 8.7]
     note: >-
       2026-08-07 实测，8 次重复。**首传 BLER 0.883 不是笔误，是这个场景的真实
       失效模式**：小包 burst 太小，占用率只有 10.7%，5 秒里 OLLA 拿不到足够的
@@ -275,7 +260,6 @@ sys_mobility_60kmh:
     num_slots_per_sample: 8
     ue_speed_kmh: 60.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: ftp3
     arrival_rate_hz: 2.0
@@ -284,13 +268,13 @@ sys_mobility_60kmh:
     srs_period_ms: 10.0
     olla_speedup: 20.0
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_0ef213d2
-    cell_experienced_mbps: 138.3
-    ue_experienced_p5_mbps: 49.7
-    avg_mcs: 5.15
-    olla_db_mean: -4.92
     note: >-
       2026-08-04 实测（olla_speedup=20 以便 3 秒内收敛）。
       同配置零时延是 320.0 Mbps。
@@ -300,11 +284,18 @@ sys_mobility_60kmh:
 # ---------------------------------------------------------------------------
 sys_capacity_full_buffer:
   group: 系统级 · 容量上界
-  label: 满缓冲容量上界 · full buffer
+  label: 容量仿真 · 话务开到最大（full buffer）
   summary: >-
-    **体验速率在这个模型下没有意义**——缓冲区永不清空，找不到完整 busy period。
-    它只用来看小区吞吐上界与调度器的公平性，
-    结果里只该引用 cell_served_mbps 与 Jain 公平度，不要引用体验速率。
+    **"容量仿真"就是这个场景**：它不是另一条仿真分支，只是把话务开到最大。
+    缓冲区永不空 ⇒ 调度器始终有足量数据填满全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.11、开 MU 1.73），
+    调度、AMC、HARQ、解调 SINR 聚合全部照体验口径走。
+    满缓冲下 TS 28.552 的标准样本一个都不形成（样本只在 buffer 排空事件上形成），
+    drb_throughput_rel19_mbps / cell_experienced_mbps 报 None——定义使然，不是缺陷。
+    看工程口径：ITU 的 ue_served_p5_mbps 与 active_window_goodput_mbps。
+    满缓冲下两者因分母趋同而接近，但发送字节分子同源，不能验证字节记账。
+    其余需要 burst 真的传完的键同样报 None（完成时延、PDB、
+    含头速率）。结果里引用 cell_served_mbps、ue_served_p5_mbps、
+    active_window_goodput_mbps、PRB 利用率与 Jain 公平度。
   answers:
     - 这个小区的吞吐上界是多少
     - PF 在满负载下的公平性如何
@@ -315,25 +306,25 @@ sys_capacity_full_buffer:
     num_slots_per_sample: 8
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: capacity
     duration_s: 3.0
     traffic_model: full_buffer
     neighbor_prb_util: 0.3
     csi_aging: true
   expect:
-    measured: true
-    model_version: legacy_v1_pre_physics_audit_20260809
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
+    model_version: experience_v2
     dataset: ds_6e9715bc
     n_replications: 8
-    cell_served_mbps: [169.96, 0.2]
-    avg_mcs: [7.99, 0.1]
-    avg_rank: [2.005, 0.0]
-    occupancy: [1.0, 0.0]
-    cell_experienced_mbps: 0.0                # **确实是 0，这是设计意图不是 bug**
     note: >-
-      2026-08-07 实测，8 次重复。**体验速率确实是 0**：full buffer 下缓冲区永不
-      清空，3GPP TS 28.552 的掐尾口径找不到任何一个完整 burst，
-      measured_bursts=0。这验证了 summary 里那句话，**别把它当成 bug 去修**。
+      2026-08-07 实测，8 次重复（数值已因口径变更作废，见 invalidated_by）。
+      **体验速率是 None**：full buffer 下缓冲区永不清空，28.552 的 DRB
+      合并前的 legacy 路径报的是 0，
+      那是在假装"测到了 0 Mbps"；现在报 None 并在 notes 里说明。
+      **别把它当成 bug 去修。**
       注意所有区间都极窄（≤0.2%）——因为 full buffer 没有话务随机性，
       唯一的随机源只剩 HARQ 抽样。**这反过来说明其他场景那些宽区间主要来自话务**。
 
@@ -358,7 +349,6 @@ sys_experience_mixed_pf:
     num_slots_per_sample: 1
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: experience
     duration_s: 5.0
     traffic_model: mixed
     file_bytes: 500000
@@ -385,17 +375,17 @@ sys_experience_mixed_pf:
     seed: 20260809
     num_replications: 16
   expect:
-    measured: true
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
     model_version: experience_v2
     dataset: ds_329edafb
     result: artifacts/results/experience_pf_accounting_crn_n16.json
     n_replications: 16
-    small_queue_wait_ms_p95: [0.5625, 16.18]
-    small_completion_delay_ms_p95: [6.6422, 8.48]
-    small_pdb_miss_ratio: [0.0018, 66.95]
     large_burst_drb_throughput_mbps: [169.7562, 8.55]
     resource_utilization: [0.7741, 9.46]
-    cell_served_mbps: [98.1332, 4.93]
     accounting_error_pct: 0.0
     note: >-
       2026-08-09 原理修复后正式 n=16 CRN。主指标 small FIFO 排队 P95：本臂
@@ -423,7 +413,6 @@ sys_experience_mixed_pf_wrong_accounting:
     num_slots_per_sample: 1
     ue_speed_kmh: 3.0
   system:
-    evaluation_mode: experience
     duration_s: 5.0
     traffic_model: mixed
     file_bytes: 500000
@@ -450,19 +439,419 @@ sys_experience_mixed_pf_wrong_accounting:
     seed: 20260809
     num_replications: 16
   expect:
-    measured: true
+    measured: false
+    invalidated_by: >-
+      2026-09-03 合并容量/体验模式：legacy_v1 全带路径删除，所有场景改走
+      experience_v2（容量口径 = traffic_model: full_buffer）。下面的数字是
+      legacy_v1 测的，口径已变，**不再成立**。重跑 sr_probe_scenario 后再填。
     model_version: experience_v2_fault_injection
     dataset: ds_329edafb
     result: artifacts/results/experience_pf_accounting_crn_n16.json
     n_replications: 16
-    small_queue_wait_ms_p95: [1.2109, 26.34]
-    small_completion_delay_ms_p95: [8.1359, 10.52]
-    small_pdb_miss_ratio: [0.0091, 40.28]
     large_burst_drb_throughput_mbps: [167.0458, 8.09]
     resource_utilization: [0.7738, 9.44]
-    cell_served_mbps: [98.1410, 4.91]
     accounting_error_pct: 0.0
     note: >-
       2026-08-09 正式 n=16 CRN 的反向控制。它故意给部分 RBG 用户按全带记 PF，
       只用于验证不变量，**不得作为推荐配置**。与正确臂的主指标配对差及判决见
       sys_experience_mixed_pf 和 result JSON。
+
+# ---------------------------------------------------------------------------
+# 九、合并后单路径的实测锚点
+#
+# 这一节的场景是**按 OLLA 收敛需求重新设计过的**，不是把旧场景照搬。
+# 判据来自物理而不是经验：外环的稳态 BLER 恒等于 step_up/(step_up+step_down)，
+# 默认 0.01/0.09 就是 10%。所以「实测首传 BLER 落在 10% 附近」= 场景给够了反馈；
+# 落不到就是场景太短或太闲，该调场景，不该调断言。
+#
+# 实测：跨 1 档 MCS 需要 100 次连续 ACK。旧配置每 UE 只被调度约 280 次，
+# 冷启动走不到稳态（BLER 实测 2.4~3.2 倍目标）。把占用率从 0.2x 抬到 0.4~0.6，
+# 每 UE 约 1100 次，四个场景分别落到 0.88 / 1.12 / 1.34 / 1.04 倍。
+#
+# **反例（已实测，勿重蹈）**：用 olla_warmup_speedup=10 "加速收敛" 会把 BLER
+# 打到 0.64 倍。步长比例 up:down = 1:9 不对称，预热期 10 倍大步向下过冲后，
+# 测量期每次 ACK 只能爬 0.01，爬不回来。正确解法是补足反馈量，不是调学习率。
+#
+# **合并 #23（BLER/EESM 显式化、S 时隙折算、SU/MU 准入门）后逐字重测过**：
+# 四个场景共 69 项指标（16+18+17+18）**一个都没变**。原因可查：这四个锚点都是
+# SU、都用预置 MCS 表 3、TDD 图案都不含 S 时隙，而 #23 动的是表 1/2 的解析 BLER、
+# S 时隙折算系数与 MU 配对准入——与这些锚点物理正交。**这一致本身就是证据**，
+# 不是"没跑"。
+# ---------------------------------------------------------------------------
+sys_single_cell_capacity:
+  group: 系统级 · 单小区基线
+  label: 单小区容量口径 · SU 基线（**不是容量上界，上界看 _mu 那个**）
+  summary: >-
+    合并后唯一路径的容量锚点。单站单扇区，**没有几何邻区干扰**（实测 IoT 中位
+    0.004 dB，就是噪声受限），所以吞吐显著高于多小区场景，不能与
+    sys_multicell_center_cell 直接比——那一个实测 IoT 23.2 dB。
+    体验类标准 KPI 按 TS 28.552 定义无样本（buffer 永不排空），报 None；
+    容量口径看 cell_served_mbps 与 ITU 口径的 ue_served_p5_mbps。
+  answers:
+    - 合并后的单路径在满缓冲下吞吐/MCS/BLER 是多少（SU 基线）
+    - 关掉空间复用时这个小区能跑多少（与 _mu 那个配对读，量出 MU 的贡献）
+  pair_with: sys_single_cell_capacity_mu
+  pair_varies: [mu_enabled]
+  channel_preset: single_cell_64t4r
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 8
+    ue_speed_kmh: 3.0
+    # **这四类覆盖缺一不可**，否则 sr_system_sim 分别在载波格栅、CSI 来源上硬失败：
+    num_rb: 272                 # 预设默认 273；系统口径固定 272 = 17 RBG x 16 RB
+    link: BOTH                  # SRS 是上行；只给 DL 拿不到 ul_srs_estimate
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
+  system:
+    duration_s: 3.0
+    traffic_model: full_buffer
+    mu_enabled: false          # 显式写出来：与 _mu 那个只差这一项
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_e94f1f09
+    n_replications: 8
+    replication_workers: 1
+    cell_served_mbps: [533.5044, 0.16]
+    scheduled_ues_per_busy_tti: [1.1056, 0.46]
+    mu_share: [0.0, null]
+    avg_mcs_first_tx: [21.1684, 0.14]
+    avg_rank: [2.0, 0.0]
+    bler_first_tx: [0.0854, 1.4]
+    serving_cell_prb_utilization: [1.0, 0.0]
+    edge_mcs_p5: [8.289, 0.76]
+    ue_served_p5_mbps: [16.9416, 1.0]
+    ue_served_median_mbps: [67.8516, 0.39]
+    ue_served_mean_mbps: [53.3504, 0.16]
+    active_window_goodput_mbps: [53.4312, 0.16]
+    note: >-
+      2026-09-05 在合并 #18/#21 后按当前树重测，8 次重复、单进程；格式
+      [均值, 95% 区间半宽占均值的百分比]。#18 扣除 DM-RS/PDCCH 后
+      cell_served_mbps 从历史 618.6804 降为 533.5044，历史 KPI 数字作废。
+      首传 BLER 0.0854 = 10% 目标的 0.85 倍；resource utilization=1.0，满缓冲
+      不变量保持。drb_throughput_completed_bursts=0、inflight_share=1.0，标准样本
+      无定义。ue_served_mean 与 active_window_goodput 的发送字节分子同源，接近只检查
+      分母边界，不验证字节记账；有限话务字节守恒才约束分子。
+      scheduled_ues_per_busy_tti=1.1056 不是 1.0，证明频选仍可在同一忙 TTI 服务多个 UE。
+
+sys_single_cell_capacity_mu:
+  group: 系统级 · 单小区基线
+  label: 单小区容量口径 · **开 MU（这个才是容量上界）**
+  summary: >-
+    与 sys_single_cell_capacity **只差一个 mu_enabled**。
+    **64T4R 立 64 根天线主要就是为了空间复用，所以"容量上界"必须开 MU。**
+    SU 基线报 533.50 Mbps，开 MU 是 735.03——**差 37.8%**，这不是零头。
+    实测 64.2% 的忙 TTI 会配对两个用户，每忙 TTI 平均服务 1.73 个。
+    边缘用户速率只从 16.94 升到 17.41（**+2.8%**），远小于小区容量收益：
+    min_pairing_mcs 与相关性门使边缘用户较少参与配对。**MU 主要给小区容量，
+    不能把 37.8% 外推成边缘体验收益。**
+  answers:
+    - 这个小区真正的吞吐上界是多少（开了空间复用的）
+    - MU 对容量和对边缘体验的贡献差多少
+  pair_with: sys_single_cell_capacity
+  pair_varies: [mu_enabled]
+  channel_preset: single_cell_64t4r
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 8
+    ue_speed_kmh: 3.0
+    # **这四类覆盖缺一不可**，否则 sr_system_sim 分别在载波格栅、CSI 来源上硬失败：
+    num_rb: 272                 # 预设默认 273；系统口径固定 272 = 17 RBG x 16 RB
+    link: BOTH                  # SRS 是上行；只给 DL 拿不到 ul_srs_estimate
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
+  system:
+    duration_s: 3.0
+    traffic_model: full_buffer
+    mu_enabled: true
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_e94f1f09
+    n_replications: 8
+    replication_workers: 1
+    cell_served_mbps: [735.0279, 0.33]
+    avg_mcs_first_tx: [19.0519, 1.05]
+    avg_rank: [2.0, 0.0]
+    bler_first_tx: [0.1465, 2.5]
+    scheduled_ues_per_busy_tti: [1.7267, 0.7]
+    mu_share: [0.6423, 2.05]
+    resource_utilization: [1.0, 0.0]
+    serving_cell_prb_utilization: [1.0, 0.0]
+    edge_mcs_p5: [9.4781, 4.61]
+    ue_served_p5_mbps: [17.4111, 1.66]
+    ue_served_median_mbps: [63.0287, 1.44]
+    ue_served_mean_mbps: [73.5028, 0.33]
+    active_window_goodput_mbps: [73.5694, 0.33]
+    note: >-
+      2026-09-05 在合并 #18/#21 后按当前树重测，8 次重复、单进程。与 SU 臂
+      **逐字受控**，只差 mu_enabled。配对差：cell_served **+37.8%**
+      （735.03 vs 533.50）、ue_served_mean 同幅 +37.8%（73.50 vs 53.35），
+      ue_served_p5 只 **+2.8%**（17.41 vs 16.94），远小于容量收益。
+      **MU 的代价两半都如实出现了**，这正是 pair_table 记账该有的样子：
+      一半是发得更保守——avg_mcs_first_tx 从 21.17 掉到 19.05（**−2.12 档**）；
+      一半是更容易错——首传 BLER 从 0.0854 升到 0.1465（0.85 倍 → **1.47 倍**目标）。
+      历史的 se_ratio_legacy 只把 TBS 乘个标量、误块抽签仍按 SU，等于「包变小但
+      一点也不更容易错」，物理上说不通，已随容量分支一起下线。
+      **BLER 1.47 倍在仓库 1.6 倍门限内但明显差于 SU 臂的 0.85 倍**：MU 配对本身
+      抬高误块率，3 秒窗口仍未证明完全收敛。加重复次数只收窄置信区间，若要进一步
+      压近目标必须加 duration_s。引用这个场景的 BLER 时要说清是 3 秒口径。
+      满缓冲下标准 KPI 照例报 None，accounting_error_pct 也报 None（offered 无界）。
+
+sys_single_cell_experience_ftp3:
+  group: 系统级 · 单小区基线
+  label: 单小区体验口径 · FTP3（负载已调到外环可收敛）
+  summary: >-
+    合并后唯一路径的体验锚点。占用率约 0.63，标准与工程两套 KPI 同时有值，
+    可核对「busy-period 吞吐」与「全窗平均」在部分负载下相差约 8 倍这件事。
+    到达率 6 Hz 不是随便定的：3 Hz 时占用率只有 0.28，外环拿不到足够 ACK/NACK，
+    首传 BLER 会停在 2.4 倍目标上。
+  answers:
+    - 部分负载下标准 KPI 与工程 KPI 差多少
+    - 合并后的单路径在有限话务下资源占用与 BLER 是多少
+  channel_preset: single_cell_64t4r
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 8
+    ue_speed_kmh: 3.0
+    # **这四类覆盖缺一不可**，否则 sr_system_sim 分别在载波格栅、CSI 来源上硬失败：
+    num_rb: 272                 # 预设默认 273；系统口径固定 272 = 17 RBG x 16 RB
+    link: BOTH                  # SRS 是上行；只给 DL 拿不到 ul_srs_estimate
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
+  system:
+    duration_s: 5.0
+    traffic_model: ftp3
+    arrival_rate_hz: 6.0
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_e94f1f09
+    n_replications: 8
+    replication_workers: 1
+    cell_served_mbps: [242.6129, 4.61]
+    avg_mcs_first_tx: [14.158, 2.25]
+    bler_first_tx: [0.1085, 4.05]
+    scheduled_ues_per_busy_tti: [1.2137, 1.11]
+    occupancy: [0.6308, 5.25]
+    serving_cell_prb_utilization: [0.6528, 5.06]
+    edge_mcs_p5: [7.4761, 1.84]
+    drb_throughput_rel19_mbps: [175.2573, 1.55]
+    cell_experienced_mbps: [145.0029, 1.27]
+    ue_experienced_p5_mbps: [28.4183, 28.85]
+    ue_served_p5_mbps: [17.9377, 9.65]
+    ue_served_median_mbps: [23.9377, 4.49]
+    ue_served_mean_mbps: [24.2613, 4.61]
+    note: >-
+      2026-09-05 在合并 #18/#21 后按当前树重测，8 次重复、单进程。
+      **首传 BLER 0.1085 = 10% 目标的 1.09 倍**，这个负载下外环仍在目标附近。
+      **两项有意不记**，因为在飞 busy period 只占样本的 1.2%，样本太少：
+      active_window_goodput_mbps（半宽 111.4%）、drb_throughput_inflight_share
+      （半宽 45.5%）。它们在 full_buffer 场景里才是主力指标。
+      口径对照：标准 busy-period 吞吐 175.3 Mbps 与 ITU 全窗口径 ue_served
+      中位 23.9 Mbps 相差约 7.3 倍——前者是「burst 在传时多快」，后者是「UE 全时段
+      平均拿到多少」，部分负载下必然分开，**不可互相顶替**。
+
+sys_single_cell_experience_mixed:
+  group: 系统级 · 单小区基线
+  label: 单小区体验口径 · 大小包混跑（负载已调到外环可收敛）
+  summary: >-
+    大小 UE 同场竞争的单小区锚点，占用率约 0.46。大包 8 Hz / 小包 60 Hz 同样是
+    按外环收敛需求定的：默认的 2 Hz / 20 Hz 只有 0.216 占用率，BLER 停在 3.2 倍目标。
+    这是四个锚点里 BLER 偏离最大的一个（1.49 倍），因为小包 burst 短、
+    每次调度贡献的反馈少。
+  answers:
+    - mixed 话务在合并后的单路径上的分层 KPI 量级
+    - 大小包混跑时外环收敛得如何
+  channel_preset: single_cell_64t4r
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 8
+    ue_speed_kmh: 3.0
+    # **这四类覆盖缺一不可**，否则 sr_system_sim 分别在载波格栅、CSI 来源上硬失败：
+    num_rb: 272                 # 预设默认 273；系统口径固定 272 = 17 RBG x 16 RB
+    link: BOTH                  # SRS 是上行；只给 DL 拿不到 ul_srs_estimate
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
+  system:
+    duration_s: 5.0
+    traffic_model: mixed
+    arrival_rate_hz: 8.0
+    small_arrival_rate_hz: 60.0
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_e94f1f09
+    n_replications: 8
+    replication_workers: 1
+    cell_served_mbps: [159.4561, 5.46]
+    avg_mcs_first_tx: [17.5268, 11.03]
+    bler_first_tx: [0.1491, 14.89]
+    scheduled_ues_per_busy_tti: [1.4114, 2.29]
+    occupancy: [0.4631, 12.06]
+    serving_cell_prb_utilization: [0.4088, 17.25]
+    edge_mcs_p5: [8.8408, 12.74]
+    drb_throughput_rel19_mbps: [59.1161, 1.98]
+    cell_experienced_mbps: [97.4742, 11.48]
+    ue_experienced_p5_mbps: [34.0465, 17.78]
+    ue_served_p5_mbps: [0.6761, 3.61]
+    ue_served_median_mbps: [12.5586, 8.22]
+    ue_served_mean_mbps: [15.9456, 5.46]
+    note: >-
+      2026-09-05 在合并 #18/#21 后按当前树重测，8 次重复、单进程。
+      **首传 BLER 0.1491 = 10% 目标的 1.49 倍**，在仓库的 1.6 倍
+      告警门限内，但**是四个锚点里最差的**——小包 burst 短，单位时间给外环的
+      反馈少于大包场景。要更准就再抬小包到达率或加长 duration_s。
+      **两项有意不记**（在飞样本仅占 0.17%）：active_window_goodput_mbps
+      半宽 67.2%、drb_throughput_inflight_share 半宽 50.0%。
+      ue_served_p5_mbps 只有 0.68 Mbps 而中位 12.56——这是 mixed 的设计意图：
+      小包 UE 全时段平均速率天然低，不代表它体验差（看 ue_experienced_p5_mbps 34.0）。
+
+sys_multicell_center_cell:
+  group: 系统级 · 多小区基线
+  label: 多小区容量口径 · 中心站小区（3GPP 标准撒点密度）
+  summary: >-
+    **按 3GPP TR 36.814 的标准密度撒点**：7 站 21 扇区共 210 个 UE，平均每扇区 10 个
+    （实测 5~19 个，随机撒点的自然离散）。仿真器一次只调度一个小区，用
+    serving_cell 挑出其中一个。
+    **挑哪个是物理选择**：拓扑没有 wrap-around，边缘站邻区不完整、干扰被低估。
+    这里选小区 1（13 个 UE，几何 SIR 中位 4.22 dB，全部候选里最低 = 被包围最完整）；
+    反例是小区 11（9 个 UE，SIR 中位 16.25 dB），**两者相差 12 dB**。
+  answers:
+    - 有真实几何邻区干扰时，合并后的单路径容量是多少
+    - 选中心站还是边缘站对结论影响多大
+  pair_with: sys_multicell_edge_cell
+  pair_varies: [serving_cell]
+  channel_preset: company_64t4r_multicell
+  generate:
+    num_ues: 210               # 21 扇区 x 每扇区 10 个（TR 36.814 标准密度）
+    num_samples: 420           # 每 UE 2 个样本
+    num_slots_per_sample: 4    # 每 UE 共 8 个快照（CLAUDE.md 的下限是 4）
+    ue_speed_kmh: 3.0
+  system:
+    duration_s: 3.0
+    traffic_model: full_buffer
+    serving_cell: 1
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_b0f4a906
+    n_replications: 8
+    replication_workers: 1
+    cell_served_mbps: [534.2259, 0.14]
+    avg_mcs_first_tx: [21.5444, 0.1]
+    avg_rank: [2.0, 0.0]
+    bler_first_tx: [0.1024, 1.2]
+    scheduled_ues_per_busy_tti: [1.0995, 0.31]
+    serving_cell_prb_utilization: [1.0, 0.0]
+    edge_mcs_p5: [14.6128, 0.13]
+    ue_served_p5_mbps: [24.0283, 0.69]
+    ue_served_median_mbps: [39.3102, 0.57]
+    ue_served_mean_mbps: [41.0943, 0.14]
+    active_window_goodput_mbps: [41.1845, 0.14]
+    note: >-
+      2026-09-05 在合并 #18/#21 后按当前树重测，8 次重复、单进程，serving_cell=1
+      （13 个 UE / 210 个 / 21 小区）。**自闭环核对四条都过**：① 首传 BLER 0.1024
+      = 10% 目标的 1.02 倍；② ue_served_mean 41.094 与 active_window_goodput 41.185
+      不是两条独立路径，分子是同一份发送净荷记账，只有分母不同，吻合是必然的，
+      验不了记账本身（详见 sys_single_cell_capacity 的 note）；
+      ③ IoT 中位 23.23 dB，落在 CLAUDE.md 说的「密集城区常 >20 dB」
+      区间，且与单小区场景的 0.004 dB 形成决定性对比——**这一个数就证明多小区
+      数据集真的带几何邻区干扰、单小区确实噪声受限，两族场景不可能被搞混**；
+      ④ 满缓冲下 completed_bursts = 0、inflight_share = 1.0。
+      **中心站 vs 边缘站的对比在数据集层与仿真层都成立**。数据集层（不依赖仿真）：
+      小区 1 几何 SIR 中位 4.22 dB / IoT 28.54 dB；小区 11（边缘）16.25 dB / 21.95 dB。
+      仿真层见对照组 sys_multicell_edge_cell（只差 serving_cell）：选边缘站会把小区
+      吞吐高估 28.8%、把 ITU 小区边缘用户速率 ue_served_p5 高估 156%。
+      **运行约束**：这个数据集必须 replication_workers=1 串行跑。本轮单臂约 62~66 s；
+      默认 auto 会复制链路表，历史上曾被内存杀掉。
+
+sys_multicell_edge_cell:
+  group: 系统级 · 多小区基线
+  label: 反向对照 · 边缘站小区（**不得作为推荐配置**）
+  summary: >-
+    与 sys_multicell_center_cell **只差一个 serving_cell**，用来回答「多小区拓扑里
+    挑哪个小区，对结论影响多大」。撒点没有 wrap-around，小区 11 在拓扑边缘、邻区
+    不完整，几何 SIR 中位 16.25 dB（中心站 4.22 dB），干扰被系统性低估。
+    **它同时是「场景合格判据」的反面教材**：首传 BLER 实测 0.0342，只有 10% 目标的
+    0.34 倍，因为信道太好、MCS 顶到表 3 的天花板（最高 27 档，实测均值 26.08），
+    外环想再往上爬也没有档位，BLER 只能低于目标。
+    所以边缘站不是「另一个可用锚点」，是**选错小区的示范**。
+  answers:
+    - 挑错 serving cell 会把容量高估多少
+    - 为什么信道太好的场景不能拿来当外环收敛的锚点
+  pair_with: sys_multicell_center_cell
+  pair_varies: [serving_cell]
+  channel_preset: company_64t4r_multicell
+  generate:
+    num_ues: 210               # 21 扇区 x 每扇区 10 个（TR 36.814 标准密度）
+    num_samples: 420           # 每 UE 2 个样本
+    num_slots_per_sample: 4    # 每 UE 共 8 个快照（CLAUDE.md 的下限是 4）
+    ue_speed_kmh: 3.0
+  system:
+    duration_s: 3.0
+    traffic_model: full_buffer
+    serving_cell: 11
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_b0f4a906
+    n_replications: 8
+    replication_workers: 1
+    cell_served_mbps: [688.1287, 0.06]
+    avg_mcs_first_tx: [26.0826, 0.03]
+    avg_rank: [2.0, 0.0]
+    bler_first_tx: [0.0342, 1.91]
+    scheduled_ues_per_busy_tti: [1.0067, 0.16]
+    serving_cell_prb_utilization: [1.0, 0.0]
+    edge_mcs_p5: [22.8892, 0.22]
+    ue_served_p5_mbps: [61.5623, 0.27]
+    ue_served_median_mbps: [81.4028, 0.09]
+    ue_served_mean_mbps: [76.4587, 0.06]
+    active_window_goodput_mbps: [76.5865, 0.05]
+    note: >-
+      2026-09-05 在合并 #18/#21 后按当前树重测，8 次重复、单进程，serving_cell=11
+      （9 个 UE / 210 个 / 21 小区）。
+      与中心站**逐字受控**，只差 serving_cell。配对差：
+      cell_served **+28.8%**（688.13 vs 534.23）、
+      ue_served_p5 **+156%**（61.56 vs 24.03）、
+      IoT 中位 16.78 vs 23.23 dB（**低估 6.45 dB**）。
+      **BLER 0.0342 = 目标的 0.34 倍，这个场景按本仓库的判据是不合格的**，
+      原因可查且是物理的：avg_mcs_first_tx 26.08 已经贴着表 3 的最高档 27，
+      olla_db_mean = +1.43 dB（外环在往上推却推不动），
+      而中心站是 21.54 档 / −3.07 dB（外环在正常回退）。
+      **信道太好 ⇒ MCS 撞天花板 ⇒ 外环失去调节余量 ⇒ BLER 低于目标。**
+      这条同时解释了为什么锚点必须挑被邻区包围最完整的小区。
+      **不得把这个场景的数字当成「多小区容量」引用。**

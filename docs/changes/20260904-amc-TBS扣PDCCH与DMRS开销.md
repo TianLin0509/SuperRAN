@@ -7,7 +7,7 @@
 
 TBS 计算的第一步——**一个下行时隙里 PDSCH 到底拿得到多少 RE**。
 
-改前两条主调度路径都按 `PRB × 12 子载波 × 12 符号 = 144 RE/PRB` 算，
+改前系统级两条旧调度路径都按 `PRB × 12 子载波 × 12 符号 = 144 RE/PRB` 算，
 不扣任何开销（`system.py` 的注释写着"扣 DM-RS 与控制开销"，代码没扣）。
 改后走 38.214 §5.1.3.2 步骤 1：
 
@@ -15,7 +15,8 @@ TBS 计算的第一步——**一个下行时隙里 PDSCH 到底拿得到多少 
 
 新增 `linkadapt.PdschOverhead`（`pdsch_symbols=12` / `dmrs_re_per_prb=6` /
 `pdcch_symbols=1`），由 `SystemConfig.pdsch_overhead` 携带，
-`system` 的 legacy 主循环与 `experience.TbsLookup` **共用同一个实例**。
+当前统一后的系统主循环由 `experience.TbsLookup` 消费同一个实例；链路级工具也复用
+`PdschOverhead`，不再保留另一套 legacy 换算。
 DM-RS 走 38.211 §7.4.1.1 的 Configuration type 1 单符号（6 RE/PRB，双符号 12）；
 PDCCH 按**等效法**折成前置符号数 × 12 RE/PRB，不做 RB 级 CORESET 账本。
 
@@ -28,7 +29,7 @@ PDCCH 按**等效法**折成前置符号数 × 12 RE/PRB，不做 RB 级 CORESET
 
 不扣开销让 TBS 系统性偏大约 12.5%，吞吐、PF credit、所需 RBG 数全部跟着偏乐观。
 项目里本来就有正确实现 `linkadapt.re_per_slot()`（含 156 上限），
-但只在 `link_to_system_mapping()` 内部用，两条主调度路径没接进去。
+但只在 `link_to_system_mapping()` 内部用，当时的两条系统调度路径都没接进去。
 
 对照 AirView 的 `GDlScheduler.cc:2674-2695`：逐 RB 动态记账
 `iTotalusedRe += pdcchReNum + dmrsReNum`。本次采用用户 2026-09-04 确认的等效法，
@@ -137,7 +138,8 @@ B09 预注册的预测是"冻结点 MCS12/rank2 偏离一个 RBG 的线性外推
 
 ## 影响哪些 KPI
 
-小区吞吐与用户体验速率**全面下降约 12%**（legacy 主循环实测
-167.95 → 147.55 Mbps，−12.1%）。所需 RBG 数上升，PRB 利用率上升。
+满缓冲小区吞吐下降约 13.8%（当前六锚点复测：单小区 SU 618.68 → 533.50 Mbps，
+多小区中心站 620.52 → 534.23 Mbps）；有限话务的外生到达量不变，所需 RBG 数与
+PRB 利用率上升，busy-period 吞吐下降约 12%~14%。
 S 时隙相对 D 的承载从 0.70 降到 0.62，含 S 的图案（`DDDSU`）跌幅略大于纯 D。
 **改前的所有吞吐结论都偏乐观，不能与改后的数字放进同一张趋势图。**
