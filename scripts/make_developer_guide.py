@@ -4772,8 +4772,8 @@ MU计划交付79,927 B，最终走MU。若SU在本TTI能清空全部队列，则
             ("MU OLLA", "每用户一条、所有 pair 共用", "误称为 pair-specific OLLA"),
             ("capacity MU（默认）", "读 pair 表：MCS 与误块抽签都用真值",
              "以为 capacity 只有标量近似"),
-            ("se_ratio_legacy", "MU/SU 聚合标量比值，仅复现旧结果",
-             "把它当默认口径或当 pair 实现"),
+            ("se_ratio_legacy", "已于 2026-09-04 删除，选中直接报错",
+             "以为它还能用来复现旧结果"),
         ],
     )
     body += """
@@ -4782,10 +4782,12 @@ MU计划交付79,927 B，最终走MU。若SU在本TTI能清空全部队列，则
 每流只分到 P/4、还要吃残余干扰，MCS 应当往下走；另一半是「更容易错」——同一档
 MCS 在配对状态下的误块概率本来就更高。历史的 capacity 只认了第三种东西：把 TBS
 乘一个建表阶段测出的标量 <code>mu_se_ratio</code>，于是配对表现为「包变小，但一点
-也不更容易错」。物理上说不通，而且配对越激进结果越乐观。</p>
+也不更容易错」。物理上说不通，而且配对越激进结果越乐观。该路径已于 2026-09-04
+删除：<code>mu_accounting="se_ratio_legacy"</code> 与 <code>simulate(...,
+mu_se_ratio=)</code> 入口都不再存在，选中时直接报错而不是静默乐观。</p>
 """
     body += table(
-        ["环节", "pair_table（默认，2026-09-02 起）", "se_ratio_legacy（历史）"],
+        ["环节", "pair_table（唯一口径）", "se_ratio_legacy（已删除）"],
         [
             ("MCS 决策", "AMC 坐标 + CorrLoss + PowerLoss",
              "SU 单用户坐标，完全不减配对代价"),

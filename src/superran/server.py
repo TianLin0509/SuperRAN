@@ -2039,9 +2039,9 @@ def sr_system_sim(
     ``experience_v2`` 同构：MCS 从 pair 表的 ``CorrLoss + powerLoss`` 平移出来、
     TBS 按该 MCS 全带算、**误块抽签用 pair 的真实 SINR**（ZF 权按基站可能已
     老化的 CSI 打，但打在双方 ``h_true`` 上，对方的流进干扰协方差）。
-    ``se_ratio_legacy`` 是历史行为，只用于复现旧结果：MCS 与误块抽签都走 SU
-    单用户口径，配对代价只表现为 TBS 乘一个标量 ``mu_se_ratio``——「包变小但
-    不更容易错」，结果会系统性乐观，并且会写进 ``notes``。
+    历史的 ``se_ratio_legacy`` 已于 2026-09-04 删除（MCS 与误块抽签都走 SU
+    单用户口径，配对代价只表现为 TBS 乘一个标量——「包变小但不更容易错」，
+    结果系统性乐观）。现在传这个值会直接报错，不再静默退回。
 
     ``mu_precoder`` 可选 ``zf`` 或 ``rzf``。RZF 的
     ``mu_csi_error_variance`` 是每个复信道系数的估计误差方差，加载项为
@@ -2441,12 +2441,6 @@ def sr_system_sim(
                 "RB 功控的当前 SystemResult 是单小区调度结果，数据集却包含多个 "
                 f"serving cell {_serving_cells}。不能把独立小区的 RBG 当成一个互斥"
                 "资源池；请生成/筛选同一服务小区的 UE。跨小区联合调度属于下一阶段。")}
-    if (power_cfg.enabled and mode == "capacity" and _flag(mu_enabled)
-            and str(mu_accounting) == "se_ratio_legacy"):
-        return {"error": (
-            "RB 功控与 MU 同开时不能用 mu_accounting='se_ratio_legacy'："
-            "标量 MU 增益没有逐 RBG pair SINR，不能准确评估。改用 "
-            "mu_accounting='pair_table'（默认）或 evaluation_mode='experience'。")}
     try:
         csi_cfg = sysm.ca.CsiConfig(
             enabled=_flag(csi_aging), srs_period_ms=float(srs_period_ms),
@@ -2580,7 +2574,6 @@ def sr_system_sim(
     except (TypeError, ValueError) as exc:
         return {"error": str(exc)}
     load_rng = load_book.generator("neighbor_load")
-    mu_load_rng = load_book.generator("neighbor_load")
     _t_build = time.perf_counter()
     try:
         _array_md = ds.summary.get("antenna_model", {}) or {}
@@ -2639,35 +2632,13 @@ def sr_system_sim(
                 f"{sorted(effective_periods)}")}
         effective_csi_cfg = replace(
             csi_cfg, srs_period_ms=float(next(iter(effective_periods))))
-    mu_gain = (sysm.measure_mu_gain(
-        h_users, [float(x) for x in sinr], num_ues=n_ue,
-        h_for_precoding_users=h_est_users,
-        geo_sir_db=sir, neighbor_load=float(neighbor_prb_util),
-        neighbor_load_jitter=float(neighbor_load_jitter),
-        rb_per_rbg=carrier["rb_per_rbg"],
-        rbg_boundaries=tuple(
-            (int(pair[0]), int(pair[1])) for pair in carrier["rbg_boundaries"]),
-        load_jitter_rng=(mu_load_rng if float(neighbor_load_jitter) > 0 else None),
-        csi=csi_cfg, snapshot_ms=snap_ms,
-        power_constraint=str(power_constraint), mu_precoder=str(mu_precoder),
-        mu_csi_error_variance=float(mu_csi_error_variance),
-        min_pairing_mcs=min_pairing_mcs,
-        pf_gain_threshold=float(pf_gain_threshold),
-        mu_corr_threshold=float(mu_corr_threshold),
-        orthogonalization_mode=str(orthogonalization_mode))
-        if (_flag(mu_enabled) and mode == "capacity"
-            and str(mu_accounting) == "se_ratio_legacy")
-        else {"ratio": 1.0, "measured": False,
-              "note": ("逐 pair 查表口径（mu_accounting='pair_table'）不使用标量"
-                       "比值；MU 代价直接进 MCS 与误块抽签"
-                       if _flag(mu_enabled) else "未开 MU")})
-    if (_flag(mu_enabled) and mode == "capacity"
-            and str(mu_accounting) == "se_ratio_legacy"
-            and not mu_gain.get("measured")):
-        return {
-            "error": "已启用 MU，但没有任何快照完成 MU/SU 配对；已停止，未用 1.0 静默降级。",
-            "mu_gain": mu_gain,
-        }
+    # ``measure_mu_gain`` 仍是一个可单独调用的**测量**入口（见 test_csi_aging
+    # 用它比较不同 CSI 老化下的 MU/SU 聚合比），但仿真主链路不再消费它的标量：
+    # 唯一的 MU 记账口径 pair_table 把配对代价直接放进 MCS 与误块抽签。
+    mu_gain = {"ratio": 1.0, "measured": False,
+               "note": ("逐 pair 查表口径（mu_accounting='pair_table'）不使用标量"
+                        "比值；MU 代价直接进 MCS 与误块抽签"
+                        if _flag(mu_enabled) else "未开 MU")}
     build_s = time.perf_counter() - _t_build
 
     # **建表只做一次，重复的只是 TTI 主循环。** build_link_tables 与随机种子
@@ -2686,16 +2657,14 @@ def sr_system_sim(
                 formal_refinements=load_calibration_formal_refinements,
                 num_replications=num_replications, master_seed=seed,
                 sys_cfg=system_cfg, traffic=traffic_cfg, sched=scheduler_cfg,
-                kpi=kpi_cfg, mu_se_ratio=float(mu_gain["ratio"]),
-                build_elapsed_s=build_s,
+                kpi=kpi_cfg, build_elapsed_s=build_s,
                 replication_workers=replication_workers)
             res = calibration.result
         else:
             res = sysm.simulate_replications(
                 tables, num_replications=num_replications, master_seed=seed,
                 sys_cfg=system_cfg, traffic=traffic_cfg, sched=scheduler_cfg,
-                kpi=kpi_cfg, mu_se_ratio=float(mu_gain["ratio"]),
-                build_elapsed_s=build_s,
+                kpi=kpi_cfg, build_elapsed_s=build_s,
                 replication_workers=replication_workers)
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}

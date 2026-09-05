@@ -287,34 +287,32 @@ check(_g_bad["measured"] is False, "单用户时 MU 增益明确标成未测得"
 check(bool(_g_bad.get("errors")), "MU 配对失败返回可审计错误，而不是静默吞掉")
 check("禁止用于仿真" in _g_bad["note"], "诊断占位 1.0 不冒充可用 MU 增益")
 
-# **标量比值口径是历史臂**（mu_accounting='se_ratio_legacy'），必须显式选。
-# 比值 <= 1 时调度器不该切 MU（SU 无干扰且可到 rank4）
+# **标量比值口径已于 2026-09-04 废除**。它只把 TBS 乘 mu_se_ratio/K，配对代价
+# 不进误块抽签——"包变小但不更容易错"。保留成兜底只会让这种乐观静默发生，
+# 所以现在在**配置构造**这一层就硬失败，而不是等到跑完给一段 notes。
+try:
+    sysm.SchedulerConfig(mu_enabled=True, mu_accounting="se_ratio_legacy")
+    check(False, "se_ratio_legacy 必须在 SchedulerConfig 构造时就被拒绝")
+except ValueError as _exc_legacy:
+    check("已于 2026-09-04 废除" in str(_exc_legacy)
+          and "pair_table" in str(_exc_legacy),
+          f"se_ratio_legacy 被拒且错误信息指向 pair 表口径（{_exc_legacy}）")
+check("mu_se_ratio" not in
+      {k for k in __import__("inspect").signature(sysm.simulate).parameters},
+      "simulate() 不再接受 mu_se_ratio 标量入口")
+# 开了 MU 就必须有 pair 表：这是删掉兜底之后唯一还剩的 MU 路径。
 _T_legacy_ebf = fake_tables(power_constraint="ebf")
-
-
-def _legacy_mu(ratio: float):
-    return sysm.simulate(
+try:
+    sysm.simulate(
         _T_legacy_ebf,
         sys_cfg=sysm.SystemConfig(duration_s=2.0, seed=12,
                                   power_constraint="ebf"),
         traffic=sysm.TrafficConfig(model="full_buffer"),
-        sched=sysm.SchedulerConfig(mu_enabled=True,
-                                   mu_accounting="se_ratio_legacy"),
-        mu_se_ratio=ratio)
-
-
-_r_su = _legacy_mu(0.8)
-check(_r_su.cell["mu_share"] == 0.0, "MU 不划算时（比值<1）自适应选 SU，不强行配对")
-_r_mu = _legacy_mu(1.6)
-print(f"  比值 0.8 -> MU 占比 {_r_su.cell['mu_share']:.0%}；"
-      f"比值 1.6 -> MU 占比 {_r_mu.cell['mu_share']:.0%}")
-check(_r_mu.cell["mu_share"] > 0.5, "MU 划算时确实切过去")
-check(_r_mu.cell["cell_served_mbps"] > _r_su.cell["cell_served_mbps"],
-      "切到 MU 之后小区吞吐确实更高")
-check(_r_mu.cell["mu_accounting"] == "se_ratio_legacy",
-      "历史标量口径必须随结果显式上报")
-check(any("se_ratio_legacy" in n for n in _r_mu.notes),
-      "历史口径必须进 notes：包变小但不更容易错，结果会系统性乐观")
+        sched=sysm.SchedulerConfig(mu_enabled=True))
+    check(False, "开了 MU 却没有 pair 表时必须硬失败")
+except ValueError as _exc_nopair:
+    check("pair" in str(_exc_nopair),
+          f"缺 pair 表时报错指向 build_link_tables(mu_enabled=True)（{_exc_nopair}）")
 
 # --- capacity 的 pair_table 口径：缺 pair 表要硬失败，不静默降级 ---------
 try:
@@ -2456,17 +2454,15 @@ def _mu_pair_tables(corr: float, seed: int = 20260902):
         csi=sysm.ca.CsiConfig(enabled=False))
 
 
-def _mu_run(tables, *, mu_on: bool, accounting: str = "pair_table",
-            ratio: float = 1.0):
+def _mu_run(tables, *, mu_on: bool):
     return sysm.simulate(
         tables,
         sys_cfg=sysm.SystemConfig(evaluation_mode="capacity", duration_s=0.6,
                                   tdd_pattern="DDDSU", seed=4242),
         traffic=sysm.TrafficConfig(model="full_buffer"),
-        sched=sysm.SchedulerConfig(mu_enabled=mu_on,
-                                   mu_accounting=accounting),
+        sched=sysm.SchedulerConfig(mu_enabled=mu_on),
         kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
-        mu_se_ratio=ratio, rng=rg.RngBook(4242, 0))
+        rng=rg.RngBook(4242, 0))
 
 
 _T_indep = _mu_pair_tables(0.0)
@@ -2607,23 +2603,9 @@ check(_corr_arm.cell["mu_pair_rejection_reasons"].get(
           "correlation_threshold", 0) > 0,
       "拒配对的原因被显式计数，不是静默不配")
 
-# 历史标量口径的反向对照：MCS 完全不因配对下降。
-_legacy_tabs = sysm.build_link_tables(
-    [_T_indep[0].h_true_rbg, _T_indep[1].h_true_rbg], [14.0, 12.0],
-    max_rank=2, rb_per_rbg=16, mu_enabled=False,
-    csi=sysm.ca.CsiConfig(enabled=False))
-_legacy_arm = _mu_run(_legacy_tabs, mu_on=True,
-                      accounting="se_ratio_legacy", ratio=1.4)
-_legacy_su = _mu_run(_legacy_tabs, mu_on=False)
-print(f"  历史标量口径：SU 首传 MCS {_legacy_su.cell['avg_mcs_first_tx']:.2f} → "
-      f"MU {_legacy_arm.cell['avg_mcs_first_tx']:.2f}"
-      f"（MU 占比 {_legacy_arm.cell['mu_share']:.0%}）")
-check(_legacy_arm.cell["mu_share"] > 0.3, "历史口径下也确实配了对")
-check(abs(_legacy_arm.cell["avg_mcs_first_tx"]
-          - _legacy_su.cell["avg_mcs_first_tx"]) < 0.5,
-      "历史口径下配对完全不压 MCS——代价只体现在 TBS 上，这正是被修掉的问题")
-check(_legacy_arm.cell["mu_olla_mcs_mean"] == 0.0,
-      "历史口径不走 MU OLLA，那条状态全程为 0")
+# 历史标量口径的反向对照（"配对完全不压 MCS"）随该路径一起删除——那条路径
+# 现在根本构造不出来。它想守住的性质由上面 _su_arm / _mu_arm 的正向断言覆盖：
+# pair 表口径下 MU 的首传 MCS 必须低于 SU，且 MU 专用 OLLA 确实在动。
 
 print("\n" + "=" * 70)
 if FAILED:
