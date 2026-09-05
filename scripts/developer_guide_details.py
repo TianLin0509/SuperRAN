@@ -777,7 +777,7 @@ DETAIL_SPECS.update({
     "kpi": DetailSpec(
         promise="把体验 KPI 的对象、起止事件、分子分母和覆盖率逐一说清，并解释单臂小区/用户分析、2~5 算法比较、逐 TTI 钻取与 Agent 自适应优先展示如何共存而不改变底层真值。",
         principles=(
-            "体验速率必须先定义一个 DRB busy period 和可计入包。掐头去尾速率从首包第一次调度开始，到倒数一个完整 ACK 包结束；含头速率使用相同 payload 和尾部排除，但分母从首包到达开始，因此明确包含首包等待。首包时延单独量每个包从 arrival 到 first scheduled，不把完整传输或重传时间混进来。",
+            "体验速率必须先定义一个 DRB busy period 和可计入包。掐头去尾速率从首包第一次调度开始，到倒数一个完整发送包结束；含头速率使用相同 payload 和尾部排除，但分母从首包到达开始，因此明确包含首包等待。首包时延单独量每个包从 arrival 到 first scheduled，不把完整传输或重传时间混进来。",
             "任何带 eligibility 的指标都要同时给覆盖率。仿真结束时尚未第一次调度的包不能填 0；未形成足够完整包的短 burst 不能硬算无限/零速率。结果应给 observed count、eligible count、share 与排除原因。这样，算法通过让困难用户“没有样本”来美化均值时会立即暴露。",
             "PRB 利用率是本小区在测量窗口内已用物理资源/可用资源；0..17 RBG 直方图以每个 DL 等价 TTI 的唯一 used index 数计数。mixed 业务常呈两头高：空闲 TTI 落在 0，大包或积压落在 17，小包填在低 RBG；这是一种预期形态而非硬编码通过条件。MU 配对比例则是 MU PRB/已用 PRB，与 MU 用户传输次数不同。",
             "呈现分小区级和用户级两个 tab。小区级看整体负载、尾部分位和模式；用户级展示每 UE 的无线条件、业务、吞吐、首包时延、资源、MU/BLER，并支持散点、时间序列与跨 UE CDF。Agent 可以根据用户问题给 KPI relevance score，把更相关卡片前置、其他折叠，但所有原始 KPI、公式和选择理由仍可查看，不能让 LLM 在库内偷偷改数。",
@@ -785,7 +785,10 @@ DETAIL_SPECS.update({
             "多算法页面不按算法分 tab：算法是贯穿总览、KPI 矩阵、用户 CDF、TTI 趋势和单 TTI 详情的固定颜色系列，基线不可隐藏；tab 表示读者正在回答的问题。每个算法臂必须携带同一 dataset 与逐位一致的 (master_seed, replication)，主 KPI 的候选对基线复用 Gate 3，并在 2~5 臂场景用 Holm step-down 收紧家族判决。只有 dataset 的生成前 prereg 同时匹配主 KPI 与基线标签时才允许产生 publishable winner；否则即使显著也保持 exploratory_unregistered。单 TTI 只能解释机制分叉，不能从一个事件外推算法收益。",
         ),
         implementation=(
-            ("事件级采集", "包对象记录 arrival、first_scheduled、ACK/completion；allocation 记录 TTI、RBG、模式、TBS、payload、SINR/BLER/draw、ACK、OLLA 前后、PF metric 与用户。"),
+            ("事件级采集", "包对象记录 arrival、first_scheduled、发送/completion；allocation 记录 TTI、RBG、模式、TBS、payload、SINR/BLER/draw、ACK、OLLA 前后、PF metric 与用户。"),
+            ("buffer 在发送时扣减", "现场速率统计口径（2026-09-04）：数据被组进 TB 发出去就离开 buffer，busy period 在<strong>清空 buffer 的那一次发送</strong>结束（<code>last_tx_tti</code>），KPI 当场可统计，<strong>完全不看这个 TB 正确与否</strong>。<code>TxEvent</code> 只记首传；重传走 <code>is_retx=True</code>，只累加 <code>tx_attempts</code>，不动队列、不产生 <code>TxEvent</code>、不推进 busy period。"),
+            ("误码怎么影响速率", "不是靠「传丢的不算」，而是两条：重传<strong>占资源</strong>（时频资源被吃掉，自己后面的数据和别的 UE 都发不了），以及重传<strong>优先级高于新传</strong>（buffer 没空时 NACK 回来会插队，把后面的数据往后推，掐头去尾时间被拉长）。传丢的部分只进 <code>residual_bler</code>，不从已发送字节里扣回去。最小反例：首传全对 368.8 Mbps → 首传全错重传全对 184.4 Mbps → 首传重传都错 184.4 Mbps（后两者逐值相同，只有 residual_bler 从 0 变 1）。"),
+            ("这条口径是多进程 HARQ 的前提", "按 ACK 扣减时，被 NACK 的 TB 其字节仍留在队列里，同一个 UE 的另一个 HARQ 进程会把<strong>同一批字节</strong>再组成一个新 TB 发一遍，原 TB 的重传随后发现队列已经不够冻结的 payload。所以 <code>scheduler_finalize</code> 与 <code>_build_su_plan</code> 里「队列必须 ≥ 冻结 payload」的两道校验都已删除。"),
             ("窗口与 eligibility", "warmup 后才累加正式资源；busy period、包和用户样本按明确跨界规则进入统计，并记录 coverage。"),
             ("双层聚合", "先生成每 UE 指标和原始分布，再在小区层汇总均值/分位/CDF；小区均值不替代用户表。"),
             ("自适应呈现", "kpi_view 根据 intent/relevance 元数据排序卡片、选择图形和折叠次要项；数值只读 Result contract。"),
