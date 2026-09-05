@@ -302,7 +302,8 @@ def _retx_su_plan(*, frequency_aware: bool, cursor: int,
     frozen_tbs = int(lookup.tbs_bytes_for_indices("D", 23, 2, first_tx_indices))
     frozen_prb = int(sum(_UNEVEN_SIZES[i] for i in first_tx_indices))
     pending = exp_mod._HarqTb(
-        mcs=23, rank=2, n_rbg=len(first_tx_indices), n_prb=frozen_prb,
+        harq_id=0, mcs=23, rank=2,
+        n_rbg=len(first_tx_indices), n_prb=frozen_prb,
         tb_bytes=frozen_tbs, payload_bytes=frozen_tbs,
         slot="D", first_tti=0, first_mode="SU",
         feedback=ap.FirstTxFeedback(

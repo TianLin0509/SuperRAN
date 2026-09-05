@@ -6,7 +6,8 @@
 只允许一次 IR/CC 重传：空口 MCS/RBG 数/rank/TBS 冻结。
 BLER 来源分层：**系统级只跑预置表 3**，从 NewTx 曲线推导；表 1/2 的有限码长
 解析近似只服务链路级（``sr_throughput``），系统级入口会硬失败并说明原因。
-当前不展开 RV、LLR、并行 HARQ process 或标准时序。
+``experience_v2`` 支持每 UE 最多 N 个并行 HARQ process（默认 8、上限 16）；
+仍不展开 RV 序列、LLR 软合并内部与完整标准 K1/K2/PUCCH 资源。
 
 **只有一条评估路径。** TTI 主循环、资源分配与 KPI 口径全在
 :mod:`superran.experience`（``experience_v2``：DRB busy-period、首传起点、
@@ -419,7 +420,7 @@ class SchedulerConfig:
     # Rank 策略。默认固定 rank2——现网基线，也避免逐快照换 rank 让链路
     # 自适应根本收敛不了。自适应模式按周期决策并带迟滞，见 amc_policy。
     rank: ap.RankConfig = field(default_factory=ap.RankConfig)
-    # ``auto``：capacity/legacy 用 best_se，experience_v2 用实际 scheduled TBS。
+    # ``auto``：唯一系统路径解析为实际 scheduled TBS。
     # acked_goodput 是研究型口径，NACK 时给 0 会反向抬高坏链路用户优先级，
     # 所以不作为默认。
     pf_accounting: PfAccounting = "auto"
@@ -927,10 +928,14 @@ class SystemConfig:
     rbg_prb_sizes: tuple[int, ...] | None = None
     tdd_pattern: str = "DDDSU"
     # S 时隙相对完整 D 时隙的下行承载比例。默认保留 0.7 兼容旧结果；
-    # 报告 dl_ratio、capacity RE 预算与 experience TBS 查表共用这一份值。
+    # 报告 dl_ratio 与唯一系统路径的 TBS 查表共用这一份值。
     s_slot_dl_fraction: float = S_SLOT_DL_FRACTION
     # 每个 TB 最多一次重传。IR：半谱效等效 MCS（默认）；CC：SINR +10log10(2)。
     harq_combining: HarqCombining = "ir"
+    # **同一个 UE 允许几个 TB 同时在途。** 默认 8；38.213 §5.3 下行上限 16。
+    # 设为 1 精确退化到历史单进程行为。进程放开会缩短反馈等待，但也会拿掉
+    # 单进程强制轮空带来的隐式公平，调度器阈值必须单独标定。
+    harq_max_processes: int = 8
     # ACK/NACK 要等上行时隙才回得来：TB 在 D/S 发出，反馈在其后第一个 U 上报，
     # OLLA 更新与重传资格从该 U 之后的第一个 D/S 起生效
     # （偏移表见 :func:`amc_policy.feedback_effective_offsets`）。
@@ -1018,6 +1023,11 @@ class SystemConfig:
                 )
         if str(self.harq_combining).lower() not in ("ir", "cc"):
             raise ValueError("harq_combining 只支持 ir / cc")
+        if (isinstance(self.harq_max_processes, (bool, np.bool_))
+                or not isinstance(self.harq_max_processes, (int, np.integer))
+                or not 1 <= int(self.harq_max_processes) <= 16):
+            raise ValueError(
+                "harq_max_processes 必须是 1..16 的整数（38.213 §5.3 下行上限 16）")
         if not isinstance(self.harq_feedback_delay, (bool, np.bool_)):
             raise ValueError("harq_feedback_delay 必须是布尔值")
         if (not np.isfinite(self.snapshot_update_ms)
@@ -1084,6 +1094,7 @@ class SystemConfig:
                 "tdd_pattern": self.tdd_pattern,
                 "s_slot_dl_fraction": float(self.s_slot_dl_fraction),
                 "harq_combining": str(self.harq_combining).lower(),
+                "harq_max_processes": int(self.harq_max_processes),
                 "harq_feedback_delay": bool(self.harq_feedback_delay),
                 "harq_feedback_offsets_tti": list(
                     ap.feedback_effective_offsets(self.tdd_pattern)
@@ -1091,10 +1102,12 @@ class SystemConfig:
                     else (1,) * len(self.tdd_pattern)),
                 "harq_feedback_contract": (
                     "ACK/NACK rides the first U slot after the transmission; "
-                    "ACK and NACK both hold the single process in flight; OLLA, "
-                    "rank feedback and retransmission eligibility start at the "
-                    "first D/S slot after that U slot; a retransmission's terminal "
-                    "feedback only releases the process and causes no more learning/TX"
+                    "ACK and NACK both hold their HARQ process in flight; a UE may "
+                    f"keep up to {int(self.harq_max_processes)} TBs in flight at "
+                    "once, each with its own process id; OLLA, rank feedback and "
+                    "retransmission eligibility start at the first D/S slot after "
+                    "that U slot; a retransmission's terminal feedback only releases "
+                    "the process and causes no more learning/TX"
                     if self.harq_feedback_delay and "U" in self.tdd_pattern.upper()
                     else "no uplink slot in the pattern: zero-delay feedback"),
                 "max_retransmissions": 1,
@@ -1209,7 +1222,7 @@ class UeLinkTable:
     # 零时延时它与 ``se`` / ``best_se`` 逐位相同。
     se_gnb: np.ndarray | None = None       # [snapshot, rank]
     best_se_gnb: np.ndarray | None = None  # [snapshot]
-    mcs_table: int = 3                     # capacity 可用 1/2/3；experience 只接受表 3
+    mcs_table: int = 3                     # 建表可用 1/2/3；系统主循环只接受表 3
     # 建表时用的目标 BLER。**主循环必须读它，不能自己写死 0.1**——
     # 否则 build_link_tables(target_bler=...) 选出来的 rank 和主循环选出来的 MCS
     # 是按两个不同判据来的，而这种不一致在结果里完全看不出来。

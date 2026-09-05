@@ -244,7 +244,13 @@ if free: alloc[order[0]] += free               # 尾料给第一名</code></pre>
 <p>而且 <code>tr.step(tti)</code> 投数据的同一个 TTI 里就可能被调度、被发出去
 —— <b>k0 / k1 / k2 三个都是 0</b>。</p>
 <div class="callout c-green"><p><b>底稿列出的两个「顺手要修」的 bug，我在 P0 阶段已经修完了</b>：
-重传 BLER 查错 MCS、S 时隙口径不一致。<b>所以 P1-B 的实际工作量比底稿估的小。</b></p></div>"""),
+重传 BLER 查错 MCS、S 时隙口径不一致。<b>所以 P1-B 的实际工作量比底稿估的小。</b></p></div>
+<div class="callout c-amber"><p><b>2026-09-05 后记：上面这段「现状」已经过时。</b>
+系统级现已只有 <code>experience_v2</code> 一条路径，并支持 N 个 HARQ 进程
+（<code>SystemConfig.harq_max_processes</code>，默认 8、设 1 回到旧行为）。当前 4 UE / ftp3
+受控夹具中，体验中位 112.2→349.8 Mbps、完成时延 p50 39.2→12.0 ms，小区吞吐
+67.2→68.4 Mbps。它证明收益主要落在单文件完成时间，不是现场通用百分比。
+本页其余内容保留当时的原样。</p></div>"""),
             ("DDDSU 下的 RTT 手算（我逐格验过）", """
 <p>时隙相位 <code>n mod 5</code> = <code>[D0, D1, D2, S3, U4]</code>，
 ACK 只能落在 U 上。{rtt}</p>

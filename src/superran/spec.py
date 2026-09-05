@@ -679,6 +679,8 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "MCS 选择与 SU/MU OLLA 共用；默认 0.10"),
     ("harq_combining", "HARQ 合并", "select", ["ir", "cc"],
      "默认 IR=半谱效等效 MCS；CC=原 MCS 的码字 SINR +3.0103 dB；最多一次重传"),
+    ("harq_max_processes", "每 UE HARQ 进程数", "number", (1, 16, 1),
+     "默认 8、上限 16；设为 1 精确退回历史单进程行为"),
     ("harq_feedback_delay", "HARQ 反馈时延", "select", ["on", "off"],
      "on=ACK/NACK 搭下一个 U 时隙，OLLA 与重传从其后第一个 D/S 生效；"
      "off 只作零时延反向对照"),
@@ -820,6 +822,7 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "max_logical_prb_per_tti": None,
     "target_bler": 0.1,
     "harq_combining": "ir",
+    "harq_max_processes": 8,
     "harq_feedback_delay": "on",
     "rank_mode": "fixed",
     "fixed_rank": 2,

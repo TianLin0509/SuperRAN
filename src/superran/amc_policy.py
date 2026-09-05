@@ -77,8 +77,11 @@ def feedback_effective_offsets(pattern: str) -> tuple[int, ...]:
     自洽的选择；调用方必须把这件事写进 ``notes``，不能让它看起来像已经
     建模了反馈时延。
 
-    这里**不建模** k1/k2 的具体取值、PUCCH 资源或 HARQ 进程数：偏移完全由
-    图案决定，等价于"第一个可用上行机会就能把反馈带回来"。
+    这里**不建模** k1/k2 的具体取值或 PUCCH 资源：偏移完全由图案决定，
+    等价于"第一个可用上行机会就能把反馈带回来"。也就是说，当前取的是
+    **最小 K1**，与 38.213 §5.3 Table 9.2-7 的查表值有差距——真实 K1 只会
+    更大，所以本模型给出的反馈比现场更快、OLLA 收敛也更快。
+    HARQ **进程数**不由本函数决定，见 ``SystemConfig.harq_max_processes``。
     """
     text = str(pattern).upper()
     if not text or any(slot not in "DSU" for slot in text):
@@ -106,8 +109,11 @@ class FirstTxFeedback:
 
     The decoder outcome is sampled when the TB is sent, but the gNB must not use
     that outcome until ``effective_tti``.  Both system loops keep one of these
-    records for **ACK and NACK** so a single-process UE cannot send a new TB while
-    its previous result is still in flight.
+    records for **ACK and NACK**, so the HARQ process that carried the TB stays
+    occupied until its result becomes visible.  The ``capacity`` loop gives each UE
+    ``harq_max_processes`` such slots (default 8), so a UE with a free process can
+    send a new TB while an earlier one is still in flight; the ``experience`` loop
+    still has exactly one slot per UE.
 
     ``olla_delta_mcs`` is frozen at transmission time because the warm-up speed
     multiplier and SU/MU mode belong to that transmission.  Applying the event

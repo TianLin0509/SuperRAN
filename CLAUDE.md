@@ -424,11 +424,28 @@ IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在�
 重传失败后结束本次 HARQ；payload 已在首传发送时离开队列，末次失败只进
 `residual_bler`，不回队列，也不得再挂第二次重传。
 
-**"最多一次重传 + 单 HARQ 进程"是显式决定，不是待补的半成品**（用户
-2026-09-02 确认："HARQ 我们先仅考虑一次重传"）。现场实现规格里是 16 个 HARQ
-进程、`max_retx=3`（共 4 次传输）；扩到那一档会同时改动队列模型、反馈时延语义
-（一个 UE 可以在等反馈时继续发别的进程）和全部 BLER/时延口径，因此**当前显式
-不做**。所有 residual BLER 都要按"一次重传后仍失败"来读。
+**"最多一次重传"是显式决定，不是待补的半成品**（用户 2026-09-02 确认：
+"HARQ 我们先仅考虑一次重传"）。现场实现规格里是 `max_retx=3`（共 4 次传输）；
+扩到那一档会改动全部 BLER/时延口径，因此**当前显式不做**。所有 residual BLER
+都要按"一次重传后仍失败"来读。
+
+**HARQ 进程数**（2026-09-04）：唯一系统路径 `experience_v2` 支持 N 进程，
+`SystemConfig.harq_max_processes` 默认 **8**，38.213 §5.3 的下行上限是 16；
+设成 1 精确退回历史单进程行为。full_buffer 与有限话务只是同一路径的不同工作点。
+
+**收益在体验速率，不在小区吞吐。** 有限话务下小区吞吐通常 offered-limited，
+小区吞吐是 offered-limited 的，被 HARQ 挡住的 UE 会被别人顶上，所以
+UE 数 ≥4 时小区吞吐几乎不动（实测 ±0.3% 以内）。真正被单进程压住的是
+**单个文件多久传完**：
+
+| 当前受控夹具（4 UE / ftp3） | 1 进程 | 8 进程 |
+|---|---|---|
+| 体验中位 | 112.2 Mbps | **349.8 Mbps（+212%）** |
+| 完成时延 p50 | 39.2 ms | **12.0 ms** |
+| 小区吞吐 | 67.2 Mbps | 68.4 Mbps（几乎不动） |
+
+10-TTI 的 `DDDSU` 饱和反例里 **4 个进程已经填满 8 个 D/S 机会**，8 与 16 不再增量；
+默认 8 是给更长反馈链与时隙类型约束留余量，不是现场最优值的标定结论。
 表 3 使用版本化256QAM映射：历史内部表行0..14为
 `[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28]`，对应上报4-bit CQI1..15；
 上报CQI0是out-of-range。自动量化用各映射MCS的NewTx目标BLER门限。当前曲线仅
@@ -437,9 +454,8 @@ IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在�
 表1的64QAM和表2的标准256QAM只在调用方显式指定时使用。
 `build_link_tables` 的三张表各走同一口径：表 1/2 的 CQI 门限、MCS 选择、首传与一次
 IR/CC 重传统一使用有限码长解析 BLER；表 3 使用 preset_20b_256qam 曲线，不能交叉借表。
-`capacity/legacy_v1` 可显式选择表 1/2，但结果会逐次标注“解析、未按特定译码器或现场
-曲线标定”；`experience_v2` 仍硬拒绝非表 3，因为它的 TBS/单码字 TBLER profile 只在
-表 3 上冻结。默认仍是表 3，旧调用的数值路径不变。
+链路级工具可显式选择表 1/2，并标注“解析、未按特定译码器或现场曲线标定”；
+系统级唯一主循环硬拒绝非表 3，因为它的 TBS/单码字 TBLER profile 只在表 3 上冻结。
 `target_bler` 可配，但必须落在 28 档曲线的**共同实测区间 [0.001, 0.998]** 内，
 越界提前硬失败而不是在深层抛一个看不出哪档的 ValueError。注意这条链里目标 BLER
 **开环几乎抵消**（它同时出现在 CQI→Γ 与 Γ→MCS 两侧，两次平移方向相同），真正
@@ -1137,21 +1153,24 @@ OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工
 `U` 时隙回来，OLLA 更新与该 TB 的重传资格都从**该 U 之后第一个 D/S** 起生效。
 偏移由 TDD 图案算出（`amc_policy.feedback_effective_offsets`），`DDDSU` 在
 30 kHz 下逐相位是 5/4/3/2 个 TTI；两个周期即 8 下行配 2 上行，与现场 8:2 一致。
-等待期间该 UE 因单 HARQ 进程模型不参与调度，单独计数为
-`harq_feedback_wait_skips`。**ACK 与 NACK 都建立 in-flight 状态**，所以 ACK 也不能在
-反馈回来前连续发新 TB；抽样结果只能在反馈到达时交给 OLLA 与 RankController。图案里
-没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
-零时延并在 notes 里说明。**k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。**
+**ACK 与 NACK 都建立 in-flight 状态**，占住发出它的那个 HARQ 进程；抽样结果只能在
+反馈到达时交给 OLLA 与 RankController。唯一系统路径下一个 UE 可以同时有
+`harq_max_processes` 个 TB 在途（默认 8），进程池空了才发不出新传；进程全满且
+都在等反馈的 UE 计入
+`harq_feedback_wait_skips`。图案里没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
+零时延并在 notes 里说明。**k1/k2 与 PUCCH 资源仍不建模**：当前取的是最小 K1，
+比 38.213 §5.3 Table 9.2-7 的查表值更快，OLLA 收敛也因此偏快。
 
 唯一一次重传发出后，其终次 ACK/NACK 也保留为 `await_final_feedback`，直到同样的反馈
-生效时刻才释放单 HARQ 进程。终次反馈只做释放：**不再进入首传 OLLA/Rank 学习，也不
+生效时刻才释放该 HARQ 进程。终次反馈只做释放：**不再进入首传 OLLA/Rank 学习，也不
 触发第三次发送**。DDDSU 的最小反例是 t0 首传 NACK、t5 重传，下一份新 TB 最早 t10，
-不能在 t6 提前发送。
+不能在 t6 提前发送（这条反例要在 `harq_max_processes=1` 下读；多进程时 t6 可以
+发的是**另一个进程**的新 TB，那份被 NACK 的 TB 仍然只能等到 t10）。
 
 顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 先用
 `sinr_tx_db` 反折 `mcs_without_olla`，再调 `apply_olla_mcs`），即实际调度下去的档位。
 **但它的分母含重传**，而重传重放的是冻结的旧 MCS，所以它不是"链路自适应现在选到
-哪一档"。要那个视角用 `avg_mcs_first_tx`（只统计首传），两条路径都提供。
+哪一档"。要那个视角用 `avg_mcs_first_tx`（只统计首传），唯一系统路径直接提供。
 
 `simulate_experience` 作为公开入口**自己**也会兑现"留空=按目标反解"：
 它拿链路表的 `target_bler` 调 `resolved_for_target`，不再依赖调用方先解析
@@ -1173,8 +1192,9 @@ OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工
 
 代码里：`DrbQueue.transmit(..., is_retx=False)` 在**发送时**扣 `queued_bytes`，
 busy period 在"清空 buffer 的那一次发送"结束（`last_tx_tti`），`tx_events` 只记
-首传。重传走 `is_retx=True`：只累加 `tx_attempts`（资源占用的证据），
-**不动队列、不产生 TxEvent、不推进 busy period**。
+首传。重传走 `is_retx=True`，对 DRB 队列是纯空操作：**不动队列、不产生 TxEvent、
+不推进 busy period，也不碰下一个 busy period 的 `tx_attempts`**；资源占用由
+`retx_count`、allocation 与 PRB 账本记录。
 
 传丢的部分不从已发送字节里扣回去，只进 `residual_bler`。实测最小反例
 （强制首传全错、`tdd_pattern="D"`）：首传全对 368.8 Mbps → 首传全错重传全对
@@ -1189,6 +1209,18 @@ busy period 在"清空 buffer 的那一次发送"结束（`last_tx_tti`），`tx
 
 因此 `scheduler_finalize` 与 `_build_su_plan` 里"队列必须 ≥ 冻结 payload"的两道
 校验都已删除：重传的字节在首传时就走了，队列剩多少与它无关。
+
+内网审核曾发现已删除的 legacy capacity `_Traffic` 仍按 ACK 扣减；#25 删除那条主循环后，
+当前只剩 `DrbQueue` 一份实现。原反例已迁到唯一系统路径：1/8 进程有限话务都守
+`sent <= arrived`，重传全对/全丢的发送字节逐值相同。不得恢复第二套队列实现。
+
+**`pf_accounting="acked_goodput"` 的合同是「NACK 给 0」**，别拿发送字节当 credit。
+buffer 改成发送时扣减之后 `sent` 在 NACK 时也是正数，直接用它会把这条合同悄悄改掉
+——PF 会把没送达的字节也算成该用户已获得的服务，坏链路用户的 `r_avg` 涨得更快、
+优先级掉得更快。默认口径 `auto`（= `scheduled_tbs`）用的是 `tb_bytes`，本来就与
+ACK 无关，不受影响。
+`tests/test_system.py` 第 17.2f 节有独立棘轮：ACK 首传的 credit 等于发送净荷，
+NACK 首传即使已从 buffer 扣字节，`pf_credit_bytes` 仍严格为 0。
 
 ### 系统仿真入口的两道硬校验（2026-08-17 第三轮审查）
 

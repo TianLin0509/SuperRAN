@@ -112,6 +112,16 @@ def test_rank_switch_default_is_identical_across_all_entry_points() -> None:
     assert ap.RankConfig().gain_factor_reduce == 1.1
 
 
+def test_harq_process_default_is_identical_across_all_entry_points() -> None:
+    signature_default = inspect.signature(srv.sr_system_sim).parameters[
+        "harq_max_processes"].default
+    control = next(row for row in specm._EDITABLE if row[0] == "harq_max_processes")
+    assert sysm.SystemConfig().harq_max_processes == 8
+    assert signature_default == 8
+    assert specm._SIM_DEFAULTS["harq_max_processes"] == 8
+    assert control[2] == "number" and control[3] == (1, 16, 1)
+
+
 def test_capacity_ok() -> None:
     """"容量仿真"就是 full_buffer 话务，不是另一条路径。"""
     _write_dataset()
@@ -134,8 +144,8 @@ def test_capacity_ok() -> None:
     assert out["cell"]["drb_throughput_inflight_share"]["mean"] == 1.0
     assert out["cell"]["drb_throughput_completed_bursts"]["mean"] == 0
     assert any("full buffer" in note for note in out["notes"])
-    # 容量口径的指标照常在。**别断言 occupancy==1**：单 HARQ 进程 + DDDSU 的
-    # 反馈时延本来就会让 2 个 UE 有一半 DL TTI 无人可发，那是物理不是缺陷。
+    # 容量口径的指标照常在。**别断言 occupancy==1**：HARQ 反馈时序、进程池与
+    # 时隙类型约束仍可能留下空闲机会，那是物理不是缺陷。
     # "满缓冲退化成全带宽"这条不变量在 test_physics_invariants 里用 DDDD 守。
     assert out["cell"]["serving_cell_prb_utilization"]["mean"] > 0.0
     assert out["cell"]["cell_served_mbps"]["mean"] > 0.0

@@ -1945,6 +1945,7 @@ def sr_system_sim(
     max_logical_prb_per_tti: int | None = None,
     target_bler: float = 0.1,
     harq_combining: str = "ir",
+    harq_max_processes: int = 8,
     harq_feedback_delay: bool | str = True,
     rank_mode: str = "fixed",
     fixed_rank: int = 2,
@@ -2077,10 +2078,12 @@ def sr_system_sim(
     D/S 发出、反馈搭其后第一个 U 回传，OLLA 更新与重传资格从该 U 之后第一个
     D/S 起生效；``DDDSU`` 在 30 kHz 下逐相位偏移 5/4/3/2 个 TTI。**重传还要
     额外等到同类型时隙**（S 上发的 TB 要等下一个 S），两个约束取交集。等待期间
-    首传 ACK 与 NACK 都占住该 UE 的单 HARQ 进程：反馈前不能更新 OLLA/rank，也不能
-    发新 TB（计入 ``harq_feedback_wait_skips``）。设成
+    首传 ACK 与 NACK 都占住本次分配的 HARQ 进程：反馈前不能更新 OLLA/rank；
+    只要该 UE 还有空闲进程，仍可发新 TB。``harq_max_processes`` 默认 8、范围 1..16，
+    设为 1 精确退回旧单进程行为；进程全满造成的跳过计入
+    ``harq_feedback_wait_skips``。``harq_feedback_delay`` 设成
     False 是零时延反向对照；图案里没有 U 时自动退化并写进 ``notes``。
-    k1/k2、PUCCH 资源与并行 HARQ 进程都不建模。
+    k2、PUCCH 资源与完整标准 K1 查表仍不建模。
 
     **CQI 的长期滤波是一阶 IIR**：``s <- s + λ(x - s)``。``cqi_filter_lambda``
     默认 0.25，**已由负责人确认为当前工程默认，但尚未经现场测量/设备数据
@@ -2163,6 +2166,8 @@ def sr_system_sim(
     harq_combining : ``ir``（默认，增量冗余的半谱效等效 MCS）或 ``cc``
         （追逐合并，码字 SINR +3.0103 dB）。每个 TB 最多重传一次；等效 MCS
         只用于 BLER 查表，实际重传 MCS 与 RBG 数保持和初传一致。
+    harq_max_processes : 每 UE 可同时在途的 HARQ TB 数，整数 1..16，默认 8。
+        设为 1 是旧单进程精确回归开关；它会恢复“等待反馈期间该 UE 强制轮空”的行为。
     scheduler : ``pf``（默认）/ ``qos_pf`` / ``rr`` / ``max_ci`` / ``edf`` /
         ``qos_pf_edf``。后两个是包长感知：``edf`` 用 ``TBS/Buffer``，优先调度
         最快能传完的用户，**牺牲长期公平性换小包时延**；``qos_pf_edf`` 是它与
@@ -2635,6 +2640,7 @@ def sr_system_sim(
         system_cfg = sysm.SystemConfig(
             duration_s=float(duration_s),
             tdd_pattern=tdd_pattern, harq_combining=str(harq_combining),
+            harq_max_processes=harq_max_processes,
             s_slot_dl_fraction=float(s_slot_dl_fraction),
             harq_feedback_delay=_flag(harq_feedback_delay),
             seed=seed, snapshot_update_ms=snap_ms,

@@ -351,6 +351,14 @@ RngRun，保证每次只比较负载倍率。
 TB 其字节仍留在队列里，同一个 UE 的另一个 HARQ 进程会把同一批字节再发一遍，
 原 TB 的重传随后就会发现队列不够冻结的 payload。
 
+#25 已删除 legacy capacity `_Traffic`，当前只有 `DrbQueue` 一份队列实现。
+原审核反例已迁到唯一系统路径：1/8 进程有限话务都守 `sent ≤ arrived`，
+重传全对与全丢的发送字节逐值相同；不得恢复第二套队列记账。
+
+`pf_accounting="acked_goodput"` 的合同是 **NACK 给 0**，所以它的 credit 仍然只算
+ACK 了的字节，不跟着 buffer 口径走。默认的 `auto`（= `scheduled_tbs`）用 `tb_bytes`，
+本来就与 ACK 无关。棘轮直接检查 allocation：ACK 首传 credit=发送净荷，NACK=0。
+
 ### 本小区 PRB 利用率与逐 TTI RBG 分布
 
 `serving_cell_prb_utilization` 是**结果 KPI**：KPI 窗口内所有可用 DL 调度机会的
@@ -557,14 +565,23 @@ BF Gain 来自当前矩阵计算，CQI/OLLA 参数仍是版本化工程近似，
 
 `avg_mcs` 报的是 **OLLA 之后**的 MCS，即实际调度下去的档位。
 
-单 HARQ 进程下，首传 ACK 和 NACK 都建立 in-flight 状态；反馈生效前同一 UE
-不得发新 TB。抽样 outcome 只在发送时冻结，直到按 TDD 图案算出的反馈时刻才同时
-交给 OLLA 与 RankController。这样 ACK 连发不会穿透反馈窗口，rank 快速回退也不会
-提前看到尚未到达的 NACK。
+首传 ACK 和 NACK 都建立 in-flight 状态，占住发出它的那个 HARQ 进程。抽样 outcome
+只在发送时冻结，直到按 TDD 图案算出的反馈时刻才同时交给 OLLA 与 RankController。
+这样 ACK 连发不会穿透反馈窗口，rank 快速回退也不会提前看到尚未到达的 NACK。
 
-唯一一次重传的终次 ACK/NACK 也占住进程直到反馈生效；终次反馈只释放进程，不再
-更新 OLLA/Rank，也不产生第三次发送。DDDSU 下 t0 首传 NACK、t5 重传后，下一份新 TB
-最早只能在 t10 发送，不能在 t6 抢跑。
+**进程数**：`SystemConfig.harq_max_processes` 默认 8（38.213 §5.3 下行上限 16），
+一个 UE 可以同时有 8 个 TB 在途；设成 1 精确退回历史单进程行为。full_buffer 与
+有限话务只是唯一 `experience_v2` 路径的不同工作点。
+
+**收益在体验速率，不在小区吞吐**：小区吞吐是 offered-limited 的，被挡住的 UE 会被
+别人顶上。当前 4 UE / ftp3 受控夹具实测 1→8 进程：体验中位
+112.2→349.8 Mbps、完成时延 p50 39.2→12.0 ms，小区吞吐 67.2→68.4 Mbps。
+10-TTI 的 `DDDSU` 饱和反例中 4 个进程已填满 8 个 D/S 机会；默认 8 是留余量，
+不是现场最优值的标定结论。
+
+唯一一次重传的终次 ACK/NACK 也占住该进程直到反馈生效；终次反馈只释放进程，不再
+更新 OLLA/Rank，也不产生第三次发送。`harq_max_processes=1` 且 DDDSU 时，
+t0 首传 NACK、t5 重传后，下一份新 TB 最早只能在 t10 发送，不能在 t6 抢跑。
 
 `experience_v2` 目前只接受 `preset_20b_256qam / MCS table 3` 预置表，Table 1/2
 传入后硬失败。代码保留显式 `mcs_table/profile` 边界与带数据指纹的 BLER cache key，
