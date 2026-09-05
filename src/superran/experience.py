@@ -5,7 +5,8 @@
 
 **"容量仿真"不是另一条分支**，而是 ``TrafficConfig(model="full_buffer")``
 这个话务配置点：缓冲区永不空 ⇒ :func:`_build_su_plan` 的按需 RBG 反查恒等于
-全带宽、每 TTI 一个 SU（或一对 MU）。调度、AMC、HARQ、解调 SINR 聚合全部照
+全带宽、RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。
+调度、AMC、HARQ、解调 SINR 聚合全部照
 本模块的定义走，**没有为它开的任何特例分支**。代价是 busy period 永不结束，
 **标准与工程两套 KPI 因此分家**：TS 28.552 的样本只在 "DRB DL buffer emptied"
 事件上形成（TS 128 552 V19.5.0 p54），满缓冲下一个都不会形成，所以
@@ -1016,7 +1017,7 @@ def _rank_se_estimates(
     ``r × MCS 谱效``。
 
     **资源消耗加权与最小 MCS 闸门不在这里做**，它们由 ``RankController``
-    统一施加——两条评估路径都喂同一个控制器，修正只应该有一份实现。因此这里
+    统一施加——系统级只有一条评估路径，这个控制器只有一份实现。因此这里
     把 MCS 一并返回。
 
     这与现场"用一份上报 RI 的 CQI 再按 ``10log10(RI/r)`` 外推"不是同一个近似：
@@ -3401,7 +3402,14 @@ def simulate_experience(
     backlog = int(tr.backlog_bytes)
     acked_total = int(np.sum(served))
     acked_total_measured = int(np.sum(served_measured))
-    acct_error = (0.0 if tr.unbounded else
+    # **满缓冲下这个检查不成立，必须报 None 而不是 0.0。**
+    # 它比的是「到达 = 已发 + 积压」，而 full buffer 的 offered 是无界的种子字节，
+    # 差值没有意义。旧容量分支在这里算出 3.7e21（把 1<<62 的种子算进了 offered），
+    # 那是**用垃圾数冒充测量**；合并初版改成硬编码 0.0，那是**用漂亮数冒充测量**，
+    # 同一种错。旁边三个兄弟字段（offered_bytes_measurement /
+    # backlog_bytes_at_measurement_start / measurement_accounting_error_pct）
+    # 满缓冲下都报 None，这个也必须一致。
+    acct_error = (None if tr.unbounded else
                   abs(acked_total + backlog - offered) / max(offered, 1) * 100.0)
     measurement_balance_error_bytes = (None if tr.unbounded else int(
         backlog_at_measurement_start + offered_measured
@@ -3769,7 +3777,8 @@ def simulate_experience(
         "warmup_tti": warmup,
         "backlog_bytes": backlog,
         "backlog_bursts": int(sum(q.active is not None for q in tr.queues)),
-        "accounting_error_pct": round(float(acct_error), 6),
+        "accounting_error_pct": (
+            None if acct_error is None else round(float(acct_error), 6)),
         "outage_ue": int(sum(1 for t in tables
                               if t.outage is not None and bool(t.outage.all()))),
         "outage_skips": int(outage_skips),
@@ -4094,7 +4103,7 @@ def simulate_experience(
     if not tr.unbounded and backlog > 0.15 * max(offered, 1):
         notes.append(f"**队列积压 {backlog * 8 / 1e6:.1f} Mb**"
                      f"（占到达量 {backlog / max(offered, 1):.0%}），系统未收敛。")
-    if acct_error > 1.0:
+    if acct_error is not None and acct_error > 1.0:
         notes.append(f"**字节对不上账（差 {acct_error:.3f}%）**："
                      "arrived 必须等于 acked + queued + in_flight + dropped。")
     if measurement_acct_error is not None and measurement_acct_error > 1.0:
@@ -4130,7 +4139,12 @@ def simulate_experience(
         notes.append(
             f"**{cell['outage_ue']} 个用户全程处于覆盖外**"
             "（用户级 SINR 够不到 MCS 0 的门限），已从调度中剔除。"
-            "他们不进 BLER 与体验速率统计——但这本身就是个结论：这些点位需要补站或降配。")
+            "他们没有发射，所以**不进 BLER 统计**；"
+            "但他们**以 0 进 ue_served_* 分布**——只要有一个覆盖外用户，"
+            "ue_served_p5_mbps 就从「最差被服务用户的速率」变成「覆盖底噪」，"
+            "方向偏低，而这个键是按 ITU-R M.2412 的 cell-edge user throughput 交付的。"
+            "按标准密度撒点的多小区场景最容易出覆盖洞，引用 p5 前先看这个计数。"
+            "——覆盖外本身也是结论：这些点位需要补站或降配。")
     diagnostics = {
         "rank_policy": rank_ctl.diagnostics(),
         "harq_feedback": {
@@ -4305,7 +4319,12 @@ def simulate_experience(
             "queued": backlog,
             "in_flight": 0,
             "dropped": 0,
-            "error_pct": round(float(acct_error), 6),
+            # arrived 无界时这条守恒式本身不成立，报 None 而不是 0.0。
+            "error_pct": (
+                None if acct_error is None else round(float(acct_error), 6)),
+            "not_applicable_reason": (
+                "full buffer: offered bytes are an unbounded seed, so "
+                "arrived = acked + queued has no meaning" if tr.unbounded else None),
         },
         "queue_wait_observation": {
             "observed_first_tx": int(queue_wait_observed_objects),

@@ -2029,7 +2029,7 @@ def sr_system_sim(
     payload/去尾规则，只把首包时延加回分母）。
 
     **“容量仿真”是这条路径的一个话务配置**：``traffic_model="full_buffer"``。
-    缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU），
+    缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74），
     这就是容量口径。调度、AMC、HARQ、解调 SINR 聚合全部照体验模式的定义走，
     没有任何为它开的特例。代价是 busy period 永不结束，于是 **TS 28.552 的标准
     样本一个都不会形成**（样本只在 "DRB DL buffer emptied" 事件上形成，

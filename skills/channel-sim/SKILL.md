@@ -162,7 +162,7 @@ busy-period 记录事件；用 TBS 单调反查表求“恰够”的 RBG 数，�
 RBG 数、rank 与 TBS，最多一次 IR/CC 重传；失败字节留在 FIFO，之后成为新 TB。
 
 **"容量仿真"= `traffic_model="full_buffer"`，是这条路径上的一个话务配置，不是另一
-条分支。** 缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU）。
+条分支。** 缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。
 **满缓冲下 TS 28.552 的标准样本一个都不形成**（样本只在 "DRB DL buffer emptied"
 事件上形成，TS 128 552 V19.5.0 p54），`drb_throughput_rel19_mbps` /
 `cell_experienced_mbps` 报 `None`——定义使然，不是缺陷。满缓冲要的是工程口径：

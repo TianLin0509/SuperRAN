@@ -287,7 +287,7 @@ sys_capacity_full_buffer:
   label: 容量仿真 · 话务开到最大（full buffer）
   summary: >-
     **"容量仿真"就是这个场景**：它不是另一条仿真分支，只是把话务开到最大。
-    缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、每 TTI 一个 SU（或一对 MU），
+    缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74），
     调度、AMC、HARQ、解调 SINR 聚合全部照体验口径走。
     满缓冲下 TS 28.552 的标准样本一个都不形成（样本只在 buffer 排空事件上形成），
     drb_throughput_rel19_mbps / cell_experienced_mbps 报 None——定义使然，不是缺陷。
@@ -479,7 +479,7 @@ sys_experience_mixed_pf_wrong_accounting:
 # ---------------------------------------------------------------------------
 sys_single_cell_capacity:
   group: 系统级 · 单小区基线
-  label: 单小区容量口径 · 话务开到最大（full buffer）
+  label: 单小区容量口径 · SU 基线（**不是容量上界，上界看 _mu 那个**）
   summary: >-
     合并后唯一路径的容量锚点。单站单扇区，**没有几何邻区干扰**（实测 IoT 中位
     0.004 dB，就是噪声受限），所以吞吐显著高于多小区场景，不能与
@@ -487,8 +487,10 @@ sys_single_cell_capacity:
     体验类标准 KPI 按 TS 28.552 定义无样本（buffer 永不排空），报 None；
     容量口径看 cell_served_mbps 与 ITU 口径的 ue_served_p5_mbps。
   answers:
-    - 合并后的单路径在满缓冲下吞吐/MCS/BLER 是多少
-    - 无邻区干扰时的容量上界是多少（与多小区场景配对读）
+    - 合并后的单路径在满缓冲下吞吐/MCS/BLER 是多少（SU 基线）
+    - 关掉空间复用时这个小区能跑多少（与 _mu 那个配对读，量出 MU 的贡献）
+  pair_with: sys_single_cell_capacity_mu
+  pair_varies: [mu_enabled]
   channel_preset: single_cell_64t4r
   generate:
     num_ues: 10
@@ -507,6 +509,7 @@ sys_single_cell_capacity:
   system:
     duration_s: 3.0
     traffic_model: full_buffer
+    mu_enabled: false          # 显式写出来：与 _mu 那个只差这一项
     neighbor_prb_util: 0.3
     csi_aging: true
   expect:
@@ -516,6 +519,8 @@ sys_single_cell_capacity:
     n_replications: 8
     replication_workers: 1
     cell_served_mbps: [618.6804, 0.1]
+    scheduled_ues_per_busy_tti: [1.0942, 0.2]
+    mu_share: [0.0, null]
     avg_mcs_first_tx: [21.6953, 0.1]
     avg_rank: [2.0, 0.0]
     bler_first_tx: [0.0884, 1.4]
@@ -528,13 +533,95 @@ sys_single_cell_capacity:
     note: >-
       2026-09-04 实测，8 次重复，单进程。格式 [均值, 95% 区间半宽占均值的百分比]。
       **半宽全部 <= 1.4%**：full buffer 没有话务随机性，唯一随机源是 HARQ 抽样。
-      自闭环核对三条都过：① 首传 BLER 0.0884 = 10% 目标的 0.88 倍；
-      ② ue_served_mean 61.868 与 active_window_goodput 61.968 是两条独立路径
-      算出来的，吻合到 0.16%；③ drb_throughput_completed_bursts = 0 且
-      inflight_share = 1.0——满缓冲下无 buffer-emptied 事件，标准样本必然为 0。
+      自闭环核对：① 首传 BLER 0.0884 = 10% 目标的 0.88 倍；
+      ② drb_throughput_completed_bursts = 0 且 inflight_share = 1.0——满缓冲下无
+      buffer-emptied 事件，标准样本必然为 0。
+      **③ 已撤回**：早先写「ue_served_mean 61.868 与 active_window_goodput 61.968
+      是两条独立路径、吻合 0.16%」，那不是交叉验证——两个数的**分子是同一份 ACK
+      净荷记账**，只有分母不同（观测窗长 vs 首传到末 ACK 跨度）。满缓冲下 UE 从头
+      忙到尾，两个分母本就重合，所以吻合是必然的。净荷记账整体缩放时这个读数不变
+      （实测放大 10%，吞吐错 10.6%，读数仍是 0.156%）。能抓记账缩放的是**有限话务
+      下的字节守恒**（到达 = 已发 + 积压，到达量由话务模型独立决定）；满缓冲下
+      accounting_error_pct 报 None，因为 offered 无界、这条守恒式不成立。
+      **④ scheduled_ues_per_busy_tti = 1.0942 不是 1.0**：出厂默认频选是 auto，
+      调度器会把「少几个但更好的 RBG」给第一个用户、余料给下一个。
+      「满缓冲 ⇒ 每忙 TTI 恰好一个 SU」是频选关+MU关时的退化解，不是普遍规律。
       **标准 KPI（drb_throughput_rel19_mbps / cell_experienced_mbps）为 None
       是设计意图**，见 TS 128 552 V19.5.0 p54。
       IoT 中位 0.004 dB 确认这是单小区、噪声受限的场景。
+
+sys_single_cell_capacity_mu:
+  group: 系统级 · 单小区基线
+  label: 单小区容量口径 · **开 MU（这个才是容量上界）**
+  summary: >-
+    与 sys_single_cell_capacity **只差一个 mu_enabled**。
+    **64T4R 立 64 根天线主要就是为了空间复用，所以"容量上界"必须开 MU。**
+    SU 基线报 618.68 Mbps，开 MU 是 848.65——**差 37.2%**，这不是零头。
+    实测 65.5% 的忙 TTI 会配对两个用户，每忙 TTI 平均服务 1.74 个。
+    **但边缘用户速率纹丝不动**（19.51 → 19.46，差 0.23%）：5% 分位那个用户在小区
+    边缘，min_pairing_mcs 门与相关性门本来就把它挡在配对之外，它既拿不到 MU 的
+    好处、也没被 MU 的干扰坑到。**MU 给的是小区容量，不是小区边缘体验**——
+    这是本仓库"容量口径 ≠ 体验口径"最硬的一条实证。
+  answers:
+    - 这个小区真正的吞吐上界是多少（开了空间复用的）
+    - MU 对容量和对边缘体验的贡献差多少
+  pair_with: sys_single_cell_capacity
+  pair_varies: [mu_enabled]
+  channel_preset: single_cell_64t4r
+  generate:
+    num_ues: 10
+    num_samples: 80
+    num_slots_per_sample: 8
+    ue_speed_kmh: 3.0
+    # **这四类覆盖缺一不可**，否则 sr_system_sim 分别在载波格栅、CSI 来源上硬失败：
+    num_rb: 272                 # 预设默认 273；系统口径固定 272 = 17 RBG x 16 RB
+    link: BOTH                  # SRS 是上行；只给 DL 拿不到 ul_srs_estimate
+    srs_periodicity: 20
+    srs_c_srs: 63
+    srs_b_srs: 1
+    srs_b_hop: 0
+    channel_est_mode: ls_mmse
+    lmmse_prior_mode: configured
+  system:
+    duration_s: 3.0
+    traffic_model: full_buffer
+    mu_enabled: true
+    neighbor_prb_util: 0.3
+    csi_aging: true
+  expect:
+    measured: true
+    model_version: experience_v2
+    dataset: ds_e94f1f09
+    n_replications: 8
+    replication_workers: 1
+    cell_served_mbps: [848.6508, 0.4]
+    avg_mcs_first_tx: [18.9716, 1.2]
+    avg_rank: [2.0, 0.0]
+    bler_first_tx: [0.1431, 4.1]
+    scheduled_ues_per_busy_tti: [1.7418, 0.4]
+    mu_share: [0.6554, 2.5]
+    resource_utilization: [1.0, 0.0]
+    serving_cell_prb_utilization: [1.0, 0.0]
+    edge_mcs_p5: [9.2519, 5.8]
+    ue_served_p5_mbps: [19.4639, 2.2]
+    ue_served_median_mbps: [73.6457, 1.7]
+    ue_served_mean_mbps: [84.8651, 0.4]
+    active_window_goodput_mbps: [84.9406, 0.4]
+    note: >-
+      2026-09-04 实测，8 次重复，单进程。与 SU 臂**逐字受控**，只差 mu_enabled。
+      配对差：cell_served **+37.2%**（848.65 vs 618.68）、
+      ue_served_mean 同幅 +37.2%（84.87 vs 61.87）、
+      **ue_served_p5 −0.23%（19.46 vs 19.51，等于没变）**。
+      **MU 的代价两半都如实出现了**，这正是 pair_table 记账该有的样子：
+      一半是发得更保守——avg_mcs_first_tx 从 21.70 掉到 18.97（**−2.72 档**）；
+      一半是更容易错——首传 BLER 从 0.0884 升到 0.1431（0.88 倍 → **1.43 倍**目标）。
+      历史的 se_ratio_legacy 只把 TBS 乘个标量、误块抽签仍按 SU，等于「包变小但
+      一点也不更容易错」，物理上说不通，已随容量分支一起下线。
+      **BLER 1.43 倍在仓库 1.6 倍门限内但明显差于 SU 臂的 0.88 倍**：MU 配对本身
+      抬高误块率，外环要更长时间才压得回来。1.5 秒时实测是 1.74 倍，3 秒降到
+      1.43 倍——还在收敛。**注意加重复次数只收窄置信区间、不会再往下压**，
+      那得靠加 duration_s。引用这个场景的 BLER 时要说清是 3 秒口径。
+      满缓冲下标准 KPI 照例报 None，accounting_error_pct 也报 None（offered 无界）。
 
 sys_single_cell_experience_ftp3:
   group: 系统级 · 单小区基线
@@ -704,8 +791,10 @@ sys_multicell_center_cell:
     note: >-
       2026-09-04 实测，8 次重复，单进程，serving_cell=1（13 个 UE / 210 个 / 21 小区）。
       **自闭环核对四条都过**：① 首传 BLER 0.1041 = 10% 目标的 1.04 倍，四个锚点里
-      最准；② ue_served_mean 47.733 与 active_window_goodput 47.833 两条独立路径
-      吻合到 0.21%；③ IoT 中位 23.23 dB，落在 CLAUDE.md 说的「密集城区常 >20 dB」
+      最准；② **已撤回**——ue_served_mean 47.733 与 active_window_goodput 47.833
+      不是两条独立路径，分子是同一份 ACK 净荷记账，只有分母不同，吻合是必然的，
+      验不了记账本身（详见 sys_single_cell_capacity 的 note）；
+      ③ IoT 中位 23.23 dB，落在 CLAUDE.md 说的「密集城区常 >20 dB」
       区间，且与单小区场景的 0.004 dB 形成决定性对比——**这一个数就证明多小区
       数据集真的带几何邻区干扰、单小区确实噪声受限，两族场景不可能被搞混**；
       ④ 满缓冲下 completed_bursts = 0、inflight_share = 1.0。

@@ -584,7 +584,7 @@ DETAIL_SPECS.update({
                            "前缀表反查最小够用 RBG 数，频选模式再挑质量最好的子集。"),
             ("Rank 谱效采样", "每个新的 AMC 坐标喂一次 observe_link：逐 rank 反折出真会发的 "
                             "MCS，过最小 MCS 闸门、乘资源消耗系数，再做 β 一阶 IIR。"
-                            "两条评估路径共用同一个控制器，修正只有一份实现。"),
+                            "系统级只有一条评估路径，这个控制器只有一份实现。"),
             ("Rank 判决与回退", "step() 每 TTI 先跑回退监测（可立即回退并返回要恢复的 OLLA "
                               "偏置），再看是否到了退避后的判决周期；主循环把返回的 OLLA "
                               "写回自己的状态。"),
@@ -688,7 +688,7 @@ DETAIL_SPECS.update({
         promise="用问题、状态机和 KPI 三个维度区分容量口径与体验口径（同一条路径的两个负载工作点），并解释预启动窗口为何属于统计合同而不是删除不利数据。",
         principles=(
             "容量口径假设业务持续存在（<code>traffic_model=\"full_buffer\"</code>），关注给定传播、干扰和调度下的饱和吞吐/谱效。队列无限使得按需 RBG 反查恒等于全带宽，于是每个 TTI 就是一个 SU（或一对 MU）拿全带——这是同一套分配逻辑的退化解，不是另一条路径。它适合比较满业务链路算法，但无法回答空闲比例、首包等待、小包抢占或按需资源利用。用户体验速率在它下面<b>是有定义的</b>，只是走 ITU-R M.2412 / TR 38.913 的 <code>ue_served_p5_mbps</code>（每 UE 已服务净荷 ÷ 观测窗长的 5% 分位）；只有 TS 28.552 的 busy-period 口径因为 buffer 永不排空而没有样本、报 None。",
-            "体验评估把业务到达、FIFO 包对象、按需 RBG、ACK/NACK、OLLA、SU/MU 方案和用户 KPI 放进连续 TTI 状态机。它必须区分 scheduled TBS、attempted payload、ACK goodput 与 padding；PF 默认按实际 scheduled TBS 记账。两种模式不是“快/慢”或“粗/精”开关，不能把 experience_v2 的某个参数关掉后称为 capacity 等价。",
+            "体验评估把业务到达、FIFO 包对象、按需 RBG、ACK/NACK、OLLA、SU/MU 方案和用户 KPI 放进连续 TTI 状态机。它必须区分 scheduled TBS、attempted payload、ACK goodput 与 padding；PF 默认按实际 scheduled TBS 记账。满缓冲与有限话务不是“快/慢”或“粗/精”两档开关：它们是同一条路径上的两个话务工作点，不能把 experience_v2 的某个参数关掉后称为“容量口径等价”。",
             "预启动时间让有状态环节先进入稳定区：OLLA 从初值收敛、SRS/PMI/CQI 报告收齐、PF 历史量形成、队列进入代表性负载。仿真仍从 t=0 正常运行，只是正式 KPI 的统计窗口从例如 1 s 开始；预热期间形成的状态继续带入测量期。若重置队列或 OLLA，就不再是预热而是另一次实验。",
             "预热长度应由收敛诊断支撑，而不是永远固定 1 s。可以比较测量期前半/后半 BLER、OLLA、PRB 利用率和队列量；若仍漂移，延长仿真或预热。报告同时给总仿真时长、warmup、有效测量时长与覆盖率。",
         ),
@@ -711,8 +711,8 @@ DETAIL_SPECS.update({
         ),
         pitfalls=(
             "把 warmup 数据从数组头部切掉，却让系统状态也从统计起点重新初始化。",
-            "用 capacity 的全带 PF 记账驱动 experience 的按需分配。",
-            "比较两种模式的同名 throughput，却不说明业务、资源和分母语义不同。",
+            "用已下线的全带 PF 记账（legacy_best_se）驱动按需分配。",
+            "把满缓冲与有限话务下的同名 throughput 直接相比，却不说明业务、资源和分母语义不同。",
         ),
         source_paths=("src/superran/system.py", "src/superran/experience.py", "src/superran/results.py"),
     ),

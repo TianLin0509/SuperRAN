@@ -467,7 +467,10 @@ check(abs(cbr.cell["offered_mbps"] - 1.0) < 1e-9,
 
 # **"容量仿真"必须是同一条路径上的一个话务配置，不是另一套语义。**
 # 把这条 revert 掉（恢复独立容量分支）就会红：满缓冲下按需 RBG 必须退化成
-# 全带宽、每忙 TTI 恰好一个 SU，且体验类 KPI 报 None 而不是 0。
+# 全带宽、RBG 全部用满，且体验类 KPI 报 None 而不是 0。
+#
+# **注意下面这条 == 1.0 只在「频选关 + MU 关」成立**，它是退化解不是普遍规律。
+# 普遍规律在本节末尾那张 2x2 表里，别拿这一条去理解满缓冲。
 fb = sy.simulate(
     tables,
     sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="DDDD"),
@@ -478,7 +481,7 @@ fb = sy.simulate(
 check(fb.config["system"]["model_version"] == "experience_v2",
       "full_buffer 走的就是体验路径，没有第二个 model_version")
 check(abs(float(fb.cell["scheduled_ues_per_busy_tti"]) - 1.0) < 1e-9,
-      "满缓冲下按需 RBG 退化成全带宽：每个忙 TTI 恰好服务 1 个 SU")
+      "频选关+MU关时，满缓冲下按需 RBG 退化成全带宽：每忙 TTI 恰好 1 个 SU")
 check(abs(float(fb.cell["resource_utilization"]) - 1.0) < 1e-9,
       "满缓冲下 RBG 全部用满，没有留空的尾料")
 check(float(fb.cell["cell_served_mbps"]) > 0.0,
@@ -498,8 +501,17 @@ _fb_active = fb.cell["active_window_goodput_mbps"]
 _fb_served_mean = float(fb.cell["ue_served_mean_mbps"])
 check(_fb_active is not None and float(_fb_active) > 0.0,
       "full buffer 下工程口径 active_window_goodput_mbps 有值")
+# **这条验的是分母，不是分子——别再当成交叉验证。**
+# 两个数的分子是**同一份** ACK 净荷记账（experience.py 里 tr.transmit() 返回的
+# payload，一边累进 served_measured、一边塞进 AckEvent）。只有分母不同：
+# 一个除观测窗长，一个除首传到末 ACK 的跨度。所以它能证明的只有
+# 「满缓冲下每个 UE 确实从头忙到尾，两个分母重合」——这是关于话务模型的陈述。
+# **净荷记账整体缩放时这条读数不变**（实测把记账放大 10%，小区吞吐错 10.6%，
+# 这条仍读 0.156%）。真正能抓记账缩放的是有限话务下的字节守恒
+# （到达 = 已发 + 积压，到达量由话务模型独立决定），见本节末尾。
 check(abs(float(_fb_active) - _fb_served_mean) <= 0.10 * _fb_served_mean,
-      "满缓冲下 UE 一直活跃，「在传时多快」收敛到「全窗平均多快」（差 <10%）")
+      "满缓冲下每个 UE 从头忙到尾，两个口径的分母重合（差 <10%）"
+      "——**这验的是分母，不验净荷记账**")
 
 # **用户体验速率在 full buffer 下是有定义的，只是走另一个口径。**
 # ITU-R M.2412 / TR 38.913：每 UE 已服务净荷 / 观测窗长，5% 分位就是
@@ -516,6 +528,67 @@ check(abs(sum(_fb_served) - float(fb.cell["cell_served_mbps"])) < 1e-6,
       "各 UE 已服务速率之和恰好等于小区吞吐——用户级与小区级同源")
 check(_fb_served[0] > _fb_served[-1],
       "几何最好的 UE 拿到的用户吞吐高于最差的（PF 不抹平几何差异）")
+
+# --- 满缓冲下"每忙 TTI 服务几个用户"的真实规律：一张 2x2 表 ------------------
+# **上面那条 == 1.0 是退化解，不是普遍规律。** 本 PR 早先把它写成了物理定律，
+# 而守卫它的断言恰好跑在「频选关 + MU 关」——两个会让它失败的开关都关掉了。
+# 真实规律是：**满缓冲保证的是 RBG 用满，不是只服务一个用户。**
+#   * 频选打开：调度器把"少几个但信道更好的 RBG"给第一个用户、余料给下一个；
+#   * MU 打开：一个 TTI 本来就配对两个用户（64T4R 立 64 根天线正是为了这个）。
+# 出厂默认是 frequency_selective="auto" + mu_enabled=False，在真实锚点数据集上
+# 实测每忙 TTI 1.07；开 MU 是 1.73、小区吞吐 +36%。
+# 这里用互补频选的合成信道把四个格子都钉住，谁把任何一格改回 1.0 都会红。
+_fsrng = np.random.default_rng(7)
+_fsH = []
+for _u in range(4):
+    _h = ((_fsrng.standard_normal((2, 272, 8, 2))
+           + 1j * _fsrng.standard_normal((2, 272, 8, 2))) / np.sqrt(2))
+    _g = np.full(272, 0.15)
+    _g[_u * 68:(_u + 1) * 68] = 1.0          # UE u 只在自己那 1/4 频段上强
+    _fsH.append((_h * _g[None, :, None, None]).astype(complex))
+_fsT = sy.build_link_tables(_fsH, [12.0] * 4, num_snapshots=2, mu_enabled=True)
+
+
+def _fs_arm(fs: str, mu: bool):
+    return sy.simulate(
+        _fsT,
+        sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="DDDD", num_rbg=17),
+        traffic=sy.TrafficConfig(model="full_buffer"),
+        sched=sy.SchedulerConfig(olla_enabled=False, mu_enabled=mu,
+                                 frequency_selective=fs),
+        kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(93, 0)).cell
+
+
+_a_ff, _a_sf = _fs_arm("off", False), _fs_arm("on", False)
+_a_fm, _a_sm = _fs_arm("off", True), _fs_arm("on", True)
+_ues = lambda c: float(c["scheduled_ues_per_busy_tti"])  # noqa: E731
+print(f"  满缓冲每忙 TTI 服务 UE 数：频选关/MU关 {_ues(_a_ff):.4f}、"
+      f"频选开/MU关 {_ues(_a_sf):.4f}、频选关/MU开 {_ues(_a_fm):.4f}、"
+      f"频选开/MU开 {_ues(_a_sm):.4f}")
+check(abs(_ues(_a_ff) - 1.0) < 1e-9,
+      "频选关+MU关：每忙 TTI 恰好 1 个（这是退化解）")
+check(_ues(_a_sf) > 1.0 + 1e-9,
+      f"**频选开就 >1**：调度器按 RBG 把带宽切给多个用户（实得 {_ues(_a_sf):.4f}）")
+check(abs(_ues(_a_fm) - 2.0) < 1e-9 and float(_a_fm["mu_share"]) > 0.0,
+      f"**MU 开就配对两个用户**（实得 {_ues(_a_fm):.4f}，"
+      f"MU 占比 {float(_a_fm['mu_share']):.2f}）")
+check(_ues(_a_sm) > _ues(_a_fm) + 1e-9,
+      f"频选与 MU 叠加还会更多（实得 {_ues(_a_sm):.4f}）")
+# **四种配置里真正不变的是这个**：满缓冲把 RBG 用满，没有留空的尾料。
+check(all(abs(float(c["resource_utilization"]) - 1.0) < 1e-9
+          for c in (_a_ff, _a_sf, _a_fm, _a_sm)),
+      "满缓冲下 RBG 全部用满——**这才是满缓冲真正保证的不变量**")
+
+# --- 满缓冲下字节守恒不适用，必须报 None 而不是 0.0 -------------------------
+# 它比的是「到达 = 已发 + 积压」，而满缓冲的 offered 是无界的种子字节。
+# 旧容量分支在这里算出 3.7e21（垃圾数冒充测量）；合并初版改成硬编码 0.0
+# （漂亮数冒充测量），**同一种错**，而且我还拿这个 0.0 当过"对账正确"的证据。
+# 旁边三个兄弟字段满缓冲下都报 None，这个也必须一致。
+check(_a_ff["accounting_error_pct"] is None,
+      "满缓冲下字节守恒不适用，accounting_error_pct 报 None 而不是 0.0")
+check(fb.diagnostics["byte_conservation"]["error_pct"] is None
+      and fb.diagnostics["byte_conservation"]["not_applicable_reason"] is not None,
+      "byte_conservation 同样报 None，并说明为什么不适用")
 
 # 反向对照：同一条路径换成有限话务，两个口径给出**不同**的数。
 # 它们不是同一个量的两种精度——轻载下 UE 全时段平均远低于它 burst 在飞时的速率。
@@ -549,10 +622,16 @@ _ovl = sy.simulate(
 check(int(_ovl.cell["drb_throughput_inflight_bursts"]) > 0
       and int(_ovl.cell["drb_throughput_completed_bursts"]) > 0,
       "过载场景里已完成与在飞 busy period 同时存在（哨兵前提成立）")
-# **只断言"含不含在飞样本会改变结果"，不断言方向。** 偏差方向随场景而定：
-# 慢 burst 更不容易传完会让 completed-only 偏乐观；但若在飞的恰好是刚起步的
-# 好信道用户，方向就反过来。实测两种都见过（中载 11.59→8.78；本例 126.0→131.9）。
-# 能守住的不变量是：completed-only 用的是 rel19 样本集的真子集，两者必须不同。
+# **只断言两个数不同，不断言方向。** 偏差方向随场景而定：慢 burst 更不容易传完
+# 会让 completed-only 偏乐观；但若在飞的恰好是刚起步的好信道用户，方向就反过来。
+# 实测两种都见过（中载 11.59→8.78；本例 126.0→131.9）。
+#
+# **纠正（审核 2026-09-04 指出）**：这两个数的差**不是**"含不含在飞样本"，
+# 在飞样本从来不进 drb_throughput_rel19_mbps——那正是本 PR 的核心约定。
+# 它们差的是**聚合权重**：
+#   * drb_throughput_rel19_mbps        = 所有已完成 burst 的**汇池均值**
+#   * cell_experienced_completed_only  = 每个 UE 先各自平均，再对 UE 取均值
+# 同一个样本集、两种加权，burst 数在 UE 之间不均时必然不等。
 # ---------------------------------------------------------------------------
 # **反例棘轮：1 个字节的尾随到达不许翻转标准 KPI 的样本资格。**
 # 审核（2026-09-04）给的反例：首传 100 B payload 装进 1000 B TB → NACK；
@@ -605,7 +684,7 @@ check(int(_r_small.cell["drb_throughput_completed_bursts"])
 check(_ovl.cell["cell_experienced_completed_only_mbps"] is not None
       and abs(float(_ovl.cell["cell_experienced_completed_only_mbps"])
               - float(_ovl.cell["drb_throughput_rel19_mbps"])) > 1e-9,
-      "completed-only 与含在飞段的数确实不同——在飞样本真的进了统计")
+      "汇池均值与逐用户均值不等——两者同一样本集、两种加权，不可混引")
 
 
 def test_s_slot_fraction_single_source_of_truth() -> None:

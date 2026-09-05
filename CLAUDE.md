@@ -906,8 +906,7 @@ rank 与 MCS **逐位相同**、谱效差 0.1%，建表快一倍。
 按 `1/K` 分 RE，MU 的聚合吞吐就和 SU **一模一样**——等于把空间复用做成了
 时频复用，MU 增益整个消失。测试里"切到 MU 之后小区吞吐确实更高"当场抓到。
 
-配对后每人只分到 `1/K` 的功率、还要吃残余干扰。**两条评估路径现在都从同一张
-pair 表读这部分代价**（`SchedulerConfig.mu_accounting="pair_table"`，默认）：
+配对后每人只分到 `1/K` 的功率、还要吃残余干扰。**这部分代价统一从 pair 表读**（`SchedulerConfig.mu_accounting="pair_table"`，默认）：
 MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、**误块抽签用
 `MuPairLink.true_sinr_db`**——ZF 权按基站（可能已老化的）CSI 打，但打在双方
 `h_true` 上，对方的流进干扰协方差。逐 TTI 只查表，矩阵运算全在建表阶段
@@ -1480,12 +1479,59 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 **没有"容量模式"这个分支了。** `evaluation_mode` 已删除，`system.simulate()` 恒走
 `experience.simulate_experience()`。文档和对话里说的"容量仿真"指的是
 **`traffic_model="full_buffer"` 这个话务配置**：缓冲区永不空 ⇒ 按需 RBG 反查恒等于
-全带宽、每 TTI 一个 SU（或一对 MU），这正是容量口径。
+全带宽，**RBG 全部用满**（`resource_utilization == 1.0`），这正是容量口径。
+
+> **⚠️ 撤回：满缓冲保证的是"RBG 用满"，不是"每忙 TTI 只服务一个用户"。**
+> 早先这里写着"每 TTI 一个 SU（或一对 MU）"，那是**频选关 + MU 关**时的退化解。
+> 合成互补频选信道上实测这张 2×2 表（棘轮在
+> `tests/test_physics_invariants.py` 第 8 节）：
+>
+> | `scheduled_ues_per_busy_tti` | MU 关 | MU 开 |
+> |---|---|---|
+> | 频选 `off` | **1.0000** | 2.0000 |
+> | 频选 `on` | 1.3200 | 2.8200 |
+>
+> 频选打开时调度器把"少几个但信道更好的 RBG"给第一个用户、余料给下一个；
+> MU 打开时一个 TTI 本来就配对两个用户。**两者都是正确的物理行为。**
+> 出厂默认是 `frequency_selective="auto"` + `mu_enabled=False`，
+> 在真实锚点数据集上实测每忙 TTI **1.0942**。
+> 后果：满缓冲口径**不等于**经典"单用户占满全带"的容量定义，跨版本、跨工具
+> 引用容量数会有系统性偏差——`sys_single_cell_capacity` 的 preset 注释里量过。
 
 **不许为 full_buffer 开任何特例分支。** 调度、AMC、HARQ、解调 SINR 聚合（按本次
 实际授予的那几个 RBG 算，满缓冲下"那几个"天然就是全部）一律照体验模式的定义走。
 想让容量工况跑快一点的诱惑（比如满缓冲时跳过频选搜索）**明确否决**——那会重新造出
-一条只在特定话务下成立的路径，也就是这次合并要消灭的东西。
+一条只在特定话务下成立的路径，也就是这次合并要消灭的东西。棘轮已经守住这条：
+把 `frequency_aware` 在满缓冲下强制置 False，第 8 节的 2×2 表立刻变红。
+
+### 报"容量上界"必须开 MU
+
+**`mu_enabled` 默认是 `False`**（`SchedulerConfig` 与 `sr_system_sim` 都是），
+理由是做算法 A/B 时 MU 是个大混淆项，先看清 SU 基线。**这个默认不要改**，
+改了会静默移动所有历史结果。
+
+**但"容量上界"这个问题必须开 MU 来答。** 64T4R 立 64 根天线主要就是为了空间复用，
+SU-only 的数不是上界。preset `sys_single_cell_capacity` ↔
+`sys_single_cell_capacity_mu` 是只差一个 `mu_enabled` 的受控对照，8 次重复实测：
+
+| | SU 基线 | 开 MU | 差 |
+|---|---|---|---|
+| `cell_served_mbps` | 618.68 | **848.65** | **+37.2%** |
+| `ue_served_mean_mbps` | 61.87 | 84.87 | +37.2% |
+| **`ue_served_p5_mbps`（边缘用户）** | 19.51 | 19.46 | **−0.23%，等于没变** |
+| `scheduled_ues_per_busy_tti` | 1.0942 | 1.7418 | |
+| `mu_share` | 0 | 0.6554 | |
+| `avg_mcs_first_tx` | 21.70 | 18.97 | **−2.72 档** |
+| `bler_first_tx` | 0.0884（0.88×） | 0.1431（1.43×） | |
+
+**结论一句话：MU 给的是小区容量，不是小区边缘体验。** 5% 分位那个用户在小区边缘，
+`min_pairing_mcs` 门与相关性门本来就把它挡在配对之外——它拿不到 MU 的好处，
+也没被 MU 的干扰坑到。**这是"容量口径 ≠ 体验口径"最硬的一条实证。**
+
+**MU 的代价两半都如实出现了**（这正是 `pair_table` 记账该有的样子）：一半是发得更
+保守（MCS −2.72 档），一半是更容易错（BLER 0.88× → 1.43×）。BLER 1.43× 在 1.6×
+门限内但明显差于 SU，且**还在收敛**（1.5 秒时是 1.74×，3 秒 1.43×）——
+**加重复次数只收窄置信区间、不会再往下压**，要压得靠加 `duration_s`。
 
 ### 「用户体验速率」有两个口径，别混
 
@@ -1495,13 +1541,30 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 |---|---|---|---|
 | ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | **观测窗长**（每 UE 已服务净荷 ÷ 窗长，跨 UE 取分布） | **照常有值——这就是满缓冲评估的主指标**，5% 分位即 cell-edge user throughput |
 | TS 28.552 busy-period（**标准**） | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | **已排空的 busy period 时长**（首传 → 倒数第二个 ACK） | **报 `None`**：样本只在 "DRB DL buffer emptied" 事件上形成（TS 128 552 V19.5.0 p54），满缓冲下该事件不发生 |
-| 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 在飞 busy period 落在测量窗内那一段的 goodput | **有值**，且与 ITU 口径收敛 |
+| 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 在飞 busy period 落在测量窗内那一段的 goodput | **有值**。与 ITU 口径数值接近，但**那不是交叉验证**，见下 |
 
 它们**不是同一个数的两种精度**。preset `sys_single_cell_experience_ftp3` 实测：
 `ue_served_mean_mbps=24.52` 而 `cell_experienced_mbps=173.05`，同一次仿真差 7.1 倍
 ——前者是 UE 全时段平均，后者是它的 burst 在传时的速率。满缓冲下 ITU 口径与工程
-口径收敛（UE 一直活跃），preset `sys_single_cell_capacity` 实测 61.868 vs 61.968，
-差 0.16%；**两者算法完全不同，这个吻合就是拿来自查的**。
+口径数值接近（UE 一直活跃），preset `sys_single_cell_capacity` 实测 61.868 vs
+61.968，差 0.16%。
+
+> **⚠️ 撤回：这个 0.16% 不是交叉验证，别再当证据用。**
+> 这两个数的**分子是同一份 ACK 净荷记账**——`experience.py` 里 `tr.transmit()`
+> 返回的那个 `payload`，一边累进 `served_measured`、一边塞进 `AckEvent`。
+> 只有分母不同：一个除观测窗长，一个除首传到末 ACK 的跨度。满缓冲下 UE 从头忙到
+> 尾，两个分母本就重合，**所以吻合是必然的**。它能证明的只有"满缓冲确实让每个 UE
+> 全程活跃"，这是关于话务模型的陈述，**不是关于记账正确性的**。
+> 实测：把净荷记账整体放大 10%，小区吞吐从 618.10 错成 683.93（错 10.6%），
+> 而这个读数仍是 0.156%，一个报警都不响。
+>
+> **那什么能抓住记账整体缩放？有限话务下的字节守恒。** `accounting_error_pct`
+> 比的是「到达 = 已发 + 积压」，而**到达量由话务模型独立决定**，记账一缩放这个
+> 等式立刻破。**满缓冲下它不可用**（offered 是无界的种子字节），所以
+> `accounting_error_pct` 在满缓冲下报 `None` 而不是 `0.0`——报 0.0 是拿漂亮数
+> 冒充测量，跟旧容量分支报 3.7e21 拿垃圾数冒充测量是同一种错。
+> **满缓冲场景的净荷口径正确性，是靠同一套代码在有限话务下过了字节守恒间接保证
+> 的，不是靠满缓冲自己的自查。**
 
 **标准字段绝不能混进在飞样本。** 在飞段确实要报，但另起字段
 （`active_window_goodput_mbps`，`throughput_kind = "engineering_active_window"`，
@@ -1574,8 +1637,8 @@ full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst �
 - 新的表驱动 BLER → 原始常量放独立数据模块，必须有 SHA-256、全 MCS 覆盖、
   横轴/BLER 单调、目标门限覆盖检查；来源不是标准就不能塞进 `verify_tables`
 - 新的门禁判据 → `gates.py`（门 2/门 3）或 `validate.py`（门 1，会自动进门 1）
-- 新的 rank 策略 / HARQ 反馈时序 → `amc_policy.py`；两条评估路径共用同一份实现，
-  别在 `system.py` 和 `experience.py` 里各写一套
+- 新的 rank 策略 / HARQ 反馈时序 → `amc_policy.py`；只有一条评估路径，实现只该有
+  一份，别在 `system.py` 和 `experience.py` 里各写一套
 - 新的随机流 → `rng.register_stream(名字, 用途)`，**别直接改 `STREAMS` 的顺序**
   （流键来自名字的 crc32，加流不会扰动已有流；改顺序也不会，但改用途会）。
   统计判决一律走 `rng.compare_replications`，它复用 `gates.py`，不要另写

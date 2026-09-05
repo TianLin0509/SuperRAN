@@ -214,7 +214,7 @@ def _traffic() -> Family:
                    summary="话务开到最大，缓冲区永不空",
                    detail="**这就是过去所说的容量模式**，但它不是另一条仿真分支，"
                           "只是话务配置点：缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、"
-                          "每 TTI 一个 SU（或一对 MU）。调度、AMC、HARQ、解调 SINR "
+                          "RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。调度、AMC、HARQ、解调 SINR "
                           "聚合全部照体验口径走。代价是 busy period 永不结束，"
                           "28.552 的标准样本因此一个都不形成，"
                           "drb_throughput_rel19_mbps 报 None；改看工程口径的 "
