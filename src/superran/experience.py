@@ -5,7 +5,7 @@
 
 **"容量仿真"不是另一条分支**，而是 ``TrafficConfig(model="full_buffer")``
 这个话务配置点：缓冲区永不空 ⇒ 调度器始终有足量数据填满全部 RBG
-（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.11、开 MU 1.73）。
+（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.14、开 MU 1.86）。
 调度、AMC、HARQ、解调 SINR 聚合全部照
 本模块的定义走，**没有为它开的任何特例分支**。代价是 busy period 永不结束，
 **标准与工程两套 KPI 因此分家**：TS 28.552 的样本只在 "DRB DL buffer emptied"
@@ -14,7 +14,7 @@
 定义使然，不是缺陷**。满缓冲要看的是工程口径：ITU-R M.2412 / TR 38.913 的
 ``ue_served_p5_mbps``（每 UE 已发送净荷 ÷ 观测窗长）与 ``active_window_goodput_mbps``
 （在飞 busy period 的窗内段发送速率）。满缓冲下两者的分母趋同，实测
-53.350 vs 53.431 Mbps，差 0.15%；但它们的发送字节分子同源，接近只能检查
+52.915 vs 53.003 Mbps，差 0.17%；但它们的发送字节分子同源，接近只能检查
 分母边界，**不能证明字节记账正确**。有限话务的独立到达量守恒才约束分子。
 
 物理边界明确写在结果里：逐 RBG 频选与 RB 功控是两个独立开关；只要链路表
@@ -2425,6 +2425,14 @@ def simulate_experience(
     harq_draw = book.generator("harq").random((int(sys_cfg.num_tti), n_ue))
     scheduler_draw = book.generator("scheduler").random((int(sys_cfg.num_tti), n_ue))
     snap_every = max(1, int(round(sys_cfg.snapshot_update_ms / sys_cfg.tti_ms)))
+    # --- CQI 上报：运行时事件驱动，还是建表阶段一次性算好 -----------------
+    # 启用时 tables 换成本次仿真私有的副本，reporter 每个 TTI 把最新上报的 CQI
+    # 回写进 sinr_tx_db / sinr_tx_rbg_db，本文件二十多处读点一行不用改；
+    # 关闭时 tables 原样、reporter 为 None，与本机制出现之前逐位一致。
+    tables, cqi_reporter = ap.attach_runtime_cqi(
+        tables, getattr(sys_cfg, "cqi_report", None), snap_every=snap_every,
+        tti_ms=float(sys_cfg.tti_ms))
+    _cqi_last_snap = -1
     r_avg = np.full(n_ue, 1e-6, dtype=float)
     olla_db = np.zeros(n_ue, dtype=float)
     mu_olla_db = np.zeros(n_ue, dtype=float)
@@ -2632,6 +2640,17 @@ def simulate_experience(
             }
         # 业务在 UL/保护时隙照样到达；旧实现把 step 放在 continue 后面，会漏掉这些到达。
         tr.step(tti)
+        # UE 侧 CQI 按 CSI 报告周期上报，随后回写进本快照。**放在调度判决之前**：
+        # 本 TTI 的 MCS 判决要用本 TTI 已经到手的那份 CQI，而它测的是若干
+        # TTI 之前的信道。
+        if cqi_reporter is not None:
+            _cqi_snap = (tti // snap_every) % n_snap
+            # 回写只在**有人上报**或**换了快照**时做：BF Gain 是逐快照的，
+            # 快照没变、也没人上报时那一格已经是最新值。十万 TTI 下这一条
+            # 把回写次数从 100k 降到 3.5 万。
+            if cqi_reporter.step(tti) or _cqi_snap != _cqi_last_snap:
+                cqi_reporter.apply_to_tables(_cqi_snap)
+                _cqi_last_snap = _cqi_snap
         # 到期的 ACK/NACK 先同时交给 OLLA 与 RankController，再做本 TTI
         # 的决策。ACK 删除进程；NACK 转为唯一一次重传就绪状态。
         # **一个 UE 一个 TTI 可能有多个 TB 同时到期**，要遍历完。进程号从小到大
@@ -3986,6 +4005,15 @@ def simulate_experience(
                               if t.outage is not None and bool(t.outage.all()))),
         "outage_skips": int(outage_skips),
         "harq_feedback_wait_skips": int(feedback_wait_skips),
+        # CQI 新鲜度诊断；运行时上报关掉时为 None（离线预计算没有"上报时刻"）。
+        "cqi_update_count_mean": (
+            float(np.mean(cqi_reporter.diagnostics(
+                int(sys_cfg.num_tti) - 1)["cqi_update_count"]))
+            if cqi_reporter is not None else None),
+        "cqi_age_tti_max": (
+            int(cqi_reporter.diagnostics(
+                int(sys_cfg.num_tti) - 1)["cqi_age_tti_max"])
+            if cqi_reporter is not None else None),
         "olla_db_mean": float(np.mean(olla_db)),
         "olla_db_p5": float(np.percentile(olla_db, 5)),
         "olla_db_p95": float(np.percentile(olla_db, 95)),
@@ -4350,8 +4378,11 @@ def simulate_experience(
             "方向偏低，而这个键是按 ITU-R M.2412 的 cell-edge user throughput 交付的。"
             "按标准密度撒点的多小区场景最容易出覆盖洞，引用 p5 前先看这个计数。"
             "——覆盖外本身也是结论：这些点位需要补站或降配。")
+    _cqi_diag = (cqi_reporter.diagnostics(int(sys_cfg.num_tti) - 1)
+                 if cqi_reporter is not None else None)
     diagnostics = {
         "rank_policy": rank_ctl.diagnostics(),
+        "cqi_report": _cqi_diag,
         "harq_feedback": {
             "delay_modelled": bool(feedback_modelled),
             "requested": bool(feedback_delay_on),

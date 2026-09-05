@@ -1115,6 +1115,42 @@ API的表行0映射MCS0、对应上报CQI1；真实上报**CQI=0是out-of-range*
 `cqi_index`（现场口径：在量化后的 CQI 档上滤波），`sinr_db` 只用于量化前后的
 口径消融，两个域的结果不能混着比。
 
+**CQI 上报从 2026-09-04 起是运行时事件驱动的**（`SystemConfig.cqi_report`，
+默认 `CqiReportConfig(cqi_period_tti=None, csi_delay_tti=3,
+ue_implementation_loss_db=1.5)`）。唯一系统主循环改成：每个上报周期让 UE 上报一次，
+测的是 `tti − 上报周期 − csi_delay_tti` 时刻的信道，IIR 在线更新，基站读的时候
+再按**当前快照**把瞬时 BF Gain 加回去。
+`CqiReportConfig(enabled=False)` 退回建表阶段一次性算好的 `sinr_tx_db`，
+**逐位一致**：与 #19 合并后的旧树在 4 个 full-buffer/FTP3 × 1/8 HARQ 进程场景
+逐字对比，指纹 `fef442140fe30ef852bc4eee360d42c9d784d34b19b62974c3324ffcc466f6a7`。
+
+**上报周期跟 CSI 报告周期，不跟上行 SRS 周期**（用户 2026-09-04 定）。
+SRS 是上行探测、服务于互易性预编码；CQI 来自 CSI-RS + CSI 报告，周期由
+`CsiConfig.csi_report_period_ms` 配（默认 20 ms，30 kHz 下 = **40 TTI**）。
+`cqi_period_tti=None`（默认）表示"从链路表带出来的 `csi_report_period_ms` 换算"；
+显式给整数只用于消融（`cqi_period_tti=1` 是理想 CQI 的上界）。
+结果里 `cqi_period_source` 会写明是 `csi_report_period_ms` 还是 `explicit_override`。
+
+**它和 `csi_aging` 是两个维度，不要合并**：`csi_aging` 管预编码权用的 `h_prec`
+有多陈旧；`cqi_report` 管 MCS 决策输入 `sinr_tx_db` 多久更新一次；误块抽签用的
+`h_eval` 真实 SINR 两者都不碰。
+
+三件必须知道的事：
+
+1. **离线那份 AMC 坐标系统性乐观**。同一夹具 OLLA 关掉时，离线预计算的首传
+   BLER 是 **0.515**（目标 0.1），默认口径（40 TTI 周期 + 1.5 dB 实现损失）
+   是 **0.016**，理想 CQI（周期 1 / 时延 0 / 无损失）是 0.086。
+   小区吞吐 380.5 → 429.3 Mbps：离线那份太激进，误块把重传资源吃掉了；
+   默认又明显过保守，1.5 dB 不能解释成已标定补偿。
+2. **IIR 的 λ 是"每次上报"作用一次，不是"每毫秒"**。所以拉长 CQI 报告周期会同时
+   拉长滤波器在时间上的记忆——周期 40 TTI 时实测 AMC 反而**更保守**
+   （无实现损失时 BLER 0.065，而周期 4 时为 0.185），与"CQI 陈旧 → 更激进"
+   的直觉相反。要让 λ 表示固定的时间
+   常数，得按周期比例换算，当前**没有**这么做。
+3. **1.5 dB 的 UE 实现损失只保证方向，不保证落点**。它一定让 AMC 更保守；
+   是否"正好把陈旧带来的激进补回目标"依赖场景落在 MCS 量化台阶的哪一侧；
+   当前夹具已经过冲到 0.016。**未经现场设备数据标定。**
+
 `Dataset.tdd_mcs` / `sr_tdd_mcs` 也必须遵守同一因果边界：进入 MCS 的
 `bf_gain_user_db` 只能在 gNB 可见的 `h_prec` 上计算。同一权打到
 `h_true` 得到的 `bf_gain_true_user_db` 与 prediction error 只作事后审计，
@@ -1561,8 +1597,8 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 > MU 打开时一个 TTI 本来就配对两个用户。**两者都是正确的物理行为。**
 > 出厂默认是 `frequency_selective="auto"` + `mu_enabled=False`。
 > **六个实测 preset 锚点没有一个是 1.0**：
-> capacity 1.1056、capacity_mu 1.7267、ftp3 1.2137、mixed 1.4114、
-> 多小区中心站 1.0995、多小区边缘站 1.0067。
+> capacity 1.1402、capacity_mu 1.8565、ftp3 1.2114、mixed 1.2750、
+> 多小区中心站 1.0627、多小区边缘站 1.0002。
 > 后果：满缓冲口径**不等于**经典"单用户占满全带"的容量定义，跨版本、跨工具
 > 引用容量数会有系统性偏差——`sys_single_cell_capacity` 的 preset 注释里量过。
 
@@ -1584,22 +1620,22 @@ SU-only 的数不是上界。preset `sys_single_cell_capacity` ↔
 
 | | SU 基线 | 开 MU | 差 |
 |---|---|---|---|
-| `cell_served_mbps` | 533.50 | **735.03** | **+37.8%** |
-| `ue_served_mean_mbps` | 53.35 | 73.50 | +37.8% |
-| **`ue_served_p5_mbps`（边缘用户）** | 16.94 | 17.41 | **+2.8%** |
-| `scheduled_ues_per_busy_tti` | 1.1056 | 1.7267 | |
-| `mu_share` | 0 | 0.6423 | |
-| `avg_mcs_first_tx` | 21.17 | 19.05 | **−2.12 档** |
-| `bler_first_tx` | 0.0854（0.85×） | 0.1465（1.47×） | |
+| `cell_served_mbps` | 529.15 | **867.57** | **+64.0%** |
+| `ue_served_mean_mbps` | 52.91 | 86.76 | +64.0% |
+| **`ue_served_p5_mbps`（边缘用户）** | 16.59 | 17.77 | **约 +7.1%** |
+| `scheduled_ues_per_busy_tti` | 1.1402 | 1.8565 | |
+| `mu_share` | 0 | 0.7945 | |
+| `avg_mcs_first_tx` | 20.90 | 19.80 | **−1.09 档** |
+| `bler_first_tx` | 0.0872（0.87×） | 0.1011（1.01×） | |
 
 **结论一句话：MU 主要给小区容量，不能把容量增益外推成边缘体验增益。** 本次受控对照
-里小区容量 +37.8%，5% 边缘用户仅 +2.8%；`min_pairing_mcs` 与相关性门使边缘用户
+里小区容量 +64.0%，5% 边缘用户约 +7.1%；`min_pairing_mcs` 与相关性门使边缘用户
 较少参与配对。两者不是同一个 KPI 工作点。
 
 **MU 的代价两半都如实出现了**（这正是 `pair_table` 记账该有的样子）：一半是发得更
-保守（MCS −2.12 档），一半是更容易错（BLER 0.85× → 1.47×）。BLER 1.47× 在 1.6×
-门限内但明显差于 SU，3 秒窗口仍未证明完全收敛——
-**加重复次数只收窄置信区间、不会再往下压**，要压得靠加 `duration_s`。
+保守（MCS −1.09 档），一半是更容易错（BLER 0.87× → 1.01×）。当前 MU 首传 BLER
+接近 10% 目标，但 95% 半宽仍约占均值 9.15%。加重复次数只收窄置信区间，
+加 `duration_s` 才改变收敛时间；两者都不能被当成把点估计调漂亮的手段。
 
 ### 「用户体验速率」有两个口径，别混
 
@@ -1612,12 +1648,12 @@ SU-only 的数不是上界。preset `sys_single_cell_capacity` ↔
 | 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 在飞 busy period 落在测量窗内那一段的 goodput | **有值**。与 ITU 口径数值接近，但**那不是交叉验证**，见下 |
 
 它们**不是同一个数的两种精度**。preset `sys_single_cell_experience_ftp3` 实测：
-`ue_served_mean_mbps=24.26` 而 `cell_experienced_mbps=145.00`，同一次仿真差 6.0 倍
+`ue_served_mean_mbps=24.45` 而 `cell_experienced_mbps=424.29`，同一次仿真差 17.4 倍
 ——前者是 UE 全时段平均，后者是它的 burst 在传时的速率。满缓冲下 ITU 口径与工程
-口径数值接近（UE 一直活跃），preset `sys_single_cell_capacity` 实测 53.350 vs
-53.431，差 0.15%。
+口径数值接近（UE 一直活跃），preset `sys_single_cell_capacity` 实测 52.915 vs
+53.003，差 0.17%。
 
-> **⚠️ 撤回：这个约 0.15% 不是交叉验证，别再当证据用。**
+> **⚠️ 撤回：这个约 0.17% 不是交叉验证，别再当证据用。**
 > 这两个数的**分子是同一份发送净荷记账**——`experience.py` 里 `tr.transmit()`
 > 返回的那个 `payload`，一边累进 `served_measured`、一边塞进 `TxEvent`。
 > 只有分母不同：一个除观测窗长，一个除首传到末次窗内发送的跨度。满缓冲下 UE 从头忙到
@@ -1673,13 +1709,13 @@ full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst �
 |---|---|---|---|
 | 几何 SIR 中位 | 4.22 dB | 16.25 dB | 12.0 dB |
 | IoT 中位（仿真） | 23.23 dB | 16.78 dB | 低估 6.45 dB |
-| `cell_served_mbps` | 534.23 | 688.13 | **高估 28.8%** |
-| `ue_served_p5_mbps` | 24.03 | 61.56 | **高估 156%** |
-| `bler_first_tx` | 0.1024（1.02×） | 0.0342（**0.34×**） | |
+| `cell_served_mbps` | 541.11 | 687.99 | **高估 27.1%** |
+| `ue_served_p5_mbps` | 24.90 | 61.72 | **高估 148%** |
+| `bler_first_tx` | 0.0793（0.79×） | 0.0328（**0.33×**） | |
 
 **边缘站那一列同时说明「信道太好的场景不能当外环锚点」**：它的
-`avg_mcs_first_tx` 是 26.08，已经贴着表 3 的最高档 27，`olla_db_mean` 为 **+1.43 dB**
-（外环在往上推却推不动），于是 BLER 只能低于目标。中心站是 21.54 档 / −3.07 dB，
+`avg_mcs_first_tx` 是 26.08，已经贴着表 3 的最高档 27，`olla_db_mean` 为 **+1.64 dB**
+（外环在往上推却推不动），于是 BLER 只能低于目标。中心站是 21.42 档 / −1.87 dB，
 外环在正常回退。**MCS 撞天花板 ⇒ 外环失去调节余量 ⇒ BLER 偏低**，这不是 bug，
 是场景选错。
 

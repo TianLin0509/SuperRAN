@@ -163,14 +163,14 @@ RBG 数、rank 与 TBS，最多一次 IR/CC 重传；payload 在首传发送时�
 末次失败只进 `residual_bler`、不回队列。
 
 **"容量仿真"= `traffic_model="full_buffer"`，是这条路径上的一个话务配置，不是另一
-条分支。** 缓冲区永不空 ⇒ 调度器始终有足量数据填满全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.11、开 MU 1.73）。
+条分支。** 缓冲区永不空 ⇒ 调度器始终有足量数据填满全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.14、开 MU 1.86）。
 **满缓冲下 TS 28.552 的标准样本一个都不形成**（样本只在 "DRB DL buffer emptied"
 事件上形成，TS 128 552 V19.5.0 p54），`drb_throughput_rel19_mbps` /
 `cell_experienced_mbps` 报 `None`——定义使然，不是缺陷。满缓冲要的是工程口径：
 ITU-R M.2412 / TR 38.913 的 `ue_served_p5_mbps`（每 UE 已发送净荷 ÷ 观测窗长的
 5% 分位，即 cell-edge user throughput）与 `active_window_goodput_mbps`（在飞
 busy period 窗内段的发送速率）。满缓冲下两者因分母趋同而接近，实测
-53.350 vs 53.431 Mbps（差 0.15%，preset `sys_single_cell_capacity`）；但发送字节
+52.915 vs 53.003 Mbps（差 0.17%，preset `sys_single_cell_capacity`）；但发送字节
 分子同源，这个接近不能验证字节记账。
 其余需要 burst 真的传完的键同样报 `None`：完成时延分位数、`pdb_miss_ratio`、
 `cell_head_inclusive_experienced_mbps`、`cell_experienced_completed_only_mbps`。

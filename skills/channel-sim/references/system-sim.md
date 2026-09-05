@@ -67,10 +67,10 @@ MU 打开时还可在同一 RBG 配对两个 UE，所以“每忙 TTI 恰好一�
 | TS 28.552 busy-period（**标准**） | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | 一个 burst 发完时有多快（首传 → 清空 buffer 前一段首传发送） | **报 `None`**：样本只在 buffer 排空事件上形成，满缓冲下该事件不发生 |
 | 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 还在传的 burst 落在测量窗内那段的发送速率 | **有值**；满缓冲下因分母趋同而接近 ITU 口径，但分子同源 |
 
-preset `sys_single_cell_experience_ftp3` 实测：`ue_served_mean_mbps=24.26` vs
-`cell_experienced_mbps=145.00`，同一次仿真差 6.0 倍——UE 全时段平均 vs 它的 burst
+preset `sys_single_cell_experience_ftp3` 实测：`ue_served_mean_mbps=24.45` vs
+`cell_experienced_mbps=424.29`，同一次仿真差 17.4 倍——UE 全时段平均 vs 它的 burst
 在传时的速率，本来就不是一个量。满缓冲下 ITU 与工程口径因分母趋同而接近；
-`sys_single_cell_capacity` 实测 53.350 vs 53.431，差 0.15%。两者分子同源，
+`sys_single_cell_capacity` 实测 52.915 vs 53.003，差 0.17%。两者分子同源，
 这个接近只能检查分母边界，不能证明字节记账正确；有限话务字节守恒才约束分子。
 
 **在飞 busy period 要报，但另起字段**（`active_window_goodput_mbps`），
@@ -562,6 +562,43 @@ SINR）反折无 OLLA MCS，再加连续 MCS offset、floor 并钳位；BLER 只
 
 当前未实现每流固定 15 dB BF 惩罚、CQI floor/reset 状态机或现场已标定 OLLA 步骤；
 BF Gain 来自当前矩阵计算，CQI/OLLA 参数仍是版本化工程近似，不能声称现场等价。
+
+### CQI 上报是运行时事件驱动的（2026-09-04 起）
+
+`SystemConfig.cqi_report`，默认 `CqiReportConfig(cqi_period_tti=None,
+csi_delay_tti=3, ue_implementation_loss_db=1.5)`。唯一系统主循环每个上报周期
+让 UE 上报一次，测的是 `tti − 上报周期 − csi_delay_tti` 时刻的信道
+（扣掉 UE 实现损失），IIR 在线更新，基站读的时候再按**当前快照**把瞬时
+BF Gain 加回去。`enabled=False` 退回建表阶段一次性算好的 `sinr_tx_db`；与 #19
+合并后的旧树在 4 个 full-buffer/FTP3 × 1/8 进程场景逐字一致。
+
+**上报周期跟 CSI 报告周期，不跟上行 SRS 周期。** SRS 是上行探测、服务于互易性
+预编码；CQI 来自 CSI-RS + CSI 报告，周期由 `CsiConfig.csi_report_period_ms` 配
+（默认 20 ms，30 kHz 下 = 40 TTI）。`cqi_period_tti=None`（默认）= 按链路表带出来的
+`csi_report_period_ms` 换算；显式给整数只用于消融。结果里 `cqi_period_source`
+写明用的是哪一种。
+
+**它和 `csi_aging` 是两个维度**：`csi_aging` 管预编码权 `h_prec` 的陈旧度，
+本项管 MCS 决策输入 `sinr_tx_db` 的更新频率，误块抽签用的 `h_eval` 真值两者
+都不碰。结果里带 `cqi_update_count_mean` 与 `cqi_age_tti_max` 两个新鲜度诊断
+（关闭时为 `null`）。
+
+三条读数字之前必须知道的事：
+
+1. **离线那份 AMC 坐标系统性乐观。** 同一夹具 OLLA 关掉时，离线预计算首传
+   BLER **0.515**（目标 0.1），默认口径 **0.016**，理想 CQI 0.086；
+   小区吞吐 380.5 → 429.3 Mbps（离线太激进，默认又明显过保守）。
+2. **IIR 的 λ 是「每次上报」作用一次，不是「每毫秒」。** 拉长 CQI 报告周期会同时
+   拉长滤波器在时间上的记忆，周期 40 TTI 时 AMC 反而**更保守**（无实现损失时
+   BLER 0.065，而周期 4 时为 0.185），
+   与「CQI 陈旧 → 更激进」的直觉相反。想让 λ 表示固定时间常数要自己按周期
+   换算，当前**没有**这么做。
+3. **1.5 dB 的 UE 实现损失只保证方向。** 它一定让 AMC 更保守；是否正好把陈旧
+   带来的激进补回目标依赖场景，当前夹具已过冲到 0.016。
+   **未经现场设备数据标定，不能当成现场值报出去。**
+
+另外：默认口径比离线保守约一档，实测会把 `olla_max_db=3.0` 的默认钳位顶满。
+做 OLLA 稳态实验时先确认两臂都没顶到钳位，否则比的是钳位值不是稳态偏置。
 
 `avg_mcs` 报的是 **OLLA 之后**的 MCS，即实际调度下去的档位。
 

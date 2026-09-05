@@ -122,6 +122,23 @@ def test_harq_process_default_is_identical_across_all_entry_points() -> None:
     assert control[2] == "number" and control[3] == (1, 16, 1)
 
 
+def test_runtime_cqi_switch_is_exposed_and_can_restore_offline_behavior() -> None:
+    signature_default = inspect.signature(srv.sr_system_sim).parameters[
+        "runtime_cqi_enabled"].default
+    control = next(row for row in specm._EDITABLE if row[0] == "runtime_cqi_enabled")
+    assert sysm.SystemConfig().cqi_report.enabled is True
+    assert signature_default is True
+    assert specm._SIM_DEFAULTS["runtime_cqi_enabled"] == "on"
+    assert control[3] == ["on", "off"]
+
+    _write_dataset()
+    out = _run(traffic_model="full_buffer", runtime_cqi_enabled=False)
+    assert "error" not in out, out.get("error")
+    assert out["config"]["system"]["cqi_report"]["enabled"] is False
+    assert "cqi_update_count_mean" not in out["cell"]
+    assert "cqi_age_tti_max" not in out["cell"]
+
+
 def test_capacity_ok() -> None:
     """"容量仿真"就是 full_buffer 话务，不是另一条路径。"""
     _write_dataset()

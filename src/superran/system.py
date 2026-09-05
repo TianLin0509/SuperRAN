@@ -15,7 +15,7 @@ BLER 来源分层：**系统级只跑预置表 3**，从 NewTx 曲线推导；�
 
 **"容量仿真"是这条路径的一个话务配置**，不是另一条分支：
 ``TrafficConfig(model="full_buffer")``。缓冲区永不空 ⇒ 调度器始终有足量数据填满
-全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.11、开 MU 1.73）。
+全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.14、开 MU 1.86）。
 调度、AMC、HARQ、解调 SINR 聚合一律
 照体验口径走，**没有为它开的任何特例**。代价是 busy period 永不结束，
 于是 **TS 28.552 的标准样本一个都不会形成**（样本只在 "DRB DL buffer emptied"
@@ -185,7 +185,7 @@ class TrafficConfig:
     到达率控制负载。**它是评价体验速率的标准话务模型**。
 
     ``full_buffer`` 是"话务开到最大"这个配置点，也就是过去所说的**容量仿真**：
-    缓冲区永不空 ⇒ 调度器始终有足量数据填满全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.11、开 MU 1.73）。
+    缓冲区永不空 ⇒ 调度器始终有足量数据填满全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.14、开 MU 1.86）。
     调度、AMC、HARQ、解调 SINR 聚合全部沿用体验模式的定义，没有任何特例。
     代价是 busy period 永不结束，**28.552 的 busy-period 吞吐在这个配置下无边界
     可用**，如实报 ``None``。**用户体验速率仍然有定义**，走 ITU-R M.2412 /
@@ -958,6 +958,10 @@ class SystemConfig:
     # 与上面的空间约束正交：逐 RB 连续功率倍率，默认关闭/均匀分配。
     rb_power_control: pc.RbPowerControlConfig = field(
         default_factory=pc.RbPowerControlConfig)
+    # **CQI 上报的运行时时间行为**，定义见 amc_policy.CqiReportConfig。
+    # None = 默认启用；传 CqiReportConfig(enabled=False) 精确退回建表阶段的旧坐标。
+    # 它与 csi_aging 正交：前者管 MCS 输入多久更新，后者管预编码 CSI 多陈旧。
+    cqi_report: ap.CqiReportConfig | None = None
     # PDSCH 拿不到的那部分 RE（DM-RS + PDCCH），定义见 linkadapt.PdschOverhead。
     # None = 用默认口径：12 个 PDSCH 符号、单符号 DM-RS 6 RE/PRB、PDCCH 1 符号。
     # 这里保持 None 默认而不是 default_factory，是为了不把 linkadapt 拉成
@@ -1037,6 +1041,12 @@ class SystemConfig:
             raise ValueError("power_constraint 只支持 ebf / pebf / nebf")
         if not isinstance(self.rb_power_control, pc.RbPowerControlConfig):
             raise ValueError("rb_power_control 必须是 RbPowerControlConfig")
+        if self.cqi_report is None:
+            self.cqi_report = ap.CqiReportConfig()
+        elif isinstance(self.cqi_report, dict):
+            self.cqi_report = ap.CqiReportConfig(**self.cqi_report)
+        elif not isinstance(self.cqi_report, ap.CqiReportConfig):
+            raise ValueError("cqi_report 必须是 CqiReportConfig 或它的字段字典")
         from . import linkadapt as la  # noqa: PLC0415
         if self.pdsch_overhead is None:
             self.pdsch_overhead = la.PdschOverhead()
@@ -1114,6 +1124,8 @@ class SystemConfig:
                 "tb_error_unit": "one user grant in one TTI = one single-codeword TB",
                 "dl_slot_ratio": round(self.dl_ratio, 4),
                 "snapshot_update_ms": self.snapshot_update_ms,
+                "cqi_report": (self.cqi_report.as_dict()
+                               if self.cqi_report is not None else None),
                 "pdsch_overhead": (self.pdsch_overhead.as_dict()
                                    if self.pdsch_overhead is not None else None),
                 "power_constraint": self.power_constraint,
@@ -1206,6 +1218,8 @@ class UeLinkTable:
     sinr_tx_rbg_db: np.ndarray | None = None  # legacy alias: per-RBG AMC prediction
     # --- 发送侧 SINR 的拆解，供审计与说明书引用 ---
     bf_gain_db: np.ndarray | None = None   # [snapshot, rank] SVD − PMI（基站自算）
+    # 逐 RBG 版本；运行时 CQI 只持有门限，读取时按当前快照加回瞬时 BF Gain。
+    bf_gain_rbg_db: np.ndarray | None = None   # [snapshot, rank, RBG]
     pmi_sinr_db: np.ndarray | None = None  # [snapshot, rank] Type I 权下的用户级 SINR
     # 历史字段保存 0..14 的映射表行；标准上报 codepoint 另存 0..15，
     # 其中 codepoint 0 为 out-of-range、表行 0 对应 codepoint 1。
@@ -1236,6 +1250,9 @@ class UeLinkTable:
     power_diagnostics: list[dict[str, Any]] | None = None  # [snapshot] 选中 rank
     csi_report_source_snapshot: np.ndarray | None = None   # [snapshot]
     csi_report_period_ms: float | None = None
+    # 建表阶段实际使用的 CQI IIR 参数；运行时必须复用同一套，防止离线/在线漂移。
+    cqi_filter_lambda: float = 1.0
+    cqi_filter_domain: str = "cqi_index"
     srs_resource_assignment: srsr.SrsResourceAssignment | None = None
     precoding_csi_source: str = "evaluation_channel"
     # MU 建表只保存 RBG 粒度；避免 TTI 主循环反复做 SVD/矩阵求逆。
@@ -2206,7 +2223,8 @@ def build_link_tables(
             if _iots else 0.0,
             sir_db=float(sir_in[i]), sinr_tx_db=sinr_tx, mcs_tx=mcs_tx,
             sinr_rbg_db=sinr_rbg, sinr_tx_rbg_db=sinr_tx_rbg,
-            bf_gain_db=bf_gain, pmi_sinr_db=pmi_sinr, cqi_index=cqi_idx,
+            bf_gain_db=bf_gain, bf_gain_rbg_db=bf_gain_rbg,
+            pmi_sinr_db=pmi_sinr, cqi_index=cqi_idx,
             cqi_index_per_snapshot=cqi_by_snapshot,
             reported_cqi_codepoint=reported_cqi,
             reported_cqi_codepoint_per_snapshot=reported_cqi_by_snapshot,
@@ -2227,6 +2245,8 @@ def build_link_tables(
             power_diagnostics=selected_power_diag,
             csi_report_source_snapshot=report_source,
             csi_report_period_ms=report_period_ms,
+            cqi_filter_lambda=float(cqi_lambda),
+            cqi_filter_domain=str(cqi_domain),
             srs_resource_assignment=(
                 srs_assignments[i] if srs_assignments is not None else None),
             precoding_csi_source=("explicit_estimate" if explicit_precoding_csi
@@ -2750,7 +2770,7 @@ def simulate(
 
     **"容量仿真"不是另一条分支，而是这条路径的一个话务配置**：
     ``TrafficConfig(model="full_buffer")``。缓冲区永不空 ⇒ 调度器始终有足量数据
-    填满全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.11、开 MU 1.73），
+    填满全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.14、开 MU 1.86），
     这正是容量口径。解调 SINR 仍按每次实际授予的 RBG 聚合，不需要、也不允许为
     full buffer 开任何特例分支。代价是 busy period 永不结束，因此 **28.552 的
     busy-period 吞吐没有样本**（样本只在 buffer 排空事件上形成），
