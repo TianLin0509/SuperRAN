@@ -1495,8 +1495,10 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 >
 > 频选打开时调度器把"少几个但信道更好的 RBG"给第一个用户、余料给下一个；
 > MU 打开时一个 TTI 本来就配对两个用户。**两者都是正确的物理行为。**
-> 出厂默认是 `frequency_selective="auto"` + `mu_enabled=False`，
-> 在真实锚点数据集上实测每忙 TTI **1.0942**。
+> 出厂默认是 `frequency_selective="auto"` + `mu_enabled=False`。
+> **六个实测 preset 锚点没有一个是 1.0**：
+> capacity 1.0942、capacity_mu 1.7418、ftp3 1.1694、mixed 1.3630、
+> 多小区中心站 1.0977、多小区边缘站 1.0132。
 > 后果：满缓冲口径**不等于**经典"单用户占满全带"的容量定义，跨版本、跨工具
 > 引用容量数会有系统性偏差——`sys_single_cell_capacity` 的 preset 注释里量过。
 
