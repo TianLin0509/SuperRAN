@@ -1,6 +1,6 @@
 # 2026-09-04 信道生成 — 按 Codex 双席审核返工 Sionna RT 调用链
 
-**分支 / SHA**：`feat/sionna-rt-source` / `<提交后回填>`　**风险档**：红
+**分支 / SHA**：`feat/sionna-rt-source` / 终审 SHA `ec89e4253acd73a1db41143c48dfa0b9380f2504`，合入 `develop` 为 `f5d87988`（PR #12）　**风险档**：红
 **第一轮审核**：`20260904-0537-reviewer-pr12-sionna-rt-review-codex.html`（BLOCKED）
 **第二轮审核**：`20260904-0651-reviewer-pr12-r2-sionna-rt-review-codex.html`（REVISE）
 **第三轮审核**：`20260904-0941-reviewer-pr12-cb2-final-review-codex.html`（REVISE，见文末）

@@ -1,6 +1,6 @@
 # 2026-09-04 AMC/TBS — TBS 扣掉 DM-RS 与 PDCCH 开销
 
-**分支 / SHA**：`feat/tbs-pdsch-overhead-20260904` / `<提交后回填>`　**风险档**：红
+**分支 / SHA**：`feat/tbs-pdsch-overhead-20260904` / 审核 HEAD `ee913fba64c930a984cdbb47401455c2bfd6f67f`，合入 `develop` 为 `48456324`（PR #18）　**风险档**：红
 **报告**：`C:\VibeData\Artifacts\Reports\SuperRAN\20260904-tbs-pdsch-overhead.html`
 
 ## 改了什么物理机制
