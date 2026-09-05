@@ -8,10 +8,13 @@
 
 ## 完整签名
 
+99 个参数，按用途分组（从 `server.sr_system_sim` 的真实签名生成，2026-09-05）。
+`trim` 已随 legacy 容量路径下线，传入会报错。
+
 ```python
 sr_system_sim(
-    dataset_id,
-    duration_s=5.0,
+    dataset_id, duration_s=5.0, serving_cell=None,
+    # —— 话务 ——
     traffic_model="ftp3", file_bytes=500_000, arrival_rate_hz=2.0,
     small_ue_share=0.5, small_file_bytes=1_500, small_arrival_rate_hz=20.0,
     small_pdb_ms=20.0, large_pdb_ms=300.0,
@@ -21,20 +24,44 @@ sr_system_sim(
     target_prb_utilization=None, load_calibration_axis="interarrival",
     load_calibration_tolerance=0.02, load_calibration_max_iterations=6,
     load_calibration_replications=2, load_calibration_formal_refinements=2,
+    # —— 调度 ——
     scheduler="pf", pf_window_tti=100, pf_accounting="auto",
-    target_bler=0.1, olla_step_up_db=0.01, olla_step_down_db=None,
+    frequency_selective="auto", max_layers_per_rbg=4, max_logical_prb_per_tti=None,
     qos_avg_rate_exponent=1.0, qos_instant_rate_exponent=1.0,
     qos_delay_exponent=0.0, qos_priority_weighting="none",
     edf_mixed_weight=0.5, edf_mixed_epf_scale=1.0,
     srb_priority_boost=5000.0, edf_starvation_hol_ms=None,
-    mu_enabled=False,
+    small_burst_policy="fractional_slot",
+    # —— AMC / HARQ / OLLA ——
+    target_bler=0.1, harq_combining="ir", harq_max_processes=8, harq_feedback_delay=True,
+    olla_step_up_db=0.01, olla_step_down_db=None,
+    olla_speedup=1.0, olla_warmup_speedup=1.0, warmup_s=1.0,
+    # —— rank ——
+    rank_mode="fixed", fixed_rank=2, rank_adaptation_period_tti=1_000,
+    rank_gain_factor_raise=1.1, rank_gain_factor_reduce=1.1, rank_switch_rule="unified_ratio",
+    rank_se_filter_beta=0.1, rank_se_sample_scope="snapshot", rank_min_filter_samples=3,
+    rank_min_mcs_threshold=9, rank_quick_fallback_nack_thld=90,
+    rank_quick_fallback_ibler_thld=0.3, rank_quick_fallback_se_ratio_thld=1.0,
+    rank_max_backoff_times=4, rank_probe_enabled=False,
+    # —— MU ——
+    mu_enabled=False, mu_accounting="pair_table", mu_precoder="zf",
+    mu_csi_error_variance=0.0, mu_corr_threshold=0.7,
+    min_pairing_mcs=4, pf_gain_threshold=0.0, orthogonalization_mode="select",
     mu_olla_step_up_db=0.01, mu_olla_step_down_db=None,
-    trim="tail", small_burst_policy="fractional_slot", tdd_pattern="DDDSU",
+    # —— 载波 / TDD / 邻区 ——
+    tdd_pattern="DDDSU", s_slot_dl_fraction=0.7,
     neighbor_prb_util=0.3, neighbor_load_jitter=0.05,
+    # —— CSI 老化 / SRS / CQI 上报 ——
     csi_aging=True, srs_period_ms=10.0, srs_hopping=True,
+    srs_resource_allocation=True, srs_period_adaptive=True, srs_pci_mod3=0,
     csi_processing_delay_ms=2.0, csi_report_period_ms=20.0,
-    warmup_s=1.0, olla_speedup=1.0, olla_warmup_speedup=1.0,
-    precoder="svd", power_constraint="nebf", seed=0, num_replications=8,
+    cqi_filter_lambda=0.25, cqi_filter_domain="cqi_index", runtime_cqi_enabled=True,
+    # —— 发射权 / 功率 ——
+    precoder="svd", power_constraint="nebf",
+    rb_power_control_enabled=False, rb_power_overrides="",
+    # —— 随机数 / 重复 / 产物 ——
+    seed=0, num_replications=8, replication_workers="auto",
+    algorithm_label="", tti_trace_mode="sampled", tti_trace_max_points=256,
     kpi_focus=None, kpi_intent="",
 )
 ```
@@ -389,7 +416,7 @@ RBG，**包含 idle TTI 的 0 桶**。不要拿 `rbg_size_hist` 代替：后者�
 这些指标、其余折叠，并在 `kpi_view.kpi_selection` 保存来源、标签、理由和完整排序。
 未传时才按 `kpi_intent` 关键词与场景配置做确定性兜底。库内不暗调另一个模型，保证复现与审计。
 
-**换口径数字会明显变，所以报数时必须带上用的是哪个 trim。**
+**换口径数字会明显变，所以报数时必须带上用的是哪个口径键（`drb_throughput_rel19_mbps` / `ue_served_*` / `active_window_goodput_mbps`）。**
 
 ## 邻区负载 `neighbor_prb_util`
 

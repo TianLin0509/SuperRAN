@@ -108,8 +108,11 @@ print(st.text())
 
 三项损失：**调制与表封顶**、**MCS码率离散**、**有限码长与实现损失**。
 默认表3含28档预置MCS profile + 56条NewTx/ReTx原始解调曲线（1824点）。
-系统只消费28条NewTx曲线；ReTx行用于审计。HARQ
-最多一次重传，默认 IR（半谱效等效 MCS），可选 CC（原 MCS、SINR +3.0103 dB）：
+系统只消费28条NewTx曲线；ReTx行用于审计。HARQ **每个 TB**
+最多一次重传，默认 IR（半谱效等效 MCS），可选 CC（原 MCS、SINR +3.0103 dB）；
+系统级里每个 UE 默认 **8 个 HARQ 进程**同时在途（`harq_max_processes`，38.213 §5.3 上限 16，
+设 1 退回单进程），重传冻结 MCS / rank / **PRB 数** / TBS。TBS 先按 38.214 §5.1.3.2 扣掉
+DM-RS（6 RE/PRB）与 PDCCH（1 符号等效 12 RE/PRB），**126 RE/PRB 而不是 144**，再查表：
 
 ```python
 st = ds.throughput()
@@ -170,6 +173,26 @@ SRS 测量域 SIR 差 **17.9 dB**（−10.50 vs +7.37）。
 其中两条与直觉相反：`pdsch_load` 对下行 IoT **完全无效**（0.2 与 1.0 逐位相同），
 `num_interfering_ues` 影响的是测量域而非业务域上行 IoT。
 
+**六点七、系统级问的是"这个小区里的用户实际体验到多快"。** 链路级回答"这个信道
+能跑多快"，系统级把连续几秒的 TTI、话务到达、PF 调度、HARQ、OLLA 和 CSI 老化串起来，
+出的是体验速率、完成时延、PRB 利用率这类现网 KPI。**只有一条评估路径**（`experience_v2`）：
+"容量仿真"不是另一条分支，而是 `traffic_model="full_buffer"` 这个话务配置点——缓冲区
+永不空，调度器始终有数据填满全部 RBG。满缓冲下 TS 28.552 的 busy-period 体验速率按定义
+形不成样本（报 `None`），要看 ITU-R M.2412 口径的 `ue_served_p5_mbps`。
+
+```python
+scene = sr_system_scene("sys_single_cell_experience_ftp3")   # 预设：generate 段 + system 段 + 实测锚点
+r = sr_system_sim(dataset_id, **scene["system"], algorithm_label="pf_baseline")
+r["cell"]["ue_served_p5_mbps"]   # 不是裸数：{mean, std, ci95, n_rep, rel_half_width, ...}
+r["notes"]                       # "这组数字在什么条件下不成立"的清单，逐条转述，不许挑
+```
+
+每个 KPI 默认跑 8 次独立重复、按 t 分布给区间；**两臂比较必须用公共随机数**（同一批
+replication 流）再走 `sr_compare_system_results`，单臂数字差 10% 不是结论——只改种子的
+变异系数就有 11.4%。系统级每 UE 默认 8 个 HARQ 进程；CQI 不是建表时一次算好，而是
+按 CSI 报告周期（默认 20 ms）由 UE 运行时上报、带 3 TTI 处理时延与 1.5 dB 未标定的
+实现损失。全部旋钮与 `notes` 清单 → `skills/channel-sim/references/system-sim.md`。
+
 **七、跑得快但不换样本。** `workers="auto"` 按配置预估耗时自动决定要不要多进程；
 static internal_sim 用同 seed + 全局 sample index 分块，worker 数变化时逐样本逐位一致。
 移动轨迹、拒绝采样或未支持索引的外部源会带原因回退串行。
@@ -222,15 +245,36 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 设计参考 [superpowers](https://github.com/obra/superpowers) 的 brainstorming，
 按仿真场景做了调整——它面对开放式设计所以一次一问，而仿真参数空间有限且已知。
 
+## 近期改动（2026-09-03 ～ 09-05，读旧报告前先看）
+
+这三天有 10 个实质改动进了 `develop`，其中三个**移动了数值基线**：#18（TBS 扣开销）、
+#21（发送即记账）、#20（运行时 CQI）。**改前改后的吞吐 / 体验速率不能拼在同一张趋势图里**，
+引用任何绝对数字前先确认它是在哪个基线上测的。逐条五节文档在 `docs/changes/`，
+批次摘要在 `CHANGELOG.md`。
+
+| PR | 动了哪个环节 | 白话一句 | 结果怎么变 |
+|---|---|---|---|
+| #12 | 信道来源 | 除 3GPP 统计信道 CDL 外，可显式选 Sionna 射线追踪（`source: sionna_rt`）拿真实建筑几何的多径；**只换信道矩阵**，撒点、路损、阵列全部共用，CDL↔RT 的差异可归因 | 默认路径零影响；RT 数据集不支持 `ds.paths()`，静止 UE 多轮会在入口被拒；QuaDRiGa 路线删除 |
+| #16 | HARQ 重传资源 | 重传冻结的是 **PRB 数**而不是 RBG 个数：51 RB 这类首尾 RBG 不等长的栅格里"1 个 RBG"可能是 3 或 8 个 PRB，TBS 差 2.67 倍 | 默认 17×16 等长栅格逐位不变 |
+| #17 | MU 记账 | 删掉"配对只把 TBS 缩小、却不更容易错"的标量近似，只留 pair 表——配对后功率减半、吃对方残余干扰，都进 MCS 决策与误块抽签 | 默认 `pair_table` 路径零变化；旧标量配置直接报错 |
+| #18 | TBS | 一个 PRB 一个时隙里 PDSCH 拿不到全部 144 个 RE：DM-RS 占 6、PDCCH 等效占 12，剩 **126**，TBS 降 12.5% | 满缓冲小区吞吐约 −13.8%（合入当时锚点 618.7→533.5 Mbps） |
+| #21 | 体验速率的记账时刻 | 发出去就算发了，不等 ACK；传错的代价体现为**重传占资源、把后面的数据往后推** | 体验速率整体平移，`residual_bler` 成为唯一"传丢多少"的 KPI；顺手修掉一个让"误码越多体验越高"的 bug |
+| #23 | BLER 后端 / S 时隙 / MU 准入 | BLER 模型改成显式工厂（表 3 预置曲线；表 1/2 解析近似并标"未标定"），EESM 压缩显式化；S 时隙下行占比 `s_slot_dl_fraction` 成为显式配置；MU 新增 `min_pairing_mcs=4` 等三道准入门 | 默认 0.7 逐位复现；MU 默认关，不受影响 |
+| #25 | 系统评估路径 | 两条路径合成一条：`evaluation_mode` 删除，"容量仿真"= `traffic_model="full_buffer"`；顺手修掉"只统计传完的 burst"这个右删失 | 满缓冲下 28.552 标准体验速率按定义为 `None`，主指标改看 ITU `ue_served_p5_mbps` |
+| #19 | HARQ 进程数 | 每 UE 从 1 个进程改成默认 **8 个**：等 ACK 的时候还能发下一个 TB | 4 UE / ftp3 受控夹具：体验中位 112→350 Mbps、完成时延 p50 39→12 ms，小区吞吐几乎不动（offered-limited） |
+| #20 | CQI 产生时刻 | CQI 不再建表时一次算好，而是每 20 ms（CSI 报告周期）由 UE 上报一次，带 3 TTI 处理时延与 1.5 dB 实现损失；BF Gain 仍按当前快照瞬时加回 | AMC 保守约一档，首传 BLER 从 0.52 回到目标附近，吞吐反而升（OLLA 关：380→429 Mbps）；TTI 主循环慢约 5 倍 |
+
+#9 / #10 / #11 / #14 / #15 / #22 是协作机制（`.agents/` 合同、审核包、看板、钩子），
+不动物理，入口在 `.agents/README.md`。
+
 ## 文档
 
-- **[SuperRAN 开发者文档 `docs/index.html`](docs/index.html)** —— 当前实现的主入口：无线物理、64T4R/192×64 阵列、SRS/LMMSE、EBF/PEBF/NEBF、独立 BF Gain 章节、SU/MU、capacity/experience、话务/PF/KPI、35 个 MCP 工具、Skill、全部公开 API 与本次审计修复；单文件离线可打开
+- **[SuperRAN 开发者文档 `docs/index.html`](docs/index.html)** —— 当前实现的主入口：无线物理、64T4R/192×64 阵列、SRS/LMMSE、EBF/PEBF/NEBF、独立 BF Gain 章节、SU/MU、唯一的 `experience_v2` 系统路径（容量 = `full_buffer` 话务）、HARQ N 进程、运行时 CQI、话务/PF/KPI、35 个 MCP 工具、Skill、全部公开 API 与本次审计修复；单文件离线可打开
 - **[安装说明 `SETUP.html`](SETUP.html)** —— 由哪几块拼成、要装什么、怎么装、装完先跑什么、排错
 - **[`INSTALL_AGENT.md`](INSTALL_AGENT.md)** —— 写给 AI agent 看的安装步骤，丢给它自己装
 - **[能力手册 `CAPABILITIES.html`](CAPABILITIES.html)** —— 能产生哪些信道、能拿到哪些观察量（含形状与单位）、参数全表、能力边界
 - **[实测场景演示 `SHOWCASE.html`](SHOWCASE.html)** —— 真实跑过的场景对话、三道门、踩过的坑
 - **[接入自研算法 `EXTERNAL_ALGO.html`](EXTERNAL_ALGO.html)** —— 让你自己的算法进门 2/门 3、预注册分析口径、边界与局限
-- **[从 SINR 到真实吞吐 `LINK_ADAPTATION.html`](LINK_ADAPTATION.html)** —— L1 链路自适应、38.214 MCS/CQI、SNR 扫描曲线、并行生成
 - **[测试体系历史说明 `TESTS.html`](TESTS.html)** —— 2026-07-31 的历史快照，用于理解测试理念与事故案例；当前文件/接口清单以开发者文档为准
 - **仿真说明书 / 运行前工作台** —— `sr_spec_sheet` 出的 HTML，默认只返回 URL、不打断用户；明确传 `open_browser=True` 才弹浏览器。页面以真实拓扑与用户/默认来源打头，其余折进 7 个页签；改参数时会标出信道/链路表/TTI/KPI 哪些层需要重算，点「应用到仿真」把 delta 送回 agent（`sr_await_config` 接）。同时支持说明书/Resolved config JSON 下载、摘要复制、页面截图、系统分享与打印/PDF；拷走用 `file://` 打开时自动退回复制粘贴
 - **CDF 话务与目标负载校准** —— 包大小/包间隔各读一份 `value,cdf`，支持全局×profile 双标量、多 profile 与 `ue_ids` 显式用户映射；`target_prb_utilization=0.30` 用公共随机数调话务，最后另跑正式重复实验，未达容差绝不回填目标值。内置 synthetic CDF 只用于接口演示，后续可直接替换现场 CDF
@@ -250,11 +294,15 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
   与全分配底噪，提供开环UL功控、绝对SRS链路预算和线性域PreSINR IIR；UL IoT可写入
   原子NPZ sidecar并复算IoT/双SHA。城市RT缓存使用稳定进程锁、源/准备后双指纹及独立
   RF材料revision，缓存手改自动重建，中断发布journal硬失败。
+**以下为历史快照**（2026-08-13 ～ 08-25 写成），早于 2026-09-04 的三次基线变化，其中的绝对数字与 capacity/experience 双路径描述**不可再引用**，看机制与决策记录即可：
+
 - **[MU-MIMO 算法流程 `MU_MIMO.html`](MU_MIMO.html)** —— 配对/预编码/功率分配逐步展开，含六个待确认的设计选择与实测数字
 - **[通宵成果与待审 `TONIGHT.html`](TONIGHT.html)** —— 6 个 bug、5 个新需求提案、8 个待拍板的决策点
 - **[通宵进展与待审问题 `MORNING_REVIEW.html`](MORNING_REVIEW.html)** —— 3GPP/ITU 对标结果 + 12 个待拍板的问题
 - **[还缺什么 `ROADMAP.html`](ROADMAP.html)** —— 对着 Sionna / MATLAB 5G Toolbox / 5G-LENA 逐模块点名。**只下行 · 只 TDD · BLER 一律查表**，边界写在第七节
 - **[场景拓展与干扰量化 `SCENARIOS.html`](SCENARIOS.html)** —— IoT 噪声抬升、业务域 vs 测量域、21 个场景的实测画像、场景探测、哪些提速是真的
+- **[从 SINR 到真实吞吐 `LINK_ADAPTATION.html`](LINK_ADAPTATION.html)** —— L1 链路自适应、38.214 MCS/CQI、SNR 扫描曲线、并行生成（TBS 尚未扣 DM-RS/PDCCH 开销，数字偏乐观约 12.5%）
+- `EXPERIENCE_MODE.html` / `P1_PLAN.html` / `P1_DESIGN.md` / `DECISIONS.html` / `AUDIT.html` —— 体验模式方案评审、P1 计划与全库自审的当时版本，其中 capacity/experience 两条路径的表述已被 #25 取代
 
 ## 四条设计铁律
 
@@ -286,22 +334,19 @@ PMI 给码本索引而非嵌入向量。
 | 把香农谱效当吞吐报 | 真实系统要打 4~6 折，差的是调制受限+码率离散+码长 |
 | 声称实测 BLER | 表 1/2 是分析模型；表 3 是用户曲线插值，二者都不是 3GPP 实测 |
 
-## 团队 Agent 开发
+## 协作方式：单维护者 + AI 群聊
 
-- 普通组员或组长本人做具体实现时，都打开 `docs/team/member-start.html`；该页面固定启动正式 `FORMAL` Author 流程。
-- 组长使用 `docs/team/lead-start.html` 分任务、看状态、审核 PR，并按当前完整 SHA 决定合并。
-- `develop` 是所有实现 PR 的目标分支；`main` 是组长单独控制的发布分支。
+SuperRAN 由**一位维护者**（无线通信工程师）主导，Agent 是执行者不是决策者。
+全部协作规则在 [`.agents/README.md`](.agents/README.md)，人看那一份就够：
+一个 AI 群聊 = 一个任务，**工作位**在自己的 worktree 实现并推分支，**合并位**独立验证、
+做棘轮反证、通过后由它执行 `python scripts/merge_task.py <分支>` 合入 `develop`。
+日常合并**全在本地**，不经过 GitHub PR；同步 GitHub 是维护者明确要求时的独立动作
+（`.agents/SYNC.md`）。三条铁律：一个提交只动一个物理机制；物理 bug 的修复必须带一条
+"revert 掉会变红"的测试；不许静默降级。
 
-GitHub Owner 身份不会再自动触发演练：Owner 在正式模式下直接推送上游 topic branch，
-普通组员推送自己的 Fork。演练只能从组长页复制明确的 `TEAM_MODE: REHEARSAL` Prompt。
-组长本人提交正式 PR 后，用另一个全新 Agent Session 和隔离 worktree 完成审核。
-
-两份页面会自动引导 Agent 安装仓库版本的 `channel-sim`、`superran-member-task` 与
-`superran-lead`，无需人手改 Prompt 或复制 Skill 文件。
-
-任一 Author PR 提交或更新后，Author Agent 还会生成绑定当前远端 PR HEAD 的离线交互式改动
-说明 HTML；人类 Author 把该文件与 PR 链接一起交给组长审核会话。它用于理解改动，不代表审核通过，
-默认不提交到公开仓库。
+> 早先的多人「组长-组员」流程（`skills/superran-lead/`、`skills/superran-member-task/`、
+> `docs/team/*.html`、`TEAM_MODE: FORMAL/REHEARSAL`）**已废弃**，一律以 `.agents/` 为准。
+> 这些文件暂未删除，只因 `tests/test_developer_guide.py` 仍在断言它们；退役与否由维护者决定。
 
 ## 安装
 
@@ -357,7 +402,7 @@ pip install sionna-rt      # 可选，射线追踪（约 300 MB）
 claude mcp add superran -- python /path/to/superran/scripts/mcp_server.py
 codex  mcp add superran -- python /path/to/superran/scripts/mcp_server.py
 
-# Codex 团队 Skill（按当前角色选一个）
+# Codex Skill 安装器：channel-sim 仍推荐；superran-member-task / superran-lead 属已废弃流程（见「协作方式」）
 python scripts/install_agent_skills.py --role member
 python scripts/install_agent_skills.py --role lead
 ```
@@ -388,6 +433,8 @@ python scripts/install_agent_skills.py --role lead
 | 工具 | 作用 |
 |---|---|
 | `sr_capabilities` / `sr_list_presets` / `sr_list_scenes` | 能力与场景发现 |
+| `sr_probe_scenario` / `sr_compare_scenarios` | **几十秒探场景**：把 RB/符号压到最小，几何量与全量逐位相同；多预设并排 |
+| `sr_interference_report` / `sr_design_interference` / `sr_iot_convert` | **干扰画像**：业务域 IoT 与测量域 SIR 分开报；哪些旋钮真能动 IoT；IoT ↔ 等效负载换算 |
 | `sr_missing_slots` | **结论模板还缺哪些槽** —— 决定该主动问什么 |
 | `sr_plan` / `sr_revise` | 分轮协商：实验设计 + 参数 + 对比组 + 陷阱 |
 | `sr_generate` | 生成数据集，返回句柄与统计摘要 |
@@ -406,7 +453,8 @@ python scripts/install_agent_skills.py --role lead
 | `sr_mcs_info` | 表 1/2：38.214 + 分析模型；表 3：用户 MCS + NewTx/ReTx 门限 |
 | `sr_bler_curve` | 查单档原始 BLER 曲线、10% 门限，并在任意 SINR 点做对数域插值 |
 | `sr_tdd_mcs` | **TDD AMC**：CQI → PMI/SVD BF Gain → MCS → OLLA，返回逐 RB/流审计链 |
-| `sr_system_sim` | **系统级仿真**：连续几秒 TTI + PF 调度 + 话务，出体验速率等现网 KPI |
+| `sr_system_scene` | **系统级场景预设**：一句名字换回 `generate` 段 + `system` 段 + 实测锚点 + 受控对照，免得每次手拍八九个参数 |
+| `sr_system_sim` | **系统级仿真**：连续几秒 TTI + 话务 + PF 调度 + 8 进程 HARQ + 运行时 CQI + OLLA，出体验速率等现网 KPI，默认 8 次重复带置信区间 |
 | `sr_compare_system_results` | **2~5 算法 KPI 对比**：CRN 配对、用户 CDF、TTI 趋势/钻取、Gate 3 + Holm |
 | `sr_spec_sheet` | **仿真说明书**：拓扑图 + 分级页签 + 调参面板；默认只返回 URL，`open_browser=True` 才弹浏览器 |
 | `sr_await_config` | 等用户在说明书上点「应用到仿真」，**改动直接回来**，免复制粘贴 |
