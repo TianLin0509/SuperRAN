@@ -649,6 +649,10 @@ class _HarqTb:
     mcs: int
     rank: int
     n_rbg: int
+    # 冻结的**PRB 数**。Type-0 分组在 51 RB 这类带宽下首尾组不足名义 P
+    # （(8,8,8,8,8,8,3)），只冻结 RBG 个数不足以复现 TBS：重传落到
+    # 8 PRB 组时 TBS 会是首传落在 3 PRB 尾组时的 2.7 倍。
+    n_prb: int
     tb_bytes: int
     payload_bytes: int
     slot: str
@@ -1317,6 +1321,66 @@ def _frequency_pool_audit(
     )
 
 
+def _retx_indices(ordered: Sequence[int], lookup: TbsLookup,
+                  n_prb: int) -> tuple[int, ...] | None:
+    """按优先级顺序挑出**PRB 数正好等于** ``n_prb`` 的一组 RBG。
+
+    重传必须复现首传的 TBS，而 TBS 只取决于 RE 数，也就是 PRB 数——不是 RBG
+    个数。等长分组下（``rbg_prb_sizes`` 全相同，绝大多数配置）本函数按顺序取
+    前 k 个，与旧的 ``ordered[:n]`` 逐位一致。
+
+    **必须回溯，不能只做贪心。** 优先级最高的那个组不一定进得了解：
+    51 RB 的 ``(8,8,8,8,8,8,3)`` 下如果 3 PRB 的尾组排在最前、而要凑的是
+    8 PRB，先拿走尾组就再也补不齐（剩下全是 8，只差 5）——纯贪心会返回
+    "无解"，可实际上随便一个 8 PRB 组就是解。这不是罕见组合：非频选时
+    ``rotated_order`` 的 cursor 每 ``num_rbg`` 个 TTI 就会把尾组轮到最前，
+    频选时尾组只要信道好也会排最前。返回假的"无解"会让这次重传被无限推迟。
+
+    所以这里做的是**带回溯的优先级搜索**：优先尝试"包含当前最高优先级的组"，
+    走不通再回退成"跳过它"，并把走不通的 ``(下标, 还差多少)`` 记下来，
+    避免指数级重试。取值集合很小（组数 ≤ 20 上下、目标 ≤ 275 PRB），
+    状态数是 O(组数 × 目标)，主循环里可以忽略。
+
+    凑不出恰好 ``n_prb``（例如尾组这一 TTI 真的被别人占了）时返回 ``None``，
+    调用方把这次重传推迟到下一个同类型时隙——**不允许**退而求其次用别的
+    PRB 数，那等于让重传的 TB 变了大小。
+    """
+    sizes = lookup.rbg_prb_sizes
+    target = int(n_prb)
+    if target <= 0:
+        return None
+    order = [int(value) for value in ordered]
+    widths = [int(sizes[idx]) for idx in order]
+    count = len(order)
+    # 后缀和剪枝：剩下的全加起来都不够就不用再往下试
+    suffix = [0] * (count + 1)
+    for i in range(count - 1, -1, -1):
+        suffix[i] = suffix[i + 1] + widths[i]
+    dead: set[tuple[int, int]] = set()
+    picked: list[int] = []
+
+    def _search(start: int, remaining: int) -> bool:
+        if remaining == 0:
+            return True
+        if start >= count or suffix[start] < remaining:
+            return False
+        key = (start, remaining)
+        if key in dead:
+            return False
+        # 先试"要这个组"——这样等长分组下解就是 ordered[:k]，与旧行为逐位一致
+        if widths[start] <= remaining:
+            picked.append(order[start])
+            if _search(start + 1, remaining - widths[start]):
+                return True
+            picked.pop()
+        if _search(start + 1, remaining):
+            return True
+        dead.add(key)
+        return False
+
+    return tuple(picked) if _search(0, target) else None
+
+
 def _build_su_plan(
     ordered_users: Sequence[int], *, queue_bytes: dict[int, int],
     lookup: TbsLookup, slot: str, num_rbg: int,
@@ -1366,7 +1430,9 @@ def _build_su_plan(
                 score = np.asarray(base_rows[snap, rank - 1], dtype=float)
                 ordered = sfreq.quality_order(
                     tuple(available), score, cursor=cursor)
-                indices = tuple(ordered[:n])
+                indices = _retx_indices(ordered, lookup, int(pending.n_prb))
+                if indices is None:
+                    continue
                 frequency_score_gain = float(
                     np.mean(score[np.asarray(indices, dtype=int)])
                     - np.mean(score[np.asarray(tuple(available), dtype=int)]))
@@ -1375,8 +1441,12 @@ def _build_su_plan(
                 true_sinr = _subset_db(
                     tables[u].sinr_rbg_db[snap, rank - 1], indices)
             else:
-                indices = tuple(sfreq.rotated_order(
-                    tuple(available), cursor=cursor, total_rbg=num_rbg)[:n])
+                indices = _retx_indices(
+                    sfreq.rotated_order(
+                        tuple(available), cursor=cursor, total_rbg=num_rbg),
+                    lookup, int(pending.n_prb))
+                if indices is None:
+                    continue
                 base_rows = (tables[u].sinr_tx_db
                              if tables[u].sinr_tx_db is not None
                              else tables[u].sinr_db)
@@ -1384,6 +1454,8 @@ def _build_su_plan(
                 true_sinr = _granted_true_sinr_db(
                     tables[u], snap, rank, indices,
                     float(tables[u].sinr_db[snap, rank - 1]))
+            n = len(indices)
+            full_need = remaining_need = n
             no_olla_mcs = _select_mcs(base_tx, lookup)
             current_tbs = int(
                 lookup.tbs_bytes_for_indices(slot, mcs, rank, indices))
@@ -2797,13 +2869,15 @@ def simulate_experience(
                     if pending_tb.state != "retx_ready":
                         raise RuntimeError(
                             "尚未收到反馈的 HARQ TB 不得进入发送路径")
-                    identity = (mcs, n_alloc, rank, tb_bytes)
+                    # 比 PRB 数而不是 RBG 个数：TBS 只由 RE 数决定，而不等长
+                    # 分组下同样是 1 个 RBG 可以是 8 PRB 也可以是 3 PRB。
+                    identity = (mcs, grant_prb, rank, tb_bytes)
                     expected_identity = (
-                        int(pending_tb.mcs), int(pending_tb.n_rbg),
+                        int(pending_tb.mcs), int(pending_tb.n_prb),
                         int(pending_tb.rank), int(pending_tb.tb_bytes))
                     if identity != expected_identity:
                         raise RuntimeError(
-                            "HARQ 重传身份被改写："
+                            "HARQ 重传身份被改写（mcs, n_prb, rank, tb_bytes）："
                             f"actual={identity}, expected={expected_identity}")
                     payload = int(pending_tb.payload_bytes)
                 else:
@@ -2926,7 +3000,7 @@ def simulate_experience(
                     # outcome 在发送时抽样，但只能由下一轮顶部的 due-event
                     # 路径交给 OLLA 与 RankController。
                     harq_pending[u] = _HarqTb(
-                        mcs=mcs, rank=rank, n_rbg=n_alloc,
+                        mcs=mcs, rank=rank, n_rbg=n_alloc, n_prb=grant_prb,
                         tb_bytes=tb_bytes, payload_bytes=payload,
                         slot=slot, first_tti=tti,
                         first_mode=str(grant.mode),
