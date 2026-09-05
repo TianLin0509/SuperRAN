@@ -5,10 +5,11 @@
 SuperRAN 由**一位维护者**（无线通信工程师）主导，Agent 是执行者不是决策者。
 所有协作规则在 `.agents/` 目录，**开工前必读，不要按聊天里粘贴的 prompt 工作**：
 
-- 实现任务：`.agents/AUTHOR.md`
-- 独立审核：`.agents/MERGER.md`
+- 实现任务（工作位）：`.agents/AUTHOR.md`
+- 独立验证并合入主干（合并位）：`.agents/MERGER.md`
 - 需要几个 Reviewer：`.agents/RISK.md`（按文件路径查表，不许自己估）
-- 推送与建 PR：`.agents/SYNC.md`（只在维护者明确说“同步 GitHub”时执行）
+- 主干闸门与项目配置：`.agents/project.json`（主干名、合并前跑哪些测试、worktree 放哪）
+- 同步 GitHub：`.agents/SYNC.md`（**只**在维护者明确说“同步 GitHub”时执行；日常合并全在本地）
 - 仿真设计、数据生成或性能结论：`skills/channel-sim/SKILL.md`
 
 三条铁律：**一个提交只动一个物理机制**；**审核发现的物理 bug，修复时必须补一条

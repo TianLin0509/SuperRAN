@@ -1,8 +1,8 @@
 # 对外文档与批次记录
 
-> 推分支、开 PR 现在是 Author 的收尾动作，见 `.agents/AUTHOR.md`。
-> 审 PR 与执行合并是 Reviewer 的事，见 `.agents/MERGER.md`。
-> 这份文件只管**对外能读懂的改动记录**。
+> 推分支是工作位的收尾动作，见 `.agents/AUTHOR.md`。
+> 验证与执行合并是合并位的事，见 `.agents/MERGER.md`。**日常合并不经过 GitHub。**
+> 这份文件只管两件事：**对外能读懂的改动记录**，以及维护者明确说「同步 GitHub」时怎么推。
 
 ## 什么时候写
 
