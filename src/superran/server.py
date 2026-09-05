@@ -1997,6 +1997,7 @@ def sr_system_sim(
     csi_report_period_ms: float = 20.0,
     cqi_filter_lambda: float = 0.25,
     cqi_filter_domain: str = "cqi_index",
+    runtime_cqi_enabled: bool | str = True,
     warmup_s: float = 1.0,
     olla_speedup: float = 1.0,
     olla_warmup_speedup: float = 1.0,
@@ -2089,6 +2090,8 @@ def sr_system_sim(
     默认 0.25，**已由负责人确认为当前工程默认，但尚未经现场测量/设备数据
     标定**；``cqi_filter_domain`` 默认在量化后的 CQI 档上。两者都随结果上报；
     ``λ=1`` 关闭滤波可作反向对照。不得把工程默认表述成现场等价。
+    ``runtime_cqi_enabled=False`` 关闭事件驱动状态机并精确退回建表阶段的旧 CQI；
+    这是回归开关，不等于关闭 CQI 本身。
 
     ``target_bler`` 可配，但它在**开环上大部分抵消**（同一个目标同时出现在
     CQI→门限 与 门限→MCS 两侧）：实测 384 个样本里 92% 选出完全相同的 MCS。
@@ -2127,8 +2130,8 @@ def sr_system_sim(
         （``IoT = SIR/(SIR-SINR)``，与结果里的 ``iot_db_median`` 同一公式）。
         算不出来时给 ``selected_interference_note`` 说明原因，不留哑 ``None``。
         实测同一份 210 UE 数据集只换 ``serving_cell``：中心站（SIR 中位 4.22 dB）
-        与边缘站（16.25 dB）相比，后者把 ``cell_served_mbps`` 高估 28.8%、
-        把 ``ue_served_p5_mbps`` 高估 156%。
+        与边缘站（16.25 dB）相比，后者把 ``cell_served_mbps`` 高估 27.1%、
+        把 ``ue_served_p5_mbps`` 高估 148%。
         与 ``rb_power_control_enabled`` 同开会硬失败：逐 RB 功控的几何量直接来自
         数据集、不随样本筛选走，混用会得到一个半对半错的资源池。
     traffic_model : ``ftp3``（3GPP FTP Model 3，评价体验速率的标准话务）/
@@ -2228,6 +2231,8 @@ def sr_system_sim(
     csi_processing_delay_ms : 信道估计 + 预编码计算 + 调度下发的固定时延。
     csi_report_period_ms : 宽带 CQI/PMI 报告周期，默认 20 ms。它与 5 ms 的信道
         快照间隔、SRS 周期是三个不同量；38.331 按 slot 配置，并未规定 PMI 固定 5 ms。
+    runtime_cqi_enabled : 默认开。关掉时不创建运行时 CQI reporter，直接使用建表阶段
+        的离线 CQI/MCS 坐标；用于逐位回归，不代表终端不报告 CQI。
     warmup_s : 预启动时长，默认 1 s。PF/OLLA/SRS 继续演进，体验与 BLER/资源 KPI
         从该时刻后才统计；5 s 仿真默认统计后 4 s。
     olla_speedup : OLLA 两个步长的**等比**放大系数，默认 1.0；目标为 10% 且
@@ -2641,6 +2646,7 @@ def sr_system_sim(
             duration_s=float(duration_s),
             tdd_pattern=tdd_pattern, harq_combining=str(harq_combining),
             harq_max_processes=harq_max_processes,
+            cqi_report=sysm.ap.CqiReportConfig(enabled=_flag(runtime_cqi_enabled)),
             s_slot_dl_fraction=float(s_slot_dl_fraction),
             harq_feedback_delay=_flag(harq_feedback_delay),
             seed=seed, snapshot_update_ms=snap_ms,

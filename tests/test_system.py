@@ -2289,11 +2289,11 @@ _cqi_tabs = sysm.build_link_tables(
     csi=sysm.ca.CsiConfig(enabled=False))
 
 
-def _cqi_run(cfg, *, mode="capacity", olla=True, duration_s=3.0):
+def _cqi_run(cfg, *, olla=True, duration_s=3.0):
     return sysm.simulate(
         _cqi_tabs,
-        sys_cfg=sysm.SystemConfig(evaluation_mode=mode, duration_s=duration_s,
-                                  tdd_pattern="DDDSU", cqi_report=cfg),
+        sys_cfg=sysm.SystemConfig(duration_s=duration_s, tdd_pattern="DDDSU",
+                                  cqi_report=cfg),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=olla),
         kpi=sysm.KpiConfig(warmup_tti=0), rng=rg.RngBook(5, 0))
@@ -2314,14 +2314,14 @@ for _per in (1, 4, 40):
     _cnt_raw = _run_p.cell["cqi_update_count_mean"]
     _age_raw = _run_p.cell["cqi_age_tti_max"]
     if _cnt_raw is None or _age_raw is None:
-        check(False, f"SRS 周期 {_per} TTI：运行时上报没生效，新鲜度诊断为 None")
+        check(False, f"CQI 周期 {_per} TTI：运行时上报没生效，新鲜度诊断为 None")
         continue
     _cnt = float(_cnt_raw)
     _age = int(_age_raw)
     check(abs(_cnt - _cqi_num_tti / _per) <= 1.0,
-          f"SRS 周期 {_per} TTI：上报次数 {_cnt:.0f} ≈ {_cqi_num_tti}/{_per}")
+          f"CQI 周期 {_per} TTI：上报次数 {_cnt:.0f} ≈ {_cqi_num_tti}/{_per}")
     check(_age == _per - 1,
-          f"SRS 周期 {_per} TTI：CQI 年龄峰值 {_age} = 周期 - 1")
+          f"CQI 周期 {_per} TTI：CQI 年龄峰值 {_age} = 周期 - 1")
 
 # 2) 关掉运行时上报 → 退回建表那份数组，诊断键显式为 None（不是 0）
 _cqi_off = _cqi_run(ap.CqiReportConfig(enabled=False))
@@ -2392,7 +2392,7 @@ check(_bler_long < _bler_off["stale_no_loss"],
       "周期拉长到 40 TTI 反而更保守：IIR 的 lambda 是**每次上报**作用一次，"
       "周期越长，滤波器在时间上的记忆越长，持有的 CQI 越贴近长期均值")
 
-# 5) 不许偷看未来：上报测的是 srs_period + srs_delay 个 TTI **之前**的信道
+# 5) 不许偷看未来：上报测的是 cqi_period + csi_delay 个 TTI **之前**的信道
 _probe = ap.CqiReporter(
     _cqi_tabs, ap.CqiReportConfig(cqi_period_tti=4, csi_delay_tti=3),
     snap_every=10, cqi_filter_lambda=0.25, cqi_filter_domain="cqi_index",
@@ -2500,23 +2500,21 @@ for _q_table in (3, 2, 1):
               f"la.select_reported_cqi 在 {_q_probe.size} 个探测点上逐值等价"
               f"（不等的有 {len(_q_bad)} 个）")
 
-# 端到端：三张 MCS 表都要能跑完运行时上报，而且真的上报了。
-# experience_v2 只收 table 3，所以这里走 capacity。
-for _q_table in (3, 2, 1):
-    _q_tabs = sysm.build_link_tables(
-        [np.ones((2, 16, 4, 2), dtype=complex)], [10.0],
-        table=_q_table, num_snapshots=2)
-    _q_cell = sysm.simulate(
-        _q_tabs,
-        sys_cfg=sysm.SystemConfig(evaluation_mode="capacity", duration_s=0.05,
-                                  tdd_pattern="DDDSU"),
-        traffic=sysm.TrafficConfig(model="full_buffer"),
-        sched=sysm.SchedulerConfig(olla_enabled=False),
-        kpi=sysm.KpiConfig(warmup_tti=0)).cell
-    check(_q_cell["cqi_update_count_mean"] is not None
-          and float(_q_cell["cqi_update_count_mean"]) > 0.0,
-          f"table {_q_table}：运行时 CQI 端到端跑通且真的上报了"
-          f"（平均上报 {_q_cell['cqi_update_count_mean']} 次）")
+# 端到端系统路径只支持 table 3；table 1/2 的量化原语在上面逐点验证，不能为了
+# “跑通三张表”恢复已被 #25 删除的 legacy capacity 消费者。
+_q_tabs = sysm.build_link_tables(
+    [np.ones((2, 16, 4, 2), dtype=complex)], [10.0],
+    table=3, num_snapshots=2)
+_q_cell = sysm.simulate(
+    _q_tabs,
+    sys_cfg=sysm.SystemConfig(duration_s=0.05, tdd_pattern="DDDSU"),
+    traffic=sysm.TrafficConfig(model="full_buffer"),
+    sched=sysm.SchedulerConfig(olla_enabled=False),
+    kpi=sysm.KpiConfig(warmup_tti=0)).cell
+check(_q_cell["cqi_update_count_mean"] is not None
+      and float(_q_cell["cqi_update_count_mean"]) > 0.0,
+      f"table 3：运行时 CQI 端到端跑通且真的上报了"
+      f"（平均上报 {_q_cell['cqi_update_count_mean']} 次）")
 
 
 # --- 17.3 解码 SINR 只在实际授予的 RBG 上取 --------------------------------

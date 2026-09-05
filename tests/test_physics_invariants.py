@@ -534,9 +534,9 @@ check(_fb_served[0] > _fb_served[-1],
 # 而守卫它的断言恰好跑在「频选关 + MU 关」——两个会让它失败的开关都关掉了。
 # 真实规律是：**满缓冲保证的是 RBG 用满，不是只服务一个用户。**
 #   * 频选打开：调度器把"少几个但信道更好的 RBG"给第一个用户、余料给下一个；
-#   * MU 打开：一个 TTI 本来就配对两个用户（64T4R 立 64 根天线正是为了这个）。
+#   * MU 打开：被准入的 MU TTI 会配对两个用户；相关性、MCS、PF 增益等门限仍可拒配。
 # 出厂默认是 frequency_selective="auto" + mu_enabled=False，在真实锚点数据集上
-# 实测每忙 TTI 1.07；开 MU 是 1.73、小区吞吐 +36%。
+# 实测每忙 TTI 1.14；开 MU 是 1.86、小区吞吐 +64%。
 # 这里用互补频选的合成信道把四个格子都钉住，谁把任何一格改回 1.0 都会红。
 _fsrng = np.random.default_rng(7)
 _fsH = []
@@ -569,9 +569,11 @@ check(abs(_ues(_a_ff) - 1.0) < 1e-9,
       "频选关+MU关：每忙 TTI 恰好 1 个（这是退化解）")
 check(_ues(_a_sf) > 1.0 + 1e-9,
       f"**频选开就 >1**：调度器按 RBG 把带宽切给多个用户（实得 {_ues(_a_sf):.4f}）")
-check(abs(_ues(_a_fm) - 2.0) < 1e-9 and float(_a_fm["mu_share"]) > 0.0,
-      f"**MU 开就配对两个用户**（实得 {_ues(_a_fm):.4f}，"
-      f"MU 占比 {float(_a_fm['mu_share']):.2f}）")
+_fm_mu_share = float(_a_fm["mu_share"])
+check(_fm_mu_share > 0.0
+      and abs(_ues(_a_fm) - (1.0 + _fm_mu_share)) < 1e-9,
+      f"**MU 开后确实发生二用户配对**：平均服务数 = 1 + MU TTI 占比"
+      f"（实得 {_ues(_a_fm):.4f} = 1 + {_fm_mu_share:.4f}）")
 check(_ues(_a_sm) > _ues(_a_fm) + 1e-9,
       f"频选与 MU 叠加还会更多（实得 {_ues(_a_sm):.4f}）")
 # **四种配置里真正不变的是这个**：满缓冲把 RBG 用满，没有留空的尾料。
