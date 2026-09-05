@@ -404,6 +404,88 @@ def re_per_slot(n_prb: int, n_symbols: int = 12, n_dmrs_per_prb: int = 12,
     return max(0, per_prb) * int(n_prb)
 
 
+@dataclass(frozen=True)
+class PdschOverhead:
+    """一个下行时隙里 PDSCH **拿不到**的那部分 RE，即 38.214 §5.1.3.2 步骤 1
+    的 ``N_DMRS`` 与 ``N_OTH``。
+
+    以前主调度路径直接按 ``12 子载波 × 12 符号 = 144 RE/PRB`` 算 TBS，
+    等于假设 DM-RS 与 PDCCH 都不占资源，TBS 偏大约 12%。这个类把口径集中到
+    一处，让 ``system`` 的 legacy 主循环与 ``experience`` 的 ``TbsLookup``
+    用**同一个**换算，不会各自算各自的。
+
+    三个参数的物理含义：
+
+    ``pdsch_symbols``
+        一个 D 时隙里留给 PDSCH 的 OFDM 符号数。项目历史口径是 14 符号里取
+        12，**这 12 是资源换算的入口，不是标准值**；改成 13/14 会同比抬高
+        所有 TBS，属于口径决策，所以做成参数。
+    ``dmrs_re_per_prb``
+        DM-RS 每 PRB 占的 RE。38.211 §7.4.1.1 的 Configuration type 1：
+        单符号 DM-RS 6 RE/PRB（默认），双符号 12 RE/PRB。
+    ``pdcch_symbols``
+        PDCCH 等效占用的前置 OFDM 符号数，每符号折 12 RE/PRB。**这是等效法**：
+        真实系统里 PDCCH 只占 CORESET 覆盖的那些 RB，这里摊到全带宽。
+        RB 级 CORESET 账本是后续可选项，不在本模型内。
+
+    S 时隙不是 D 时隙的等比缩小：DM-RS 与 PDCCH 是**每时隙固定开销**，
+    不随下行符号数缩水，所以 S 的可用 RE 比 ``D × s_slot_fraction`` 更少。
+    ``symbols()`` 只把符号数按比例折算，开销随后只扣一次——这正是"不要和
+    ``frac`` 双重扣减"的含义。
+    """
+
+    pdsch_symbols: int = 12
+    dmrs_re_per_prb: int = 6
+    pdcch_symbols: int = 1
+
+    def __post_init__(self) -> None:
+        for name in ("pdsch_symbols", "dmrs_re_per_prb", "pdcch_symbols"):
+            value = getattr(self, name)
+            if (isinstance(value, (bool, np.bool_))
+                    or not isinstance(value, (int, np.integer))):
+                raise ValueError(f"{name} 必须是整数")
+        if not 1 <= int(self.pdsch_symbols) <= 14:
+            raise ValueError("pdsch_symbols 必须在 1..14 之间")
+        if not 0 <= int(self.dmrs_re_per_prb) <= 12:
+            raise ValueError("dmrs_re_per_prb 必须在 0..12 之间（type-1 单/双符号）")
+        if not 0 <= int(self.pdcch_symbols) < int(self.pdsch_symbols):
+            raise ValueError("pdcch_symbols 必须非负且小于 pdsch_symbols")
+
+    def symbols(self, slot: str, s_slot_fraction: float = 1.0) -> int:
+        """该时隙类型下留给 PDSCH 的 OFDM 符号数。
+
+        D 时隙就是 ``pdsch_symbols``；S 时隙按下行占比折算并至少留 1 个符号。
+        """
+        key = str(slot).upper()
+        if key == "D":
+            return int(self.pdsch_symbols)
+        if key != "S":
+            raise ValueError(f"slot 只支持 D / S，收到 {slot!r}")
+        frac = float(s_slot_fraction)
+        if not np.isfinite(frac) or not 0.0 < frac <= 1.0:
+            raise ValueError("s_slot_fraction 必须是 (0,1] 内的有限数")
+        return max(1, int(round(int(self.pdsch_symbols) * frac)))
+
+    def re_per_prb(self, slot: str, s_slot_fraction: float = 1.0) -> int:
+        """扣完 DM-RS 与 PDCCH 之后每 PRB 的 PDSCH RE 数（含 156 上限）。"""
+        return re_per_slot(
+            1, n_symbols=self.symbols(slot, s_slot_fraction),
+            n_dmrs_per_prb=int(self.dmrs_re_per_prb),
+            overhead_per_prb=12 * int(self.pdcch_symbols))
+
+    def re_per_grant(self, n_prb: int, slot: str,
+                     s_slot_fraction: float = 1.0) -> int:
+        """一次 ``n_prb`` 的 grant 在该时隙类型下的 PDSCH RE 总数。"""
+        return int(self.re_per_prb(slot, s_slot_fraction)) * int(n_prb)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"pdsch_symbols": int(self.pdsch_symbols),
+                "dmrs_re_per_prb": int(self.dmrs_re_per_prb),
+                "pdcch_symbols": int(self.pdcch_symbols),
+                "pdcch_re_per_prb": 12 * int(self.pdcch_symbols),
+                "re_per_prb_d": int(self.re_per_prb("D"))}
+
+
 # ---------------------------------------------------------------------------
 # 五、BLER 模型（**这是模型，不是实测曲线**）
 # ---------------------------------------------------------------------------
