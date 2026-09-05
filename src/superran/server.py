@@ -2132,9 +2132,9 @@ def sr_system_sim(
         ``cdf``（两份 value,cdf 文件驱动包大小与包间隔 renewal process）/
         ``mixed``（推荐：大小 UE 混跑，包长与到达率外生定义）/
         ``full_buffer``（**这就是"容量仿真"**：话务开到最大、缓冲区永不空，
-        按需 RBG 退化成全带宽。TS 28.552 的样本只在 buffer 排空事件上形成，满缓冲下
+        调度器始终有足量数据填满全部 RBG。TS 28.552 的样本只在 buffer 排空事件上形成，满缓冲下
         不发生 ⇒ ``drb_throughput_rel19_mbps`` 报 ``None``；看工程口径
-        ``ue_served_p5_mbps`` 与 ``active_window_goodput_mbps``，两者应收敛）/ ``cbr``
+        ``ue_served_p5_mbps`` 与 ``active_window_goodput_mbps``；两者分母趋同但发送字节分子同源）/ ``cbr``
     arrival_rate_hz : 每用户每秒到达几个文件。控制负载——太高会积压，
         ``notes`` 会拦。
     packet_size_cdf / interarrival_cdf : UTF-8 两列经验 CDF，cdf 支持 0..1 或

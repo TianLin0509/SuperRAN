@@ -287,12 +287,13 @@ sys_capacity_full_buffer:
   label: 容量仿真 · 话务开到最大（full buffer）
   summary: >-
     **"容量仿真"就是这个场景**：它不是另一条仿真分支，只是把话务开到最大。
-    缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74），
+    缓冲区永不空 ⇒ 调度器始终有足量数据填满全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74），
     调度、AMC、HARQ、解调 SINR 聚合全部照体验口径走。
     满缓冲下 TS 28.552 的标准样本一个都不形成（样本只在 buffer 排空事件上形成），
     drb_throughput_rel19_mbps / cell_experienced_mbps 报 None——定义使然，不是缺陷。
-    看工程口径：ITU 的 ue_served_p5_mbps 与 active_window_goodput_mbps，
-    两者算法不同但应收敛。其余需要 burst 真的传完的键同样报 None（完成时延、PDB、
+    看工程口径：ITU 的 ue_served_p5_mbps 与 active_window_goodput_mbps。
+    满缓冲下两者因分母趋同而接近，但发送字节分子同源，不能验证字节记账。
+    其余需要 burst 真的传完的键同样报 None（完成时延、PDB、
     含头速率）。结果里引用 cell_served_mbps、ue_served_p5_mbps、
     active_window_goodput_mbps、PRB 利用率与 Jain 公平度。
   answers:
@@ -795,7 +796,7 @@ sys_multicell_center_cell:
       2026-09-04 实测，8 次重复，单进程，serving_cell=1（13 个 UE / 210 个 / 21 小区）。
       **自闭环核对四条都过**：① 首传 BLER 0.1041 = 10% 目标的 1.04 倍，四个锚点里
       最准；② **已撤回**——ue_served_mean 47.733 与 active_window_goodput 47.833
-      不是两条独立路径，分子是同一份 ACK 净荷记账，只有分母不同，吻合是必然的，
+      不是两条独立路径，分子是同一份发送净荷记账，只有分母不同，吻合是必然的，
       验不了记账本身（详见 sys_single_cell_capacity 的 note）；
       ③ IoT 中位 23.23 dB，落在 CLAUDE.md 说的「密集城区常 >20 dB」
       区间，且与单小区场景的 0.004 dB 形成决定性对比——**这一个数就证明多小区

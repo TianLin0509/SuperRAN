@@ -12,15 +12,17 @@
 事件上形成（TS 128 552 V19.5.0 p54），满缓冲下一个都不会形成，所以
 ``drb_throughput_rel19_mbps`` / ``cell_experienced_mbps`` 报 ``None``——**这是
 定义使然，不是缺陷**。满缓冲要看的是工程口径：ITU-R M.2412 / TR 38.913 的
-``ue_served_p5_mbps``（每 UE 已服务净荷 ÷ 观测窗长）与 ``active_window_goodput_mbps``
-（在飞 busy period 的窗内段 goodput）。这两条路径算法不同，满缓冲下应当收敛，
-实测 61.868 vs 61.968 Mbps，差 0.16%——**这正是拿来自查的交叉核对**。
+``ue_served_p5_mbps``（每 UE 已发送净荷 ÷ 观测窗长）与 ``active_window_goodput_mbps``
+（在飞 busy period 的窗内段发送速率）。满缓冲下两者的分母趋同，实测
+61.868 vs 61.968 Mbps，差 0.16%；但它们的发送字节分子同源，接近只能检查
+分母边界，**不能证明字节记账正确**。有限话务的独立到达量守恒才约束分子。
 
 物理边界明确写在结果里：逐 RBG 频选与 RB 功控是两个独立开关；只要链路表
 带逐 RBG SINR，实际 grant 就按 bitmap 聚合并重选 MCS。当前聚合仍是 dB
 算术平均而非标定过的
 EESM/MIESM。每个单码字 TB 最多一次 IR/CC 重传：空口 MCS、RBG 数、rank 与
-TBS 保持不变，BLER 只由预置 NewTx 曲线推导；失败 payload 留队并成为后续新 TB。
+TBS 保持不变，BLER 只由预置 NewTx 曲线推导；payload 在首传发送时离开队列，
+末次失败只进 ``residual_bler``，不回队列。
 """
 from __future__ import annotations
 
@@ -59,6 +61,10 @@ class TbsLookup:
     ``values`` 保留从 RBG0 开始的前缀表，兼容等长载波与旧 API；实际 grant
     会用 ``rbg_indices`` 把各组真实 PRB 数相加后查 TBS。这样 Configuration 2
     下 51 RB 的 ``[8,8,8,8,8,8,3]`` 尾组既不会丢，也不会被错算成 8 PRB。
+
+    每 PRB 的 RE 数由 ``overhead``（:class:`linkadapt.PdschOverhead`）决定，
+    已扣 DM-RS 与 PDCCH。``s_slot_fraction`` 现在只折算**符号数**，固定开销
+    随后只扣一次，因此 S/D 的 TBS 之比小于 ``s_slot_fraction``。
     """
 
     values: np.ndarray                 # int64 [2, 28, 4, num_rbg]，单位 byte
@@ -68,13 +74,16 @@ class TbsLookup:
     rbg_prb_sizes: tuple[int, ...]
     mcs_table: int = 3
     target_bler: float = 0.1
+    # DM-RS 与 PDCCH 开销口径；None 视作 la.PdschOverhead() 的默认值。
+    overhead: la.PdschOverhead = field(default_factory=la.PdschOverhead)
 
     @classmethod
     def build(cls, num_rbg: int, rb_per_rbg: int,
               s_slot_fraction: float = 0.7, *,
               rbg_prb_sizes: Sequence[int] | None = None,
               mcs_table: int = 3,
-              target_bler: float = 0.1) -> TbsLookup:
+              target_bler: float = 0.1,
+              overhead: la.PdschOverhead | None = None) -> TbsLookup:
         for name, value in (("num_rbg", num_rbg), ("rb_per_rbg", rb_per_rbg)):
             if (isinstance(value, (bool, np.bool_))
                     or not isinstance(value, (int, np.integer)) or int(value) < 1):
@@ -109,15 +118,21 @@ class TbsLookup:
             raise ValueError("experience_v2 的 TBS/BLER 反查只支持 MCS table 3")
         if not np.isfinite(target_bler) or not 0.0 < float(target_bler) < 1.0:
             raise ValueError("target_bler 必须是 (0,1) 内的有限数")
+        oh = la.PdschOverhead() if overhead is None else overhead
+        if not isinstance(oh, la.PdschOverhead):
+            raise ValueError("overhead 必须是 linkadapt.PdschOverhead")
         table = np.zeros((2, 28, 4, n_rbg), dtype=np.int64)
         prefix_prb = np.cumsum(np.asarray(sizes, dtype=np.int64))
-        for slot, frac in (("D", 1.0), ("S", float(s_slot_fraction))):
+        # S 时隙的缩减只走符号数（``oh.symbols``），DM-RS/PDCCH 随后只扣一次。
+        # 以前是 ``144 × frac`` 完全不扣开销，且 frac 与开销的语义混在一起。
+        for slot in ("D", "S"):
             si = _SLOT_INDEX[slot]
+            re_per_prb = oh.re_per_prb(slot, float(s_slot_fraction))
             for mcs in range(28):
                 obj = la.MCS_TABLES[int(mcs_table)][mcs]
                 for rank in range(1, 5):
                     for n in range(1, n_rbg + 1):
-                        n_re = int(int(prefix_prb[n - 1]) * 12 * 12 * frac)
+                        n_re = int(prefix_prb[n - 1]) * re_per_prb
                         table[si, mcs, rank - 1, n - 1] = (
                             la.transport_block_size(
                                 n_re, obj.rate, obj.q_m, layers=rank) // 8)
@@ -131,7 +146,7 @@ class TbsLookup:
                 f"n_rbg={int(bad[3]) + 1}->{int(bad[3]) + 2}")
         return cls(
             table, n_rbg, rb, float(s_slot_fraction), sizes,
-            int(mcs_table), float(target_bler)
+            int(mcs_table), float(target_bler), oh
         )
 
     def _tbs_for_prbs(self, slot: str, mcs: int, rank: int, num_prb: int) -> int:
@@ -143,9 +158,9 @@ class TbsLookup:
             or int(num_prb) < 1
         ):
             raise ValueError("num_prb 必须至少为 1")
-        frac = 1.0 if str(slot).upper() == "D" else self.s_slot_fraction
         obj = la.MCS_TABLES[self.mcs_table][int(mcs)]
-        n_re = int(int(num_prb) * 12 * 12 * frac)
+        n_re = self.overhead.re_per_grant(
+            int(num_prb), str(slot).upper(), self.s_slot_fraction)
         return int(la.transport_block_size(
             n_re, obj.rate, obj.q_m, layers=int(rank)) // 8)
 
@@ -269,30 +284,72 @@ class TbsLookup:
 
 
 @dataclass
-class AckEvent:
+class TxEvent:
+    """一次**首传**：把 payload 从 buffer 里搬走的那一次。
+
+    ``ack`` 只作诊断，不参与 KPI —— 现场口径按发送记账，不看这个 TB 对不对。
+    重传不产生 TxEvent：它不带新数据，只占资源。
+    """
+
     tti: int
     payload_bytes: int
     scheduled_bytes: int
     padding_bytes: int
+    ack: bool = True
+
+
+#: 历史别名。旧脚本读 ``AckEvent`` 时不至于 ImportError，但语义已经是"发送"。
+AckEvent = TxEvent
 
 
 @dataclass
 class BusyPeriod:
-    """一个 DRB buffer 从空到非空、再回到空的完整 busy period。"""
+    """一个 DRB buffer 从空到非空、再回到空的完整 busy period。
+
+    **buffer 在发送时扣减，不是在 ACK 时**（现场速率统计口径，用户
+    2026-09-04 确认）：数据一旦被组进 TB 发出去就离开 buffer，busy period
+    在"清空 buffer 的那一次**发送**"结束，KPI 当场可统计，**完全不看这个 TB
+    正确与否**。误码与重传对体验速率的影响体现在两处，都不是"等它传对"：
+
+    1. 重传要占资源（时频资源被吃掉，别人发不了）；
+    2. 重传优先级高于新传。发完这个包 buffer 还没空时，NACK 回来会插队，
+       把后面的数据往后推，于是掐头去尾时间被拉长、速率下降。
+
+    这条口径不只是 KPI 偏好——**多进程 HARQ 必须靠它才自洽**。按 ACK 扣减时，
+    被 NACK 的 TB 其字节仍留在队列里，同一个 UE 的另一个 HARQ 进程会把
+    **同一批字节**再组成一个新 TB 发一遍，然后原 TB 的重传发现队列已经不够
+    冻结的 payload 了。
+    """
 
     start_tti: int
     traffic_class: str
     pdb_ms: float
     bytes_arrived: int = 0
-    bytes_acked: int = 0
+    #: 已经离开 buffer 的字节（发送即算，与 ACK 无关）
+    bytes_sent: int = 0
     first_tx_tti: int = -1
-    last_ack_tti: int = -1
+    #: 清空 buffer 的那一次发送所在 TTI
+    last_tx_tti: int = -1
     tx_attempts: int = 0
-    ack_events: list[AckEvent] = field(default_factory=list)
+    #: 只记首传；重传不带新数据，不进这里
+    tx_events: list[TxEvent] = field(default_factory=list)
 
     @property
     def completed(self) -> bool:
-        return self.bytes_acked >= self.bytes_arrived > 0
+        return self.bytes_sent >= self.bytes_arrived > 0
+
+    # -- 历史字段名的只读别名（结果 JSON 与旧分析脚本还在用） --------------
+    @property
+    def bytes_acked(self) -> int:
+        return self.bytes_sent
+
+    @property
+    def last_ack_tti(self) -> int:
+        return self.last_tx_tti
+
+    @property
+    def ack_events(self) -> list[TxEvent]:
+        return self.tx_events
 
 
 @dataclass
@@ -334,36 +391,46 @@ class DrbQueue:
         self.items.append(ArrivalItem(int(tti), n, n))
 
     def transmit(self, tti: int, scheduled_bytes: int, payload_bytes: int,
-                 *, ack: bool) -> int:
-        """记录一次空口发送。只有 ACK 才从队列扣 payload。"""
+                 *, ack: bool, is_retx: bool = False) -> int:
+        """记录一次空口发送。**发送即从队列扣 payload，与 ACK 无关。**
+
+        ``is_retx=True`` 的那次不带新数据——它的字节在首传时就已经离开
+        buffer——所以**对 DRB 队列完全是个空操作**：不动队列、不产生 TxEvent、
+        不推进 busy period，也**不碰任何 busy period 的计数器**。
+
+        为什么连 ``tx_attempts`` 都不能加：发送即扣减之后，一个 TB 的重传往往
+        落在**它自己那个 busy period 已经关闭之后**（那次首传正好把 buffer 清空）。
+        这时 ``self.active`` 指向的是**下一个** busy period，给它加 ``tx_attempts``
+        等于把上一个包的重传记到下一个包头上。后果不是记多了一次，而是
+        ``burst_metrics`` 的 ``len(events)==1 and tx_attempts==1`` 这道小包闸门被
+        它顶开，那个 burst 的吞吐直接变成 ``None`` ——**从话统里整个消失**。
+        被丢掉的又恰好是"期间有重传"的那些（也就是慢的那些），于是误码越多
+        体验速率反而越高。实测过：首传全错 62.47 Mbps > 首传全对 57.57 Mbps。
+
+        重传占的资源不靠这里记——它在 ``retx_count``、allocation 明细和 PRB
+        利用率里都有，那几处才是它该出现的地方。
+        """
         b = self.active
-        if b is None or payload_bytes <= 0:
+        if is_retx or b is None or payload_bytes <= 0:
             return 0
         if b.first_tx_tti < 0:
             b.first_tx_tti = int(tti)
         b.tx_attempts += 1
-        # 首传等待属于到达对象，而不是整个 busy period。一次 TB 可以拼接多个
-        # FIFO 对象；即便 NACK，它们也已经发生过首传，不能等 ACK 后才记起点。
-        mark_left = min(int(payload_bytes), self.queued_bytes)
-        for item in self.items:
-            if mark_left <= 0:
-                break
-            covered = min(int(item.remaining_bytes), mark_left)
-            if covered > 0 and item.first_tx_tti < 0:
-                item.first_tx_tti = int(tti)
-            mark_left -= covered
-        if not ack:
-            return 0
         payload = min(int(payload_bytes), self.queued_bytes)
+        if payload <= 0:
+            return 0
         padding = max(0, int(scheduled_bytes) - payload)
         self.queued_bytes -= payload
-        b.bytes_acked += payload
-        b.last_ack_tti = int(tti)
-        b.ack_events.append(AckEvent(int(tti), payload, int(scheduled_bytes), padding))
+        b.bytes_sent += payload
+        b.last_tx_tti = int(tti)
+        b.tx_events.append(
+            TxEvent(int(tti), payload, int(scheduled_bytes), padding, bool(ack)))
         consume_left = payload
         while consume_left > 0 and self.items:
             item = self.items[0]
             take = min(int(item.remaining_bytes), consume_left)
+            if item.first_tx_tti < 0:
+                item.first_tx_tti = int(tti)
             item.remaining_bytes -= take
             consume_left -= take
             if item.remaining_bytes == 0:
@@ -419,19 +486,16 @@ def active_window_goodput(burst: BusyPeriod, tti_ms: float,
     需要知道"正在传的时候有多快"。所以另起一个字段、另起一个名字，
     与标准字段并列上报，任何时候都不混进 ``drb_throughput_rel19_mbps``。
 
-    **不掐尾，是因为它本来就是 goodput（有用字节 ÷ 经过时间），不是标准吞吐。**
-    我曾断言"在飞的末 ACK 必是满 slot 所以无尾可掐"——**那个断言是错的**，
-    审核给了反例：首传 100B 装进 1000B TB 后 NACK，等待期间新增 1 B，重传 ACK
-    时队列仍非空、该 ACK 却带 900 B padding。padding 对 goodput 无影响
-    （分子本来就只数有用字节），但它足以否定"满 slot"这个说法，
-    因此也否定了"可以按标准口径处理在飞段"的想法。
+    **不掐尾，是因为它本来就是工程发送速率（发送净荷 ÷ 经过时间），不是标准
+    busy-period 吞吐。** 在飞 busy period 还没有 buffer-emptied 事件，无法知道哪次
+    发送会成为标准口径要排除的最后一个 piece；因此不能把工程窗内段冒充标准样本。
 
     含头速率只在**该 busy period 本身起始于测量窗内**时才给：起始于窗外的 burst，
     它的排队等待发生在窗外，加进窗内分母是两个口径混用。
     """
     if burst.first_tx_tti < 0:
         return BurstMetrics(None, None, None, None, None)
-    events = [e for e in burst.ack_events if e.tti >= int(warmup_tti)]
+    events = [e for e in burst.tx_events if e.tti >= int(warmup_tti)]
     if not events:
         return BurstMetrics(None, None, None, None, None)
     vol = int(sum(e.payload_bytes for e in events))
@@ -454,19 +518,19 @@ def burst_metrics(burst: BusyPeriod, tti_ms: float,
                   small_burst_policy: str = "fractional_slot") -> BurstMetrics:
     """按 28.552 Rel-19 与时延口径计算一个已完成 busy period。
 
-    * 大 burst：从首传开始，体积与时间都排除清空 buffer 的最后一个 ACK piece。
+    * 大 burst：从首传开始，体积与时间都排除清空 buffer 的最后一个发送 piece。
     * 单次首传即成功的小 burst：可选 fractional-slot，时间按
       ``slot × payload/TBVol`` 折算（TBVol−PaddingVol 就是 payload）。
     * 排队等待与完成时延从 arrival 开始，和 3GPP throughput 分开上报。
     * 含头速率与上述吞吐使用完全相同的 payload numerator 和去尾规则，唯一差异是
       denominator 还包含从 busy-period 到达到首次调度的等待时间。
     """
-    if not burst.completed or burst.first_tx_tti < 0 or burst.last_ack_tti < 0:
+    if not burst.completed or burst.first_tx_tti < 0 or burst.last_tx_tti < 0:
         return BurstMetrics(None, None, None, None, None)
     wait = max(0, burst.first_tx_tti - burst.start_tti) * float(tti_ms)
-    completion = (burst.last_ack_tti - burst.start_tti + 1) * float(tti_ms)
+    completion = (burst.last_tx_tti - burst.start_tti + 1) * float(tti_ms)
     pdb_miss = completion > float(burst.pdb_ms) if burst.pdb_ms > 0 else None
-    events = burst.ack_events
+    events = burst.tx_events
     if len(events) >= 2:
         vol = int(sum(e.payload_bytes for e in events[:-1]))
         duration_tti = events[-2].tti - burst.first_tx_tti + 1
@@ -985,9 +1049,9 @@ class ExperienceTraffic:
         return max(0, int(tti) - b.start_tti) * self.tti_ms if b is not None else 0.0
 
     def transmit(self, ue: int, tti: int, scheduled_bytes: int,
-                 payload_bytes: int, *, ack: bool) -> int:
+                 payload_bytes: int, *, ack: bool, is_retx: bool = False) -> int:
         return self.queues[int(ue)].transmit(
-            tti, scheduled_bytes, payload_bytes, ack=ack)
+            tti, scheduled_bytes, payload_bytes, ack=ack, is_retx=is_retx)
 
     @property
     def backlog_bytes(self) -> int:
@@ -1467,10 +1531,9 @@ def _build_su_plan(
         full_fits = remaining_fits = False
         full_potential = int(potential_of[u])
         if pending is not None:
-            if q < int(pending.payload_bytes):
-                raise RuntimeError(
-                    f"UE {u} HARQ 队列只剩 {q} B，小于冻结 payload "
-                    f"{pending.payload_bytes} B")
+            # **这里不能再拿队列长度去校验冻结 payload。** buffer 在首传时就已经
+            # 扣掉了这些字节，重传不带新数据，所以队列剩多少与它无关——
+            # 它只是来占资源、并且插在新传前面的。
             full_need = remaining_need = int(pending.n_rbg)
             full_fits = remaining_fits = True
             if remaining_need > remaining:
@@ -2307,7 +2370,8 @@ def simulate_experience(
     lookup = TbsLookup.build(
         sys_cfg.num_rbg, sys_cfg.rb_per_rbg, s_slot_fraction,
         rbg_prb_sizes=rbg_sizes, mcs_table=mcs_table,
-        target_bler=link_target_bler)
+        target_bler=link_target_bler,
+        overhead=getattr(sys_cfg, "pdsch_overhead", None))
     frequency_mode = str(getattr(sched, "frequency_selective", "auto"))
     su_frequency_ready = all(
         getattr(table, "sinr_rbg_db", None) is not None
@@ -2974,7 +3038,10 @@ def simulate_experience(
                     mode_tx_by_ue[mode][u] += 1
                     mode_nack_by_ue[mode][u] += int(not ack)
                     mode_expected_bler_by_ue[mode][u] += bler
-                acked = tr.transmit(u, tti, tb_bytes, payload, ack=ack)
+                # **发送即扣 buffer。** 重传不带新数据（字节在首传时就走了），
+                # 对 DRB 队列完全不记账；资源占用由 retx_count/allocation/PRB 账本记录。
+                sent = tr.transmit(u, tti, tb_bytes, payload, ack=ack,
+                                   is_retx=is_retx)
                 if is_retx:
                     retx_count[u] += 1
                     retx_nack_count[u] += int(not ack)
@@ -2994,7 +3061,7 @@ def simulate_experience(
                 if accounting == "scheduled_tbs":
                     credit = tb_bytes
                 elif accounting == "acked_goodput":
-                    credit = acked
+                    credit = sent
                 else:
                     credit = lookup.tbs_bytes_for_indices(
                         slot, mcs, rank, tuple(range(int(sys_cfg.num_rbg))))
@@ -3002,12 +3069,12 @@ def simulate_experience(
                 sched_cnt[u] += 1
                 mcs_sum[u] += mcs
                 rank_sum[u] += rank
-                served[u] += acked
+                served[u] += sent
                 scheduled_tbs[u] += tb_bytes
                 attempted_payload[u] += payload
                 padding[u] += pad
                 if in_measurement:
-                    served_measured[u] += acked
+                    served_measured[u] += sent
                     scheduled_tbs_measured[u] += tb_bytes
                     attempted_payload_measured[u] += payload
                     padding_measured[u] += pad
@@ -3075,14 +3142,14 @@ def simulate_experience(
                     class_physical_rbg_share[cls] = (
                         class_physical_rbg_share.get(cls, 0.0)
                         + n_alloc / max(len(grant.users), 1))
-                    class_acked[cls] = class_acked.get(cls, 0) + acked
+                    class_acked[cls] = class_acked.get(cls, 0) + sent
                 pos = cand_pos[u]
                 alloc = Allocation(
                     tti=tti, snapshot=snap, ue=u, traffic_class=cls, slot=slot,
                     rbg_indices=indices, n_rbg=n_alloc, n_prb=grant_prb,
                     mcs=mcs, rank=rank,
                     scheduled_bytes=tb_bytes, payload_bytes=payload,
-                    acked_bytes=acked, padding_bytes=pad, pf_credit_bytes=int(credit),
+                    acked_bytes=sent, padding_bytes=pad, pf_credit_bytes=int(credit),
                     queue_bytes_before=int(queue_before),
                     required_rbg=int(grant.required_rbg[side]),
                     fits_in_fullband=bool(grant.fits_in_fullband[side]),
@@ -3654,7 +3721,7 @@ def simulate_experience(
     mu_paired_prb_utilization = float(
         mu_prb_equiv / max(available_prb_equiv, _EPS))
     # **用户吞吐的分布：ITU-R M.2412 / TR 38.913 的"用户体验速率"口径。**
-    # 每 UE 在测量窗内 ACK 到的净荷字节 / 窗长，取跨 UE 的分布；5% 分位就是
+    # 每 UE 在测量窗内发送的净荷字节 / 窗长，取跨 UE 的分布；5% 分位就是
     # cell-edge user throughput。它和 busy-period 口径是**两个不同的定义**，
     # 不是同一个数的两种精度：
     #   * busy-period（下面的 cell_experienced_mbps / drb_throughput_rel19_mbps）
@@ -3668,7 +3735,7 @@ def simulate_experience(
         "ue_served_median_mbps": _pct(user_served, 50),
         "ue_served_p5_mbps": _pct(user_served, 5),
         "ue_served_throughput_definition": (
-            "per-UE ACKed payload bytes over the measurement window divided by "
+            "per-UE transmitted payload bytes over the measurement window divided by "
             "the window duration; the 5th percentile is the ITU-R M.2412 / "
             "TR 38.913 cell-edge user throughput. Defined for every traffic "
             "model including full buffer, where the busy-period KPIs are not."),
@@ -3691,12 +3758,12 @@ def simulate_experience(
         "active_window_goodput_mbps": _mean(active_window_goodputs),
         "active_window_goodput_samples": int(inflight_burst_count),
         "active_window_goodput_definition": (
-            "ENGINEERING metric, NOT a TS 28.552 sample: ACKed payload of the "
+            "ENGINEERING metric, NOT a TS 28.552 sample: transmitted payload of the "
             "still-in-flight busy period within the measurement window divided by "
             "the elapsed time from its first transmission (or window start) to its "
-            "last in-window ACK. No tail trimming because this is goodput, not a "
-            "standard throughput sample; the last in-window ACK may itself carry "
-            "padding. Reported alongside drb_throughput_rel19_mbps, never merged "
+            "last in-window new transmission. No tail trimming because the buffer-"
+            "emptied event has not happened, so the standard final piece is not yet "
+            "known. Reported alongside drb_throughput_rel19_mbps, never merged "
             "into it."),
         # **标准样本的统计有效性必须可见。** 过载时已完成 busy period 会变得很少
         # 甚至为 0，此时 drb_throughput_rel19_mbps 是少数样本的均值或 None。
@@ -4023,7 +4090,7 @@ def simulate_experience(
         #
         # **需要一个数的用户看这两个工程字段**（任何话务下都有值）：
         #   * ue_served_p5/median/mean_mbps —— ITU-R M.2412 / TR 38.913 口径，
-        #     每 UE 已服务净荷 ÷ 观测窗长，5% 分位即 cell-edge user throughput；
+        #     每 UE 已发送净荷 ÷ 观测窗长，5% 分位即 cell-edge user throughput；
         #   * active_window_goodput_mbps —— 在飞 busy period 窗内段的 goodput。
         for _k in ("cell_experienced_mbps",
                    "cell_head_inclusive_experienced_mbps",
@@ -4165,10 +4232,11 @@ def simulate_experience(
             "drb_throughput_rel19_mbps / 完成时延 / PDB）无定义，报 None（不是 0）。"
             "**用户体验速率仍然有定义**，只是走另一个口径：ue_served_p5_mbps "
             "是 ITU-R M.2412 / TR 38.913 的 cell-edge user throughput（每 UE "
-            "已服务净荷 / 观测窗长的 5% 分位），ue_served_mean/median_mbps 是同一"
+            "已发送净荷 / 观测窗长的 5% 分位），ue_served_mean/median_mbps 是同一"
             "分布的均值与中位；另一个工程口径是 active_window_goodput_mbps"
-            "（在飞 busy period 落在测量窗内那段的 goodput）——它与 ue_served "
-            "算法完全不同，满缓冲下应当收敛，可拿来互相自查；"
+            "（在飞 busy period 落在测量窗内那段的发送速率）。满缓冲下两者的分母"
+            "趋同所以数值应接近，但发送字节分子同源，只能检查分母边界，不能验证"
+            "字节记账；"
             "小区总吞吐看 cell_served_mbps。"
             "**标准与工程不是同一个数的两种精度，不可互相顶替。**")
     if measured_bursts < 20 and not tr.unbounded:

@@ -213,13 +213,14 @@ def _traffic() -> Family:
             Option("full_buffer", "full buffer（即「容量仿真」）",
                    summary="话务开到最大，缓冲区永不空",
                    detail="**这就是过去所说的容量模式**，但它不是另一条仿真分支，"
-                          "只是话务配置点：缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、"
-                          "RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。调度、AMC、HARQ、解调 SINR "
+                           "只是话务配置点：缓冲区永不空 ⇒ 调度器始终有足量数据填满"
+                           "全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。调度、AMC、HARQ、解调 SINR "
                           "聚合全部照体验口径走。代价是 busy period 永不结束，"
                           "28.552 的标准样本因此一个都不形成，"
                           "drb_throughput_rel19_mbps 报 None；改看工程口径的 "
-                          "active_window_goodput_mbps 与 ITU 口径的 "
-                          "ue_served_p5_mbps，两者算法不同但满缓冲下收敛。",
+                           "active_window_goodput_mbps 与 ITU 口径的 "
+                           "ue_served_p5_mbps；两者因分母趋同而接近，但发送字节分子同源，"
+                           "不能据此验证字节记账。",
                    when="测小区容量、对标 ITU 的平均小区谱效",
                    cost="最省"),
             Option("cbr", "CBR（恒定速率）",
@@ -311,7 +312,7 @@ def _harq() -> Family:
             ("抽 ACK / NACK", "伯努利，概率就是查到的 BLER"),
             ("NACK 则进重传队列", "该 UE 在重传完成前不开新的首传"),
             ("唯一一次重传", "IR 半谱效映射或 CC +3.0103 dB；只查 NewTx 曲线"),
-            ("结束本次 HARQ", "失败字节留队，后续作为新 TB，不再第二次重传"),
+            ("结束本次 HARQ", "payload 已在首传发送时离开队列；末次失败只进 residual_bler"),
         ],
            branches=[(2, "ACK", "数据交付，OLLA 上调偏置")]),
     )

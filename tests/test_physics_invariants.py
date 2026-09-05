@@ -502,9 +502,9 @@ _fb_served_mean = float(fb.cell["ue_served_mean_mbps"])
 check(_fb_active is not None and float(_fb_active) > 0.0,
       "full buffer 下工程口径 active_window_goodput_mbps 有值")
 # **这条验的是分母，不是分子——别再当成交叉验证。**
-# 两个数的分子是**同一份** ACK 净荷记账（experience.py 里 tr.transmit() 返回的
-# payload，一边累进 served_measured、一边塞进 AckEvent）。只有分母不同：
-# 一个除观测窗长，一个除首传到末 ACK 的跨度。所以它能证明的只有
+# 两个数的分子是**同一份**发送净荷记账（experience.py 里 tr.transmit() 返回的
+# payload，一边累进 served_measured、一边塞进 TxEvent）。只有分母不同：
+# 一个除观测窗长，一个除首传到末次窗内发送的跨度。所以它能证明的只有
 # 「满缓冲下每个 UE 确实从头忙到尾，两个分母重合」——这是关于话务模型的陈述。
 # **净荷记账整体缩放时这条读数不变**（实测把记账放大 10%，小区吞吐错 10.6%，
 # 这条仍读 0.156%）。真正能抓记账缩放的是有限话务下的字节守恒
@@ -514,7 +514,7 @@ check(abs(float(_fb_active) - _fb_served_mean) <= 0.10 * _fb_served_mean,
       "——**这验的是分母，不验净荷记账**")
 
 # **用户体验速率在 full buffer 下是有定义的，只是走另一个口径。**
-# ITU-R M.2412 / TR 38.913：每 UE 已服务净荷 / 观测窗长，5% 分位就是
+# ITU-R M.2412 / TR 38.913：每 UE 已发送净荷 / 观测窗长，5% 分位就是
 # cell-edge user throughput。把 ue_served_* 删掉或让它在 full buffer 下返回
 # None，这几条就会红——满缓冲评估的主指标不许消失。
 _fb_served = [float(row["served_mbps"]) for row in fb.users]
@@ -633,40 +633,41 @@ check(int(_ovl.cell["drb_throughput_inflight_bursts"]) > 0
 #   * cell_experienced_completed_only  = 每个 UE 先各自平均，再对 UE 取均值
 # 同一个样本集、两种加权，burst 数在 UE 之间不均时必然不等。
 # ---------------------------------------------------------------------------
-# **反例棘轮：1 个字节的尾随到达不许翻转标准 KPI 的样本资格。**
-# 审核（2026-09-04）给的反例：首传 100 B payload 装进 1000 B TB → NACK；
-# 等待期间新增 1 B；t5 同 TB 重传并 ACK。此时队列还剩 1 B，busy period 仍在飞，
-# 而那个末 ACK **带 900 B padding**——它根本不是满 slot。
-# 我曾据此把在飞段当作"无尾可掐"混进 drb_throughput_rel19_mbps，于是：
-#   * 没有那 1 B 时 → burst 完成 → 标准样本（这里恰好 None）
-#   * 有那 1 B 时   → 在飞 → 凭空多出一个 0.2667 Mbps 的"标准"样本
-# 1 个字节改变标准 KPI 的有无，且样本建立在重度 padding 的 slot 上。
-# 现在标准样本只来自 buffer emptied 事件，工程量另走 active_window_goodput。
+# **反例棘轮：没有 buffer-emptied 事件的在飞段不许冒充标准样本。**
+# #21 改成"发送即扣队列"后，重传对 DRB 队列是空操作；旧的"NACK 留队、重传
+# 清空"构造已经失效。新反例在同一个 busy period 里多放 1 B，只发送其中 100 B：
+#   * 没有那 1 B → buffer emptied → 形成标准小 burst 样本；
+#   * 有那 1 B   → 仍在飞 → 只能形成 engineering_active_window 样本。
+# 首传故意取 NACK，证明工程发送速率与标准样本边界都不等 ACK；末次失败只影响
+# residual_bler，不能把发送过的 100 B 放回队列。
 _TC = type("_Tc", (), {"name": "ratchet", "pdb_ms": 0.0})()
 
 
-def _padded_retx_queue(trailing_byte: bool) -> ex.DrbQueue:
+def _one_byte_tail_queue(trailing_byte: bool) -> ex.DrbQueue:
     q = ex.DrbQueue(ue=0, traffic_class=_TC)
     q.arrive(0, 100)
-    q.transmit(0, scheduled_bytes=1000, payload_bytes=100, ack=False)
     if trailing_byte:
-        q.arrive(2, 1)
-    q.transmit(5, scheduled_bytes=1000, payload_bytes=100, ack=True)
+        q.arrive(0, 1)
+    q.transmit(0, scheduled_bytes=1000, payload_bytes=100, ack=False)
     return q
 
 
-_q_no, _q_yes = _padded_retx_queue(False), _padded_retx_queue(True)
+_q_no, _q_yes = _one_byte_tail_queue(False), _one_byte_tail_queue(True)
 check(len(_q_no.done) == 1 and _q_no.active is None
       and len(_q_yes.done) == 0 and _q_yes.active is not None,
       "反例构造成立：1 B 尾随到达把 busy period 从「已完成」变成「在飞」")
-check(_q_yes.active.ack_events[-1].padding_bytes == 900,
-      "在飞 busy period 的末 ACK 确实带 900 B padding——「必为满 slot」是错的")
+check(_q_yes.active.tx_events[-1].padding_bytes == 900
+      and not _q_yes.active.tx_events[-1].ack,
+      "在飞 busy period 的 NACK 首传带 900 B padding，但发送的 100 B 仍已记账")
 _m_yes = ex.active_window_goodput(_q_yes.active, 0.5, 0)
 check(_m_yes.throughput_kind == "engineering_active_window"
-      and "rel19" not in str(_m_yes.throughput_kind),
-      "在飞段的样本类别不带 rel19：它不是 TS 28.552 样本")
-check(ex.burst_metrics(_q_no.done[0], 0.5).throughput_kind is None,
-      "无尾随时该 busy period 也产生不了标准样本（单 ACK + 两次发送）")
+      and "rel19" not in str(_m_yes.throughput_kind)
+      and _m_yes.throughput_mbps is not None,
+      "NACK 的在飞发送只形成工程样本，不冒充 TS 28.552 样本")
+check(ex.burst_metrics(_q_yes.active, 0.5).throughput_kind is None,
+      "没有 buffer-emptied 事件的在飞 busy period 不产生标准样本")
+check(ex.burst_metrics(_q_no.done[0], 0.5).throughput_kind == "rel19_fractional_slot",
+      "同样的 NACK 首传只要清空 buffer，就按发送时口径形成标准小 burst 样本")
 # 端到端：同一场景加 1 B，标准字段的样本数不许改变。
 _ratchet_cfg = dict(
     sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="D"),
@@ -738,6 +739,54 @@ def test_mu_admission_gates_are_explicit_and_reversible() -> None:
 
 
 test_mu_admission_gates_are_explicit_and_reversible()
+
+# ---------------------------------------------------------------------------
+section("9  唯一系统主循环必须消费同一个 PDSCH 开销口径（38.214 §5.1.3.2 步骤 1）")
+# **棘轮。** 把 experience.TbsLookup 或系统集成入口换回硬编码的 `PRB x 12 x 12`，
+# 下面几条会变红：那等于假设 DM-RS 与 PDCCH 都不占资源。判据不是"数值等于多少"，
+# 而是"改开销配置，TBS 表和真实系统吞吐都必须跟着动"；硬编码路径的比值会退化成 1.000。
+_oh_default = la.PdschOverhead()                                  # 126 RE/PRB
+_oh_free = la.PdschOverhead(dmrs_re_per_prb=0, pdcch_symbols=0)   # 144 RE/PRB
+_re_ratio = _oh_free.re_per_prb("D") / _oh_default.re_per_prb("D")
+check(abs(_re_ratio - 144.0 / 126.0) < 1e-12,
+      f"两组开销参数的每 PRB RE 之比 = 144/126（实得 {_re_ratio:.6f}）")
+
+# --- experience 侧：TbsLookup 必须消费传进去的开销 ---
+_lut_default = ex.TbsLookup.build(17, 16, sy.S_SLOT_DL_FRACTION)
+_lut_free = ex.TbsLookup.build(17, 16, sy.S_SLOT_DL_FRACTION, overhead=_oh_free)
+_tbs_ratio = (int(_lut_free.values[0, 12, 0, -1])
+              / int(_lut_default.values[0, 12, 0, -1]))
+check(abs(_tbs_ratio - _re_ratio) < 0.01,
+      f"TbsLookup 的 TBS 随开销口径同比变化（实得 {_tbs_ratio:.4f} vs "
+      f"RE 比 {_re_ratio:.4f}）")
+
+
+# --- 系统集成侧：唯一主循环必须消费 sys_cfg.pdsch_overhead ---
+def _system_served(overhead):
+    return sy.simulate(
+        tables[:1],
+        sys_cfg=sy.SystemConfig(duration_s=0.05, tdd_pattern="DDDD",
+                                pdsch_overhead=overhead),
+        traffic=sy.TrafficConfig(model="full_buffer"),
+        sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+        kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(92, 0),
+    ).cell["cell_served_mbps"]
+
+
+_served_default = _system_served(None)
+_served_free = _system_served(_oh_free)
+_served_ratio = _served_free / max(_served_default, 1e-12)
+print(f"  唯一系统主循环：126 RE/PRB -> {_served_default:.2f} Mbps，"
+      f"144 RE/PRB -> {_served_free:.2f} Mbps，比值 {_served_ratio:.4f}")
+check(_served_ratio > 1.05,
+      f"唯一系统主循环确实读了 sys_cfg.pdsch_overhead（比值 {_served_ratio:.4f}；"
+      "硬编码 12x12 时会退化成 1.000）")
+check(abs(_served_ratio - _re_ratio) < 0.03,
+      f"系统吞吐随开销口径同比变化（实得 {_served_ratio:.4f} vs "
+      f"RE 比 {_re_ratio:.4f}）")
+check(_lut_default.overhead == _oh_default
+      and sy.SystemConfig().pdsch_overhead == _oh_default,
+      "TBS 表与系统入口的默认口径是同一个 PdschOverhead()，不会各自漂移")
 
 
 # ---------------------------------------------------------------------------

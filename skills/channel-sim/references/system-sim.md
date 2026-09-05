@@ -43,8 +43,9 @@ sr_system_sim(
 
 **`evaluation_mode` 已经删除。** 系统级仿真只有 `experience_v2` 一条路径：
 TBS 反查最小够用 RBG、同一 TTI 可排多个 UE、尾料可留空；每 TB 最多一次 IR/CC，
-失败字节留 FIFO 后续成为新 TB；KPI 走 TS 28.552 Rel-19 的 DRB busy-period 与
-FIFO 到达对象，小 burst 按 fractional slot 折算。
+buffer 在首传发送时扣减；重传只占资源、不带新数据，末次失败只进 `residual_bler`、
+不回队列。KPI 走 TS 28.552 Rel-19 的 DRB busy-period 与 FIFO 到达对象，
+小 burst 按 fractional slot 折算。
 
 **过去说的"容量模式"现在是 `traffic_model="full_buffer"`**——话务开到最大：
 
@@ -53,22 +54,24 @@ FIFO 到达对象，小 burst 按 fractional slot 折算。
 | 小区吞吐上界、调度器公平性 | `traffic_model="full_buffer"` | `cell_served_mbps`、`serving_cell_prb_utilization`、`avg_mcs_first_tx`、`bler_first_tx`、Jain |
 | 用户体验速率、等待与 PDB | `traffic_model="mixed"`（推荐）/ `ftp3` / `cdf` | `drb_throughput_rel19_mbps`、`arrival_queue_wait_ms_*`、`pdb_miss_ratio` |
 
-为什么 full_buffer 天然退化成容量口径：缓冲区永不空 ⇒ 按需 RBG 的反查结果恒等于
-"全部可用 RBG"，于是每 TTI 就是一个 SU（或一对 MU）拿全带宽。调度、AMC、HARQ、
-解调 SINR 聚合（按本次实际授予的那几个 RBG 算）**没有任何为它开的特例分支**。
+为什么 full_buffer 天然退化成容量口径：缓冲区永不空 ⇒ 调度器始终有足量数据可填满
+全部 RBG，因而 `resource_utilization == 1.0`。频选打开时可把不同 RBG 分给多个 UE，
+MU 打开时还可在同一 RBG 配对两个 UE，所以“每忙 TTI 恰好一个 SU”只在频选关、MU 关
+时成立。调度、AMC、HARQ、解调 SINR 聚合**没有任何为 full_buffer 开的特例分支**。
 
 **两个体验速率口径，不是同一个数的两种精度：**
 
 | 口径 | 键 | 量什么 | full_buffer 下 |
 |---|---|---|---|
-| ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | 每 UE 已服务净荷 ÷ 观测窗长，跨 UE 取分布；5% 分位 = cell-edge user throughput | **照常有值，这是满缓冲评估的主指标** |
-| TS 28.552 busy-period（**标准**） | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | 一个 burst 传完时有多快（首传 → 倒数第二个 ACK） | **报 `None`**：样本只在 buffer 排空事件上形成，满缓冲下该事件不发生 |
-| 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 还在传的 burst 落在测量窗内那段的 goodput | **有值**，与 ITU 口径收敛 |
+| ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | 每 UE 已发送净荷 ÷ 观测窗长，跨 UE 取分布；5% 分位 = cell-edge user throughput | **照常有值，这是满缓冲评估的主指标** |
+| TS 28.552 busy-period（**标准**） | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | 一个 burst 发完时有多快（首传 → 清空 buffer 前一段首传发送） | **报 `None`**：样本只在 buffer 排空事件上形成，满缓冲下该事件不发生 |
+| 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 还在传的 burst 落在测量窗内那段的发送速率 | **有值**；满缓冲下因分母趋同而接近 ITU 口径，但分子同源 |
 
 preset `sys_single_cell_experience_ftp3` 实测：`ue_served_mean_mbps=24.52` vs
 `cell_experienced_mbps=173.05`，同一次仿真差 7.1 倍——UE 全时段平均 vs 它的 burst
-在传时的速率，本来就不是一个量。满缓冲下 ITU 与工程口径收敛（UE 一直活跃），
-`sys_single_cell_capacity` 实测 61.868 vs 61.968，差 0.16%。
+在传时的速率，本来就不是一个量。满缓冲下 ITU 与工程口径因分母趋同而接近；
+`sys_single_cell_capacity` 实测 61.868 vs 61.968，差 0.16%。两者分子同源，
+这个接近只能检查分母边界，不能证明字节记账正确；有限话务字节守恒才约束分子。
 
 **在飞 busy period 要报，但另起字段**（`active_window_goodput_mbps`），
 绝不混进标准字段。理由是右删失：只数已排空的会把"慢到没传完"的 burst 系统性丢掉，
@@ -250,7 +253,7 @@ SCS、BWP 起点与 RBG configuration 若存在也必须匹配；任何错配立
 | `ftp3` | 3GPP FTP Model 3，泊松到达的固定大小文件 | **默认**，评价体验速率的标准话务 |
 | `mixed` | 一部分 UE 发 1500 B 小文件，另一部分 UE 发大文件；包长和到达率都是外生量 | **experience_v2 推荐**，验证“小包不再偷走整个 TTI” |
 | `cdf` | 两份 `value,cdf` 文件分别驱动包大小与逐 UE renewal 包间隔 | 接现场话务 CDF；外部曲线未接入前只能用明确标注的 synthetic 输入 |
-| `full_buffer` | **这就是「容量仿真」**：话务开到最大、缓冲区永不空，按需 RBG 退化成全带宽 | 容量上限、调度公平性、工程口径的用户体验速率（`ue_served_p5_mbps` 与 `active_window_goodput_mbps`，两者算法不同但应收敛）；**28.552 的 `drb_throughput_rel19_mbps` 无样本、报 `None`**，与完成时延、PDB、含头速率一样 |
+| `full_buffer` | **这就是「容量仿真」**：话务开到最大、缓冲区永不空，调度器始终有数据填满全部 RBG | 容量上限、调度公平性、工程口径的用户体验速率（`ue_served_p5_mbps` 与 `active_window_goodput_mbps`；满缓冲下分母趋同，但发送字节分子同源）；**28.552 的 `drb_throughput_rel19_mbps` 无样本、报 `None`**，与完成时延、PDB、含头速率一样 |
 | `cbr` | 恒定比特率 | 固定码率业务 |
 
 `ftp3` 的负载由 `file_bytes × 8 × arrival_rate_hz` 决定，
@@ -306,9 +309,12 @@ RngRun，保证每次只比较负载倍率。
 历史的 `trim`（`tail` / `head_tail` / `none`）随 legacy 容量路径一起下线，
 `KpiConfig(trim=...)` 现在直接 `TypeError`。唯一口径是事件记录器：
 
-1. buffer 从空变非空创建 DRB busy period，之后到达的数据合并，直到 ACK 后重新为空。
-2. 大 burst 的标准吞吐时间从**第一次传输**开始，末端排除最终让 buffer 变空的 ACK piece；
-   从到达到首传的 queue wait 单独上报。
+1. buffer 从空变非空创建 DRB busy period，之后到达的数据合并，直到**发送**后重新为空。
+   **buffer 在发送时扣减，不是在 ACK 时**（现场口径，2026-09-04）：数据被组进 TB 发出去
+   就离开 buffer，busy period 在"清空 buffer 的那一次发送"结束，KPI 当场可统计，
+   **完全不看这个 TB 正确与否**。
+2. 大 burst 的标准吞吐时间从**第一次传输**开始，末端排除最终让 buffer 变空的那一段
+   发送；从到达到首传的 queue wait 单独上报。
 3. 如果所有 buffered data 在一次初传 TB 内送完，`small_burst_policy="fractional_slot"`
    用 `(TBVol-PaddingVol)/TBVol × slot` 折算有效时长；`exclude` 可显式保留旧式盲区。
 4. 每个 FTP/mixed 文件还是一个独立 FIFO arrival object，分别记录 first-schedule wait、
@@ -320,6 +326,30 @@ RngRun，保证每次只比较负载倍率。
 
 因此 `small_queue_wait_ms_p95` / `small_completion_delay_ms_p95` /
 `small_pdb_miss_ratio` 与 busy-period throughput 是不同层级的指标，不能互换。
+
+### 误码与重传是怎么影响速率的
+
+**不是靠"传丢的不算"**，而是两条：
+
+1. **重传占资源。** 重传走 `is_retx=True`：只累加 `tx_attempts`，不动队列、不产生
+   `TxEvent`、不推进 busy period。它吃掉的时频资源让自己后面的数据和别的 UE 都发不了。
+2. **重传优先级高于新传。** 发完这个包 buffer 还没空时，时间继续统计；NACK 回来时
+   如果 buffer 还没空，就得先重发误码的包，把后面的数据往后推，掐头去尾时间被拉长。
+
+传丢的部分不从已发送字节里扣回去，只进 `residual_bler`。最小反例
+（强制首传全错、`tdd_pattern="D"`）：
+
+| 轨迹 | `cell_served_mbps` | `residual_bler` |
+|---|---|---|
+| 首传全对 | 368.8 | 0.0 |
+| 首传全错、重传全对 | **184.4** | 0.0 |
+| 首传全错、重传也全错 | **184.4**（逐值相同） | 1.0 |
+
+第二行相对第一行掉一半 = 重传吃掉的资源。第三行与第二行**逐值相同** = KPI 不看对错。
+
+**这条口径不只是 KPI 偏好，多进程 HARQ 必须靠它才自洽**：按 ACK 扣减时，被 NACK 的
+TB 其字节仍留在队列里，同一个 UE 的另一个 HARQ 进程会把同一批字节再发一遍，
+原 TB 的重传随后就会发现队列不够冻结的 payload。
 
 ### 本小区 PRB 利用率与逐 TTI RBG 分布
 
@@ -594,7 +624,7 @@ useful payload bytes，只有 MU 不小于 SU 才选 MU。接收端用 per-user 
 现场算法待后续接入。
 
 方向性证据（固定合成反例，不是一般现场收益承诺）：互补 8/9-RBG 两用户在相同 CRN 下，
-频选 on/off 的 ACK 吞吐为 486.52/148.71 Mbps；MU 例中 UE1 虽是更早伙伴，但 −5 dB
+频选 on/off 的发送吞吐为 486.52/148.71 Mbps；MU 例中 UE1 虽是更早伙伴，但 −5 dB
 CorrLoss 只得 3315.8 useful B/RBG，后到 UE2 的 −1 dB CorrLoss 得 4701.6 B/RBG，
 最终选择 UE2。完整逐 TTI 证据在 `artifacts/results/scheduler_p0_validation.json`。
 

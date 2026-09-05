@@ -110,7 +110,7 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
         principles=(
             "平台的窄腰是<strong>数据合同与证据合同</strong>。上游默认是本仓 first-party source，可选接 direct Sionna RT；下游可以换预编码、接收机、调度器与 KPI，但中间必须始终说清 <code>h_true</code>、<code>h_est</code>、功率参考面、随机种子、样本单位和统计窗口。只要这些角色没有混在一起，同一实验才有可能复现；一旦把估计信道偷换成真值，后续再漂亮的曲线也失去解释力。",
             "一次可信实验同时包含三条链。<strong>物理链</strong>回答信号如何经过阵列、传播和干扰；<strong>决策链</strong>回答 gNB 在当时信息下如何选 rank、MCS、SU/MU 与资源；<strong>证据链</strong>回答样本是否独立、比较是否配对、统计是否跨过预热窗口。三条链最终在 manifest、逐样本结果和 Gate 报告中会合，结论才不仅是一次脚本输出。",
-            "系统级只有一条评估路径，靠话务配置区分问题：满缓冲（<code>traffic_model=\"full_buffer\"</code>）回答“持续有数据时空口能做多快”，有限到达（ftp3/cbr/mixed/cdf）回答“用户实际等多久、拿到多少有效字节”。两者共用同一套 FIFO、空闲 TTI、按需 RBG 与尾料逻辑——满缓冲只是队列永不排空，于是按需 RBG 反查恒等于全带宽，不需要任何特例分支。反过来说，KPI 口径必须写死：满缓冲下 TS 28.552 的忙期样本不会形成，标准字段只能空着，能报的是工程口径。",
+            "系统级只有一条评估路径，靠话务配置区分问题：满缓冲（<code>traffic_model=\"full_buffer\"</code>）回答“持续有数据时空口能做多快”，有限到达（ftp3/cbr/mixed/cdf）回答“用户实际等多久、拿到多少有效字节”。两者共用同一套 FIFO、空闲 TTI、按需 RBG 与尾料逻辑——满缓冲只是队列永不排空，调度器始终有足量数据填满全部 RBG，不需要任何特例分支。反过来说，KPI 口径必须写死：满缓冲下 TS 28.552 的忙期样本不会形成，标准字段只能空着，能报的是工程口径。",
             "交互配置 Mock 和 KPI 工作台是这三条链面向用户的两个检查点。前者在运行前把 resolved config 画成拓扑、阵列、频时资源、PDP 与算法选择，并把用户修改作为受限 delta 回到 Draft；后者在运行后只读取 Result contract，把小区、用户、CDF、资源和告警按本轮意图排序。一个负责防止“看见的配置和执行的配置不同”，另一个负责防止“平均值遮住边缘用户和口径限制”。它们不是宣传截图，而是实验合同的可视化接口。",
         ),
         implementation=(
@@ -687,7 +687,7 @@ DETAIL_SPECS.update({
     "modes": DetailSpec(
         promise="用问题、状态机和 KPI 三个维度区分容量口径与体验口径（同一条路径的两个负载工作点），并解释预启动窗口为何属于统计合同而不是删除不利数据。",
         principles=(
-            "容量口径假设业务持续存在（<code>traffic_model=\"full_buffer\"</code>），关注给定传播、干扰和调度下的饱和吞吐/谱效。队列无限使得按需 RBG 反查恒等于全带宽，于是每个 TTI 就是一个 SU（或一对 MU）拿全带——这是同一套分配逻辑的退化解，不是另一条路径。它适合比较满业务链路算法，但无法回答空闲比例、首包等待、小包抢占或按需资源利用。用户体验速率在它下面<b>是有定义的</b>，只是走 ITU-R M.2412 / TR 38.913 的 <code>ue_served_p5_mbps</code>（每 UE 已服务净荷 ÷ 观测窗长的 5% 分位）；只有 TS 28.552 的 busy-period 口径因为 buffer 永不排空而没有样本、报 None。",
+            "容量口径假设业务持续存在（<code>traffic_model=\"full_buffer\"</code>），关注给定传播、干扰和调度下的饱和吞吐/谱效。队列无限让调度器始终有足量数据填满全部 RBG；频选可把不同 RBG 分给多个 UE，MU 还可在同一 RBG 配对，因此“每忙 TTI 一个 SU”只在频选关、MU 关时成立。这是同一套分配逻辑的工作点，不是另一条路径。它适合比较满业务链路算法，但无法回答空闲比例、首包等待、小包抢占或按需资源利用。用户体验速率在它下面<b>是有定义的</b>，只是走 ITU-R M.2412 / TR 38.913 的 <code>ue_served_p5_mbps</code>（每 UE 已发送净荷 ÷ 观测窗长的 5% 分位）；只有 TS 28.552 的 busy-period 口径因为 buffer 永不排空而没有样本、报 None。",
             "体验评估把业务到达、FIFO 包对象、按需 RBG、ACK/NACK、OLLA、SU/MU 方案和用户 KPI 放进连续 TTI 状态机。它必须区分 scheduled TBS、attempted payload、ACK goodput 与 padding；PF 默认按实际 scheduled TBS 记账。满缓冲与有限话务不是“快/慢”或“粗/精”两档开关：它们是同一条路径上的两个话务工作点，不能把 experience_v2 的某个参数关掉后称为“容量口径等价”。",
             "预启动时间让有状态环节先进入稳定区：OLLA 从初值收敛、SRS/PMI/CQI 报告收齐、PF 历史量形成、队列进入代表性负载。仿真仍从 t=0 正常运行，只是正式 KPI 的统计窗口从例如 1 s 开始；预热期间形成的状态继续带入测量期。若重置队列或 OLLA，就不再是预热而是另一次实验。",
             "预热长度应由收敛诊断支撑，而不是永远固定 1 s。可以比较测量期前半/后半 BLER、OLLA、PRB 利用率和队列量；若仍漂移，延长仿真或预热。报告同时给总仿真时长、warmup、有效测量时长与覆盖率。",
@@ -784,7 +784,7 @@ DETAIL_SPECS.update({
     "kpi": DetailSpec(
         promise="把体验 KPI 的对象、起止事件、分子分母和覆盖率逐一说清，并解释单臂小区/用户分析、2~5 算法比较、逐 TTI 钻取与 Agent 自适应优先展示如何共存而不改变底层真值。",
         principles=(
-            "体验速率必须先定义一个 DRB busy period 和可计入包。掐头去尾速率从首包第一次调度开始，到倒数一个完整 ACK 包结束；含头速率使用相同 payload 和尾部排除，但分母从首包到达开始，因此明确包含首包等待。首包时延单独量每个包从 arrival 到 first scheduled，不把完整传输或重传时间混进来。",
+            "体验速率必须先定义一个 DRB busy period 和可计入包。掐头去尾速率从首包第一次调度开始，到倒数一个完整发送包结束；含头速率使用相同 payload 和尾部排除，但分母从首包到达开始，因此明确包含首包等待。首包时延单独量每个包从 arrival 到 first scheduled，不把完整传输或重传时间混进来。",
             "任何带 eligibility 的指标都要同时给覆盖率。仿真结束时尚未第一次调度的包不能填 0；未形成足够完整包的短 burst 不能硬算无限/零速率。结果应给 observed count、eligible count、share 与排除原因。这样，算法通过让困难用户“没有样本”来美化均值时会立即暴露。",
             "PRB 利用率是本小区在测量窗口内已用物理资源/可用资源；0..17 RBG 直方图以每个 DL 等价 TTI 的唯一 used index 数计数。mixed 业务常呈两头高：空闲 TTI 落在 0，大包或积压落在 17，小包填在低 RBG；这是一种预期形态而非硬编码通过条件。MU 配对比例则是 MU PRB/已用 PRB，与 MU 用户传输次数不同。",
             "呈现分小区级和用户级两个 tab。小区级看整体负载、尾部分位和模式；用户级展示每 UE 的无线条件、业务、吞吐、首包时延、资源、MU/BLER，并支持散点、时间序列与跨 UE CDF。Agent 可以根据用户问题给 KPI relevance score，把更相关卡片前置、其他折叠，但所有原始 KPI、公式和选择理由仍可查看，不能让 LLM 在库内偷偷改数。",
@@ -792,7 +792,10 @@ DETAIL_SPECS.update({
             "多算法页面不按算法分 tab：算法是贯穿总览、KPI 矩阵、用户 CDF、TTI 趋势和单 TTI 详情的固定颜色系列，基线不可隐藏；tab 表示读者正在回答的问题。每个算法臂必须携带同一 dataset 与逐位一致的 (master_seed, replication)，主 KPI 的候选对基线复用 Gate 3，并在 2~5 臂场景用 Holm step-down 收紧家族判决。只有 dataset 的生成前 prereg 同时匹配主 KPI 与基线标签时才允许产生 publishable winner；否则即使显著也保持 exploratory_unregistered。单 TTI 只能解释机制分叉，不能从一个事件外推算法收益。",
         ),
         implementation=(
-            ("事件级采集", "包对象记录 arrival、first_scheduled、ACK/completion；allocation 记录 TTI、RBG、模式、TBS、payload、SINR/BLER/draw、ACK、OLLA 前后、PF metric 与用户。"),
+            ("事件级采集", "包对象记录 arrival、first_scheduled、发送/completion；allocation 记录 TTI、RBG、模式、TBS、payload、SINR/BLER/draw、ACK、OLLA 前后、PF metric 与用户。"),
+            ("buffer 在发送时扣减", "现场速率统计口径（2026-09-04）：数据被组进 TB 发出去就离开 buffer，busy period 在<strong>清空 buffer 的那一次发送</strong>结束（<code>last_tx_tti</code>），KPI 当场可统计，<strong>完全不看这个 TB 正确与否</strong>。<code>TxEvent</code> 只记首传；重传走 <code>is_retx=True</code>，只累加 <code>tx_attempts</code>，不动队列、不产生 <code>TxEvent</code>、不推进 busy period。"),
+            ("误码怎么影响速率", "不是靠「传丢的不算」，而是两条：重传<strong>占资源</strong>（时频资源被吃掉，自己后面的数据和别的 UE 都发不了），以及重传<strong>优先级高于新传</strong>（buffer 没空时 NACK 回来会插队，把后面的数据往后推，掐头去尾时间被拉长）。传丢的部分只进 <code>residual_bler</code>，不从已发送字节里扣回去。最小反例：首传全对 368.8 Mbps → 首传全错重传全对 184.4 Mbps → 首传重传都错 184.4 Mbps（后两者逐值相同，只有 residual_bler 从 0 变 1）。"),
+            ("这条口径是多进程 HARQ 的前提", "按 ACK 扣减时，被 NACK 的 TB 其字节仍留在队列里，同一个 UE 的另一个 HARQ 进程会把<strong>同一批字节</strong>再组成一个新 TB 发一遍，原 TB 的重传随后发现队列已经不够冻结的 payload。所以 <code>scheduler_finalize</code> 与 <code>_build_su_plan</code> 里「队列必须 ≥ 冻结 payload」的两道校验都已删除。"),
             ("窗口与 eligibility", "warmup 后才累加正式资源；busy period、包和用户样本按明确跨界规则进入统计，并记录 coverage。"),
             ("双层聚合", "先生成每 UE 指标和原始分布，再在小区层汇总均值/分位/CDF；小区均值不替代用户表。"),
             ("自适应呈现", "kpi_view 根据 intent/relevance 元数据排序卡片、选择图形和折叠次要项；数值只读 Result contract。"),
@@ -1608,12 +1611,13 @@ DETAIL_SPECS.update({
         ),
         implementation=(
             ("解析标准链路表", "<code>linkadapt.py</code> 维护 CQI/MCS/TBS 规则，TBS 对 RBG 数用表驱动反查；不能用全带字节除以 17 估计所需 RBG。"),
+            ("扣掉 PDSCH 拿不到的 RE", "TBS 的第一步是 38.214 §5.1.3.2 的 <code>N_RE = min(156, 12·符号数 − N_DMRS − N_OTH) × N_PRB</code>。<code>PdschOverhead</code> 把这个口径集中到一处，默认 12 个 PDSCH 符号、单符号 type-1 DM-RS 6 RE/PRB、PDCCH 等效 1 个符号（12 RE/PRB），即每 PRB 126 RE。<code>system</code> 的 legacy 主循环与 <code>experience</code> 的 <code>TbsLookup</code> 共用它，不能各自硬编码 <code>12×12=144</code>。S 时隙只按 <code>S_SLOT_DL_FRACTION</code> 折**符号数**，DM-RS 与 PDCCH 是每时隙固定开销、随后只扣一次，所以 S/D 的可用 RE 之比是 78/126≈0.619，小于 0.7。"),
             ("生成 QAM MI", "对单位能量 M-QAM 星座和复高斯噪声做 Gauss-Hermite 数值积分，生成单调缓存，并提供正/逆插值。"),
             ("映射频选 SINR", "<code>effective_sinr()</code> 根据modulation/method选择MIESM或EESM；EESM接受显式beta，缺正式标定时结果只能作为参考。输入中的每个RB都必须有限，空数组或任一NaN/Inf当场失败，禁止只丢掉坏RB后用剩余好RB计算。"),
             ("计算分析 BLER", "表 1/2 按 MI 余量、码长和实现损失得到 CB 瀑布，再按 38.212 分段估算 C 并合成 TB BLER；anchor_check 只输出对标点。"),
             ("装载预置曲线", "<code>bler_data_20b.py</code> 提供 28 MCS×NewTx/ReTx 原始点，<code>verify_curves()</code> 检查 SHA、覆盖、横轴/BLER 单调和 10% crossing；系统使用范围明确为 NewTx 28 条，ReTx 只供审计。"),
             ("形成一次 TTI/TB 判错", "调度器先确定 grant、rank、MCS 与 TBS，再以码字级有效 SINR+MCS 查通用 NewTx 曲线并从独立 BLER 随机流抽一次 ACK/NACK；CB 不进入系统状态。"),
-            ("进入唯一一次重传", "NACK 后冻结 MCS/RBG 数/rank/TBS；IR 查半谱效等效 MCS 的 NewTx 曲线，CC 查原 MCS NewTx 曲线并加 3.0103 dB。失败后结束 HARQ，字节留队并在后续成为新 TB。"),
+            ("进入唯一一次重传", "NACK 后冻结 MCS/RBG 数/rank/TBS；IR 查半谱效等效 MCS 的 NewTx 曲线，CC 查原 MCS NewTx 曲线并加 3.0103 dB。payload 已在首传发送时离开队列，末次失败只进 residual_bler。"),
             ("独立复现", "从本章复制完整 raw JSON，用纯 NumPy 重建横轴、对数域插值、门限反查、单码字 SINR、MCS 选择与 CC/IR；五个冻结锚点逐值对齐后再接系统状态机。"),
         ),
         example_title="MCS20 的 IR 为什么查 MCS10，却仍发送 MCS20",
@@ -1630,10 +1634,13 @@ DETAIL_SPECS.update({
             ("全曲线可见", "手册 28 行审计表与 56 条瀑布由源常量直接生成；10% crossing、源范围和点数与 verify_curves 一致。"),
             ("参考面与事件标签", "查询结果带 source axis、single-codeword one-TTI/TB event、空口 MCS、lookup MCS、clamp 与通用曲线范围；分析后端不伪装预置表后端。"),
             ("一次重传身份", "强制 NACK 轨迹逐 TB 验证 MCS/RBG 数/rank/TBS 与 D/S 类型不变；失败后没有第二次重传，窗口末 pending 单列右删失。"),
+            ("开销口径两条路径一致", "改 <code>PdschOverhead</code> 的参数后，legacy 主循环的小区吞吐与 <code>TbsLookup</code> 的 TBS 必须同比变化（test_physics_invariants 第 9 节）。硬编码 <code>12×12</code> 的路径对配置免疫，比值会退化成 1.000，当场变红。"),
             ("文档可执行性", "完整 MCS 表由代码生成；JSON raw rows 摘要等于 DATA_SHA256；独立参考实现五个锚点通过。"),
         ),
         pitfalls=(
             "把 38.214 的 MCS/TBS 表称为 3GPP BLER 曲线。",
+            "按 <code>12 子载波 × 12 符号 = 144 RE/PRB</code> 算 TBS，等于假设 DM-RS 与 PDCCH 都不占资源，TBS 系统性偏大约 12.5%。",
+            "把 S 时隙的 RE 直接写成 <code>D × 0.7</code>：固定开销不随下行符号数缩水，这样算会少扣一次开销。",
             "QAM MI 的实/复噪声方差约定不匹配，造成整体约 3 dB 偏移。",
             "看到 <code>effective_sinr()</code> 已存在，就宣称体验系统已改成 MIESM/EESM。",
             "把含NaN/Inf的逐RB数组过滤后继续映射；这会系统性删除最差或未知RB并高估码字能力。",
@@ -2899,7 +2906,7 @@ DETAIL_SPECS.update({
         example=(
             "<p>压力例中 PF 先选 UE0 为 anchor；伙伴顺序里 UE1 的 <code>pf_order=1</code>，UE2 的 <code>pf_order=2</code>。UE1 与 UE0 的 CorrLoss 是 −5 dB，17 RBG 上两份最终 MCS 为 12/11，合计 useful density 约 <b>3315.8 B/RBG</b>；UE2 虽排得更后，但 CorrLoss 只有 −1 dB，最终 MCS 17/14，density 约 <b>4701.6 B/RBG</b>，因此选择 UE2。</p>"
             "<p>该 TTI 的 SU-only plan 只能交付 54,285 B；选中 MU plan 在同一 17-RBG bitmap 上交付 79,927 B，所以 <code>MU_useful_bytes_ge_SU</code> 成立。资源账显示物理 272 PRB 只扣一次、总层数为 4；两个用户共享同一个 <code>tti0-res0</code>。若把 UE2 相关性改到门限以上，它会留下 <code>correlation_threshold</code> 拒绝记录，而不是从结果中消失。</p>"
-            "<p>互补子带频选反例中，off 基线小区 ACK 吞吐为 148.71 Mbps、每忙 TTI 只服务 1 个 UE；on 在相同 CRN 下为 486.52 Mbps、每忙 TTI 服务 2 个 UE，约 3.27×。这个构造证明频选机制的方向和 bitmap 落账正确；它不是对一般现场信道承诺 3.27×。</p>"
+            "<p>互补子带频选反例中，off 基线小区发送吞吐为 148.71 Mbps、每忙 TTI 只服务 1 个 UE；on 在相同 CRN 下为 486.52 Mbps、每忙 TTI 服务 2 个 UE，约 3.27×。这个构造证明频选机制的方向和 bitmap 落账正确；它不是对一般现场信道承诺 3.27×。</p>"
             "<p>小包+大包反例中，两位MU用户队列为1,000 B和500,000 B，required RBG为1/17。旧式min规则只给1 RBG并把两人移出pending；当前共享bitmap给满17 RBG，小包交付1,000 B、大包交付26,647 B。该反例专门证明“任一用户够”不能替代“两位用户都够或资源耗尽”。</p>"
         ),
         checks=(

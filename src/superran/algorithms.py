@@ -341,7 +341,7 @@ def _algorithms(cfg: dict[str, Any]) -> list[Algorithm]:
             why="初传与重传都只消费预置 NewTx 曲线：IR 用半谱效等效 MCS，CC 用原 MCS "
                 "+3.0103 dB；空口 MCS/RBG 数/rank/TBS 冻结。",
             caveat="这是 BLER 级工程抽象，尚未展开 RV、LLR、并行 process 与标准 timing。"
-                   "重传失败字节留队，后续作为新 TB，而不是第二次重传。",
+                   "payload 在首传发送时离开队列；末次失败只进 residual_bler，不回队列。",
             source="预置表的通用曲线与一次 CC/IR 口径",
         ),
     ]

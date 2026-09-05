@@ -2206,12 +2206,13 @@ Sionna RT 是唯一的可选 direct adapter（QuaDRiGa 路线已明确不做并�
         "<p>系统级<strong>只有一条评估路径</strong>（<code>experience_v2</code>）："
         "FIFO、按需 RBG、真实 MU pair、PF 实际 TBS 记账和 Rel-19 体验 KPI。"
         "所谓“容量仿真”是它的一个话务配置 <code>traffic_model=\"full_buffer\"</code>："
-        "队列无限使按需 RBG 退化成全带宽。**不许为它开特例分支**；"
+        "队列无限使调度器始终有足量数据填满全部 RBG。<strong>不许为它开特例分支</strong>；"
         "代价是 busy period 永不结束，<strong>TS 28.552 的样本只在 buffer 排空事件上"
         "形成，满缓冲下一个都不会形成</strong>，"
         "<code>drb_throughput_rel19_mbps</code> 报 None——定义使然，不是缺陷。"
         "满缓冲看工程口径：ITU-R M.2412 的 <code>ue_served_p5_mbps</code> 与 "
-        "<code>active_window_goodput_mbps</code>，两者算法不同但应收敛。</p>",
+        "<code>active_window_goodput_mbps</code>。两者因分母趋同而接近，但发送字节"
+        "分子同源，不能拿这个接近验证字节记账。</p>",
     )
     body += """
 <h2>推荐阅读路径</h2>
@@ -4861,19 +4862,19 @@ DRB busy-period 与 FIFO 到达对象。文档和对话里说的<strong>“容�
         ["维度", "容量口径（traffic_model=full_buffer）", "体验口径（mixed / ftp3 / cdf）"],
         [
             ("问题", "满业务下的小区吞吐上界与调度公平性", "有限业务包下的排队、资源与用户体验"),
-            ("每 TTI 调度", "队列无限 ⇒ 按需 RBG 反查恒等于全带宽，一个 SU 或一对 MU",
+            ("每 TTI 调度", "队列无限 ⇒ 始终有数据填满全部 RBG；频选/MU 可服务多个 UE",
              "一次 PF 排序后可服务多个 UE，按需 RBG，尾料可留空"),
             ("解调 SINR", "按本次实际授予的 RBG 聚合——满缓冲下“那几个”天然是全部",
              "按本次实际授予的 RBG 聚合"),
             ("MU", "候选 pair 的真实链路表与完整 SU/MU plan", "同左（同一份实现）"),
             ("PF credit", "实际 scheduled TBS", "实际 scheduled TBS；可选 ACK goodput"),
-            ("队列", "每 UE 一个永不排空的 DRB", "arrival-object FIFO、NACK 留队、warmup 切窗"),
+            ("队列", "每 UE 一个永不排空的 DRB", "arrival-object FIFO、首传发送时扣队列、warmup 切窗"),
             ("体验速率（标准，TS 28.552）",
              "<strong>无样本 ⇒ 报 None（不是 0）</strong>：样本只在 buffer 排空事件上形成",
              "DRB busy-period + fractional small burst + 含头速率"),
             ("体验速率（工程）",
              "<strong>有值</strong>：ITU-R M.2412 的 ue_served_p5/median/mean_mbps，"
-             "以及 active_window_goodput_mbps；两者算法不同但应收敛",
+             "以及 active_window_goodput_mbps；两者因分母趋同而接近，但发送字节分子同源",
              "同样有值，但与标准口径量的是不同的东西，轻载下可差一个数量级"),
             ("该看什么",
              "cell_served_mbps、serving_cell_prb_utilization、Jain、avg_mcs_first_tx、"
@@ -4956,7 +4957,7 @@ def experience_page() -> Page:
         ("PF 排序一次", "<p>经典 PF 默认；QoS-PF 在 α=β=1、γ=0、w=1 时逐分配退化为经典 PF。</p>"),
         ("构造 SU/MU plan", "<p>按顺序用 searchsorted 给最小够用 RBG；没有候选需求时剩余资源留空。</p>"),
         ("按 useful bytes 选 plan", "<p>SU 能清空所有队列则强制 SU；否则 MU≥SU 才选 MU。</p>"),
-        ("真实 grant 判错", "<p>按实际 bitmap/MCS/TBS，真实 SINR 查 BLER；NACK payload 留队。</p>"),
+        ("真实 grant 判错", "<p>按实际 bitmap/MCS/TBS，真实 SINR 查 BLER；payload 在首传发送时离开队列，末次失败只进 residual_bler。</p>"),
         ("更新 OLLA/PF/KPI", "<p>记录分配、资源归因、arrival/busy period、首包与完成时延，再更新平均速率。</p>"),
     ))
     body += """
@@ -5139,7 +5140,7 @@ PDCCH/CCE 按已确认范围暂不建模；除此之外，物理 RBG、逐 RBG �
     body += table(
         ["互补子带、相同 CRN", "频选 off", "频选 on", "变化"],
         [
-            ("小区 ACK 吞吐", "148.71 Mbps", "486.52 Mbps", "3.27×"),
+            ("小区发送吞吐", "148.71 Mbps", "486.52 Mbps", "3.27×"),
             ("每忙 TTI 调度 UE", "1.00", "2.00", "两位用户各吃自己的强子带"),
             ("RBG overlap", "0", "0", "账本不变量保持"),
         ],
@@ -6068,7 +6069,7 @@ def limitations_page() -> Page:
         [
             ("PF", "经典 PF；α=β=1、γ=0、无业务权重", "现场 EPF 定义未知前不自造厂商算法"),
             ("尾料 RBG", "业务传完即留空", "PRB 利用率反映真实话务，不虚构 padding 调度"),
-            ("误块/HARQ", "单码字 TB；最多一次 IR/CC 重传", "同 MCS/RBG 数/rank/TBS；失败字节留队成为新 TB"),
+            ("误块/HARQ", "单码字 TB；最多一次 IR/CC 重传", "同 MCS/RBG 数/rank/TBS；首传发送即扣队列，末次失败只进 residual_bler"),
             ("小 burst", "fractional-slot 推荐口径", "保留单时隙 burst，不制造体验 KPI 盲区"),
             ("预启动", "默认 1 s，PF/OLLA/SRS 演进但不计 KPI", "避开冷启动；结果仍检查收敛"),
             ("物理 SRS", "C_SRS=63/B_SRS=1/b_hop=0，T_SRS=20 slot", "30 kHz 下每 10 ms 发 16 RB，17 跳覆盖 272 RB；与系统级 srs_period_ms 分清单位"),

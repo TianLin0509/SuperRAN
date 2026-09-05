@@ -421,7 +421,8 @@ MCS 查表都不含随机），所以 n 次重复只重跑 TTI 主循环。代�
 ReTx 行保留作来源审计。CC 保持原 MCS 并把查询 SINR 增加 `10log10(2)=3.0103 dB`；
 IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在不变 SINR 上查表。
 等效 MCS 只用于 BLER lookup；空口 MCS、RBG 数、rank 与 TBS 必须和初传完全一致。
-重传失败后结束本次 HARQ，payload 留队并在后续成为新 TB；不得再挂第二次重传。
+重传失败后结束本次 HARQ；payload 已在首传发送时离开队列，末次失败只进
+`residual_bler`，不回队列，也不得再挂第二次重传。
 
 **"最多一次重传 + 单 HARQ 进程"是显式决定，不是待补的半成品**（用户
 2026-09-02 确认："HARQ 我们先仅考虑一次重传"）。现场实现规格里是 16 个 HARQ
@@ -1158,6 +1159,37 @@ OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工
 `resolved_for_target` 的产物在 `as_dict()` 里按方向分别标
 `auto_from_target_bler` / `explicit_user_override`，不再只报含混的"已解析"。
 
+### 速率统计口径：buffer 在发送时扣减，不看这个 TB 对不对
+
+**这是现场的统计方式（用户 2026-09-04 给的），三条合同：**
+
+1. **发出一个包后 buffer 空了，这个包的 KPI 当场就能统计**——掐头去尾业务量与
+   掐头去尾时间——**完全不管这个包正确与否**。不等 ACK。
+2. 误码与重传对体验速率的影响，主要体现在**重传要占资源**：时频资源被吃掉，
+   别人（和自己后面的数据）发不了。
+3. **重传优先级高于新传。** 发完这个包 buffer 还没空时，时间会继续统计；
+   NACK 回来时如果 buffer 还没空，就得先把误码的包重发，把后面的数据往后推，
+   于是掐头去尾时间被进一步拉长、速率下降。
+
+代码里：`DrbQueue.transmit(..., is_retx=False)` 在**发送时**扣 `queued_bytes`，
+busy period 在"清空 buffer 的那一次发送"结束（`last_tx_tti`），`tx_events` 只记
+首传。重传走 `is_retx=True`：只累加 `tx_attempts`（资源占用的证据），
+**不动队列、不产生 TxEvent、不推进 busy period**。
+
+传丢的部分不从已发送字节里扣回去，只进 `residual_bler`。实测最小反例
+（强制首传全错、`tdd_pattern="D"`）：首传全对 368.8 Mbps → 首传全错重传全对
+184.4 Mbps（重传吃掉一半资源）→ 首传重传都错 **184.4 Mbps，逐值相同**，
+差别只在 `residual_bler` 0.0 → 1.0。
+
+**这条口径不只是 KPI 偏好，多进程 HARQ 必须靠它才自洽。** 按 ACK 扣减时，
+被 NACK 的 TB 其字节仍留在队列里，同一个 UE 的另一个 HARQ 进程会把**同一批字节**
+再组成一个新 TB 发一遍，然后原 TB 的重传发现队列已经不够冻结的 payload。
+2026-09-04 实测轨迹：t3025 发 33822 B 被 NACK（队列不减），t3026 用另一个进程把
+同一批字节又发了一遍并 ACK，到 t3028 队列只剩 17814 B，t3025 的重传直接硬失败。
+
+因此 `scheduler_finalize` 与 `_build_su_plan` 里"队列必须 ≥ 冻结 payload"的两道
+校验都已删除：重传的字节在首传时就走了，队列剩多少与它无关。
+
 ### 系统仿真入口的两道硬校验（2026-08-17 第三轮审查）
 
 `sr_system_sim` 在 server 边界新增两道硬失败，都是"静默算错不如直接拒绝"：
@@ -1543,8 +1575,8 @@ SU-only 的数不是上界。preset `sys_single_cell_capacity` ↔
 
 | 口径 | 键 | 分母是什么 | full_buffer 下 |
 |---|---|---|---|
-| ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | **观测窗长**（每 UE 已服务净荷 ÷ 窗长，跨 UE 取分布） | **照常有值——这就是满缓冲评估的主指标**，5% 分位即 cell-edge user throughput |
-| TS 28.552 busy-period（**标准**） | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | **已排空的 busy period 时长**（首传 → 倒数第二个 ACK） | **报 `None`**：样本只在 "DRB DL buffer emptied" 事件上形成（TS 128 552 V19.5.0 p54），满缓冲下该事件不发生 |
+| ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | **观测窗长**（每 UE 已发送净荷 ÷ 窗长，跨 UE 取分布） | **照常有值——这就是满缓冲评估的主指标**，5% 分位即 cell-edge user throughput |
+| TS 28.552 busy-period（**标准**） | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | **已排空的 busy period 时长**（首传 → 清空 buffer 前一段首传发送） | **报 `None`**：样本只在 "DRB DL buffer emptied" 事件上形成（TS 128 552 V19.5.0 p54），满缓冲下该事件不发生 |
 | 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 在飞 busy period 落在测量窗内那一段的 goodput | **有值**。与 ITU 口径数值接近，但**那不是交叉验证**，见下 |
 
 它们**不是同一个数的两种精度**。preset `sys_single_cell_experience_ftp3` 实测：
@@ -1554,9 +1586,9 @@ SU-only 的数不是上界。preset `sys_single_cell_capacity` ↔
 61.968，差 0.16%。
 
 > **⚠️ 撤回：这个 0.16% 不是交叉验证，别再当证据用。**
-> 这两个数的**分子是同一份 ACK 净荷记账**——`experience.py` 里 `tr.transmit()`
-> 返回的那个 `payload`，一边累进 `served_measured`、一边塞进 `AckEvent`。
-> 只有分母不同：一个除观测窗长，一个除首传到末 ACK 的跨度。满缓冲下 UE 从头忙到
+> 这两个数的**分子是同一份发送净荷记账**——`experience.py` 里 `tr.transmit()`
+> 返回的那个 `payload`，一边累进 `served_measured`、一边塞进 `TxEvent`。
+> 只有分母不同：一个除观测窗长，一个除首传到末次窗内发送的跨度。满缓冲下 UE 从头忙到
 > 尾，两个分母本就重合，**所以吻合是必然的**。它能证明的只有"满缓冲确实让每个 UE
 > 全程活跃"，这是关于话务模型的陈述，**不是关于记账正确性的**。
 > 实测：把净荷记账整体放大 10%，小区吞吐从 618.10 错成 683.93（错 10.6%），

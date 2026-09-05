@@ -39,7 +39,8 @@ CELL_KPIS = (
     # 分母是观测窗长；TS 28.552 的分母是**已排空的** busy period。
     # 有限话务下两者相差可达一个数量级，任何一个单独出现都会被误读成另一个；
     # **满缓冲下 28.552 那个直接没有样本（报 None）**，此时看 ITU 口径与
-    # active_window_goodput_mbps，这两条算法不同却应当收敛。
+    # active_window_goodput_mbps。二者分母趋同所以数值接近，但发送字节分子同源，
+    # 不能拿这个接近验证字节记账。
     KpiSpec("ue_served_p5_mbps", "5% 边缘用户吞吐（ITU 口径）", "Mbps",
             tags=("experience", "fairness", "capacity")),
     KpiSpec("ue_served_median_mbps", "用户吞吐中位（ITU 口径）", "Mbps",
@@ -58,7 +59,7 @@ CELL_KPIS = (
             tags=("experience", "latency")),
     KpiSpec("ue_experienced_p5_mbps", "5% 边缘用户体验速率", "Mbps",
             tags=("experience", "fairness")),
-    KpiSpec("cell_served_mbps", "小区 ACK 吞吐", "Mbps",
+    KpiSpec("cell_served_mbps", "小区发送吞吐", "Mbps",
             tags=("experience", "capacity")),
     KpiSpec("first_packet_delay_ms_mean", "首包时延均值", "ms",
             tags=("latency", "traffic")),
@@ -110,7 +111,7 @@ USER_KPIS = (
             tags=("experience", "fairness")),
     KpiSpec("head_inclusive_experienced_mbps", "用户含头体验速率", "Mbps",
             tags=("experience", "latency", "fairness")),
-    KpiSpec("served_mbps", "用户 ACK 吞吐", "Mbps",
+    KpiSpec("served_mbps", "用户发送吞吐", "Mbps",
             tags=("experience", "capacity")),
     KpiSpec("first_packet_delay_ms_mean", "用户首包时延均值", "ms",
             tags=("latency", "traffic")),

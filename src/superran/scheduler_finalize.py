@@ -285,10 +285,9 @@ def finalize_candidate_grant(
         if queue < 0:
             raise ValueError("queue_bytes must be non-negative")
         if is_retx:
-            if queue < int(frozen_payload):
-                raise RuntimeError(
-                    f"HARQ queue {queue} B is smaller than frozen payload {int(frozen_payload)} B"
-                )
+            # **不能拿队列长度校验冻结 payload。** buffer 在首传时就已经把这些
+            # 字节扣掉了（现场速率统计口径：发送即扣减，不看 ACK），重传不带新
+            # 数据，队列剩多少与它无关——它只是来占资源、并且插在新传前面的。
             useful = int(frozen_payload)
         else:
             useful = min(queue, tbs)

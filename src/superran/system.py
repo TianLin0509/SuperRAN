@@ -13,15 +13,16 @@ BLER 来源分层：**系统级只跑预置表 3**，从 NewTx 曲线推导；�
 末段排除、Rel-19 小 burst 折算）。历史的 ``legacy_v1`` 全带/trim 路径已删除。
 
 **"容量仿真"是这条路径的一个话务配置**，不是另一条分支：
-``TrafficConfig(model="full_buffer")``。缓冲区永不空 ⇒ 按需 RBG 反查恒等于
-全带宽、RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。
+``TrafficConfig(model="full_buffer")``。缓冲区永不空 ⇒ 调度器始终有足量数据填满
+全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。
 调度、AMC、HARQ、解调 SINR 聚合一律
 照体验口径走，**没有为它开的任何特例**。代价是 busy period 永不结束，
 于是 **TS 28.552 的标准样本一个都不会形成**（样本只在 "DRB DL buffer emptied"
 事件上形成，见 TS 128 552 V19.5.0 p54），``drb_throughput_rel19_mbps`` /
 ``cell_experienced_mbps`` 报 ``None``。满缓冲看工程口径：ITU-R M.2412 /
-TR 38.913 的 ``ue_served_p5_mbps`` 与 ``active_window_goodput_mbps``，
-两者算法不同却应收敛（实测差 0.16%）。只有明确需要
+TR 38.913 的 ``ue_served_p5_mbps`` 与 ``active_window_goodput_mbps``。
+满缓冲下二者因分母趋同而接近（实测差 0.16%），但发送字节分子同源，
+不能拿这个接近证明字节记账正确。只有明确需要
 burst 真的传完的键报 ``None``。
 
 架构上分两相，这是能跑十万 TTI 的关键：
@@ -183,11 +184,11 @@ class TrafficConfig:
     到达率控制负载。**它是评价体验速率的标准话务模型**。
 
     ``full_buffer`` 是"话务开到最大"这个配置点，也就是过去所说的**容量仿真**：
-    缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。
+    缓冲区永不空 ⇒ 调度器始终有足量数据填满全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。
     调度、AMC、HARQ、解调 SINR 聚合全部沿用体验模式的定义，没有任何特例。
     代价是 busy period 永不结束，**28.552 的 busy-period 吞吐在这个配置下无边界
     可用**，如实报 ``None``。**用户体验速率仍然有定义**，走 ITU-R M.2412 /
-    TR 38.913 口径 ``ue_served_p5_mbps``（每 UE 已服务净荷 ÷ 观测窗长的 5% 分位，
+    TR 38.913 口径 ``ue_served_p5_mbps``（每 UE 已发送净荷 ÷ 观测窗长的 5% 分位，
     即 cell-edge user throughput）；小区总吞吐看 ``cell_served_mbps`` 与 PRB 利用率。
     """
 
@@ -336,12 +337,13 @@ class TrafficConfig:
         elif self.model == "cbr":
             d |= {"cbr_mbps": self.cbr_mbps}
         elif self.model == "full_buffer":
-            d |= {"note": ("话务开到最大（旧称容量仿真）：缓冲区永不空，按需 RBG "
-                           "反查恒等于全带宽。TS 28.552 的样本只在 buffer 排空事件上"
+            d |= {"note": ("话务开到最大（旧称容量仿真）：缓冲区永不空，调度器 "
+                           "始终有足量数据填满全部 RBG。TS 28.552 的样本只在 buffer 排空事件上"
                            "形成，满缓冲下不发生 ⇒ drb_throughput_rel19_mbps / "
                            "cell_experienced_mbps 报 None（定义使然）。看工程口径："
-                           "ue_served_p5_mbps 与 active_window_goodput_mbps，"
-                           "两者算法不同但应收敛；小区总吞吐看 cell_served_mbps "
+                           "ue_served_p5_mbps 与 active_window_goodput_mbps；满缓冲下"
+                           "二者只因分母趋同而接近，发送字节分子同源，不能验证记账。"
+                           "小区总吞吐看 cell_served_mbps "
                            "与 PRB 利用率。")}
         elif self.model in ("mixed", "cdf"):
             d |= {
@@ -951,6 +953,11 @@ class SystemConfig:
     # 与上面的空间约束正交：逐 RB 连续功率倍率，默认关闭/均匀分配。
     rb_power_control: pc.RbPowerControlConfig = field(
         default_factory=pc.RbPowerControlConfig)
+    # PDSCH 拿不到的那部分 RE（DM-RS + PDCCH），定义见 linkadapt.PdschOverhead。
+    # None = 用默认口径：12 个 PDSCH 符号、单符号 DM-RS 6 RE/PRB、PDCCH 1 符号。
+    # 这里保持 None 默认而不是 default_factory，是为了不把 linkadapt 拉成
+    # system 的顶层依赖（本模块对它一直是懒加载）。
+    pdsch_overhead: Any | None = None
     seed: int = 0
 
     def __post_init__(self) -> None:
@@ -1020,6 +1027,13 @@ class SystemConfig:
             raise ValueError("power_constraint 只支持 ebf / pebf / nebf")
         if not isinstance(self.rb_power_control, pc.RbPowerControlConfig):
             raise ValueError("rb_power_control 必须是 RbPowerControlConfig")
+        from . import linkadapt as la  # noqa: PLC0415
+        if self.pdsch_overhead is None:
+            self.pdsch_overhead = la.PdschOverhead()
+        elif isinstance(self.pdsch_overhead, dict):
+            self.pdsch_overhead = la.PdschOverhead(**self.pdsch_overhead)
+        elif not isinstance(self.pdsch_overhead, la.PdschOverhead):
+            raise ValueError("pdsch_overhead 必须是 PdschOverhead 或它的字段字典")
         if (self.rb_power_control.enabled
                 and int(self.rb_power_control.num_rb)
                 != self.num_rb):
@@ -1087,6 +1101,8 @@ class SystemConfig:
                 "tb_error_unit": "one user grant in one TTI = one single-codeword TB",
                 "dl_slot_ratio": round(self.dl_ratio, 4),
                 "snapshot_update_ms": self.snapshot_update_ms,
+                "pdsch_overhead": (self.pdsch_overhead.as_dict()
+                                   if self.pdsch_overhead is not None else None),
                 "power_constraint": self.power_constraint,
                 "rb_power_control": self.rb_power_control.as_dict(),
                 "seed": self.seed}
@@ -2720,14 +2736,15 @@ def simulate(
     TTI 主循环、资源分配与 KPI 口径全部在 :mod:`experience` 里。
 
     **"容量仿真"不是另一条分支，而是这条路径的一个话务配置**：
-    ``TrafficConfig(model="full_buffer")``。缓冲区永不空 ⇒ 按需 RBG 反查恒等于
-    全带宽、RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74），这正是容量口径。解调 SINR 仍按本次实际
-    授予的那几个 RBG 聚合——full buffer 下"那几个"天然就是全部，所以不需要、
-    也不允许为它开任何特例分支。代价是 busy period 永不结束，因此 **28.552 的
+    ``TrafficConfig(model="full_buffer")``。缓冲区永不空 ⇒ 调度器始终有足量数据
+    填满全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74），
+    这正是容量口径。解调 SINR 仍按每次实际授予的 RBG 聚合，不需要、也不允许为
+    full buffer 开任何特例分支。代价是 busy period 永不结束，因此 **28.552 的
     busy-period 吞吐没有样本**（样本只在 buffer 排空事件上形成），
     ``drb_throughput_rel19_mbps`` / ``cell_experienced_mbps`` 报 ``None``。
     满缓冲看工程口径：ITU-R M.2412 / TR 38.913 的 ``ue_served_p5_mbps``
-    与 ``active_window_goodput_mbps``，两者算法不同却应收敛。
+    与 ``active_window_goodput_mbps``。两者分母趋同所以数值应接近，但发送字节
+    分子同源；该接近只能检查分母边界，不能证明字节记账正确。
     小区总吞吐看 ``cell_served_mbps`` 与 PRB 利用率。
 
     ``rng`` 是 :class:`rng.RngBook`，**按用途分流**：话务到达、HARQ 误码抽样、

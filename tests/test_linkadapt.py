@@ -93,15 +93,19 @@ def test_preset_curve_contract_is_universal_single_codeword_tb() -> None:
     lookup = ex.TbsLookup.build(17, 16)
     short_tbs = lookup.tbs_bytes("D", 12, 2, 1)
     long_tbs = lookup.tbs_bytes("D", 12, 2, 17)
-    assert (short_tbs, long_tbs) == (1_729, 29_722)
+    # 基线随 DM-RS+PDCCH 开销接入下移（每 PRB 144 RE → 126 RE）：
+    # 旧值 (1_729, 29_722)。差的正是那 12.5%。
+    assert (short_tbs, long_tbs) == (1_537, 26_122)
     short_cb = la.code_blocks(short_tbs * 8, la.MCS_TABLE_3[12].rate)[0]
     long_cb = la.code_blocks(long_tbs * 8, la.MCS_TABLE_3[12].rate)[0]
-    assert (short_cb, long_cb) == (2, 29)
+    # TB 小了，码块数跟着少：旧基线 (2, 29)。
+    assert (short_cb, long_cb) == (2, 25)
     assert list(inspect.signature(ex._bler_lookup).parameters) == ["mcs", "sinr_db"]
 
     model = la.CurveBlerModel("newtx")
     mcs = la.MCS_TABLE_3[12]
-    short_n_coded = 16 * 12 * 12 * mcs.q_m * 2
+    # 从同一个开销口径推 RE 数，别在测试里另抄一份 12x12。
+    short_n_coded = 16 * la.PdschOverhead().re_per_prb("D") * mcs.q_m * 2
     long_n_coded = 17 * short_n_coded
     short_tb = model.bler(
         14.0, mcs, n_coded_bits=short_n_coded, n_code_blocks=short_cb
@@ -214,6 +218,44 @@ def main() -> None:
     check(n_re == 273 * 132, "RE 数 = PRB × (12·符号 − DMRS)")
     check(la.re_per_slot(273, n_symbols=14, n_dmrs_per_prb=0) == 273 * 156,
           "每 PRB 的 RE 数封顶 156（标准明写）")
+
+    # --- PdschOverhead：两条主调度路径共用的开销口径 -----------------------
+    # **棘轮。** 把 system._re_of / TbsLookup 换回 `PRB × 12 × 12` 会让这里变红：
+    # 那等于假设 DM-RS 与 PDCCH 都不占资源，TBS 系统性偏大约 12.5%。
+    _oh = la.PdschOverhead()
+    check((_oh.pdsch_symbols, _oh.dmrs_re_per_prb, _oh.pdcch_symbols) == (12, 6, 1),
+          "默认口径：12 个 PDSCH 符号、单符号 type-1 DM-RS 6 RE/PRB、PDCCH 1 符号")
+    check(_oh.re_per_prb("D") == 144 - 6 - 12 == 126,
+          f"D 时隙每 PRB 126 RE（实得 {_oh.re_per_prb('D')}）")
+    check(_oh.re_per_grant(100, "D") == 12_600,
+          "100 PRB 的 D 时隙 N_RE = 12600（改前是 14400）")
+    _m10 = la.MCS_TABLES[3][10]
+    _tbs_new = la.transport_block_size(12_600, _m10.rate, _m10.q_m, layers=1)
+    _tbs_old = la.transport_block_size(14_400, _m10.rate, _m10.q_m, layers=1)
+    print(f"  100PRB MCS10 rank1：不扣开销 {_tbs_old} bit → 扣开销 {_tbs_new} bit "
+          f"（-{100 * (1 - _tbs_new / _tbs_old):.2f}%）")
+    check(0.12 < 1 - _tbs_new / _tbs_old < 0.13,
+          f"扣 DM-RS+PDCCH 让 TBS 降约 12.5%（实得 {100 * (1 - _tbs_new / _tbs_old):.2f}%）")
+    # S 时隙：只折符号数，固定开销随后扣一次，所以比值小于 s_slot_fraction
+    check(_oh.symbols("S", 0.7) == 8 and _oh.re_per_prb("S", 0.7) == 78,
+          f"S 时隙 8 个符号 / 78 RE per PRB（实得 {_oh.symbols('S', 0.7)}/"
+          f"{_oh.re_per_prb('S', 0.7)}）")
+    check(_oh.re_per_prb("S", 0.7) / _oh.re_per_prb("D") < 0.7 - 1e-9,
+          "DM-RS 与 PDCCH 是每时隙固定开销，S/D 的可用 RE 之比必须小于 0.7")
+    # 156 上限仍然生效：14 符号 + 零开销就撞顶
+    check(la.PdschOverhead(pdsch_symbols=14, dmrs_re_per_prb=0,
+                           pdcch_symbols=0).re_per_prb("D") == 156,
+          "接入 PdschOverhead 之后 156 上限没有被绕过")
+    for _bad in (dict(pdsch_symbols=0), dict(pdsch_symbols=15),
+                 dict(dmrs_re_per_prb=-1), dict(dmrs_re_per_prb=13),
+                 dict(pdcch_symbols=-1), dict(pdcch_symbols=12),
+                 dict(dmrs_re_per_prb=True)):
+        try:
+            la.PdschOverhead(**_bad)
+            check(False, f"非法开销参数必须被拒：{_bad}")
+        except ValueError:
+            pass
+    check(True, "开销参数的边界与布尔冒充整数全部在构造时被拒")
 
     small = la.transport_block_size(50, 0.234, 2, 1)
     check(small in la._TBS_SMALL, "小包走查表分支，落在 Table 5.1.3.2-1 上")

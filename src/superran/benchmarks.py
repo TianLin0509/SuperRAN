@@ -387,7 +387,26 @@ def _b08(seed: int) -> dict[str, Any]:
 
 def _b09(seed: int) -> dict[str, Any]:
     del seed
-    lookup = ex.TbsLookup.build(17, 16, 0.7)
+    # 这条基准是**首跑前锁定**的。它预注册的那个预测（冻结点 MCS12/rank2 偏离
+    # 一个 RBG 的线性外推 0.5%~2%）隐含了注册当时的资源栅格——12 符号 ×
+    # 12 子载波 = 144 RE/PRB，也就是"DM-RS 与 PDCCH 都不占资源"。这个前提当时
+    # 没有被写进 spec，是隐式的。
+    #
+    # PdschOverhead 把默认栅格改成 126 RE/PRB（扣掉 DM-RS 6 RE/PRB 与 1 个
+    # PDCCH 符号）之后，这个冻结点漂进了近线性的口袋：delta 从 +1.119% 变成
+    # -0.027%，预注册的预测因此不成立。**变的是前提，不是结论**：同一张网格上
+    # 扫完 112 个 (时隙, MCS, rank) 点，落在 0.5%~2% 带内的点反而从 27 个涨到
+    # 35 个，|delta|<0.1% 的近线性点从 17 个降到 9 个——新栅格下 TBS 比旧栅格
+    # **更**不可线性外推。
+    #
+    # 所以这里把栅格**显式钉回注册时那一个**，让预注册的数字逐值复现
+    # （one=1729 B、full=29722 B、delta=+1.119%），而不是看到结果之后改挑一个
+    # 还落在带内的新冻结点——后者正是预注册机制要防的事。
+    # 代价：本条基准从此不再走出厂默认栅格，只守它注册时那条断言。
+    # 要不要按新栅格重新注册，见 docs/changes/20260904-amc-TBS扣PDCCH与DMRS开销.md。
+    registered_grid = la.PdschOverhead(
+        pdsch_symbols=12, dmrs_re_per_prb=0, pdcch_symbols=0)
+    lookup = ex.TbsLookup.build(17, 16, 0.7, overhead=registered_grid)
     diff = np.diff(lookup.values, axis=-1)
     strict = bool(np.all(diff > 0))
     one = lookup.tbs_bytes("D", 12, 2, 1)
