@@ -214,7 +214,7 @@ def _traffic() -> Family:
                    summary="话务开到最大，缓冲区永不空",
                    detail="**这就是过去所说的容量模式**，但它不是另一条仿真分支，"
                            "只是话务配置点：缓冲区永不空 ⇒ 调度器始终有足量数据填满"
-                           "全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。调度、AMC、HARQ、解调 SINR "
+                           "全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.11、开 MU 1.73）。调度、AMC、HARQ、解调 SINR "
                           "聚合全部照体验口径走。代价是 busy period 永不结束，"
                           "28.552 的标准样本因此一个都不形成，"
                           "drb_throughput_rel19_mbps 报 None；改看工程口径的 "
@@ -251,12 +251,12 @@ def _exp_thp() -> Family:
                  r"T_{small}=\frac{TBVol-PaddingVol}{TBVol}T_{slot}"),
         caveat="**标准 burst 吞吐、到首次调度等待、arrival→completion 与 PDB miss"
                "分层上报。** 小区体验速率是用户均值而非求和。experience_v2 的"
-               "NACK 字节留队但不做 HARQ 软合并。",
+               "payload 在首传发送时离开队列；NACK 触发一次重传但不做 HARQ 软合并。",
         source="ETSI TS 28.552 V19.5.0；本项目 experience.py",
         options=[
             Option("experience_v2", "DRB busy-period + fractional small burst",
                    formula=r"buffer: empty\to nonempty\to empty",
-                   summary="大 burst 排除末 ACK piece；小 burst 用 TB padding 比例折时长",
+                   summary="大 burst 排除清空 buffer 的末段发送；小 burst 用 TB padding 比例折时长",
                    detail="排队等待单独从 arrival 到 first TX 计算；每个文件是一个 FIFO"
                           "arrival object，即使多个文件落在同一 busy period 也各自算"
                           "等待、完成时延和 PDB。",
@@ -273,7 +273,7 @@ def _exp_thp() -> Family:
             ("记录 busy period", "buffer 空→非空开始，ACK 后重新为空才结束；"
                                  "full_buffer 下永不结束，该 KPI 报 None"),
             ("记录 FIFO arrival", "每个文件各自保留 arrival/firstTX/completion/PDB"),
-            ("计算大/小 burst", "大 burst 排末 ACK；单 TB 小 burst 用 padding 比例折时长"),
+            ("计算大/小 burst", "大 burst 排除清空 buffer 的末段发送；单 TB 小 burst 用 padding 比例折时长"),
             ("按层级聚合", "busy-period 吞吐与 arrival-object 时延分开"),
             ("按小区聚合", "**各用户体验速率的平均，不是求和**"),
         ], branches=[(3, "只有 1 个 slice", "丢弃——小包的固有盲区")]),

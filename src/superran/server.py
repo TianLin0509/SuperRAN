@@ -2023,7 +2023,7 @@ def sr_system_sim(
     +10log10(2) dB 查同一 NewTx 曲线。
 
     **只有一条评估路径**（``experience_v2``），没有模式开关。KPI 用 28.552
-    Rel-19 DRB busy-period：起点是首传、排队等待另报、末段 ACK piece 排除，
+    Rel-19 DRB busy-period：起点是首传、排队等待另报、清空 buffer 的末段发送排除，
     并为单时隙小 burst 提供 TBVol/PaddingVol 的 fractional-slot 口径；另报
     “首包时延”（每个 arrival object 从生成到首次调度）与“含头速率”（相同
     payload/去尾规则，只把首包时延加回分母）。
@@ -2125,7 +2125,7 @@ def sr_system_sim(
         算不出来时给 ``selected_interference_note`` 说明原因，不留哑 ``None``。
         实测同一份 210 UE 数据集只换 ``serving_cell``：中心站（SIR 中位 4.22 dB）
         与边缘站（16.25 dB）相比，后者把 ``cell_served_mbps`` 高估 28.8%、
-        把 ``ue_served_p5_mbps`` 高估 154%。
+        把 ``ue_served_p5_mbps`` 高估 156%。
         与 ``rb_power_control_enabled`` 同开会硬失败：逐 RB 功控的几何量直接来自
         数据集、不随样本筛选走，混用会得到一个半对半错的资源池。
     traffic_model : ``ftp3``（3GPP FTP Model 3，评价体验速率的标准话务）/

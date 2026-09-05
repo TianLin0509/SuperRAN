@@ -67,10 +67,10 @@ MU 打开时还可在同一 RBG 配对两个 UE，所以“每忙 TTI 恰好一�
 | TS 28.552 busy-period（**标准**） | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | 一个 burst 发完时有多快（首传 → 清空 buffer 前一段首传发送） | **报 `None`**：样本只在 buffer 排空事件上形成，满缓冲下该事件不发生 |
 | 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 还在传的 burst 落在测量窗内那段的发送速率 | **有值**；满缓冲下因分母趋同而接近 ITU 口径，但分子同源 |
 
-preset `sys_single_cell_experience_ftp3` 实测：`ue_served_mean_mbps=24.52` vs
-`cell_experienced_mbps=173.05`，同一次仿真差 7.1 倍——UE 全时段平均 vs 它的 burst
+preset `sys_single_cell_experience_ftp3` 实测：`ue_served_mean_mbps=24.26` vs
+`cell_experienced_mbps=145.00`，同一次仿真差 6.0 倍——UE 全时段平均 vs 它的 burst
 在传时的速率，本来就不是一个量。满缓冲下 ITU 与工程口径因分母趋同而接近；
-`sys_single_cell_capacity` 实测 61.868 vs 61.968，差 0.16%。两者分子同源，
+`sys_single_cell_capacity` 实测 53.350 vs 53.431，差 0.15%。两者分子同源，
 这个接近只能检查分母边界，不能证明字节记账正确；有限话务字节守恒才约束分子。
 
 **在飞 busy period 要报，但另起字段**（`active_window_goodput_mbps`），
@@ -80,9 +80,9 @@ preset `sys_single_cell_experience_ftp3` 实测：`ue_served_mean_mbps=24.52` vs
 （126.0 → 131.9）两种都见过。样本构成看 `drb_throughput_completed_bursts` /
 `_inflight_bursts` / `_inflight_share`。
 
-**已被反例推翻**：曾说"在飞段末 ACK 必是满 slot、没有尾巴可掐"。错——首传 100 B
-装进 1000 B TB → NACK，等待期间新到 1 B，重传 ACK 时队列仍非空且带 900 B padding。
-所以在飞段只能按 goodput（有用字节 ÷ 经过时间）报，是工程口径。
+**在飞段不能冒充标准样本。** #21 后 buffer 在首传发送时扣减，重传对 DRB 队列是
+空操作。最小反例是在同一个 busy period 到达 101 B、只首传 100 B：buffer 仍剩 1 B，
+没有 emptied 事件，只能形成 `engineering_active_window`；最后 1 B 发走后才有标准边界。
 
 full_buffer 下留 `None` 的只有明确需要 burst 传完的：
 `cell_experienced_completed_only_mbps`、`cell_head_inclusive_experienced_mbps`、

@@ -71,7 +71,8 @@
 
 表 3 每 TB 最多一次重传，默认 IR、可选 CC，全部只从 NewTx 曲线推导；原始 ReTx 行
 仅供审计。IR 用半谱效等效 MCS 查表，CC 用原 MCS +3.0103 dB；等效 MCS 不得写回空口。
-重传保持原 MCS/RBG 数/rank/TBS，失败字节后续成为新 TB。不要把预置 TBLER 再按 CB 数放大。
+重传保持原 MCS/RBG 数/rank/TBS；payload 在首传发送时离开队列，末次失败只进
+`residual_bler`、不回队列。不要把预置 TBLER 再按 CB 数放大。
 表3使用版本化256QAM映射。历史表行0..14对应上报4-bit CQI1..15；上报CQI0为out-of-range。
 
 ## TDD 的 CQI、BF Gain 与 OLLA

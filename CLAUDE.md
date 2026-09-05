@@ -1512,8 +1512,8 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 
 **没有"容量模式"这个分支了。** `evaluation_mode` 已删除，`system.simulate()` 恒走
 `experience.simulate_experience()`。文档和对话里说的"容量仿真"指的是
-**`traffic_model="full_buffer"` 这个话务配置**：缓冲区永不空 ⇒ 按需 RBG 反查恒等于
-全带宽，**RBG 全部用满**（`resource_utilization == 1.0`），这正是容量口径。
+**`traffic_model="full_buffer"` 这个话务配置**：缓冲区永不空 ⇒ 调度器始终有足量数据
+填满全部 RBG（`resource_utilization == 1.0`），这正是容量口径。
 
 > **⚠️ 撤回：满缓冲保证的是"RBG 用满"，不是"每忙 TTI 只服务一个用户"。**
 > 早先这里写着"每 TTI 一个 SU（或一对 MU）"，那是**频选关 + MU 关**时的退化解。
@@ -1523,19 +1523,19 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 > | `scheduled_ues_per_busy_tti` | MU 关 | MU 开 |
 > |---|---|---|
 > | 频选 `off` | **1.0000** | 2.0000 |
-> | 频选 `on` | 1.3200 | 2.8200 |
+> | 频选 `on` | 1.3800 | 2.7200 |
 >
 > 频选打开时调度器把"少几个但信道更好的 RBG"给第一个用户、余料给下一个；
 > MU 打开时一个 TTI 本来就配对两个用户。**两者都是正确的物理行为。**
 > 出厂默认是 `frequency_selective="auto"` + `mu_enabled=False`。
 > **六个实测 preset 锚点没有一个是 1.0**：
-> capacity 1.0942、capacity_mu 1.7418、ftp3 1.1694、mixed 1.3630、
-> 多小区中心站 1.0977、多小区边缘站 1.0132。
+> capacity 1.1056、capacity_mu 1.7267、ftp3 1.2137、mixed 1.4114、
+> 多小区中心站 1.0995、多小区边缘站 1.0067。
 > 后果：满缓冲口径**不等于**经典"单用户占满全带"的容量定义，跨版本、跨工具
 > 引用容量数会有系统性偏差——`sys_single_cell_capacity` 的 preset 注释里量过。
 
 **不许为 full_buffer 开任何特例分支。** 调度、AMC、HARQ、解调 SINR 聚合（按本次
-实际授予的那几个 RBG 算，满缓冲下"那几个"天然就是全部）一律照体验模式的定义走。
+实际授予的 RBG 算）一律照体验模式的定义走。
 想让容量工况跑快一点的诱惑（比如满缓冲时跳过频选搜索）**明确否决**——那会重新造出
 一条只在特定话务下成立的路径，也就是这次合并要消灭的东西。棘轮已经守住这条：
 把 `frequency_aware` 在满缓冲下强制置 False，第 8 节的 2×2 表立刻变红。
@@ -1552,21 +1552,21 @@ SU-only 的数不是上界。preset `sys_single_cell_capacity` ↔
 
 | | SU 基线 | 开 MU | 差 |
 |---|---|---|---|
-| `cell_served_mbps` | 618.68 | **848.65** | **+37.2%** |
-| `ue_served_mean_mbps` | 61.87 | 84.87 | +37.2% |
-| **`ue_served_p5_mbps`（边缘用户）** | 19.51 | 19.46 | **−0.23%，等于没变** |
-| `scheduled_ues_per_busy_tti` | 1.0942 | 1.7418 | |
-| `mu_share` | 0 | 0.6554 | |
-| `avg_mcs_first_tx` | 21.70 | 18.97 | **−2.72 档** |
-| `bler_first_tx` | 0.0884（0.88×） | 0.1431（1.43×） | |
+| `cell_served_mbps` | 533.50 | **735.03** | **+37.8%** |
+| `ue_served_mean_mbps` | 53.35 | 73.50 | +37.8% |
+| **`ue_served_p5_mbps`（边缘用户）** | 16.94 | 17.41 | **+2.8%** |
+| `scheduled_ues_per_busy_tti` | 1.1056 | 1.7267 | |
+| `mu_share` | 0 | 0.6423 | |
+| `avg_mcs_first_tx` | 21.17 | 19.05 | **−2.12 档** |
+| `bler_first_tx` | 0.0854（0.85×） | 0.1465（1.47×） | |
 
-**结论一句话：MU 给的是小区容量，不是小区边缘体验。** 5% 分位那个用户在小区边缘，
-`min_pairing_mcs` 门与相关性门本来就把它挡在配对之外——它拿不到 MU 的好处，
-也没被 MU 的干扰坑到。**这是"容量口径 ≠ 体验口径"最硬的一条实证。**
+**结论一句话：MU 主要给小区容量，不能把容量增益外推成边缘体验增益。** 本次受控对照
+里小区容量 +37.8%，5% 边缘用户仅 +2.8%；`min_pairing_mcs` 与相关性门使边缘用户
+较少参与配对。两者不是同一个 KPI 工作点。
 
 **MU 的代价两半都如实出现了**（这正是 `pair_table` 记账该有的样子）：一半是发得更
-保守（MCS −2.72 档），一半是更容易错（BLER 0.88× → 1.43×）。BLER 1.43× 在 1.6×
-门限内但明显差于 SU，且**还在收敛**（1.5 秒时是 1.74×，3 秒 1.43×）——
+保守（MCS −2.12 档），一半是更容易错（BLER 0.85× → 1.47×）。BLER 1.47× 在 1.6×
+门限内但明显差于 SU，3 秒窗口仍未证明完全收敛——
 **加重复次数只收窄置信区间、不会再往下压**，要压得靠加 `duration_s`。
 
 ### 「用户体验速率」有两个口径，别混
@@ -1580,19 +1580,19 @@ SU-only 的数不是上界。preset `sys_single_cell_capacity` ↔
 | 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 在飞 busy period 落在测量窗内那一段的 goodput | **有值**。与 ITU 口径数值接近，但**那不是交叉验证**，见下 |
 
 它们**不是同一个数的两种精度**。preset `sys_single_cell_experience_ftp3` 实测：
-`ue_served_mean_mbps=24.52` 而 `cell_experienced_mbps=173.05`，同一次仿真差 7.1 倍
+`ue_served_mean_mbps=24.26` 而 `cell_experienced_mbps=145.00`，同一次仿真差 6.0 倍
 ——前者是 UE 全时段平均，后者是它的 burst 在传时的速率。满缓冲下 ITU 口径与工程
-口径数值接近（UE 一直活跃），preset `sys_single_cell_capacity` 实测 61.868 vs
-61.968，差 0.16%。
+口径数值接近（UE 一直活跃），preset `sys_single_cell_capacity` 实测 53.350 vs
+53.431，差 0.15%。
 
-> **⚠️ 撤回：这个 0.16% 不是交叉验证，别再当证据用。**
+> **⚠️ 撤回：这个约 0.15% 不是交叉验证，别再当证据用。**
 > 这两个数的**分子是同一份发送净荷记账**——`experience.py` 里 `tr.transmit()`
 > 返回的那个 `payload`，一边累进 `served_measured`、一边塞进 `TxEvent`。
 > 只有分母不同：一个除观测窗长，一个除首传到末次窗内发送的跨度。满缓冲下 UE 从头忙到
 > 尾，两个分母本就重合，**所以吻合是必然的**。它能证明的只有"满缓冲确实让每个 UE
 > 全程活跃"，这是关于话务模型的陈述，**不是关于记账正确性的**。
-> 实测：把净荷记账整体放大 10%，小区吞吐从 618.10 错成 683.93（错 10.6%），
-> 而这个读数仍是 0.156%，一个报警都不响。
+> 历史 pre-#18 反例：把净荷记账整体放大 10%，小区吞吐从 618.10 错成 683.93
+> （错 10.6%），而两个同源指标的相对差仍约 0.16%，一个报警都不响。
 >
 > **那什么能抓住记账整体缩放？有限话务下的字节守恒。** `accounting_error_pct`
 > 比的是「到达 = 已发 + 积压」，而**到达量由话务模型独立决定**，记账一缩放这个
@@ -1612,11 +1612,10 @@ SU-only 的数不是上界。preset `sys_single_cell_capacity` ↔
 所以**不许声称"只数已完成一定偏乐观"**。样本构成由
 `drb_throughput_completed_bursts` / `_inflight_bursts` / `_inflight_share` 如实上报。
 
-**已被反例推翻的说法（勿重蹈）**：我曾断言"在飞段的最后一个 ACK 必是满 slot，
-没有尾巴可掐，所以可以按标准口径处理"。错。反例：首传 100 B payload 装进 1000 B TB
-→ NACK；等待期间新到 1 B；重传 ACK 时队列仍非空，而这个 ACK 带 900 B padding。
-**1 个字节就能改变标准 KPI 的有无，且样本建立在重度 padding 的 slot 上。**
-所以在飞段只能是 goodput（有用字节 ÷ 经过时间），是工程口径，不是 28.552。
+**在飞段不能冒充标准样本。** #21 之后 buffer 在首传发送时扣减，重传对 DRB 队列是
+空操作。最小反例是在同一个 busy period 到达 101 B、只首传 100 B：虽然首传已发生，
+buffer 仍剩 1 B，没有 `buffer-emptied` 事件；它只能形成
+`engineering_active_window`，不能进入 28.552。把最后 1 B 也发走后才形成标准边界。
 
 full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst 真的传完**：
 `cell_experienced_completed_only_mbps`、`cell_head_inclusive_experienced_mbps`
@@ -1642,13 +1641,13 @@ full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst �
 |---|---|---|---|
 | 几何 SIR 中位 | 4.22 dB | 16.25 dB | 12.0 dB |
 | IoT 中位（仿真） | 23.23 dB | 16.78 dB | 低估 6.45 dB |
-| `cell_served_mbps` | 620.52 | 799.31 | **高估 28.8%** |
-| `ue_served_p5_mbps` | 28.24 | 71.67 | **高估 154%** |
-| `bler_first_tx` | 0.1041（1.04×） | 0.0315（**0.32×**） | |
+| `cell_served_mbps` | 534.23 | 688.13 | **高估 28.8%** |
+| `ue_served_p5_mbps` | 24.03 | 61.56 | **高估 156%** |
+| `bler_first_tx` | 0.1024（1.02×） | 0.0342（**0.34×**） | |
 
 **边缘站那一列同时说明「信道太好的场景不能当外环锚点」**：它的
-`avg_mcs_first_tx` 是 26.19，已经贴着表 3 的最高档 27，`olla_db_mean` 为 **+1.43 dB**
-（外环在往上推却推不动），于是 BLER 只能低于目标。中心站是 21.88 档 / −3.07 dB，
+`avg_mcs_first_tx` 是 26.08，已经贴着表 3 的最高档 27，`olla_db_mean` 为 **+1.43 dB**
+（外环在往上推却推不动），于是 BLER 只能低于目标。中心站是 21.54 档 / −3.07 dB，
 外环在正常回退。**MCS 撞天花板 ⇒ 外环失去调节余量 ⇒ BLER 偏低**，这不是 bug，
 是场景选错。
 

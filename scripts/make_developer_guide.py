@@ -4706,7 +4706,7 @@ Qm 内检查。这个分析后端用于表 1/2，不描述预置表 3 的运行�
         "<p>初传 NACK 后，TB 进入唯一一次重传：MCS、RBG 数、rank 与 TBS 全部冻结，"
         "并在相同 D/S slot 类型上发送。默认 IR 把初传 MCS 的谱效除以 2，再用"
         " <code>searchsorted</code> 式的向下查表得到等效 MCS；CC 保持原档并增加 3.0103 dB。"
-        "两者都只查询 NewTx 曲线。重传失败则结束本次 HARQ，字节留在 DRB 队列，后续作为新 TB；"
+        "两者都只查询 NewTx 曲线。payload 在首传发送时离开 DRB 队列；末次失败只进 residual_bler，不回队列；"
         "不会发生第二次重传。当前仍未展开 RV、软比特、并行 process 和标准 HARQ timing。</p>",
     )
     body += (

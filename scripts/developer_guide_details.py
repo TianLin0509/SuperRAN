@@ -1611,7 +1611,7 @@ DETAIL_SPECS.update({
         ),
         implementation=(
             ("解析标准链路表", "<code>linkadapt.py</code> 维护 CQI/MCS/TBS 规则，TBS 对 RBG 数用表驱动反查；不能用全带字节除以 17 估计所需 RBG。"),
-            ("扣掉 PDSCH 拿不到的 RE", "TBS 的第一步是 38.214 §5.1.3.2 的 <code>N_RE = min(156, 12·符号数 − N_DMRS − N_OTH) × N_PRB</code>。<code>PdschOverhead</code> 把这个口径集中到一处，默认 12 个 PDSCH 符号、单符号 type-1 DM-RS 6 RE/PRB、PDCCH 等效 1 个符号（12 RE/PRB），即每 PRB 126 RE。<code>system</code> 的 legacy 主循环与 <code>experience</code> 的 <code>TbsLookup</code> 共用它，不能各自硬编码 <code>12×12=144</code>。S 时隙只按 <code>S_SLOT_DL_FRACTION</code> 折**符号数**，DM-RS 与 PDCCH 是每时隙固定开销、随后只扣一次，所以 S/D 的可用 RE 之比是 78/126≈0.619，小于 0.7。"),
+            ("扣掉 PDSCH 拿不到的 RE", "TBS 的第一步是 38.214 §5.1.3.2 的 <code>N_RE = min(156, 12·符号数 − N_DMRS − N_OTH) × N_PRB</code>。<code>PdschOverhead</code> 把这个口径集中到一处，默认 12 个 PDSCH 符号、单符号 type-1 DM-RS 6 RE/PRB、PDCCH 等效 1 个符号（12 RE/PRB），即每 PRB 126 RE。统一后的唯一系统主循环由 <code>experience.TbsLookup</code> 消费它，不能另写 <code>12×12=144</code>。S 时隙只按 <code>S_SLOT_DL_FRACTION</code> 折**符号数**，DM-RS 与 PDCCH 是每时隙固定开销、随后只扣一次，所以 S/D 的可用 RE 之比是 78/126≈0.619，小于 0.7。"),
             ("生成 QAM MI", "对单位能量 M-QAM 星座和复高斯噪声做 Gauss-Hermite 数值积分，生成单调缓存，并提供正/逆插值。"),
             ("映射频选 SINR", "<code>effective_sinr()</code> 根据modulation/method选择MIESM或EESM；EESM接受显式beta，缺正式标定时结果只能作为参考。输入中的每个RB都必须有限，空数组或任一NaN/Inf当场失败，禁止只丢掉坏RB后用剩余好RB计算。"),
             ("计算分析 BLER", "表 1/2 按 MI 余量、码长和实现损失得到 CB 瀑布，再按 38.212 分段估算 C 并合成 TB BLER；anchor_check 只输出对标点。"),
@@ -1634,7 +1634,7 @@ DETAIL_SPECS.update({
             ("全曲线可见", "手册 28 行审计表与 56 条瀑布由源常量直接生成；10% crossing、源范围和点数与 verify_curves 一致。"),
             ("参考面与事件标签", "查询结果带 source axis、single-codeword one-TTI/TB event、空口 MCS、lookup MCS、clamp 与通用曲线范围；分析后端不伪装预置表后端。"),
             ("一次重传身份", "强制 NACK 轨迹逐 TB 验证 MCS/RBG 数/rank/TBS 与 D/S 类型不变；失败后没有第二次重传，窗口末 pending 单列右删失。"),
-            ("开销口径两条路径一致", "改 <code>PdschOverhead</code> 的参数后，legacy 主循环的小区吞吐与 <code>TbsLookup</code> 的 TBS 必须同比变化（test_physics_invariants 第 9 节）。硬编码 <code>12×12</code> 的路径对配置免疫，比值会退化成 1.000，当场变红。"),
+            ("开销口径端到端一致", "改 <code>PdschOverhead</code> 的参数后，<code>TbsLookup</code> 的 TBS 与唯一系统主循环的小区吞吐必须同比变化（test_physics_invariants 第 9 节）。硬编码 <code>12×12</code> 的入口对配置免疫，比值会退化成 1.000，当场变红。"),
             ("文档可执行性", "完整 MCS 表由代码生成；JSON raw rows 摘要等于 DATA_SHA256；独立参考实现五个锚点通过。"),
         ),
         pitfalls=(

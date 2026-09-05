@@ -4,8 +4,8 @@
 ``experience_v2`` 用实际分配的 TBS 给 PF 记账，并允许一个 TTI 服务多个 UE。
 
 **"容量仿真"不是另一条分支**，而是 ``TrafficConfig(model="full_buffer")``
-这个话务配置点：缓冲区永不空 ⇒ :func:`_build_su_plan` 的按需 RBG 反查恒等于
-全带宽、RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74）。
+这个话务配置点：缓冲区永不空 ⇒ 调度器始终有足量数据填满全部 RBG
+（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.11、开 MU 1.73）。
 调度、AMC、HARQ、解调 SINR 聚合全部照
 本模块的定义走，**没有为它开的任何特例分支**。代价是 busy period 永不结束，
 **标准与工程两套 KPI 因此分家**：TS 28.552 的样本只在 "DRB DL buffer emptied"
@@ -14,7 +14,7 @@
 定义使然，不是缺陷**。满缓冲要看的是工程口径：ITU-R M.2412 / TR 38.913 的
 ``ue_served_p5_mbps``（每 UE 已发送净荷 ÷ 观测窗长）与 ``active_window_goodput_mbps``
 （在飞 busy period 的窗内段发送速率）。满缓冲下两者的分母趋同，实测
-61.868 vs 61.968 Mbps，差 0.16%；但它们的发送字节分子同源，接近只能检查
+53.350 vs 53.431 Mbps，差 0.15%；但它们的发送字节分子同源，接近只能检查
 分母边界，**不能证明字节记账正确**。有限话务的独立到达量守恒才约束分子。
 
 物理边界明确写在结果里：逐 RBG 频选与 RB 功控是两个独立开关；只要链路表
@@ -4111,14 +4111,15 @@ def simulate_experience(
             "frequency_selective='off' 或逐 RBG 字段不可用的结果，不再由 RB 功控"
             "开关暗中决定。"
         ),
-        "TBS 量化算法走 38.214 §5.1.3.2，但 MCS 使用预置 20B profile；D 时隙按"
-        "每 RB 12 个数据符号、S 时隙按 0.7 倍 N_RE，未展开 DMRS/PTRS/CORESET。",
+        "TBS 量化算法走 38.214 §5.1.3.2，但 MCS 使用预置 20B profile；默认 D 时隙"
+        "每 PRB 为 12×12−6(DM-RS)−12(PDCCH 等效)=126 RE，S 时隙只折符号数后"
+        "再扣同一份固定开销。未展开 PTRS 与 RB 级 CORESET 账本。",
         ("HARQ 每个单码字 TB 最多一次重传，重传保持初传 MCS、RBG 数、rank 与 TBS；"
          f"当前合并={harq_combining.upper()}。CC 用同一 NewTx 曲线并把码字 "
          "SINR 抬升 10log10(2)=3.0103 dB；IR 用原 MCS 一半谱效映射等效低档 MCS，"
          "在不变 SINR 上查该 NewTx 曲线。等效 MCS 只用于 BLER 查表，不改写空口 MCS。"
-         "重传失败后结束本次 HARQ，payload 留在 DRB 队列并在后续作为新 TB。"),
-        f"PF 平均量口径是 **{accounting}**；ACKed bytes 另作为 KPI 统计。",
+         "payload 在首传发送时离开队列；末次失败只进 residual_bler，不回队列。"),
+        f"PF 平均量口径是 **{accounting}**；发送净荷另作为 KPI 统计。",
         (f"Rank 策略={rank_cfg.mode}"
          + (f"（固定 rank{min(int(rank_cfg.fixed_rank), rank_ctl.max_rank)}）"
             if rank_cfg.mode == "fixed"
