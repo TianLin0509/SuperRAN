@@ -737,8 +737,9 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
     ("mu_enabled", "SU/MU 自适应", "select", ["off", "on"],
      "experience：PF 排序后比较数据受限 SU/MU 方案；SU 能清空全部队列时强制 SU"),
     ("mu_accounting", "MU 记账口径", "select", ["pair_table"],
-     "pair_table：MCS 与误块抽签都读 pair 表真值。历史的 se_ratio_legacy"
-     "（只缩 TBS、不进误块抽签）已随 legacy 容量路径下线"),
+     "pair_table：MCS 与误块抽签都读 pair 表真值，是唯一口径。"
+     "历史的 se_ratio_legacy（只按标量比值缩 TBS、不进误块抽签）已于 "
+     "2026-09-04 删除，它的另一个宿主 legacy 容量主循环也一并下线"),
     ("mu_precoder", "MU 预编码", "select", ["zf", "rzf"],
      "ZF 为历史基线；RZF 在噪声加载之外可加入 N_BS·sigma_e² 的 CSI 不确定性加载"),
     ("mu_csi_error_variance", "MU CSI 误差方差", "number", (0.0, 1.0, 0.001),

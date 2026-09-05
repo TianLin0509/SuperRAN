@@ -645,9 +645,9 @@ DETAIL_SPECS.update({
             "Phase A 需要预先产生真实用户对信息：候选 pair、rank、预编码器、残留相关性/干扰损失及可支持状态。Phase B 不能凭一个平均 MU 增益临时假造配对。当前可以先使用 ZF/RZF 和明确的候选规则，但 pair table 必须来自真实 h_est 设计并能在 h_true 上复评。",
             "MU 资源统计按物理 PRB 计一次。两个用户在同一 RBG 配对，已用 PRB 仍是一份；用户级 attribution 可以各记 grant 或按用户数分摊，但小区 <code>MU PRB/已用 PRB</code> 的分子分母不能把同一 RBG 双计。",
             "配对的代价有两半，任何评估路径都必须同时记账，否则结果只会朝一个方向偏。第一半是<b>发送侧变保守</b>：配对后每流只分到 P/(K·rank) 的功率，还要吃零陷残余，AMC 坐标应当整体下移，选出的 MCS 因此更低。第二半是<b>接收侧更容易错</b>：即使 MCS 已经降过，同一档在配对状态下的误块概率仍高于单用户——因为真实接收 SINR 是把 ZF 权（按基站可能已老化的 CSI 算出）打到双方 h_true 上、再把对方的流放进干扰协方差得到的，它不等于任何 dB 项的简单相加。只记第一半会低估吞吐、只记第二半会高估 MCS，而历史 capacity 两半都没记：它按 SU 坐标选 MCS、按 SU 真值抽签，只把 TB 大小乘一个建表阶段测出的标量比值，等价于宣称「配对让包变小但一点也不更容易错」。",
-            "因此 MU 一律读同一张 pair 表（<code>mu_accounting=\"pair_table\"</code>，唯一口径）。矩阵运算全部留在建表阶段，主循环只查表：实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s，与主循环十万 TTI 的开销相比可以忽略。历史的标量口径 <code>se_ratio_legacy</code> 已彻底下线：现在传它会硬失败，不再是可选降级项。它系统性乐观，旧结果不可与现在的 <code>pair_table</code> 结果拼进同一张趋势图。",
+            "因此 MU 一律读同一张 pair 表（<code>mu_accounting=\"pair_table\"</code>，唯一口径）。矩阵运算全部留在建表阶段，主循环只查表：实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s，与主循环十万 TTI 的开销相比可以忽略。历史的标量口径 <code>se_ratio_legacy</code> 已于 2026-09-04 删除，选中时直接报错，不再作为静默兜底存在。它系统性乐观，旧结果不可与 pair 表口径的新结果拼进同一张趋势图。",
             "<code>PowerLoss = −10log10(2) = −3.0103 dB</code> 是<b>记账标签而不是近似</b>。pair 表按 <code>CorrLoss ≜ pred_MU − pred_SU − PowerLoss</code> 定义，所以决策里真正生效的平移量 <code>CorrLoss + PowerLoss</code> 恒等于 <code>pred_MU − pred_SU</code>，那个常数在代数上精确抵消；单列它只是为了让诊断能分开回答「功率分摊占多少、相关性损失占多少」。这条恒等式只在当前支持的 2 用户 × 每用户 rank2 下成立：扩到 3/4 用户或不等流数时，等功率分流的常数本身要按实际流数重新定义，届时必须同时更新标签与它在诊断里的解读，不能只改数值。",
-            "SU/MU 判决是逐 TTI 做的，不依赖任何全程标量。锚点固定为 PF 第一名，先按准入判据筛伙伴（与 experience 相同：两侧的<b>预测</b> BLER 都不得超过 0.5），再在通过准入的伙伴里取聚合谱效最高的那个，最后还要赢过锚点单发的 SU 方案才真配对。capacity 是全带调度，同一 TTI 的 RE 数对 SU/MU 完全相同，所以比较 <code>Σ rank × MCS 谱效</code> 与 experience 比较 useful bytes 是同一件事。两种拒配对的原因分别计入 <code>mu_pair_rejects</code>（一个通过准入的伙伴都没有）与 <code>mu_su_wins</code>（有可配的对但单发更划算），不静默退回。",
+            "SU/MU 判决是逐 TTI 做的，不依赖任何全程标量。锚点固定为 PF 第一名，先按准入判据筛伙伴（与 experience 相同：两侧的<b>预测</b> BLER 都不得超过 0.5），再在通过准入的伙伴里取聚合谱效最高的那个，最后还要赢过锚点单发的 SU 方案才真配对。满缓冲下全带调度时同一 TTI 的 RE 数对 SU/MU 完全相同，所以比较 <code>Σ rank × MCS 谱效</code> 与有限话务下比较 useful bytes 是同一件事。拒配对的原因计入 <code>mu_candidate_scoring.rejection_reasons</code>，判单发更划算的 TTI 数计入 <code>su_mu_plan.su_selected</code>，不静默退回。",
             "重传恒按 SU 重发。HARQ 的合同是冻结发送身份（MCS/RBG 数/rank/TBS），而配对会同时改变真实 SINR 与 TBS，两者直接冲突。把重传也做成 MU 需要先定义「配对状态属不属于冻结身份的一部分」，这是尚未确认的现场口径，因此当前显式选择更保守的一侧，并在文档与 notes 里写清楚，而不是让它成为一个没人知道的隐含假设。",
         ),
         implementation=(
@@ -671,7 +671,7 @@ DETAIL_SPECS.update({
             ("资源不双计", "MU pair 的物理 RBG 在小区利用率只计一次，分摊后的用户资源和小区总量可守恒。"),
             ("代价进 MCS", "同一批链路表下开关 MU，pair 表口径的首传平均 MCS 必须显著下降（实测 23.48 → 19.93）；历史标量口径下它几乎不动（22.68 → 22.69），这正是被修掉的问题。"),
             ("代价进抽签", "同一档 MCS 分别按 SU 真值与 pair 真值查 BLER，后者必须更高（实测 0.0008 → 0.0040，真值差 −3.92 dB）。"),
-            ("自适应会判 SU 赢", "把两个 UE 的空间相关系数拉到 0.999，配对占比必须坍塌到 0，并且拒配对的原因被显式计数（实测 767 个 TTI 记为 mu_su_wins），不是静默不配。"),
+            ("自适应会判 SU 赢", "把两个 UE 的空间相关系数拉到 0.999，配对占比必须坍塌到 0，并且拒配对的原因被显式计数（<code>mu_candidate_scoring.rejection_reasons</code> 里的 <code>correlation_threshold</code>，判单发更划算的 TTI 数在 <code>su_mu_plan.su_selected</code>），不是静默不配。"),
             ("平移量恒等式", "<code>CorrLoss + PowerLoss</code> 与 <code>pred_MU − pred_SU</code> 必须逐元素相等，证明 −3.01 dB 只是标签。"),
         ),
         pitfalls=(
@@ -680,7 +680,7 @@ DETAIL_SPECS.update({
             "SU 已经清空全部可服务包仍强制 MU，只为了提高 MU 配对比例。",
             "只把配对代价记在 TB 大小上，误块抽签仍用 SU 真值——配对越激进结果越乐观，而且 KPI 上完全看不出来。",
             "把 −3.01 dB 当成一个可以直接套用到 3/4 用户或不等流数的物理近似；它在当前实现里只是 2×rank2 下会被精确抵消的记账标签。",
-            "拿 <code>se_ratio_legacy</code> 时代的旧结果和现在的 <code>pair_table</code> 结果放进同一张趋势图（该选项已下线，旧结果不可与新结果拼图）。",
+            "拿 <code>se_ratio_legacy</code>（已删除）时代的旧结果和 <code>pair_table</code> 的新结果放进同一张趋势图。",
         ),
         source_paths=("src/superran/experience.py", "src/superran/mumimo.py", "src/superran/system.py"),
     ),
@@ -704,7 +704,7 @@ DETAIL_SPECS.update({
             "<p>若直接丢弃前 1 s 所有事件并从空状态开始统计，首包等待、负载和 OLLA 仍带冷启动偏差；若把前 1 s 的资源计入分母但不计业务，又会压低利用率。正确实现把“状态是否演化”和“样本是否进入统计”分开。</p>"
         ),
         checks=(
-            ("路径隔离", "capacity 与 experience 有独立入口、允许参数与 golden regression，不共享含糊的 mode flag 分支。"),
+            ("没有路径可隔离", "系统级只有一条评估路径，容量口径是它的一个话务配置点（traffic_model=\"full_buffer\"）；早先那个 evaluation_mode 分支已删除，不存在需要隔离的第二条入口。"),
             ("预热不重置", "warmup 边界前后队列、OLLA、PF 与报告状态连续，只有统计累加发生切换。"),
             ("收敛诊断", "测量期前后半的 BLER/OLLA/负载差异可见，未稳时结果标注或阻塞。"),
             ("分母正确", "所有速率、利用率和覆盖率只使用有效测量时长/资源，且跨窗口对象规则可复算。"),
@@ -1032,7 +1032,7 @@ DETAIL_SPECS.update({
         principles=(
             "预设的目标是复用已审核的一组参数与语义，不是给配置起一个短名字。一个场景通常包含载波/天线、信道源、用户撒点、干扰、SRS/CSI、算法、traffic、scheduler、warmup 和 KPI。每一层有所有者；例如预置天线默认由 hardware profile 注入，用户只改 fixed_downtilt 时不能顺带丢掉极化和端口顺序。",
             "合并必须是确定且可解释的。常见顺序为 schema 默认→硬件/信道 preset→系统场景→用户显式 override；深层字典按字段合并，列表是否替换需明示。最终运行只读取 resolved config，并在 manifest 保存来源链与每个关键字段的 provenance。否则同名 preset 更新后，历史结果无法复现。",
-            "信道 preset 与系统场景不是同一层。前者描述数据源、channel model、阵列、频率与样本；后者增加 TTI、业务、调度、负载目标和 KPI。capacity 与 experience 也应选择各自允许的场景合同。页面中的全量清单由 YAML 动态扫描，详细阅读重点是字段语义、继承和边界，而不是重复展示每行文本。",
+            "信道 preset 与系统场景不是同一层。前者描述数据源、channel model、阵列、频率与样本；后者增加 TTI、业务、调度、负载目标和 KPI。满缓冲与有限话务是同一条路径上的两个话务工作点，各自有允许的场景合同。页面中的全量清单由 YAML 动态扫描，详细阅读重点是字段语义、继承和边界，而不是重复展示每行文本。",
             "实测 CDF 到位后应作为版本化资产进入 traffic profile：文件哈希、单位、采样规则和 scale 与 preset 一起记录。校准得到的 30%/50% scale 是场景/算法/用户数相关结果，不应写成永远有效的全局常数；可以缓存，但命中条件必须包含影响负载的配置哈希。",
         ),
         implementation=(

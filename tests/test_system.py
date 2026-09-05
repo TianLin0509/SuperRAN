@@ -331,8 +331,10 @@ check(_g_bad["measured"] is False, "单用户时 MU 增益明确标成未测得"
 check(bool(_g_bad.get("errors")), "MU 配对失败返回可审计错误，而不是静默吞掉")
 check("禁止用于仿真" in _g_bad["note"], "诊断占位 1.0 不冒充可用 MU 增益")
 
-# **标量比值口径（se_ratio_legacy）随 legacy 容量路径一起下线。** 它等于
-# 「包变小但一点也不更容易错」，物理上说不通。给了就在配置构造处硬失败。
+# **标量比值口径 se_ratio_legacy 已于 2026-09-04 废除**（#17），它的另一个宿主
+# legacy 容量主循环也随本 PR 一起下线。它只把 TBS 乘 mu_se_ratio/K，配对代价
+# 不进误块抽签——「包变小但不更容易错」。保留成兜底只会让这种乐观静默发生，
+# 所以在**配置构造**这一层就硬失败，而不是等跑完给一段 notes。
 _T_legacy_ebf = fake_tables(power_constraint="ebf")
 with pytest_raises(ValueError) as _exc_se:
     sysm.SchedulerConfig(mu_enabled=True, mu_accounting="se_ratio_legacy")
@@ -2481,14 +2483,13 @@ def _mu_pair_tables(corr: float, seed: int = 20260902):
         csi=sysm.ca.CsiConfig(enabled=False))
 
 
-def _mu_run(tables, *, mu_on: bool, accounting: str = "pair_table"):
+def _mu_run(tables, *, mu_on: bool):
     return sysm.simulate(
         tables,
         sys_cfg=sysm.SystemConfig(duration_s=0.6,
                                   tdd_pattern="DDDSU", seed=4242),
         traffic=sysm.TrafficConfig(model="full_buffer"),
-        sched=sysm.SchedulerConfig(mu_enabled=mu_on,
-                                   mu_accounting=accounting),
+        sched=sysm.SchedulerConfig(mu_enabled=mu_on),
         kpi=sysm.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
         rng=rg.RngBook(4242, 0))
 
@@ -2642,8 +2643,10 @@ check(int(_corr_plan["su_selected"]) > 0
       and sum(int(v) for v in _corr_reject.values()) > 0,
       "拒配对的原因被显式计数，不是静默不配")
 
-# 历史标量口径（se_ratio_legacy）已下线：它「包变小但一点也不更容易错」，
-# 配对越激进越乐观。现在给了就在配置入口硬失败——上面第 9 节已经验证。
+# 历史标量口径 se_ratio_legacy 已下线，给了就在配置入口硬失败——上面第 9 节验过。
+# 它那条反向对照（「配对完全不压 MCS」）随之删除，因为那条路径现在根本构造不出来。
+# 它想守住的性质由上面 _su_arm / _mu_arm 的正向断言覆盖：pair 表口径下 MU 的
+# 首传 MCS 必须低于 SU，且 MU 专用 OLLA 确实在动。
 check(sysm.SchedulerConfig().mu_accounting == "pair_table",
       "MU 记账口径只剩 pair_table 一个合法值")
 

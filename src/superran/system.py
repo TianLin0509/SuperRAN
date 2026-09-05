@@ -478,8 +478,10 @@ class SchedulerConfig:
     # 默认 1.0 保持历史行为；正式短时体验实验若启用，必须随结果显式上报。
     olla_warmup_speedup: float = 1.0
     # **默认关**：先看清 SU 基线。这也与 ``sr_system_sim(mu_enabled=False)``
-    # 和 skills/channel-sim 的口径一致。开了 MU 就必须有 pair 数据，
-    # 缺 pair 表直接硬失败，所以默认必须显式为关。
+    # 和 skills/channel-sim 的口径一致。历史上这里写的是 True，但当时的标量
+    # 入口 ``mu_se_ratio`` 默认 1.0、需要 >1 才切 MU，所以默认路径上 MU 从来
+    # 没真正触发过。现在的唯一路径要求"开了 MU 就必须有 pair 数据"
+    # （缺 pair 表直接硬失败），所以默认必须显式为关。
     mu_enabled: bool = False             # 是否允许 MU 配对（SU/MU 自适应）
     # **当前 MU 基线固定两用户配对、每用户 rank2**，pair 表就是按这个维度建的。
     # 两个字段保留为显式声明而不是可调旋钮：写别的值会在这里硬失败，
@@ -500,17 +502,18 @@ class SchedulerConfig:
     # MU 与 SU 分开维护 OLLA；步长可先复用同一基线，但状态绝不能共用。
     mu_olla_step_up_db: float = 0.01
     mu_olla_step_down_db: float | None = None
-    # **MU 的记账口径**（用户 2026-09-02 定：capacity 的误码/重传要与
-    # experience 基本一致）。
+    # **MU 的记账口径**。现在只剩一种：``pair_table``。
     #
-    # ``pair_table``（默认）
     #     与 experience_v2 同构：MCS 从 pair 表的 ``CorrLoss + powerLoss``
     #     平移出来、TBS 按该 MCS 全带算、**误块抽签用 pair 的真实 SINR**
     #     （ZF 权打到双方 h_true、对方的流进干扰协方差）。配对的代价同时
     #     体现在"发得更保守"和"更容易错"两侧。要求链路表已建 pair 数据。
     #
-    # 历史的 ``se_ratio_legacy``（TBS 乘一个标量、误块抽签仍按 SU）随 legacy
-    # 容量路径一起下线：那等于"包变小但一点也不更容易错"，物理上说不通。
+    # 历史的 ``se_ratio_legacy`` 已于 2026-09-04 删除：它让 MCS 与误块抽签
+    # 都走 SU 单用户口径，配对代价只表现为 TBS 乘一个标量 ``mu_se_ratio``，
+    # 也就是"包变小但不更容易错"——物理上说不通，配对越激进结果越乐观。
+    # 保留成兜底只会让这种乐观**静默**发生，所以选中它现在直接报错。
+    # （本分支同时把它的另一个宿主 legacy 容量主循环整个删掉了。）
     mu_accounting: MuAccounting = "pair_table"
 
     def __post_init__(self) -> None:
@@ -606,10 +609,15 @@ class SchedulerConfig:
                 "orthogonalization_mode 只支持 none / select / schmidt")
         if self.orthogonalization_mode == "schmidt":
             raise NotImplementedError("TODO: Schmidt 正交化未实现")
+        if str(self.mu_accounting) == "se_ratio_legacy":
+            raise ValueError(
+                "mu_accounting='se_ratio_legacy' 已于 2026-09-04 废除：它只把 TBS "
+                "乘一个标量 mu_se_ratio，配对代价不进误块抽签，结果系统性乐观。"
+                "请改用 mu_accounting='pair_table'（默认），并在预计算时传 "
+                "build_link_tables(..., mu_enabled=True) 建出 pair 表。")
         if self.mu_accounting != "pair_table":
             raise ValueError(
-                "mu_accounting 只支持 pair_table，收到 "
-                f"{self.mu_accounting!r}。se_ratio_legacy 随 legacy 容量路径下线。")
+                f"mu_accounting 只支持 pair_table，收到 {self.mu_accounting!r}")
         if self.mu_precoder not in ("zf", "rzf"):
             raise ValueError("mu_precoder 只支持 zf / rzf")
         if (not np.isfinite(self.mu_csi_error_variance)

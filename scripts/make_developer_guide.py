@@ -2428,7 +2428,7 @@ def architecture_page() -> Page:
             ("编排层", "自然语言意图、分轮决策、预设、说明书", "server / plan / decisions / spec / sysscenes", "不能偷偷替用户改变实验问题"),
             ("数据层", "生成、落盘、加载、观察量", "generate / channelhub / loader / measure / scenes", "h_est 缺失时禁止复制 h_true"),
             ("算法层", "预编码、接收、MCS、MU、功控", "beamforming / linklevel / linkadapt / mumimo / power_control", "设计 CSI 与评估真值必须分离"),
-            ("系统层", "连续 TTI、话务、PF、FIFO、KPI", "system / experience / traffic / kpi_view / rng", "capacity 与 experience 不混口径"),
+            ("系统层", "连续 TTI、话务、PF、FIFO、KPI", "system / experience / traffic / kpi_view / rng", "满缓冲与有限话务不混口径"),
             ("证据层", "校准、Gate、预注册、结果合同", "validate / calibration / gates / analysis / results", "Gate 不通过不得发布强结论"),
         ],
     )
@@ -4778,8 +4778,8 @@ MU计划交付79,927 B，最终走MU。若SU在本TTI能清空全部队列，则
             ("MU OLLA", "每用户一条、所有 pair 共用", "误称为 pair-specific OLLA"),
             ("capacity MU（默认）", "读 pair 表：MCS 与误块抽签都用真值",
              "以为 capacity 只有标量近似"),
-            ("se_ratio_legacy（已下线）", "MU/SU 聚合标量比值，历史选项，现在给了会硬失败",
-             "把它当默认口径或当 pair 实现"),
+            ("se_ratio_legacy", "已于 2026-09-04 删除，选中直接报错",
+             "以为它还能用来复现旧结果"),
         ],
     )
     body += """
@@ -4787,11 +4787,13 @@ MU计划交付79,927 B，最终走MU。若SU在本TTI能清空全部队列，则
 <p><strong>MU 的代价有两半，必须同时记账。</strong>一半是「发得更保守」——配对后
 每流只分到 P/4、还要吃残余干扰，MCS 应当往下走；另一半是「更容易错」——同一档
 MCS 在配对状态下的误块概率本来就更高。历史的 capacity 只认了第三种东西：把 TBS
-乘一个建表阶段测出的标量 <code>mu_se_ratio</code>（该参数已删除），于是配对表现为「包变小，但一点
-也不更容易错」。物理上说不通，而且配对越激进结果越乐观。</p>
+乘一个建表阶段测出的标量 <code>mu_se_ratio</code>，于是配对表现为「包变小，但一点
+也不更容易错」。物理上说不通，而且配对越激进结果越乐观。该路径已于 2026-09-04
+删除：<code>mu_accounting="se_ratio_legacy"</code> 与 <code>simulate(...,
+mu_se_ratio=)</code> 入口都不再存在，选中时直接报错而不是静默乐观。</p>
 """
     body += table(
-        ["环节", "pair_table（唯一口径）", "se_ratio_legacy（已下线，仅供理解为何删除）"],
+        ["环节", "pair_table（唯一口径）", "se_ratio_legacy（已删除）"],
         [
             ("MCS 决策", "AMC 坐标 + CorrLoss + PowerLoss",
              "SU 单用户坐标，完全不减配对代价"),
@@ -4816,7 +4818,7 @@ TTI）。历史标量口径下同一组配置是 22.68 → 22.69——<strong>�
 （其中 −3.01 是等功率分摊，余下是相关性损失）。</p></div>
 <div><b>实测：自适应会判 SU 赢</b>
 <p>把两个 UE 的空间相关系数拉到 0.999，ZF 无处零陷：配对占比
-<strong>0%</strong>，767 个 TTI 被显式记为「单发更划算」（<code>mu_su_wins</code>），
+<strong>0%</strong>，对应数量的 TTI 被显式记为「单发更划算」（<code>su_mu_plan.su_selected</code>），
 不是静默不配。</p></div></div>
 <p><strong>−3.01&nbsp;dB 只是记账标签，不是近似。</strong>按 pair 表的定义，
 <code>CorrLoss = pred_MU − pred_SU − PowerLoss</code>，所以决策里真正用到的平移量

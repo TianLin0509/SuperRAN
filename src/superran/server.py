@@ -2028,25 +2028,14 @@ def sr_system_sim(
     “首包时延”（每个 arrival object 从生成到首次调度）与“含头速率”（相同
     payload/去尾规则，只把首包时延加回分母）。
 
-    **“容量仿真”是这条路径的一个话务配置**：``traffic_model="full_buffer"``。
-    缓冲区永不空 ⇒ 按需 RBG 反查恒等于全带宽、RBG 全部用满（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.09、开 MU 1.74），
-    这就是容量口径。调度、AMC、HARQ、解调 SINR 聚合全部照体验模式的定义走，
-    没有任何为它开的特例。代价是 busy period 永不结束，于是 **TS 28.552 的标准
-    样本一个都不会形成**（样本只在 "DRB DL buffer emptied" 事件上形成，
-    TS 128 552 V19.5.0 p54），``drb_throughput_rel19_mbps`` /
-    ``cell_experienced_mbps`` 报 ``None``——定义使然，不是缺陷。满缓冲看工程口径：
-    ITU-R M.2412 / TR 38.913 的 ``ue_served_p5_mbps``（每 UE 已服务净荷 ÷ 观测
-    窗长的 5% 分位，即 cell-edge user throughput）与 ``active_window_goodput_mbps``
-    （在飞 busy period 的窗内段 goodput）。两者算法不同，满缓冲下应当收敛。
-    其余需要 burst 真的传完的键同样报 ``None``：完成时延分位数、
-    ``pdb_miss_ratio``、含头速率、``cell_experienced_completed_only_mbps``。
-    小区总吞吐看 ``cell_served_mbps`` 与 ``serving_cell_prb_utilization``。
-
-    **``mu_accounting`` 决定 MU 的代价怎么记账**：``pair_table``（唯一支持的
-    口径）MCS 从 pair 表的 ``CorrLoss + powerLoss`` 平移出来、TBS 按该 MCS 全带
-    算、**误块抽签用 pair 的真实 SINR**（ZF 权按基站可能已老化的 CSI 打，但打在
-    双方 ``h_true`` 上，对方的流进干扰协方差）。历史的 ``se_ratio_legacy``
-    （只把 TBS 乘一个标量、误块抽签仍按 SU）已随 legacy 容量路径一起下线。
+    **``mu_accounting`` 决定 MU 的代价怎么记账**（用户 2026-09-02 定：capacity
+    的误码与重传要与 experience 基本一致）。``pair_table``（默认）与
+    ``experience_v2`` 同构：MCS 从 pair 表的 ``CorrLoss + powerLoss`` 平移出来、
+    TBS 按该 MCS 全带算、**误块抽签用 pair 的真实 SINR**（ZF 权按基站可能已
+    老化的 CSI 打，但打在双方 ``h_true`` 上，对方的流进干扰协方差）。
+    历史的 ``se_ratio_legacy`` 已于 2026-09-04 删除（MCS 与误块抽签都走 SU
+    单用户口径，配对代价只表现为 TBS 乘一个标量——「包变小但不更容易错」，
+    结果系统性乐观）。现在传这个值会直接报错，不再静默退回。
 
     ``mu_precoder`` 可选 ``zf`` 或 ``rzf``。RZF 的
     ``mu_csi_error_variance`` 是每个复信道系数的估计误差方差，加载项为
@@ -2750,13 +2739,13 @@ def sr_system_sim(
                 f"{sorted(effective_periods)}")}
         effective_csi_cfg = replace(
             csi_cfg, srs_period_ms=float(next(iter(effective_periods))))
-    # 标量 MU 增益随 se_ratio_legacy 一起下线：MU 的代价直接进 MCS 与误块抽签。
-    # `measure_mu_gain` 仍是独立的测量原语，只是不再喂给主循环。
-    mu_gain = {
-        "ratio": 1.0, "measured": False,
-        "note": ("逐 pair 查表口径（mu_accounting='pair_table'）不使用标量比值；"
-                 "MU 代价直接进 MCS 与误块抽签"
-                 if _flag(mu_enabled) else "未开 MU")}
+    # ``measure_mu_gain`` 仍是一个可单独调用的**测量**入口（见 test_csi_aging
+    # 用它比较不同 CSI 老化下的 MU/SU 聚合比），但仿真主链路不再消费它的标量：
+    # 唯一的 MU 记账口径 pair_table 把配对代价直接放进 MCS 与误块抽签。
+    mu_gain = {"ratio": 1.0, "measured": False,
+               "note": ("逐 pair 查表口径（mu_accounting='pair_table'）不使用标量"
+                        "比值；MU 代价直接进 MCS 与误块抽签"
+                        if _flag(mu_enabled) else "未开 MU")}
     build_s = time.perf_counter() - _t_build
 
     # **建表只做一次，重复的只是 TTI 主循环。** build_link_tables 与随机种子
@@ -2775,16 +2764,14 @@ def sr_system_sim(
                 formal_refinements=load_calibration_formal_refinements,
                 num_replications=num_replications, master_seed=seed,
                 sys_cfg=system_cfg, traffic=traffic_cfg, sched=scheduler_cfg,
-                kpi=kpi_cfg,
-                build_elapsed_s=build_s,
+                kpi=kpi_cfg, build_elapsed_s=build_s,
                 replication_workers=replication_workers)
             res = calibration.result
         else:
             res = sysm.simulate_replications(
                 tables, num_replications=num_replications, master_seed=seed,
                 sys_cfg=system_cfg, traffic=traffic_cfg, sched=scheduler_cfg,
-                kpi=kpi_cfg,
-                build_elapsed_s=build_s,
+                kpi=kpi_cfg, build_elapsed_s=build_s,
                 replication_workers=replication_workers)
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}

@@ -428,23 +428,23 @@ def experiment_capacity_mu_accounting() -> dict:
     cfg = sy.SystemConfig(duration_s=0.6,
                           tdd_pattern="DDDSU", seed=4242)
 
-    def run(tables, *, mu_on, accounting="pair_table"):
+    def run(tables, *, mu_on):
         return sy.simulate(
             tables, sys_cfg=cfg,
             traffic=sy.TrafficConfig(model="full_buffer"),
-            sched=sy.SchedulerConfig(mu_enabled=mu_on,
-                                     mu_accounting=accounting),
+            sched=sy.SchedulerConfig(mu_enabled=mu_on),
             kpi=sy.KpiConfig(warmup_tti=0, tti_trace_mode="off"),
             rng=rg.RngBook(4242, 0))
 
     indep = _mu_tables(0.0)
     pair_graph = smu.validate_pair_graph(indep)
-    su = run(indep, mu_on=False, accounting="pair_table")
-    pair = run(indep, mu_on=True, accounting="pair_table")
+    su = run(indep, mu_on=False)
+    pair = run(indep, mu_on=True)
     corr = run(_mu_tables(0.999), mu_on=True)
-    # 历史标量口径 se_ratio_legacy 已随 legacy 容量路径下线（给了就在
-    # SchedulerConfig 构造处硬失败），这条对照臂随之删除。它当年证明的事
-    # ——"标量口径下配对完全不压 MCS"——现在由配置入口的硬失败直接保证。
+    # 历史标量口径 se_ratio_legacy 的对照臂已随该路径于 2026-09-04 一起删除
+    # （它的另一个宿主 legacy 容量主循环也一并下线）：配置层就会拒绝它，跑不出来。
+    # 它当年证明的"配对完全不压 MCS"由下面的正向断言 pair < su 反过来守住；
+    # 这里再显式记录一次"配置入口确实拒了它"，免得下次有人以为只是没测。
     legacy_rejected = False
     try:
         sy.SchedulerConfig(mu_enabled=True, mu_accounting="se_ratio_legacy")

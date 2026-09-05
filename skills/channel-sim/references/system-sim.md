@@ -569,8 +569,10 @@ bitmap TBS、payload/padding/useful bytes，并与 planner 估值逐值硬比较
 默认 **False**，先看清 SU 基线。`mu_accounting="pair_table"` 是**唯一**口径：
 在建表阶段预计算所有两用户、每用户 rank2 的 pair 链路，MCS 输入按
 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、误块抽签用 pair 的 `true_sinr_db`。
-历史的聚合 `mu_gain` 标量近似（`se_ratio_legacy`）随容量路径一起删除——它只缩 TBS、
-不进误块抽签，等于「包变小但一点也不更容易错」，结果系统性乐观。
+历史的聚合 `mu_gain` 标量近似（`mu_accounting="se_ratio_legacy"` 与
+`simulate(..., mu_se_ratio=)` 入口）**已于 2026-09-04 删除**，它的另一个宿主
+legacy 容量主循环也一并下线——它只缩 TBS、不进误块抽签，等于「包变小但一点也不
+更容易错」，结果系统性乐观；现在传这个值直接报错，不留静默兜底。
 MU 准入要过 predicted BLER ≤ 0.5，查询的是叠加 SU+MU OLLA 后的**实际发送 MCS**，
 不是 OLLA 前的基准档；拒配原因计入 `mu_candidate_scoring.rejection_reasons`，
 判 SU 更划算的 TTI 数在 `su_mu_plan.su_selected`；重传恒按 SU 重发
