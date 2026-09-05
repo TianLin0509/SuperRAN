@@ -186,8 +186,8 @@ def _run(algorithm: str, *, saturated: bool = False, scenario: str | None = None
     # 那条交互单独钉在 test_multiprocess_harq_weakens_the_starvation_guard 里，
     # 不在这里混着测。
     cfg = sysm.SystemConfig(
-        evaluation_mode="experience", duration_s=duration,
-        seed=41, tdd_pattern="DDDSU", harq_max_processes=1)
+        duration_s=duration, seed=41, tdd_pattern="DDDSU",
+        harq_max_processes=1)
     run = sysm.simulate(
         tables_of(),
         sys_cfg=cfg,
@@ -324,17 +324,6 @@ def test_edf_rejects_full_buffer() -> None:
     """full_buffer 把队列钉在 2**50 B，EDF 的分母失去物理含义——硬失败。"""
     with pytest.raises(ValueError, match="有限队列"):
         _run("edf", traffic=sysm.TrafficConfig(model="full_buffer"))
-
-
-def test_edf_rejects_capacity_mode() -> None:
-    """容量口径没有队列可言。"""
-    with pytest.raises(ValueError, match="experience"):
-        sysm.simulate(
-            _LIGHT_TABLES,
-            sys_cfg=sysm.SystemConfig(evaluation_mode="capacity",
-                                      duration_s=0.2, seed=1),
-            traffic=sysm.TrafficConfig(model="ftp3"),
-            sched=sysm.SchedulerConfig(algorithm="edf"), kpi=sysm.KpiConfig())
 
 
 def test_config_validates_edf_parameters() -> None:
@@ -540,7 +529,7 @@ def test_multiprocess_harq_weakens_the_starvation_guard() -> None:
         return sysm.simulate(
             tables_of(),
             sys_cfg=sysm.SystemConfig(
-                evaluation_mode="experience", duration_s=duration, seed=41,
+                duration_s=duration, seed=41,
                 tdd_pattern="DDDSU", harq_max_processes=procs),
             traffic=sysm.TrafficConfig(**scen_traffic),
             sched=sysm.SchedulerConfig(algorithm="edf", mu_enabled=False,
@@ -679,7 +668,7 @@ def test_replication_result_delivers_the_scheduler_identity() -> None:
     """
     res = sysm.simulate_replications(
         _SAT_TABLES,
-        sys_cfg=sysm.SystemConfig(evaluation_mode="experience", duration_s=0.5,
+        sys_cfg=sysm.SystemConfig(duration_s=0.5,
                                   seed=41, tdd_pattern="DDDSU"),
         traffic=sysm.TrafficConfig(**_SAT_TRAFFIC),
         sched=sysm.SchedulerConfig(algorithm="qos_pf_edf", mu_enabled=False,

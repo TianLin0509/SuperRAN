@@ -28,7 +28,7 @@ def _frequency_stress() -> dict[str, object]:
     run = sy.simulate(
         tables,
         sys_cfg=sy.SystemConfig(
-            evaluation_mode="experience", duration_s=1.0,
+            duration_s=1.0,
             tdd_pattern="DDDSU", seed=20260825),
         traffic=sy.TrafficConfig(model="full_buffer"),
         sched=sy.SchedulerConfig(
@@ -71,7 +71,7 @@ def _mu_stress() -> dict[str, object]:
     run = sy.simulate(
         tables,
         sys_cfg=sy.SystemConfig(
-            evaluation_mode="experience", duration_s=0.5,
+            duration_s=0.5,
             tdd_pattern="D", seed=20260825),
         traffic=sy.TrafficConfig(model="full_buffer"),
         sched=sy.SchedulerConfig(

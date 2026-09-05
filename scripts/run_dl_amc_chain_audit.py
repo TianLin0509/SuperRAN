@@ -69,7 +69,7 @@ def _cell(run) -> dict[str, float]:
 def experiment_rank_stability() -> dict:
     """固定 rank2 与逐快照跟随 best_rank 的对照。"""
     tables = _tables()
-    cfg = sy.SystemConfig(evaluation_mode="experience", duration_s=1.0,
+    cfg = sy.SystemConfig(duration_s=1.0,
                           tdd_pattern="DDDSU", seed=77)
     arms = {}
     for name, rank_cfg in (
@@ -115,7 +115,7 @@ def _expected_base_tx(table, alloc) -> float:
 def experiment_olla_coordinate() -> dict:
     """关掉 OLLA 时决策坐标是否仍是 CQI+BF。"""
     tables = _tables()
-    cfg = sy.SystemConfig(evaluation_mode="experience", duration_s=0.5,
+    cfg = sy.SystemConfig(duration_s=0.5,
                           tdd_pattern="DDDSU", seed=31)
     rows = {}
     for name, olla in (("olla_on", True), ("olla_off", False)):
@@ -154,7 +154,7 @@ def experiment_feedback_delay() -> dict:
     arms = {}
     for name, delay in (("delay_on", True), ("delay_off_control", False)):
         cfg = sy.SystemConfig(
-            evaluation_mode="experience", duration_s=1.0, tdd_pattern="DDDSU",
+            duration_s=1.0, tdd_pattern="DDDSU",
             seed=88, harq_feedback_delay=delay)
         run = _run(tables, sched=sy.SchedulerConfig(mu_enabled=False),
                    sys_cfg=cfg)
@@ -185,7 +185,7 @@ def experiment_feedback_delay() -> dict:
             result = _run(
                 one, sched=sy.SchedulerConfig(mu_enabled=False),
                 sys_cfg=sy.SystemConfig(
-                    evaluation_mode=mode, duration_s=0.005,
+                    duration_s=0.005,
                     tdd_pattern="DDDSU", seed=650))
             ack_runs[mode] = {
                 "scheduled_tti": int(result.cell["scheduled_tti"]),
@@ -221,7 +221,7 @@ def experiment_feedback_delay() -> dict:
                 result = _run(
                     one, sched=sy.SchedulerConfig(mu_enabled=False),
                     sys_cfg=sy.SystemConfig(
-                        evaluation_mode=mode, duration_s=0.006,
+                        duration_s=0.006,
                         tdd_pattern="DDDSU", seed=651))
                 key = f"{mode}/retx_{'ack' if terminal_ack else 'nack'}"
                 terminal_runs[key] = {
@@ -370,24 +370,43 @@ def experiment_grant_decode_sinr() -> dict:
 
 
 def experiment_table3_migration() -> dict:
-    """Breaking migration: system link tables reject Table 1/2 at the boundary."""
+    """Table 1/2 的边界在哪一层——**这条边界搬过一次家，别按记忆写。**
+
+    早先 ``build_link_tables(table=1/2)`` 在**建表入口**就拒。#23 给表 1/2 补了
+    有限码长解析 BLER 之后建表合法了，边界因此下移到**仿真入口**：体验路径没有
+    表 1/2 的 TBS/BLER profile，``simulate()`` 显式硬失败。
+    这个函数就是把「现在到底在哪一层拒」钉死，避免又变成凭记忆断言。
+    """
     h = np.ones((1, 4, 2, 2), dtype=complex)
+    built = {}
+    for table in (1, 2):
+        tabs = sy.build_link_tables([h], [10.0], table=table)
+        assert int(tabs[0].mcs_table) == table
+        built[str(table)] = int(tabs[0].mcs_table)
+    accepted = sy.build_link_tables([h], [10.0], table=3)
+    assert int(accepted[0].mcs_table) == 3
+    # 建表放行，仿真拒——且报错必须点名收到的表号，不能让人对着下游报错猜。
     rejected = {}
     for table in (1, 2):
+        tabs = sy.build_link_tables([h], [10.0], table=table, num_snapshots=2)
         try:
-            sy.build_link_tables([h], [10.0], table=table)
+            sy.simulate(tabs,
+                        sys_cfg=sy.SystemConfig(duration_s=0.01),
+                        traffic=sy.TrafficConfig(model="full_buffer"),
+                        kpi=sy.KpiConfig(warmup_s=0.0))
         except ValueError as exc:
             rejected[str(table)] = str(exc)
-    accepted = sy.build_link_tables([h], [10.0], table=3)
     assert set(rejected) == {"1", "2"}
-    assert int(accepted[0].mcs_table) == 3
+    assert all(f"table={t}" in msg for t, msg in rejected.items())
     return {
         "question": "旧 build_link_tables(table=1/2) 调用怎样迁移",
+        "built_tables": built,
         "rejected": rejected,
         "accepted_table": int(accepted[0].mcs_table),
         "migration": (
-            "系统/体验调用改用 table=3；Table 1/2 只保留给显式链路级分析。"
-            "失败前移到建表入口，避免先产生一张看似可用的错口径系统表。"),
+            "建表这一层现在放行表 1/2（#23 的有限码长解析 BLER），拒绝下移到仿真入口："
+            "系统级只支持预置表 3，表 1/2 只服务显式链路级分析（sr_throughput）。"
+            "系统/体验调用一律改用 table=3。"),
     }
 
 
@@ -406,7 +425,7 @@ def _mu_tables(corr: float, n_snap: int = 6, seed: int = 20260902):
 
 def experiment_capacity_mu_accounting() -> dict:
     """capacity 开 MU 时，配对的代价进了哪几处。"""
-    cfg = sy.SystemConfig(evaluation_mode="capacity", duration_s=0.6,
+    cfg = sy.SystemConfig(duration_s=0.6,
                           tdd_pattern="DDDSU", seed=4242)
 
     def run(tables, *, mu_on):
@@ -422,9 +441,15 @@ def experiment_capacity_mu_accounting() -> dict:
     su = run(indep, mu_on=False)
     pair = run(indep, mu_on=True)
     corr = run(_mu_tables(0.999), mu_on=True)
-    # 历史标量口径 se_ratio_legacy 的对照臂已随该路径于 2026-09-04 一起删除：
-    # 配置层就会拒绝它，跑不出来。它当年证明的"配对完全不压 MCS"由下面的
-    # 正向断言 pair < su 反过来守住。
+    # 历史标量口径 se_ratio_legacy 的对照臂已随该路径于 2026-09-04 一起删除
+    # （它的另一个宿主 legacy 容量主循环也一并下线）：配置层就会拒绝它，跑不出来。
+    # 它当年证明的"配对完全不压 MCS"由下面的正向断言 pair < su 反过来守住；
+    # 这里再显式记录一次"配置入口确实拒了它"，免得下次有人以为只是没测。
+    legacy_rejected = False
+    try:
+        sy.SchedulerConfig(mu_enabled=True, mu_accounting="se_ratio_legacy")
+    except ValueError:
+        legacy_rejected = True
 
     link = indep[0].mu_links[1]
     delta_db = float(np.mean(link.true_sinr_db
@@ -477,25 +502,32 @@ def experiment_capacity_mu_accounting() -> dict:
         olla_admission = sy.simulate(
             indep,
             sys_cfg=sy.SystemConfig(
-                evaluation_mode="capacity", duration_s=0.01,
+                duration_s=0.01,
                 tdd_pattern="DDDSU", seed=313),
             traffic=sy.TrafficConfig(model="full_buffer"),
             sched=sy.SchedulerConfig(
                 mu_enabled=True, mu_accounting="pair_table",
                 mu_corr_threshold=1.0, mu_olla_step_up_db=3.0,
                 olla_max_db=6.0),
+            kpi=sy.KpiConfig(warmup_s=0.0),
             rng=rg.RngBook(313, 0))
     finally:
         sy._bler_lookup = old_lookup
     assert olla_admission.cell["mu_share"] > 0
-    assert olla_admission.cell["mu_pair_rejects"] > 0
+    # 拒配原因改由 mu_candidate_scoring.rejection_reasons 上报（更细），
+    # 容量分支的标量计数 mu_pair_rejects 随该分支一起下线。
+    assert sum(int(v) for v in
+               olla_admission.cell["mu_candidate_scoring"][
+                   "rejection_reasons"].values()) > 0
     assert pair.cell["avg_mcs_first_tx"] < su.cell["avg_mcs_first_tx"]
     assert corr.cell["mu_share"] < 0.05
+    assert legacy_rejected
     return {
-        "question": "capacity 开 MU 之后，配对的代价体现在哪几处",
+        "question": "开 MU 之后，配对的代价体现在哪几处（容量口径 = full_buffer 话务）",
         "arms": {
             "SU_only": _cell(su),
             "MU_pair_table": _cell(pair),
+            "se_ratio_legacy_rejected_at_config": legacy_rejected,
             "MU_pair_table_corr0.999": _cell(corr),
         },
         "pair_true_minus_su_true_db": round(delta_db, 3),
@@ -507,11 +539,12 @@ def experiment_capacity_mu_accounting() -> dict:
             "pre_olla_mcs": base_mcs,
             "step_bler_reject_mcs": bler_step_mcs,
             "mu_share": round(float(olla_admission.cell["mu_share"]), 4),
-            "mu_pair_rejects": int(olla_admission.cell["mu_pair_rejects"]),
+            "mu_candidate_rejection_reasons": dict(
+            olla_admission.cell["mu_candidate_scoring"]["rejection_reasons"]),
         },
         "mu_share_independent": round(float(pair.cell["mu_share"]), 4),
         "mu_share_corr0.999": round(float(corr.cell["mu_share"]), 4),
-        "mu_su_wins_corr0.999": int(corr.cell["mu_su_wins"]),
+        "su_selected_tti_corr0.999": int(corr.cell["su_mu_plan"]["su_selected"]),
         "interpretation": (
             "pair 表口径下配对的代价同时进 MCS 决策与误块抽签：首传平均 MCS 明显"
             "下降，而历史标量口径下它几乎不动（代价只体现在 TB 变小）。"

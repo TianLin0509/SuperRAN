@@ -11,6 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 
+from superran import kpi_view as _kpi_view
+
+#: **计数一律从 kpi_view 算，不许手写。** 手写的数字漂过两次：加 KPI 的人
+#: 不会想到来改一段散文。test_developer_guide 用算出来的值做断言守这条。
+_N_CELL_KPI = len(_kpi_view.CELL_KPIS)
+_N_USER_KPI = len(_kpi_view.USER_KPIS)
+
 
 @dataclass(frozen=True)
 class DetailSpec:
@@ -103,7 +110,7 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
         principles=(
             "平台的窄腰是<strong>数据合同与证据合同</strong>。上游默认是本仓 first-party source，可选接 direct Sionna RT；下游可以换预编码、接收机、调度器与 KPI，但中间必须始终说清 <code>h_true</code>、<code>h_est</code>、功率参考面、随机种子、样本单位和统计窗口。只要这些角色没有混在一起，同一实验才有可能复现；一旦把估计信道偷换成真值，后续再漂亮的曲线也失去解释力。",
             "一次可信实验同时包含三条链。<strong>物理链</strong>回答信号如何经过阵列、传播和干扰；<strong>决策链</strong>回答 gNB 在当时信息下如何选 rank、MCS、SU/MU 与资源；<strong>证据链</strong>回答样本是否独立、比较是否配对、统计是否跨过预热窗口。三条链最终在 manifest、逐样本结果和 Gate 报告中会合，结论才不仅是一次脚本输出。",
-            "容量模式与体验模式分别回答“持续有数据时空口能做多快”和“有限业务到达后用户实际等多久、拿到多少有效字节”。前者可以全带调度并关注谱效，后者必须模拟 FIFO、空闲 TTI、按需 RBG、首包等待和尾料。两种模式共用物理输入，却不能共享一套含糊的 KPI 口径。",
+            "系统级只有一条评估路径，靠话务配置区分问题：满缓冲（<code>traffic_model=\"full_buffer\"</code>）回答“持续有数据时空口能做多快”，有限到达（ftp3/cbr/mixed/cdf）回答“用户实际等多久、拿到多少有效字节”。两者共用同一套 FIFO、空闲 TTI、按需 RBG 与尾料逻辑——满缓冲只是队列永不排空，调度器始终有足量数据填满全部 RBG，不需要任何特例分支。反过来说，KPI 口径必须写死：满缓冲下 TS 28.552 的忙期样本不会形成，标准字段只能空着，能报的是工程口径。",
             "交互配置 Mock 和 KPI 工作台是这三条链面向用户的两个检查点。前者在运行前把 resolved config 画成拓扑、阵列、频时资源、PDP 与算法选择，并把用户修改作为受限 delta 回到 Draft；后者在运行后只读取 Result contract，把小区、用户、CDF、资源和告警按本轮意图排序。一个负责防止“看见的配置和执行的配置不同”，另一个负责防止“平均值遮住边缘用户和口径限制”。它们不是宣传截图，而是实验合同的可视化接口。",
         ),
         implementation=(
@@ -122,7 +129,7 @@ DETAIL_SPECS: dict[str, DetailSpec] = {
         checks=(
             ("角色可追溯", "每个结果能反查设计 CSI、评估真值、场景、配置哈希与随机流。"),
             ("比较只改一件事", "A/B 使用相同 drop、traffic、BLER 和 scheduler 随机流，差异项在 manifest 中可见。"),
-            ("模式口径明确", "报告显式标注 capacity/legacy_v1 或 experience/experience_v2，KPI 不跨模式偷换。"),
+            ("负载工作点明确", "报告显式标注 traffic_model；容量口径（full_buffer）与体验口径的 KPI 不互相顶替。"),
             ("结论受 Gate 约束", "任何提升数字都能对应通过的 Gate 2/3 记录、样本量与适用边界。"),
             ("界面身份一致", "说明书关键字段与 manifest 一致；KPI 工作台数值与 Result JSON 一致，排序前后只改变位置。"),
         ),
@@ -417,7 +424,7 @@ DETAIL_SPECS.update({
         principles=(
             "链路计算必须先固定矩阵和功率参考面。端口级信道 H 只描述传播增益；物理预编码 Q 同时包含方向与发射幅度；两者相乘得到有效流信道。接收端再把目标流、同用户其他流、MU 用户、邻区和噪声投影到同一个 G 上，得到 post-MMSE SINR。若 Q 已经包含 <code>sqrt(P/L)</code>，后续公式不能再乘一次 P/L。",
             "总载波功率、每 RB 功率和数字波束功率是三层预算。总功率均匀摊到调度 RB 后得到每 RB 输入；同一 RB 内再由 rank/MU 流分功率；EBF/PEBF/NEBF 则约束这些流在物理天线上的合成。任何一层被重复扣除都会让 SINR 偏低，被遗漏则偏高。噪声也必须按 12 个子载波的 RB 带宽和 NF 计算，不能拿整带噪声与单 RB 信号相除。",
-            "所谓“全带谱效”是对整带各 RB/流的可传输效率进行定义明确的聚合，而不是把平均 SINR直接代入 Shannon。频率选择信道上，先把每 RB SINR 映射到 MCS/谱效再加权，与先平均线性 SINR或 dB SINR后映射并不等价。容量模式可以按满业务可用效率聚合；体验模式还必须用队列封顶后的 useful bytes，超出包长的 padding 不算真实谱效。",
+            "所谓“全带谱效”是对整带各 RB/流的可传输效率进行定义明确的聚合，而不是把平均 SINR直接代入 Shannon。频率选择信道上，先把每 RB SINR 映射到 MCS/谱效再加权，与先平均线性 SINR或 dB SINR后映射并不等价。满缓冲下队列封顶不生效，聚合等于全带可用效率；有限到达时必须用队列封顶后的 useful bytes，超出包长的 padding 不算真实谱效。这是同一段代码在两种话务下的自然结果，不是两套算法。",
             "Shannon <code>log2(1+SINR)</code> 只适合作为连续理想上界或诊断。实际调度使用 CQI/MCS、BLER 曲线、TBS 量化、DMRS/控制开销和 rank；若用 Shannon 生成链路表，再用离散 TBS 评价，会把两套口径混在一起。",
         ),
         implementation=(
@@ -577,7 +584,7 @@ DETAIL_SPECS.update({
                            "前缀表反查最小够用 RBG 数，频选模式再挑质量最好的子集。"),
             ("Rank 谱效采样", "每个新的 AMC 坐标喂一次 observe_link：逐 rank 反折出真会发的 "
                             "MCS，过最小 MCS 闸门、乘资源消耗系数，再做 β 一阶 IIR。"
-                            "两条评估路径共用同一个控制器，修正只有一份实现。"),
+                            "系统级只有一条评估路径，这个控制器只有一份实现。"),
             ("Rank 判决与回退", "step() 每 TTI 先跑回退监测（可立即回退并返回要恢复的 OLLA "
                               "偏置），再看是否到了退避后的判决周期；主循环把返回的 OLLA "
                               "写回自己的状态。"),
@@ -638,18 +645,18 @@ DETAIL_SPECS.update({
             "Phase A 需要预先产生真实用户对信息：候选 pair、rank、预编码器、残留相关性/干扰损失及可支持状态。Phase B 不能凭一个平均 MU 增益临时假造配对。当前可以先使用 ZF/RZF 和明确的候选规则，但 pair table 必须来自真实 h_est 设计并能在 h_true 上复评。",
             "MU 资源统计按物理 PRB 计一次。两个用户在同一 RBG 配对，已用 PRB 仍是一份；用户级 attribution 可以各记 grant 或按用户数分摊，但小区 <code>MU PRB/已用 PRB</code> 的分子分母不能把同一 RBG 双计。",
             "配对的代价有两半，任何评估路径都必须同时记账，否则结果只会朝一个方向偏。第一半是<b>发送侧变保守</b>：配对后每流只分到 P/(K·rank) 的功率，还要吃零陷残余，AMC 坐标应当整体下移，选出的 MCS 因此更低。第二半是<b>接收侧更容易错</b>：即使 MCS 已经降过，同一档在配对状态下的误块概率仍高于单用户——因为真实接收 SINR 是把 ZF 权（按基站可能已老化的 CSI 算出）打到双方 h_true 上、再把对方的流放进干扰协方差得到的，它不等于任何 dB 项的简单相加。只记第一半会低估吞吐、只记第二半会高估 MCS，而历史 capacity 两半都没记：它按 SU 坐标选 MCS、按 SU 真值抽签，只把 TB 大小乘一个建表阶段测出的标量比值，等价于宣称「配对让包变小但一点也不更容易错」。",
-            "因此 capacity 与 experience 现在读同一张 pair 表（<code>mu_accounting=\"pair_table\"</code>，默认）。矩阵运算全部留在建表阶段，主循环只查表：实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s，与主循环十万 TTI 的开销相比可以忽略。历史的标量口径 <code>se_ratio_legacy</code> 已于 2026-09-04 删除，选中时直接报错，不再作为静默兜底存在。它产出的旧结果与 pair 表口径的新结果不可拼在同一张趋势图里。",
+            "因此 MU 一律读同一张 pair 表（<code>mu_accounting=\"pair_table\"</code>，唯一口径）。矩阵运算全部留在建表阶段，主循环只查表：实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s，与主循环十万 TTI 的开销相比可以忽略。历史的标量口径 <code>se_ratio_legacy</code> 已于 2026-09-04 删除，选中时直接报错，不再作为静默兜底存在。它系统性乐观，旧结果不可与 pair 表口径的新结果拼进同一张趋势图。",
             "<code>PowerLoss = −10log10(2) = −3.0103 dB</code> 是<b>记账标签而不是近似</b>。pair 表按 <code>CorrLoss ≜ pred_MU − pred_SU − PowerLoss</code> 定义，所以决策里真正生效的平移量 <code>CorrLoss + PowerLoss</code> 恒等于 <code>pred_MU − pred_SU</code>，那个常数在代数上精确抵消；单列它只是为了让诊断能分开回答「功率分摊占多少、相关性损失占多少」。这条恒等式只在当前支持的 2 用户 × 每用户 rank2 下成立：扩到 3/4 用户或不等流数时，等功率分流的常数本身要按实际流数重新定义，届时必须同时更新标签与它在诊断里的解读，不能只改数值。",
-            "capacity 的 SU/MU 判决是逐 TTI 做的，不再依赖一个全程标量。锚点固定为 PF 第一名，先按准入判据筛伙伴（与 experience 相同：两侧的<b>预测</b> BLER 都不得超过 0.5），再在通过准入的伙伴里取聚合谱效最高的那个，最后还要赢过锚点单发的 SU 方案才真配对。capacity 是全带调度，同一 TTI 的 RE 数对 SU/MU 完全相同，所以比较 <code>Σ rank × MCS 谱效</code> 与 experience 比较 useful bytes 是同一件事。两种拒配对的原因分别计入 <code>mu_pair_rejects</code>（一个通过准入的伙伴都没有）与 <code>mu_su_wins</code>（有可配的对但单发更划算），不静默退回。",
-            "capacity 的重传恒按 SU 重发。HARQ 的合同是冻结发送身份（MCS/RBG 数/rank/TBS），而配对会同时改变真实 SINR 与 TBS，两者直接冲突。把重传也做成 MU 需要先定义「配对状态属不属于冻结身份的一部分」，这是尚未确认的现场口径，因此当前显式选择更保守的一侧，并在文档与 notes 里写清楚，而不是让它成为一个没人知道的隐含假设。",
+            "SU/MU 判决是逐 TTI 做的，不依赖任何全程标量。锚点固定为 PF 第一名，先按准入判据筛伙伴（与 experience 相同：两侧的<b>预测</b> BLER 都不得超过 0.5），再在通过准入的伙伴里取聚合谱效最高的那个，最后还要赢过锚点单发的 SU 方案才真配对。满缓冲下全带调度时同一 TTI 的 RE 数对 SU/MU 完全相同，所以比较 <code>Σ rank × MCS 谱效</code> 与有限话务下比较 useful bytes 是同一件事。拒配对的原因计入 <code>mu_candidate_scoring.rejection_reasons</code>，判单发更划算的 TTI 数计入 <code>su_mu_plan.su_selected</code>，不静默退回。",
+            "重传恒按 SU 重发。HARQ 的合同是冻结发送身份（MCS/RBG 数/rank/TBS），而配对会同时改变真实 SINR 与 TBS，两者直接冲突。把重传也做成 MU 需要先定义「配对状态属不属于冻结身份的一部分」，这是尚未确认的现场口径，因此当前显式选择更保守的一侧，并在文档与 notes 里写清楚，而不是让它成为一个没人知道的隐含假设。",
         ),
         implementation=(
             ("一次 PF 排序", "对所有有数据且非 outage 用户计算 metric，稳定 tie-break 后得到 ordered_users；该数组同时喂给 SU 与 MU planner。"),
             ("构造 SU 方案", "按顺序为用户查 required_rbg、分配不重叠 RBG，计算队列封顶 useful bytes，并判断是否清空全部可服务队列。"),
             ("构造 MU 方案", "从同一顺序读取 Phase A pair，应用 CorrLoss、powerLoss 与 MU OLLA 重新选 MCS，在相同物理 RBG 上形成 pair grant。"),
             ("选择与落账", "SU 清空全部可服务队列则选 SU；outage或错slot HARQ backlog只作诊断；否则 MU useful≥SU useful 才选 MU。执行后按真实模式更新队列、PF、OLLA、PRB 与配对 KPI。"),
-            ("capacity 共用同一张表", "capacity 主循环把「这一格实际会发哪一档 MCS」抽成单一函数：AMC 坐标（MU 时加 CorrLoss+PowerLoss）叠 OLLA（MU 时叠 SU+MU 两条）后 floor 钳位。配对判决与真正发送调用同一个函数，避免「按什么比的」和「发了什么」悄悄漂开。"),
-            ("误块抽签换坐标", "capacity 首传的 BLER 查表输入在 MU 时改读 <code>MuPairLink.true_sinr_db[snap, side]</code>，SU 时仍读 <code>UeLinkTable.sinr_db[snap, rank-1]</code>；重传恒为 SU，因此仍查 SU 真值。"),
+            ("发送档位只有一份实现", "主循环把「这一格实际会发哪一档 MCS」抽成单一函数：AMC 坐标（MU 时加 CorrLoss+PowerLoss）叠 OLLA（MU 时叠 SU+MU 两条）后 floor 钳位。配对判决与真正发送调用同一个函数，避免「按什么比的」和「发了什么」悄悄漂开。"),
+            ("误块抽签换坐标", "首传的 BLER 查表输入在 MU 时改读 <code>MuPairLink.true_sinr_db[snap, side]</code>，SU 时仍读 <code>UeLinkTable.sinr_db[snap, rank-1]</code>；重传恒为 SU，因此仍查 SU 真值。"),
             ("缺表硬失败", "开了 MU 又选 <code>pair_table</code> 却没有 pair 数据时直接抛错并给出两条明确出路（补建 pair 表，或显式改用历史口径），不静默按 1.0 降级。"),
         ),
         example_title="两个 rank-2 用户并不意味着 MU 一定更好",
@@ -664,7 +671,7 @@ DETAIL_SPECS.update({
             ("资源不双计", "MU pair 的物理 RBG 在小区利用率只计一次，分摊后的用户资源和小区总量可守恒。"),
             ("代价进 MCS", "同一批链路表下开关 MU，pair 表口径的首传平均 MCS 必须显著下降（实测 23.48 → 19.93）；历史标量口径下它几乎不动（22.68 → 22.69），这正是被修掉的问题。"),
             ("代价进抽签", "同一档 MCS 分别按 SU 真值与 pair 真值查 BLER，后者必须更高（实测 0.0008 → 0.0040，真值差 −3.92 dB）。"),
-            ("自适应会判 SU 赢", "把两个 UE 的空间相关系数拉到 0.999，配对占比必须坍塌到 0，并且拒配对的原因被显式计数（实测 767 个 TTI 记为 mu_su_wins），不是静默不配。"),
+            ("自适应会判 SU 赢", "把两个 UE 的空间相关系数拉到 0.999，配对占比必须坍塌到 0，并且拒配对的原因被显式计数（<code>mu_candidate_scoring.rejection_reasons</code> 里的 <code>correlation_threshold</code>，判单发更划算的 TTI 数在 <code>su_mu_plan.su_selected</code>），不是静默不配。"),
             ("平移量恒等式", "<code>CorrLoss + PowerLoss</code> 与 <code>pred_MU − pred_SU</code> 必须逐元素相等，证明 −3.01 dB 只是标签。"),
         ),
         pitfalls=(
@@ -678,15 +685,15 @@ DETAIL_SPECS.update({
         source_paths=("src/superran/experience.py", "src/superran/mumimo.py", "src/superran/system.py"),
     ),
     "modes": DetailSpec(
-        promise="用问题、状态机和 KPI 三个维度区分容量评估与体验评估，并解释预启动窗口为何属于统计合同而不是删除不利数据。",
+        promise="用问题、状态机和 KPI 三个维度区分容量口径与体验口径（同一条路径的两个负载工作点），并解释预启动窗口为何属于统计合同而不是删除不利数据。",
         principles=(
-            "容量评估假设业务持续存在，关注给定传播、干扰和调度下的饱和吞吐/谱效。历史 <code>legacy_v1</code> 每次被调度用户可以拿全带，PF 平均量也按历史全带口径更新。它适合回归旧结果和比较满业务链路算法，但无法回答空闲比例、首包等待、小包抢占或按需资源利用。",
-            "体验评估把业务到达、FIFO 包对象、按需 RBG、ACK/NACK、OLLA、SU/MU 方案和用户 KPI 放进连续 TTI 状态机。它必须区分 scheduled TBS、attempted payload、ACK goodput 与 padding；PF 默认按实际 scheduled TBS 记账。两种模式不是“快/慢”或“粗/精”开关，不能把 experience_v2 的某个参数关掉后称为 capacity 等价。",
+            "容量口径假设业务持续存在（<code>traffic_model=\"full_buffer\"</code>），关注给定传播、干扰和调度下的饱和吞吐/谱效。队列无限让调度器始终有足量数据填满全部 RBG；频选可把不同 RBG 分给多个 UE，MU 还可在同一 RBG 配对，因此“每忙 TTI 一个 SU”只在频选关、MU 关时成立。这是同一套分配逻辑的工作点，不是另一条路径。它适合比较满业务链路算法，但无法回答空闲比例、首包等待、小包抢占或按需资源利用。用户体验速率在它下面<b>是有定义的</b>，只是走 ITU-R M.2412 / TR 38.913 的 <code>ue_served_p5_mbps</code>（每 UE 已发送净荷 ÷ 观测窗长的 5% 分位）；只有 TS 28.552 的 busy-period 口径因为 buffer 永不排空而没有样本、报 None。",
+            "体验评估把业务到达、FIFO 包对象、按需 RBG、ACK/NACK、OLLA、SU/MU 方案和用户 KPI 放进连续 TTI 状态机。它必须区分 scheduled TBS、attempted payload、ACK goodput 与 padding；PF 默认按实际 scheduled TBS 记账。满缓冲与有限话务不是“快/慢”或“粗/精”两档开关：它们是同一条路径上的两个话务工作点，不能把 experience_v2 的某个参数关掉后称为“容量口径等价”。",
             "预启动时间让有状态环节先进入稳定区：OLLA 从初值收敛、SRS/PMI/CQI 报告收齐、PF 历史量形成、队列进入代表性负载。仿真仍从 t=0 正常运行，只是正式 KPI 的统计窗口从例如 1 s 开始；预热期间形成的状态继续带入测量期。若重置队列或 OLLA，就不再是预热而是另一次实验。",
             "预热长度应由收敛诊断支撑，而不是永远固定 1 s。可以比较测量期前半/后半 BLER、OLLA、PRB 利用率和队列量；若仍漂移，延长仿真或预热。报告同时给总仿真时长、warmup、有效测量时长与覆盖率。",
         ),
         implementation=(
-            ("模式显式分派", "SystemConfig/入口根据 mode/version 进入独立 capacity 或 experience 执行路径，并限制各自支持的 PF accounting、traffic 与 KPI。"),
+            ("没有模式分派", "入口不再有 evaluation_mode；容量口径是话务配置 traffic_model=\"full_buffer\"，与体验口径共用同一条执行路径与同一套 PF accounting、traffic 与 KPI。"),
             ("全程演化状态", "experience 从 TTI 0 生成业务、更新报告和 OLLA；<code>in_measurement</code> 只控制 KPI 累加，不跳过状态更新。"),
             ("窗口边界记账", "到达、服务、资源和 delay 样本标记是否属于测量期；跨过边界的 busy period 按明确 eligibility 处理。"),
             ("结果显式标注", "cell/user 结果携带 mode、warmup_tti、measurement_duration_s、PF 口径和近似说明。"),
@@ -697,15 +704,15 @@ DETAIL_SPECS.update({
             "<p>若直接丢弃前 1 s 所有事件并从空状态开始统计，首包等待、负载和 OLLA 仍带冷启动偏差；若把前 1 s 的资源计入分母但不计业务，又会压低利用率。正确实现把“状态是否演化”和“样本是否进入统计”分开。</p>"
         ),
         checks=(
-            ("路径隔离", "capacity 与 experience 有独立入口、允许参数与 golden regression，不共享含糊的 mode flag 分支。"),
+            ("没有路径可隔离", "系统级只有一条评估路径，容量口径是它的一个话务配置点（traffic_model=\"full_buffer\"）；早先那个 evaluation_mode 分支已删除，不存在需要隔离的第二条入口。"),
             ("预热不重置", "warmup 边界前后队列、OLLA、PF 与报告状态连续，只有统计累加发生切换。"),
             ("收敛诊断", "测量期前后半的 BLER/OLLA/负载差异可见，未稳时结果标注或阻塞。"),
             ("分母正确", "所有速率、利用率和覆盖率只使用有效测量时长/资源，且跨窗口对象规则可复算。"),
         ),
         pitfalls=(
             "把 warmup 数据从数组头部切掉，却让系统状态也从统计起点重新初始化。",
-            "用 capacity 的全带 PF 记账驱动 experience 的按需分配。",
-            "比较两种模式的同名 throughput，却不说明业务、资源和分母语义不同。",
+            "用已下线的全带 PF 记账（legacy_best_se）驱动按需分配。",
+            "把满缓冲与有限话务下的同名 throughput 直接相比，却不说明业务、资源和分母语义不同。",
         ),
         source_paths=("src/superran/system.py", "src/superran/experience.py", "src/superran/results.py"),
     ),
@@ -781,7 +788,7 @@ DETAIL_SPECS.update({
             "任何带 eligibility 的指标都要同时给覆盖率。仿真结束时尚未第一次调度的包不能填 0；未形成足够完整包的短 burst 不能硬算无限/零速率。结果应给 observed count、eligible count、share 与排除原因。这样，算法通过让困难用户“没有样本”来美化均值时会立即暴露。",
             "PRB 利用率是本小区在测量窗口内已用物理资源/可用资源；0..17 RBG 直方图以每个 DL 等价 TTI 的唯一 used index 数计数。mixed 业务常呈两头高：空闲 TTI 落在 0，大包或积压落在 17，小包填在低 RBG；这是一种预期形态而非硬编码通过条件。MU 配对比例则是 MU PRB/已用 PRB，与 MU 用户传输次数不同。",
             "呈现分小区级和用户级两个 tab。小区级看整体负载、尾部分位和模式；用户级展示每 UE 的无线条件、业务、吞吐、首包时延、资源、MU/BLER，并支持散点、时间序列与跨 UE CDF。Agent 可以根据用户问题给 KPI relevance score，把更相关卡片前置、其他折叠，但所有原始 KPI、公式和选择理由仍可查看，不能让 LLM 在库内偷偷改数。",
-            "工作台是 experience_v2 的标准结果面，而不是运行结束后手工挑几张图。当前登记 27 项小区 KPI 与 25 项用户 KPI；可用项取决于 Result 是否真的携带相应数据。页面同时保留 95% CI、replication 数、KPI key、定义、告警、话务 profile 与校准轨迹，使一张卡片能向下追到统计样本和公式。<code>url</code> 只是便利入口，UTF-8 自包含 <code>html_path</code> 才是稳定离线产物；loopback 服务失败必须显式呈现，不能导致数值结果丢失或被悄悄替换。",
+            "工作台是 experience_v2 的标准结果面，而不是运行结束后手工挑几张图。当前登记 " + str(_N_CELL_KPI) + " 项小区 KPI 与 " + str(_N_USER_KPI) + " 项用户 KPI；可用项取决于 Result 是否真的携带相应数据。页面同时保留 95% CI、replication 数、KPI key、定义、告警、话务 profile 与校准轨迹，使一张卡片能向下追到统计样本和公式。<code>url</code> 只是便利入口，UTF-8 自包含 <code>html_path</code> 才是稳定离线产物；loopback 服务失败必须显式呈现，不能导致数值结果丢失或被悄悄替换。",
             "多算法页面不按算法分 tab：算法是贯穿总览、KPI 矩阵、用户 CDF、TTI 趋势和单 TTI 详情的固定颜色系列，基线不可隐藏；tab 表示读者正在回答的问题。每个算法臂必须携带同一 dataset 与逐位一致的 (master_seed, replication)，主 KPI 的候选对基线复用 Gate 3，并在 2~5 臂场景用 Holm step-down 收紧家族判决。只有 dataset 的生成前 prereg 同时匹配主 KPI 与基线标签时才允许产生 publishable winner；否则即使显著也保持 exploratory_unregistered。单 TTI 只能解释机制分叉，不能从一个事件外推算法收益。",
         ),
         implementation=(
@@ -1028,7 +1035,7 @@ DETAIL_SPECS.update({
         principles=(
             "预设的目标是复用已审核的一组参数与语义，不是给配置起一个短名字。一个场景通常包含载波/天线、信道源、用户撒点、干扰、SRS/CSI、算法、traffic、scheduler、warmup 和 KPI。每一层有所有者；例如预置天线默认由 hardware profile 注入，用户只改 fixed_downtilt 时不能顺带丢掉极化和端口顺序。",
             "合并必须是确定且可解释的。常见顺序为 schema 默认→硬件/信道 preset→系统场景→用户显式 override；深层字典按字段合并，列表是否替换需明示。最终运行只读取 resolved config，并在 manifest 保存来源链与每个关键字段的 provenance。否则同名 preset 更新后，历史结果无法复现。",
-            "信道 preset 与系统场景不是同一层。前者描述数据源、channel model、阵列、频率与样本；后者增加 TTI、业务、调度、负载目标和 KPI。capacity 与 experience 也应选择各自允许的场景合同。页面中的全量清单由 YAML 动态扫描，详细阅读重点是字段语义、继承和边界，而不是重复展示每行文本。",
+            "信道 preset 与系统场景不是同一层。前者描述数据源、channel model、阵列、频率与样本；后者增加 TTI、业务、调度、负载目标和 KPI。满缓冲与有限话务是同一条路径上的两个话务工作点，各自有允许的场景合同。页面中的全量清单由 YAML 动态扫描，详细阅读重点是字段语义、继承和边界，而不是重复展示每行文本。",
             "实测 CDF 到位后应作为版本化资产进入 traffic profile：文件哈希、单位、采样规则和 scale 与 preset 一起记录。校准得到的 30%/50% scale 是场景/算法/用户数相关结果，不应写成永远有效的全局常数；可以缓存，但命中条件必须包含影响负载的配置哈希。",
         ),
         implementation=(
@@ -1447,7 +1454,7 @@ DETAIL_SPECS.update({
             ("分类可重复", "同一 intent 多次运行得到同一 TaskProfile、同一命中证据和稳定 generic fallback；不依赖外部模型状态。"),
             ("两轮收敛", "代表性任务在目标两轮内填满结论槽位；默认接受、已回答项和 also_configurable 不会制造重复问题。"),
             ("优先级可证明", "defaults→preset→task hints→user overrides 用冲突值逐层测试，最终值与 explicit/history 均可追溯。"),
-            ("目录来自配置", "切换 channel_est_mode、precoder、power_constraint 或 evaluation_mode 后，algorithm_list、derivations 与 caveat 同步变化。"),
+            ("目录来自配置", "切换 channel_est_mode、precoder、power_constraint 或 traffic_model 后，algorithm_list、derivations 与 caveat 同步变化。"),
             ("桥接最小权限", "非 loopback、错误 token、未知键、嵌套对象、超大 payload、过期 draft 与重放 nonce 全部拒绝；合法 delta 幂等。"),
             ("执行身份一致", "spec、Agent 摘要、resolved_config 与数据集/系统结果 manifest 对关键字段逐项相等。"),
             ("交互降级可见", "post 模式可按 spec_id 收到 delta；服务关闭/失败时页面和返回值明确为 clipboard，且 serve_error 可审计。"),
@@ -1604,13 +1611,13 @@ DETAIL_SPECS.update({
         ),
         implementation=(
             ("解析标准链路表", "<code>linkadapt.py</code> 维护 CQI/MCS/TBS 规则，TBS 对 RBG 数用表驱动反查；不能用全带字节除以 17 估计所需 RBG。"),
-            ("扣掉 PDSCH 拿不到的 RE", "TBS 的第一步是 38.214 §5.1.3.2 的 <code>N_RE = min(156, 12·符号数 − N_DMRS − N_OTH) × N_PRB</code>。<code>PdschOverhead</code> 把这个口径集中到一处，默认 12 个 PDSCH 符号、单符号 type-1 DM-RS 6 RE/PRB、PDCCH 等效 1 个符号（12 RE/PRB），即每 PRB 126 RE。<code>system</code> 的 legacy 主循环与 <code>experience</code> 的 <code>TbsLookup</code> 共用它，不能各自硬编码 <code>12×12=144</code>。S 时隙只按 <code>S_SLOT_DL_FRACTION</code> 折**符号数**，DM-RS 与 PDCCH 是每时隙固定开销、随后只扣一次，所以 S/D 的可用 RE 之比是 78/126≈0.619，小于 0.7。"),
+            ("扣掉 PDSCH 拿不到的 RE", "TBS 的第一步是 38.214 §5.1.3.2 的 <code>N_RE = min(156, 12·符号数 − N_DMRS − N_OTH) × N_PRB</code>。<code>PdschOverhead</code> 把这个口径集中到一处，默认 12 个 PDSCH 符号、单符号 type-1 DM-RS 6 RE/PRB、PDCCH 等效 1 个符号（12 RE/PRB），即每 PRB 126 RE。统一后的唯一系统主循环由 <code>experience.TbsLookup</code> 消费它，不能另写 <code>12×12=144</code>。S 时隙只按 <code>S_SLOT_DL_FRACTION</code> 折**符号数**，DM-RS 与 PDCCH 是每时隙固定开销、随后只扣一次，所以 S/D 的可用 RE 之比是 78/126≈0.619，小于 0.7。"),
             ("生成 QAM MI", "对单位能量 M-QAM 星座和复高斯噪声做 Gauss-Hermite 数值积分，生成单调缓存，并提供正/逆插值。"),
             ("映射频选 SINR", "<code>effective_sinr()</code> 根据modulation/method选择MIESM或EESM；EESM接受显式beta，缺正式标定时结果只能作为参考。输入中的每个RB都必须有限，空数组或任一NaN/Inf当场失败，禁止只丢掉坏RB后用剩余好RB计算。"),
             ("计算分析 BLER", "表 1/2 按 MI 余量、码长和实现损失得到 CB 瀑布，再按 38.212 分段估算 C 并合成 TB BLER；anchor_check 只输出对标点。"),
             ("装载预置曲线", "<code>bler_data_20b.py</code> 提供 28 MCS×NewTx/ReTx 原始点，<code>verify_curves()</code> 检查 SHA、覆盖、横轴/BLER 单调和 10% crossing；系统使用范围明确为 NewTx 28 条，ReTx 只供审计。"),
             ("形成一次 TTI/TB 判错", "调度器先确定 grant、rank、MCS 与 TBS，再以码字级有效 SINR+MCS 查通用 NewTx 曲线并从独立 BLER 随机流抽一次 ACK/NACK；CB 不进入系统状态。"),
-            ("进入唯一一次重传", "NACK 后冻结 MCS/RBG 数/rank/TBS；IR 查半谱效等效 MCS 的 NewTx 曲线，CC 查原 MCS NewTx 曲线并加 3.0103 dB。失败后结束 HARQ，字节留队并在后续成为新 TB。"),
+            ("进入唯一一次重传", "NACK 后冻结 MCS/RBG 数/rank/TBS；IR 查半谱效等效 MCS 的 NewTx 曲线，CC 查原 MCS NewTx 曲线并加 3.0103 dB。payload 已在首传发送时离开队列，末次失败只进 residual_bler。"),
             ("独立复现", "从本章复制完整 raw JSON，用纯 NumPy 重建横轴、对数域插值、门限反查、单码字 SINR、MCS 选择与 CC/IR；五个冻结锚点逐值对齐后再接系统状态机。"),
         ),
         example_title="MCS20 的 IR 为什么查 MCS10，却仍发送 MCS20",
@@ -1627,7 +1634,7 @@ DETAIL_SPECS.update({
             ("全曲线可见", "手册 28 行审计表与 56 条瀑布由源常量直接生成；10% crossing、源范围和点数与 verify_curves 一致。"),
             ("参考面与事件标签", "查询结果带 source axis、single-codeword one-TTI/TB event、空口 MCS、lookup MCS、clamp 与通用曲线范围；分析后端不伪装预置表后端。"),
             ("一次重传身份", "强制 NACK 轨迹逐 TB 验证 MCS/RBG 数/rank/TBS 与 D/S 类型不变；失败后没有第二次重传，窗口末 pending 单列右删失。"),
-            ("开销口径两条路径一致", "改 <code>PdschOverhead</code> 的参数后，legacy 主循环的小区吞吐与 <code>TbsLookup</code> 的 TBS 必须同比变化（test_physics_invariants 第 9 节）。硬编码 <code>12×12</code> 的路径对配置免疫，比值会退化成 1.000，当场变红。"),
+            ("开销口径端到端一致", "改 <code>PdschOverhead</code> 的参数后，<code>TbsLookup</code> 的 TBS 与唯一系统主循环的小区吞吐必须同比变化（test_physics_invariants 第 9 节）。硬编码 <code>12×12</code> 的入口对配置免疫，比值会退化成 1.000，当场变红。"),
             ("文档可执行性", "完整 MCS 表由代码生成；JSON raw rows 摘要等于 DATA_SHA256；独立参考实现五个锚点通过。"),
         ),
         pitfalls=(
@@ -2899,7 +2906,7 @@ DETAIL_SPECS.update({
         example=(
             "<p>压力例中 PF 先选 UE0 为 anchor；伙伴顺序里 UE1 的 <code>pf_order=1</code>，UE2 的 <code>pf_order=2</code>。UE1 与 UE0 的 CorrLoss 是 −5 dB，17 RBG 上两份最终 MCS 为 12/11，合计 useful density 约 <b>3315.8 B/RBG</b>；UE2 虽排得更后，但 CorrLoss 只有 −1 dB，最终 MCS 17/14，density 约 <b>4701.6 B/RBG</b>，因此选择 UE2。</p>"
             "<p>该 TTI 的 SU-only plan 只能交付 54,285 B；选中 MU plan 在同一 17-RBG bitmap 上交付 79,927 B，所以 <code>MU_useful_bytes_ge_SU</code> 成立。资源账显示物理 272 PRB 只扣一次、总层数为 4；两个用户共享同一个 <code>tti0-res0</code>。若把 UE2 相关性改到门限以上，它会留下 <code>correlation_threshold</code> 拒绝记录，而不是从结果中消失。</p>"
-            "<p>互补子带频选反例中，off 基线小区 ACK 吞吐为 148.71 Mbps、每忙 TTI 只服务 1 个 UE；on 在相同 CRN 下为 486.52 Mbps、每忙 TTI 服务 2 个 UE，约 3.27×。这个构造证明频选机制的方向和 bitmap 落账正确；它不是对一般现场信道承诺 3.27×。</p>"
+            "<p>互补子带频选反例中，off 基线小区发送吞吐为 148.71 Mbps、每忙 TTI 只服务 1 个 UE；on 在相同 CRN 下为 486.52 Mbps、每忙 TTI 服务 2 个 UE，约 3.27×。这个构造证明频选机制的方向和 bitmap 落账正确；它不是对一般现场信道承诺 3.27×。</p>"
             "<p>小包+大包反例中，两位MU用户队列为1,000 B和500,000 B，required RBG为1/17。旧式min规则只给1 RBG并把两人移出pending；当前共享bitmap给满17 RBG，小包交付1,000 B、大包交付26,647 B。该反例专门证明“任一用户够”不能替代“两位用户都够或资源耗尽”。</p>"
         ),
         checks=(

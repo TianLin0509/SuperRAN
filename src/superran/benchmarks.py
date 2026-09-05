@@ -240,11 +240,13 @@ def _jain(run: sy.SystemResult) -> float:
 
 def _b05(seed: int) -> dict[str, Any]:
     tables = _pf_tables(seed)
+    # 容量口径 = 话务开到最大（full_buffer）。没有单独的容量分支，
+    # 调度/AMC/HARQ/解调 SINR 聚合全部走同一条体验路径。
     cfg = sy.SystemConfig(
-        evaluation_mode="capacity", duration_s=0.5, tdd_pattern="DDDD",
+        duration_s=0.5, tdd_pattern="DDDD",
         num_rbg=17, rb_per_rbg=1, scs_khz=30)
     traffic = sy.TrafficConfig(model="full_buffer")
-    kpi = sy.KpiConfig(trim="none", warmup_s=0.0)
+    kpi = sy.KpiConfig(warmup_s=0.0)
     results: dict[str, sy.ReplicationResult] = {}
     for algorithm in ("pf", "max_ci", "rr"):
         results[algorithm] = sy.simulate_replications(

@@ -202,18 +202,25 @@ def _traffic() -> Family:
                    when="默认；对标 3GPP 参考值时",
                    cost="最省",
                    source="TR 36.814 Annex A.2.1.3.1"),
-            Option("bimodal", "现网两头高中间低",
-                   formula=r"P(1\,\text{RBG}) = 0.3, \quad P(N_{RBG}) = 0.3, "
-                           r"\quad P(\text{空闲 TTI}) = 0.3",
-                   summary="按**占用 RBG 数**分布：小包和满带宽各占 30%，中间均匀",
-                   detail="现网口径（用户 2026-08-02）。**这是一次传输占多少频域资源的分布，"
-                          "不是文件大小的分布**——两者完全不同。"
-                          "小包与大包的体验速率分开报，因为前者由调度时延主导。",
+            Option("cdf", "经验 CDF 驱动",
+                   summary="两份 value,cdf 文件驱动包长与包间隔的 renewal process",
+                   detail="要贴现网话务就走这条：包长分布外生给定，**一次传输占几个 "
+                          "RBG 由真实 TBS 反查决定**，不再由一个写死的谱效折算。"
+                          "（历史的 bimodal 按「占几个 RBG」抽样再乘 3.0 bit/s/Hz "
+                          "折成字节，已随 legacy 容量路径下线。）",
                    when="要贴近现网话务",
                    cost="最省"),
-            Option("full_buffer", "full buffer",
-                   summary="永远有数据要发",
-                   detail="用来测容量上限。**体验速率在这个模型下没有意义。**",
+            Option("full_buffer", "full buffer（即「容量仿真」）",
+                   summary="话务开到最大，缓冲区永不空",
+                   detail="**这就是过去所说的容量模式**，但它不是另一条仿真分支，"
+                           "只是话务配置点：缓冲区永不空 ⇒ 调度器始终有足量数据填满"
+                           "全部 RBG（频选或 MU 打开时一个 TTI 会服务多个用户，实测默认 1.11、开 MU 1.73）。调度、AMC、HARQ、解调 SINR "
+                          "聚合全部照体验口径走。代价是 busy period 永不结束，"
+                          "28.552 的标准样本因此一个都不形成，"
+                          "drb_throughput_rel19_mbps 报 None；改看工程口径的 "
+                           "active_window_goodput_mbps 与 ITU 口径的 "
+                           "ue_served_p5_mbps；两者因分母趋同而接近，但发送字节分子同源，"
+                           "不能据此验证字节记账。",
                    when="测小区容量、对标 ITU 的平均小区谱效",
                    cost="最省"),
             Option("cbr", "CBR（恒定速率）",
@@ -223,7 +230,7 @@ def _traffic() -> Family:
         ],
         flow=Flow(steps=[
             ("每 TTI 抽一次到达", "伯努利近似泊松，p = λ·T_TTI"),
-            ("决定这次的大小", "ftp3 用固定文件大小；bimodal 抽 RBG 数再折算字节"),
+            ("决定这次的大小", "ftp3 用固定文件大小；cdf 从经验分布抽包长"),
             ("进缓冲区", "该 UE 没有活跃 burst 就直接激活，否则排队"),
             ("被调度时扣减", "记录首次/末次被调度的 TTI，供体验速率统计用"),
             ("发完出队", "下一个排队的 burst 接上"),
@@ -237,54 +244,39 @@ def _exp_thp() -> Family:
         name="体验速率口径",
         stage="系统级",
         current="experience_v2",
-        config_key="evaluation_mode",
-        intro="先分 profile：legacy_v1 的 trim 只为复现；experience_v2 用 DRB busy-period"
-              "事件与 FIFO 到达对象，二者不是同一 KPI 的精度开关。",
+        config_key="small_burst_policy",
+        intro="**只有一个口径**：DRB busy-period 事件 + FIFO 到达对象。历史的 "
+              "trim（掐尾/掐头去尾）随 legacy 容量路径一起下线，不再是可选项。",
         formula=(r"Thp_{large}=\frac{\sum V_{ACK}-V_{final}}{T_{penultimateACK}-T_{firstTX}},\quad "
                  r"T_{small}=\frac{TBVol-PaddingVol}{TBVol}T_{slot}"),
         caveat="**标准 burst 吞吐、到首次调度等待、arrival→completion 与 PDB miss"
                "分层上报。** 小区体验速率是用户均值而非求和。experience_v2 的"
-               "NACK 字节留队但不做 HARQ 软合并。",
+               "payload 在首传发送时离开队列；NACK 触发一次重传但不做 HARQ 软合并。",
         source="ETSI TS 28.552 V19.5.0；本项目 experience.py",
         options=[
             Option("experience_v2", "DRB busy-period + fractional small burst",
                    formula=r"buffer: empty\to nonempty\to empty",
-                   summary="大 burst 排除末 ACK piece；小 burst 用 TB padding 比例折时长",
+                   summary="大 burst 排除清空 buffer 的末段发送；小 burst 用 TB padding 比例折时长",
                    detail="排队等待单独从 arrival 到 first TX 计算；每个文件是一个 FIFO"
                           "arrival object，即使多个文件落在同一 busy period 也各自算"
                           "等待、完成时延和 PDB。",
                    when="按需 RBG 与大小包混跑",
                    cost="逐 TTI FIFO + RBG 分配",
                    source="TS 28.552 V19.5.0"),
-            Option("tail", "legacy 掐尾（仅复现）",
-                   formula=r"V \leftarrow V - V_{last}, \quad T \leftarrow T - T_{last}",
-                   summary="历史实现，排除清空缓冲区的末 slice",
-                   detail="只在 evaluation_mode=capacity 的 legacy_v1 生效；不再冒充"
-                          "Rel-19 唯一标准口径。单 slice 小包会不可测。",
-                   when="复现旧结果",
-                   cost="零",
-                   source="本项目 legacy_v1"),
-            Option("head_tail", "legacy 掐头去尾",
-                   formula=r"T \leftarrow T_{last} - T_{first\_sched}",
-                   summary="起点从数据到达挪到**首次被调度**",
-                   detail="话务到达但还没被调度的等待时间**不计入分母**"
-                          "（用户 2026-08-02 明确）。轻载时两者差别很大。",
-                   when="复现旧运营商口径",
-                   cost="零"),
-            Option("none", "不掐",
-                   summary="含清空缓冲区的那个 TTI",
-                   detail="**数值虚高，不建议**。只作为理解口径影响的对照。",
+            Option("exclude", "小 burst 直接排除",
+                   summary="单时隙 burst 不进体验速率统计",
+                   detail="保留旧式盲区口径，只作为理解 fractional-slot 影响的对照。",
                    when="对照实验",
                    cost="零"),
         ],
         flow=Flow(steps=[
-            ("识别 profile", "capacity→legacy_v1；experience→experience_v2"),
-            ("记录 busy period", "buffer 空→非空开始，ACK 后重新为空才结束"),
+            ("记录 busy period", "buffer 空→非空开始，ACK 后重新为空才结束；"
+                                 "full_buffer 下永不结束，该 KPI 报 None"),
             ("记录 FIFO arrival", "每个文件各自保留 arrival/firstTX/completion/PDB"),
-            ("计算大/小 burst", "大 burst 排末 ACK；单 TB 小 burst 用 padding 比例折时长"),
+            ("计算大/小 burst", "大 burst 排除清空 buffer 的末段发送；单 TB 小 burst 用 padding 比例折时长"),
             ("按层级聚合", "busy-period 吞吐与 arrival-object 时延分开"),
             ("按小区聚合", "**各用户体验速率的平均，不是求和**"),
-        ], branches=[(4, "只有 1 个 slice", "丢弃——小包的固有盲区")]),
+        ], branches=[(3, "只有 1 个 slice", "丢弃——小包的固有盲区")]),
     )
 
 
@@ -320,7 +312,7 @@ def _harq() -> Family:
             ("抽 ACK / NACK", "伯努利，概率就是查到的 BLER"),
             ("NACK 则进重传队列", "该 UE 在重传完成前不开新的首传"),
             ("唯一一次重传", "IR 半谱效映射或 CC +3.0103 dB；只查 NewTx 曲线"),
-            ("结束本次 HARQ", "失败字节留队，后续作为新 TB，不再第二次重传"),
+            ("结束本次 HARQ", "payload 已在首传发送时离开队列；末次失败只进 residual_bler"),
         ],
            branches=[(2, "ACK", "数据交付，OLLA 上调偏置")]),
     )

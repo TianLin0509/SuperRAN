@@ -56,6 +56,7 @@ DETAILED_MODULE_EXEMPTIONS = {"__init__", "katex", "mathml", "_lazy"}
 
 from superran import bler_curves as bc  # noqa: E402
 from superran import katex as kx  # noqa: E402
+from superran import kpi_view as _kv  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import mathml as mm  # noqa: E402
 from superran import srs_resource as srsres  # noqa: E402
@@ -2047,7 +2048,7 @@ def phases_svg() -> str:
         body += svg_box(35 + i * 270, 180, 235, 66, title, sub, "b")
         if i:
             body += arrow(35 + (i - 1) * 270 + 235, 213, 35 + i * 270, 213)
-    body += '<text class="ds" x="570" y="286">主循环禁止重复矩阵分解；legacy_v1 标量 MU 与 experience_v2 pair 表必须分开解释</text>'
+    body += '<text class="ds" x="570" y="286">主循环禁止重复矩阵分解；MU 一律读 pair 表，标量近似已下线</text>'
     return svg_wrap(body, 1140, 315, "系统仿真的两相架构")
 
 
@@ -2152,7 +2153,7 @@ def product_surfaces_showcase() -> str:
         <span class="surface-stage">RUN · AFTER</span>
         <h3>多算法 KPI 对比与单 TTI 复盘</h3>
         <p>2~5 个算法同屏固定颜色，基线不可隐藏；总览、KPI 矩阵、用户 CDF、TTI 趋势、同 TTI grant 详情与
-        统计门禁形成一条钻取链。单臂工作台仍保留 27 项小区 KPI、25 项用户 KPI 和 Agent 自适应首屏。</p>
+        统计门禁形成一条钻取链。单臂工作台仍保留 """ + f"{len(_kv.CELL_KPIS)} 项小区 KPI、{len(_kv.USER_KPIS)} 项用户 KPI" + """ 和 Agent 自适应首屏。</p>
         <a href="#/kpi">查看 KPI 口径与工作台合同 →</a>
       </div>
       """ + kpi_shot + """
@@ -2202,9 +2203,16 @@ Sionna RT 是唯一的可选 direct adapter（QuaDRiGa 路线已明确不做并�
 """
     body += callout(
         "warn", "最重要的边界",
-        "<p><code>capacity / legacy_v1</code> 与 <code>experience / experience_v2</code> "
-        "是两种评估模式，不是同一算法的精度开关。前者复现全带调度历史行为；后者实现 FIFO、"
-        "按需 RBG、真实 MU pair、PF 实际 TBS 记账和体验 KPI。跨模式比较必须把语义差异写出来。</p>",
+        "<p>系统级<strong>只有一条评估路径</strong>（<code>experience_v2</code>）："
+        "FIFO、按需 RBG、真实 MU pair、PF 实际 TBS 记账和 Rel-19 体验 KPI。"
+        "所谓“容量仿真”是它的一个话务配置 <code>traffic_model=\"full_buffer\"</code>："
+        "队列无限使调度器始终有足量数据填满全部 RBG。<strong>不许为它开特例分支</strong>；"
+        "代价是 busy period 永不结束，<strong>TS 28.552 的样本只在 buffer 排空事件上"
+        "形成，满缓冲下一个都不会形成</strong>，"
+        "<code>drb_throughput_rel19_mbps</code> 报 None——定义使然，不是缺陷。"
+        "满缓冲看工程口径：ITU-R M.2412 的 <code>ue_served_p5_mbps</code> 与 "
+        "<code>active_window_goodput_mbps</code>。两者因分母趋同而接近，但发送字节"
+        "分子同源，不能拿这个接近验证字节记账。</p>",
     )
     body += """
 <h2>推荐阅读路径</h2>
@@ -2303,7 +2311,6 @@ print(comparison["statement"])  # 只有 passed=True 才能写成已验证收益
     followup = r'''# 可选：同一数据集继续跑 5 s 体验仿真，1 s 后开始统计
 experience = sr_system_sim(
     dataset_id=data["dataset_id"],
-    evaluation_mode="experience",
     traffic_model="mixed",
     duration_s=5.0,
     warmup_s=1.0,
@@ -2373,7 +2380,7 @@ dataset，也不要把两种场景的均值直接相减。并行器会按 UE bat
     body += """
 <h2>把同一数据集继续送进 KPI 工作台</h2>
 <p>链路级 Hello World 回答“哪种权的谱效更高”；下面这一步才回答有限话务下的首包、体验速率、
-PRB 占用和用户差异。<code>sr_system_sim(evaluation_mode="experience")</code> 会自动写出自包含 HTML，
+PRB 占用和用户差异。<code>sr_system_sim()</code> 会自动写出自包含 HTML，
 返回 <code>kpi_view.url/html_path</code>、小区/用户双 Tab 和完整 KPI 排序证据。</p>
 """ + code(followup, "MCP tool sequence")
     body += """
@@ -2422,7 +2429,7 @@ def architecture_page() -> Page:
             ("编排层", "自然语言意图、分轮决策、预设、说明书", "server / plan / decisions / spec / sysscenes", "不能偷偷替用户改变实验问题"),
             ("数据层", "生成、落盘、加载、观察量", "generate / channelhub / loader / measure / scenes", "h_est 缺失时禁止复制 h_true"),
             ("算法层", "预编码、接收、MCS、MU、功控", "beamforming / linklevel / linkadapt / mumimo / power_control", "设计 CSI 与评估真值必须分离"),
-            ("系统层", "连续 TTI、话务、PF、FIFO、KPI", "system / experience / traffic / kpi_view / rng", "capacity 与 experience 不混口径"),
+            ("系统层", "连续 TTI、话务、PF、FIFO、KPI", "system / experience / traffic / kpi_view / rng", "满缓冲与有限话务不混口径"),
             ("证据层", "校准、Gate、预注册、结果合同", "validate / calibration / gates / analysis / results", "Gate 不通过不得发布强结论"),
         ],
     )
@@ -4699,7 +4706,7 @@ Qm 内检查。这个分析后端用于表 1/2，不描述预置表 3 的运行�
         "<p>初传 NACK 后，TB 进入唯一一次重传：MCS、RBG 数、rank 与 TBS 全部冻结，"
         "并在相同 D/S slot 类型上发送。默认 IR 把初传 MCS 的谱效除以 2，再用"
         " <code>searchsorted</code> 式的向下查表得到等效 MCS；CC 保持原档并增加 3.0103 dB。"
-        "两者都只查询 NewTx 曲线。重传失败则结束本次 HARQ，字节留在 DRB 队列，后续作为新 TB；"
+        "两者都只查询 NewTx 曲线。payload 在首传发送时离开 DRB 队列；末次失败只进 residual_bler，不回队列；"
         "不会发生第二次重传。当前仍未展开 RV、软比特、并行 process 和标准 HARQ timing。</p>",
     )
     body += (
@@ -4812,7 +4819,7 @@ TTI）。历史标量口径下同一组配置是 22.68 → 22.69——<strong>�
 （其中 −3.01 是等功率分摊，余下是相关性损失）。</p></div>
 <div><b>实测：自适应会判 SU 赢</b>
 <p>把两个 UE 的空间相关系数拉到 0.999，ZF 无处零陷：配对占比
-<strong>0%</strong>，767 个 TTI 被显式记为「单发更划算」（<code>mu_su_wins</code>），
+<strong>0%</strong>，对应数量的 TTI 被显式记为「单发更划算」（<code>su_mu_plan.su_selected</code>），
 不是静默不配。</p></div></div>
 <p><strong>−3.01&nbsp;dB 只是记账标签，不是近似。</strong>按 pair 表的定义，
 <code>CorrLoss = pred_MU − pred_SU − PowerLoss</code>，所以决策里真正用到的平移量
@@ -4845,34 +4852,53 @@ rank2 下成立</strong>；扩到 3/4 用户或不等流数时，这个常数标
 def modes_page() -> Page:
     body = phases_svg()
     body += """
-<h2>两种模式，不是两档精度</h2>
+<h2>只有一条评估路径；容量是它的一个话务配置</h2>
+<p><code>evaluation_mode</code> 已删除。系统级仿真恒走 <code>experience_v2</code>：
+一次 PF 排序后可服务多个 UE、按 TBS 反查最小够用 RBG、KPI 用 TS 28.552 Rel-19 的
+DRB busy-period 与 FIFO 到达对象。文档和对话里说的<strong>“容量仿真”指的是
+<code>traffic_model="full_buffer"</code></strong>，不是另一套调度或 KPI 语义。</p>
 """
     body += table(
-        ["维度", "capacity / legacy_v1", "experience / experience_v2"],
+        ["维度", "容量口径（traffic_model=full_buffer）", "体验口径（mixed / ftp3 / cdf）"],
         [
-            ("问题", "满带调度下的容量/历史 KPI 复现", "有限业务包下的排队、资源与用户体验"),
-            ("每 TTI 调度", "SU 或 legacy 标量 MU；用户通常拿全带", "一次 PF 排序后可服务多个 UE，按需 RBG"),
-            ("MU", "预计算聚合 ratio 后主循环标量折算", "候选 pair 的真实链路表与完整 SU/MU plan"),
-            ("PF numerator", "gNB best_se", "假设全带 TBS(17)"),
-            ("PF credit", "best_se/受 MU rank 修正的 SE", "默认实际 scheduled TBS；可选 ACK goodput"),
-            ("队列", "历史 traffic/burst 抽象", "arrival-object FIFO、NACK 留队、warmup 切窗"),
-            ("体验速率", "legacy trim", "DRB busy-period + fractional small burst + 含头速率"),
-            ("资源 KPI", "整带占用为主", "PRB utilization、0..17 占用、MU/used、用户归因"),
-            ("HARQ", "一次 IR/CC；同 MCS/RBG 数/rank/TBS", "一次 IR/CC；按需 RBG 身份冻结并有 allocation 证据"),
+            ("问题", "满业务下的小区吞吐上界与调度公平性", "有限业务包下的排队、资源与用户体验"),
+            ("每 TTI 调度", "队列无限 ⇒ 始终有数据填满全部 RBG；频选/MU 可服务多个 UE",
+             "一次 PF 排序后可服务多个 UE，按需 RBG，尾料可留空"),
+            ("解调 SINR", "按本次实际授予的 RBG 聚合——满缓冲下“那几个”天然是全部",
+             "按本次实际授予的 RBG 聚合"),
+            ("MU", "候选 pair 的真实链路表与完整 SU/MU plan", "同左（同一份实现）"),
+            ("PF credit", "实际 scheduled TBS", "实际 scheduled TBS；可选 ACK goodput"),
+            ("队列", "每 UE 一个永不排空的 DRB", "arrival-object FIFO、首传发送时扣队列、warmup 切窗"),
+            ("体验速率（标准，TS 28.552）",
+             "<strong>无样本 ⇒ 报 None（不是 0）</strong>：样本只在 buffer 排空事件上形成",
+             "DRB busy-period + fractional small burst + 含头速率"),
+            ("体验速率（工程）",
+             "<strong>有值</strong>：ITU-R M.2412 的 ue_served_p5/median/mean_mbps，"
+             "以及 active_window_goodput_mbps；两者因分母趋同而接近，但发送字节分子同源",
+             "同样有值，但与标准口径量的是不同的东西，轻载下可差一个数量级"),
+            ("该看什么",
+             "cell_served_mbps、serving_cell_prb_utilization、Jain、avg_mcs_first_tx、"
+             "ue_served_p5_mbps",
+             "drb_throughput_rel19_mbps、queue wait、completion delay、PDB miss"),
+            ("HARQ", "一次 IR/CC；身份冻结并有 allocation 证据", "同左（同一份实现）"),
         ],
     )
     body += callout(
         "danger", "禁止横向偷换",
-        "<p>不能把 experience 的按需 RBG 结果与 capacity 的全带 legacy 结果直接相减后称为“算法提升”；"
-        "两边必须共享 evaluation profile、话务、CSI、功率、warmup 和 KPI 定义。"
-        "同名字段若语义不同，结果 JSON 会带 profile/version/notes。</p>",
+        "<p>不能把 full_buffer 的容量数字与有限话务的体验数字直接相减后称为“算法提升”——"
+        "它们是同一条路径在两个负载工作点上的结果，回答的问题不同。"
+        "两边对比必须共享话务、CSI、功率、warmup 和 KPI 定义。</p>"
+        "<p><strong>也不要为 full_buffer 开特例。</strong>“满缓冲下频选搜索反正挑不出东西，"
+        "跳过它能快 2.5 倍”这类优化明确否决：那会重新造出一条只在特定话务下成立的路径，"
+        "正是这次合并要消灭的东西。</p>",
     )
     body += """
-<section class="toy-example"><h2>Toy example：同一个1,500 B小包，两种模式回答不同问题</h2>
-<p>capacity模式把当前用户当作持续有数据，问题是“独占全带能达到多少”；它不会因为队列只有
-1,500 B就把剩余RBG让给别人。experience模式先看真实队列，可能只给小包1个RBG，再把其余16个
-分给第二位用户，并记录小包从到达到首次调度的等待。前者适合链路容量基线，后者才回答小包是否
-偷走整个TTI。两者数字不同不是精度差异，也不能直接相减成算法收益。</p></section>
+<section class="toy-example"><h2>Toy example：同一个 1,500 B 小包，两个负载工作点</h2>
+<p>full_buffer 下这个用户的队列是无限的，反查出来的“最小够用 RBG”就是全部 17 个，
+于是它独占整个 TTI——这不是模式在做别的事，是同一套按需分配逻辑在无限队列上的取值。
+换成 mixed 话务，同一套逻辑看到真实队列只有 1,500 B，就只给 1 个 RBG，其余 16 个分给
+第二位用户，并记录小包从到达到首次调度的等待。两者数字不同不是精度差异，
+也不能直接相减成算法收益。</p></section>
 """
     body += """
 <h2>为什么要预热</h2>
@@ -4880,11 +4906,11 @@ def modes_page() -> Page:
 但体验/KPI 只统计 1–5 s。这样既让状态真实收敛，又不把初始空队列、SRS 未扫齐和 OLLA 冷启动损失
 混入稳态指标。预热时可以加速 OLLA，但测量窗应恢复正常步长，并回传切窗时的状态。</p>
 """
-    body += "<p class=source-row>模式路由：" + source_ref("src/superran/system.py", "evaluation_mode") + " · 体验入口：" + source_ref("src/superran/experience.py", "def simulate_experience") + "</p>"
+    body += "<p class=source-row>仿真入口：" + source_ref("src/superran/system.py", "def simulate") + " · TTI 主循环：" + source_ref("src/superran/experience.py", "def simulate_experience") + "</p>"
     return Page(
-        "modes", "容量评估与体验评估", "系统仿真", "EVALUATION PROFILES",
-        "capacity/legacy_v1 与 experience/experience_v2 的语义、实现和 KPI 边界。", body,
-        ("capacity", "experience", "legacy_v1", "experience_v2", "warmup"),
+        "modes", "容量口径与体验口径", "系统仿真", "LOAD OPERATING POINTS",
+        "唯一评估路径 experience_v2，以及容量口径（full_buffer）与体验口径的边界。", body,
+        ("capacity", "experience", "full_buffer", "experience_v2", "warmup"),
     )
 
 
@@ -4931,7 +4957,7 @@ def experience_page() -> Page:
         ("PF 排序一次", "<p>经典 PF 默认；QoS-PF 在 α=β=1、γ=0、w=1 时逐分配退化为经典 PF。</p>"),
         ("构造 SU/MU plan", "<p>按顺序用 searchsorted 给最小够用 RBG；没有候选需求时剩余资源留空。</p>"),
         ("按 useful bytes 选 plan", "<p>SU 能清空所有队列则强制 SU；否则 MU≥SU 才选 MU。</p>"),
-        ("真实 grant 判错", "<p>按实际 bitmap/MCS/TBS，真实 SINR 查 BLER；NACK payload 留队。</p>"),
+        ("真实 grant 判错", "<p>按实际 bitmap/MCS/TBS，真实 SINR 查 BLER；payload 在首传发送时离开队列，末次失败只进 residual_bler。</p>"),
         ("更新 OLLA/PF/KPI", "<p>记录分配、资源归因、arrival/busy period、首包与完成时延，再更新平均速率。</p>"),
     ))
     body += """
@@ -5114,7 +5140,7 @@ PDCCH/CCE 按已确认范围暂不建模；除此之外，物理 RBG、逐 RBG �
     body += table(
         ["互补子带、相同 CRN", "频选 off", "频选 on", "变化"],
         [
-            ("小区 ACK 吞吐", "148.71 Mbps", "486.52 Mbps", "3.27×"),
+            ("小区发送吞吐", "148.71 Mbps", "486.52 Mbps", "3.27×"),
             ("每忙 TTI 调度 UE", "1.00", "2.00", "两位用户各吃自己的强子带"),
             ("RBG overlap", "0", "0", "账本不变量保持"),
         ],
@@ -5276,7 +5302,7 @@ def kpi_page() -> Page:
     body += """
 <section data-kpi-workbench="standard-output">
 <h2>KPI 工作台是体验仿真的标准交付物</h2>
-<p>当 <code>evaluation_mode="experience"</code> 时，数值结果完成后会自动生成一份自包含、可离线打开的
+<p>数值结果完成后会自动生成一份自包含、可离线打开的
 HTML 工作台，并把 <code>html_path</code>、可用时的 loopback <code>url</code>、双 Tab、支持的 KPI 清单和
 本次排序证据一起放进 <code>result["kpi_view"]</code>。页面生成失败不会吞掉仿真结果，但会显式返回 error，
 因此交付者不能在没有页面的情况下假装工作台已经生成。</p>
@@ -5378,7 +5404,6 @@ print(comparison["url"] or comparison["html_path"])
     )
     body += code(r'''result = sr_system_sim(
     dataset_id=dataset_id,
-    evaluation_mode="experience",
     traffic_model="mixed", duration_s=5.0, warmup_s=1.0,
     target_prb_utilization=0.30, num_replications=8,
     kpi_intent="关注首包、边缘体验、PRB 利用率和用户差异",
@@ -5777,7 +5802,7 @@ OLLA、MU 与 KPI 口径。最终写入数据集的是解析后的配置，不�
         "warn", "label 是意图，不是实测保证",
         "<p>预设名写“高干扰”不代表结果一定高 IoT。只有 <code>expect.measured=true</code> "
         "且带数据集、重复次数、模型版本和区间的锚点才能当证据；旧的 "
-        "<code>legacy_v1_pre_physics_audit</code> 只用于历史回归。</p>",
+        "历史的 <code>legacy_v1_pre_physics_audit</code> 结果不可与当前结果拼图。</p>",
     )
 
     def preset_cards(items: dict[str, Any], *, system_mode: bool) -> str:
@@ -5791,7 +5816,6 @@ OLLA、MU 与 KPI 口径。最终写入数据集的是解析后的配置，不�
                 cfg = item.get("system", {}) or {}
                 meta = (
                     f'channel=<code>{esc(item.get("channel_preset", "—"))}</code> · '
-                    f'mode=<code>{esc(cfg.get("evaluation_mode", "—"))}</code> · '
                     f'traffic=<code>{esc(cfg.get("traffic_model", "—"))}</code>'
                 )
                 expect = item.get("expect", {}) or {}
@@ -6045,7 +6069,7 @@ def limitations_page() -> Page:
         [
             ("PF", "经典 PF；α=β=1、γ=0、无业务权重", "现场 EPF 定义未知前不自造厂商算法"),
             ("尾料 RBG", "业务传完即留空", "PRB 利用率反映真实话务，不虚构 padding 调度"),
-            ("误块/HARQ", "单码字 TB；最多一次 IR/CC 重传", "同 MCS/RBG 数/rank/TBS；失败字节留队成为新 TB"),
+            ("误块/HARQ", "单码字 TB；最多一次 IR/CC 重传", "同 MCS/RBG 数/rank/TBS；首传发送即扣队列，末次失败只进 residual_bler"),
             ("小 burst", "fractional-slot 推荐口径", "保留单时隙 burst，不制造体验 KPI 盲区"),
             ("预启动", "默认 1 s，PF/OLLA/SRS 演进但不计 KPI", "避开冷启动；结果仍检查收敛"),
             ("物理 SRS", "C_SRS=63/B_SRS=1/b_hop=0，T_SRS=20 slot", "30 kHz 下每 10 ms 发 16 RB，17 跳覆盖 272 RB；与系统级 srs_period_ms 分清单位"),

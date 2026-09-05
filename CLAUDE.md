@@ -68,7 +68,7 @@ python tests/test_gates.py                  # 校准、标准表、三道门、�
 python tests/test_results.py                # 外部算法结果契约、预注册
 python tests/test_linkadapt.py              # 链路自适应、吞吐、并行生成
 python tests/test_mumimo.py                 # MU-MIMO、单码字、RBG 粒度
-python tests/test_system.py                 # 系统级 capacity / experience
+python tests/test_system.py                 # 系统级仿真（单路径；容量=full_buffer 话务）
 python tests/test_scheduler_p0.py           # 调度资源账本、频选、MU 评分与 Finalizer
 python tests/test_srs_resource.py           # PCI 模3、4 CS、2T4R 双腿与全局周期容量
 python tests/test_srs_waveform.py           # RE级波形、解扩、CFO/时偏与UL IoT证据
@@ -421,33 +421,31 @@ MCS 查表都不含随机），所以 n 次重复只重跑 TTI 主循环。代�
 ReTx 行保留作来源审计。CC 保持原 MCS 并把查询 SINR 增加 `10log10(2)=3.0103 dB`；
 IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高 MCS 并在不变 SINR 上查表。
 等效 MCS 只用于 BLER lookup；空口 MCS、RBG 数、rank 与 TBS 必须和初传完全一致。
-重传失败后结束本次 HARQ，payload 留队并在后续成为新 TB；不得再挂第二次重传。
+重传失败后结束本次 HARQ；payload 已在首传发送时离开队列，末次失败只进
+`residual_bler`，不回队列，也不得再挂第二次重传。
 
 **"最多一次重传"是显式决定，不是待补的半成品**（用户 2026-09-02 确认：
 "HARQ 我们先仅考虑一次重传"）。现场实现规格里是 `max_retx=3`（共 4 次传输）；
 扩到那一档会改动全部 BLER/时延口径，因此**当前显式不做**。所有 residual BLER
 都要按"一次重传后仍失败"来读。
 
-**HARQ 进程数**（2026-09-04）：`capacity` 与 `experience` **两条路径都支持 N 进程**，
-`SystemConfig.harq_max_processes` 默认 **8**，38.213 §5.3 的下行上限是 16，
-设成 1 精确退回历史单进程行为（capacity 8 组 + experience 6 组场景指纹逐位一致）。
+**HARQ 进程数**（2026-09-04）：唯一系统路径 `experience_v2` 支持 N 进程，
+`SystemConfig.harq_max_processes` 默认 **8**，38.213 §5.3 的下行上限是 16；
+设成 1 精确退回历史单进程行为。full_buffer 与有限话务只是同一路径的不同工作点。
 
-**收益在体验速率，不在小区吞吐。** 两条主循环都是"话务喂多少发多少"，
+**收益在体验速率，不在小区吞吐。** 有限话务下小区吞吐通常 offered-limited，
 小区吞吐是 offered-limited 的，被 HARQ 挡住的 UE 会被别人顶上，所以
 UE 数 ≥4 时小区吞吐几乎不动（实测 ±0.3% 以内）。真正被单进程压住的是
 **单个文件多久传完**：
 
-| experience / ftp3 | 1 进程 | 8 进程 |
+| 当前受控夹具（4 UE / ftp3） | 1 进程 | 8 进程 |
 |---|---|---|
-| 4 UE 体验中位 | 118.7 Mbps | **353.3 Mbps（+197.7%）** |
-| 4 UE 完成时延 p50 | 38.3 ms | **11.5 ms** |
-| 12 UE 体验中位 | 94.9 Mbps | **232.1 Mbps（+144.5%）** |
-| 12 UE 完成时延 p50 | 41.5 ms | **21.0 ms** |
-| 小区吞吐 | 67.2 / 206.6 | 68.2 / 207.8（几乎不动） |
+| 体验中位 | 112.2 Mbps | **349.8 Mbps（+212%）** |
+| 完成时延 p50 | 39.2 ms | **12.0 ms** |
+| 小区吞吐 | 67.2 Mbps | 68.4 Mbps（几乎不动） |
 
-`DDDSU` 下 **4 个进程就够**（8 与 4 逐值相同），默认 8 是留余量。
-capacity 的全带单 grant 模型里，只有 1~2 个 UE 时小区吞吐才会跟着涨
-（+259% / +83%）。
+10-TTI 的 `DDDSU` 饱和反例里 **4 个进程已经填满 8 个 D/S 机会**，8 与 16 不再增量；
+默认 8 是给更长反馈链与时隙类型约束留余量，不是现场最优值的标定结论。
 表 3 使用版本化256QAM映射：历史内部表行0..14为
 `[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28]`，对应上报4-bit CQI1..15；
 上报CQI0是out-of-range。自动量化用各映射MCS的NewTx目标BLER门限。当前曲线仅
@@ -456,9 +454,8 @@ capacity 的全带单 grant 模型里，只有 1~2 个 UE 时小区吞吐才会�
 表1的64QAM和表2的标准256QAM只在调用方显式指定时使用。
 `build_link_tables` 的三张表各走同一口径：表 1/2 的 CQI 门限、MCS 选择、首传与一次
 IR/CC 重传统一使用有限码长解析 BLER；表 3 使用 preset_20b_256qam 曲线，不能交叉借表。
-`capacity/legacy_v1` 可显式选择表 1/2，但结果会逐次标注“解析、未按特定译码器或现场
-曲线标定”；`experience_v2` 仍硬拒绝非表 3，因为它的 TBS/单码字 TBLER profile 只在
-表 3 上冻结。默认仍是表 3，旧调用的数值路径不变。
+链路级工具可显式选择表 1/2，并标注“解析、未按特定译码器或现场曲线标定”；
+系统级唯一主循环硬拒绝非表 3，因为它的 TBS/单码字 TBLER profile 只在表 3 上冻结。
 `target_bler` 可配，但必须落在 28 档曲线的**共同实测区间 [0.001, 0.998]** 内，
 越界提前硬失败而不是在深层抛一个看不出哪档的 ValueError。注意这条链里目标 BLER
 **开环几乎抵消**（它同时出现在 CQI→Γ 与 Γ→MCS 两侧，两次平移方向相同），真正
@@ -926,8 +923,7 @@ rank 与 MCS **逐位相同**、谱效差 0.1%，建表快一倍。
 按 `1/K` 分 RE，MU 的聚合吞吐就和 SU **一模一样**——等于把空间复用做成了
 时频复用，MU 增益整个消失。测试里"切到 MU 之后小区吞吐确实更高"当场抓到。
 
-配对后每人只分到 `1/K` 的功率、还要吃残余干扰。**两条评估路径现在都从同一张
-pair 表读这部分代价**（`SchedulerConfig.mu_accounting="pair_table"`，默认）：
+配对后每人只分到 `1/K` 的功率、还要吃残余干扰。**这部分代价统一从 pair 表读**（`SchedulerConfig.mu_accounting="pair_table"`，默认）：
 MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、**误块抽签用
 `MuPairLink.true_sinr_db`**——ZF 权按基站（可能已老化的）CSI 打，但打在双方
 `h_true` 上，对方的流进干扰协方差。逐 TTI 只查表，矩阵运算全在建表阶段
@@ -938,14 +934,14 @@ MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、**误�
 OLLA 前基准 MCS 即使不过 0.5，也不能替实际发送档放行配对。
 
 **MU 的代价有两半，必须同时记账**：一半是「发得更保守」（MCS 往下走），
-一半是「更容易错」（同一档 MCS 的误块概率更高）。历史的 capacity 只把 TBS 乘一个
+一半是「更容易错」（同一档 MCS 的误块概率更高）。历史的容量分支只把 TBS 乘一个
 `measure_mu_gain()` 测出的标量 `mu_se_ratio`，等于「包变小但一点也不更容易错」，
 物理上说不通、且配对越激进越乐观。该路径（`mu_accounting="se_ratio_legacy"` 与
 `simulate(..., mu_se_ratio=)` 入口）**已于 2026-09-04 删除**，选中时直接报错，
-不留静默兜底。实测同一组配置：pair 表口径下开 MU 把首传平均 MCS 从 23.48 压到
-19.93，被删掉的历史口径是 22.68 → 22.69（一档都没降）。
-`measure_mu_gain()` 本身保留为独立的**测量**入口（比较不同 CSI 老化下的 MU/SU
-聚合比），但仿真主链路不再消费它的标量。
+不留静默兜底；它的另一个宿主 legacy 容量主循环也一并下线。实测同一组配置：
+pair 表口径下开 MU 把首传平均 MCS 从 23.48 压到 19.93，被删掉的历史口径是
+22.68 → 22.69（一档都没降）。`measure_mu_gain()` 本身保留为独立的**测量**入口
+（比较不同 CSI 老化下的 MU/SU 聚合比），但仿真主链路不再消费它的标量。
 
 MU 准入还有三层显式门：`min_pairing_mcs` 默认 4，低于该档的用户只参与 SU；
 `pf_gain_threshold` 默认 0（关闭、保持历史行为），启用后用当前
@@ -1158,9 +1154,9 @@ OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工
 偏移由 TDD 图案算出（`amc_policy.feedback_effective_offsets`），`DDDSU` 在
 30 kHz 下逐相位是 5/4/3/2 个 TTI；两个周期即 8 下行配 2 上行，与现场 8:2 一致。
 **ACK 与 NACK 都建立 in-flight 状态**，占住发出它的那个 HARQ 进程；抽样结果只能在
-反馈到达时交给 OLLA 与 RankController。`capacity` 下一个 UE 可以同时有
-`harq_max_processes` 个 TB 在途（默认 8），进程池空了才发不出新传；
-`experience` 仍是每 UE 一个槽位。进程全满且都在等反馈的 UE 计入
+反馈到达时交给 OLLA 与 RankController。唯一系统路径下一个 UE 可以同时有
+`harq_max_processes` 个 TB 在途（默认 8），进程池空了才发不出新传；进程全满且
+都在等反馈的 UE 计入
 `harq_feedback_wait_skips`。图案里没有 `U` 时（`"D"`/`"DS"` 这类合成图案）退化成
 零时延并在 notes 里说明。**k1/k2 与 PUCCH 资源仍不建模**：当前取的是最小 K1，
 比 38.213 §5.3 Table 9.2-7 的查表值更快，OLLA 收敛也因此偏快。
@@ -1174,7 +1170,7 @@ OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工
 顺带：`avg_mcs` 报的是 **OLLA 之后**的 MCS（`system.py` 先用
 `sinr_tx_db` 反折 `mcs_without_olla`，再调 `apply_olla_mcs`），即实际调度下去的档位。
 **但它的分母含重传**，而重传重放的是冻结的旧 MCS，所以它不是"链路自适应现在选到
-哪一档"。要那个视角用 `avg_mcs_first_tx`（只统计首传），两条路径都提供。
+哪一档"。要那个视角用 `avg_mcs_first_tx`（只统计首传），唯一系统路径直接提供。
 
 `simulate_experience` 作为公开入口**自己**也会兑现"留空=按目标反解"：
 它拿链路表的 `target_bler` 调 `resolved_for_target`，不再依赖调用方先解析
@@ -1196,8 +1192,9 @@ OLLA 步骤；现有 BF Gain 是矩阵计算值，CQI/OLLA 常数是版本化工
 
 代码里：`DrbQueue.transmit(..., is_retx=False)` 在**发送时**扣 `queued_bytes`，
 busy period 在"清空 buffer 的那一次发送"结束（`last_tx_tti`），`tx_events` 只记
-首传。重传走 `is_retx=True`：只累加 `tx_attempts`（资源占用的证据），
-**不动队列、不产生 TxEvent、不推进 busy period**。
+首传。重传走 `is_retx=True`，对 DRB 队列是纯空操作：**不动队列、不产生 TxEvent、
+不推进 busy period，也不碰下一个 busy period 的 `tx_attempts`**；资源占用由
+`retx_count`、allocation 与 PRB 账本记录。
 
 传丢的部分不从已发送字节里扣回去，只进 `residual_bler`。实测最小反例
 （强制首传全错、`tdd_pattern="D"`）：首传全对 368.8 Mbps → 首传全错重传全对
@@ -1213,22 +1210,17 @@ busy period 在"清空 buffer 的那一次发送"结束（`last_tx_tti`），`tx
 因此 `scheduler_finalize` 与 `_build_su_plan` 里"队列必须 ≥ 冻结 payload"的两道
 校验都已删除：重传的字节在首传时就走了，队列剩多少与它无关。
 
-**capacity 与 experience 用同一个口径**（2026-09-04 内网审核后补齐）。
-`system._Traffic.serve(..., is_retx=False)` 同样是发送即扣、重传只占资源。
-capacity 一开始漏了这一步，而它单独存在时并不刺眼——单进程下"ACK 才扣"是自洽的：
-被 NACK 的字节留在缓冲区，只有它自己的重传能把它们发走。**多进程放开后才出问题**：
-本 UE 的另一个进程会从同一个缓冲区头再取一份组成新 TB，等原 TB 的重传成功时又扣
-一次，于是有一批字节被记成送达却从来没上过空口。
-`_Traffic` 只记字节数、不记字节身份，所以 `serve()` 的 `min(n, bytes_left)` 钳位
-会把总量兜住（`served ≤ offered` 仍成立），**这个 bug 因此不会让小区吞吐虚高**，
-只会让 burst 提前算完。实测同一场景被钳掉的字节数：单进程 14,954 B，8 进程
-45,112 B，正好是三倍。
+内网审核曾发现已删除的 legacy capacity `_Traffic` 仍按 ACK 扣减；#25 删除那条主循环后，
+当前只剩 `DrbQueue` 一份实现。原反例已迁到唯一系统路径：1/8 进程有限话务都守
+`sent <= arrived`，重传全对/全丢的发送字节逐值相同。不得恢复第二套队列实现。
 
 **`pf_accounting="acked_goodput"` 的合同是「NACK 给 0」**，别拿发送字节当 credit。
 buffer 改成发送时扣减之后 `sent` 在 NACK 时也是正数，直接用它会把这条合同悄悄改掉
 ——PF 会把没送达的字节也算成该用户已获得的服务，坏链路用户的 `r_avg` 涨得更快、
 优先级掉得更快。默认口径 `auto`（= `scheduled_tbs`）用的是 `tb_bytes`，本来就与
 ACK 无关，不受影响。
+`tests/test_system.py` 第 17.2f 节有独立棘轮：ACK 首传的 credit 等于发送净荷，
+NACK 首传即使已从 buffer 扣字节，`pf_credit_bytes` 仍严格为 0。
 
 ### 系统仿真入口的两道硬校验（2026-08-17 第三轮审查）
 
@@ -1548,6 +1540,162 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 仍按几何视距概率抽样——`umi_los_canyon` 实测 `los_ratio` 是 **0.46** 而不是 1。
 判断一批数据是不是视距的看 `scenario` 字段，不看 `los_ratio`。
 
+### 系统级只有一条评估路径
+
+**没有"容量模式"这个分支了。** `evaluation_mode` 已删除，`system.simulate()` 恒走
+`experience.simulate_experience()`。文档和对话里说的"容量仿真"指的是
+**`traffic_model="full_buffer"` 这个话务配置**：缓冲区永不空 ⇒ 调度器始终有足量数据
+填满全部 RBG（`resource_utilization == 1.0`），这正是容量口径。
+
+> **⚠️ 撤回：满缓冲保证的是"RBG 用满"，不是"每忙 TTI 只服务一个用户"。**
+> 早先这里写着"每 TTI 一个 SU（或一对 MU）"，那是**频选关 + MU 关**时的退化解。
+> 合成互补频选信道上实测这张 2×2 表（棘轮在
+> `tests/test_physics_invariants.py` 第 8 节）：
+>
+> | `scheduled_ues_per_busy_tti` | MU 关 | MU 开 |
+> |---|---|---|
+> | 频选 `off` | **1.0000** | 2.0000 |
+> | 频选 `on` | 1.3800 | 2.7200 |
+>
+> 频选打开时调度器把"少几个但信道更好的 RBG"给第一个用户、余料给下一个；
+> MU 打开时一个 TTI 本来就配对两个用户。**两者都是正确的物理行为。**
+> 出厂默认是 `frequency_selective="auto"` + `mu_enabled=False`。
+> **六个实测 preset 锚点没有一个是 1.0**：
+> capacity 1.1056、capacity_mu 1.7267、ftp3 1.2137、mixed 1.4114、
+> 多小区中心站 1.0995、多小区边缘站 1.0067。
+> 后果：满缓冲口径**不等于**经典"单用户占满全带"的容量定义，跨版本、跨工具
+> 引用容量数会有系统性偏差——`sys_single_cell_capacity` 的 preset 注释里量过。
+
+**不许为 full_buffer 开任何特例分支。** 调度、AMC、HARQ、解调 SINR 聚合（按本次
+实际授予的 RBG 算）一律照体验模式的定义走。
+想让容量工况跑快一点的诱惑（比如满缓冲时跳过频选搜索）**明确否决**——那会重新造出
+一条只在特定话务下成立的路径，也就是这次合并要消灭的东西。棘轮已经守住这条：
+把 `frequency_aware` 在满缓冲下强制置 False，第 8 节的 2×2 表立刻变红。
+
+### 报"容量上界"必须开 MU
+
+**`mu_enabled` 默认是 `False`**（`SchedulerConfig` 与 `sr_system_sim` 都是），
+理由是做算法 A/B 时 MU 是个大混淆项，先看清 SU 基线。**这个默认不要改**，
+改了会静默移动所有历史结果。
+
+**但"容量上界"这个问题必须开 MU 来答。** 64T4R 立 64 根天线主要就是为了空间复用，
+SU-only 的数不是上界。preset `sys_single_cell_capacity` ↔
+`sys_single_cell_capacity_mu` 是只差一个 `mu_enabled` 的受控对照，8 次重复实测：
+
+| | SU 基线 | 开 MU | 差 |
+|---|---|---|---|
+| `cell_served_mbps` | 533.50 | **735.03** | **+37.8%** |
+| `ue_served_mean_mbps` | 53.35 | 73.50 | +37.8% |
+| **`ue_served_p5_mbps`（边缘用户）** | 16.94 | 17.41 | **+2.8%** |
+| `scheduled_ues_per_busy_tti` | 1.1056 | 1.7267 | |
+| `mu_share` | 0 | 0.6423 | |
+| `avg_mcs_first_tx` | 21.17 | 19.05 | **−2.12 档** |
+| `bler_first_tx` | 0.0854（0.85×） | 0.1465（1.47×） | |
+
+**结论一句话：MU 主要给小区容量，不能把容量增益外推成边缘体验增益。** 本次受控对照
+里小区容量 +37.8%，5% 边缘用户仅 +2.8%；`min_pairing_mcs` 与相关性门使边缘用户
+较少参与配对。两者不是同一个 KPI 工作点。
+
+**MU 的代价两半都如实出现了**（这正是 `pair_table` 记账该有的样子）：一半是发得更
+保守（MCS −2.12 档），一半是更容易错（BLER 0.85× → 1.47×）。BLER 1.47× 在 1.6×
+门限内但明显差于 SU，3 秒窗口仍未证明完全收敛——
+**加重复次数只收窄置信区间、不会再往下压**，要压得靠加 `duration_s`。
+
+### 「用户体验速率」有两个口径，别混
+
+这是最容易说错的一处：**不能笼统说「full_buffer 下体验速率无定义」**。
+
+| 口径 | 键 | 分母是什么 | full_buffer 下 |
+|---|---|---|---|
+| ITU-R M.2412 / TR 38.913 | `ue_served_p5_mbps` / `_median_` / `_mean_` | **观测窗长**（每 UE 已发送净荷 ÷ 窗长，跨 UE 取分布） | **照常有值——这就是满缓冲评估的主指标**，5% 分位即 cell-edge user throughput |
+| TS 28.552 busy-period（**标准**） | `cell_experienced_mbps` / `drb_throughput_rel19_mbps` | **已排空的 busy period 时长**（首传 → 清空 buffer 前一段首传发送） | **报 `None`**：样本只在 "DRB DL buffer emptied" 事件上形成（TS 128 552 V19.5.0 p54），满缓冲下该事件不发生 |
+| 在飞窗内段（**工程**，非标准） | `active_window_goodput_mbps` | 在飞 busy period 落在测量窗内那一段的 goodput | **有值**。与 ITU 口径数值接近，但**那不是交叉验证**，见下 |
+
+它们**不是同一个数的两种精度**。preset `sys_single_cell_experience_ftp3` 实测：
+`ue_served_mean_mbps=24.26` 而 `cell_experienced_mbps=145.00`，同一次仿真差 6.0 倍
+——前者是 UE 全时段平均，后者是它的 burst 在传时的速率。满缓冲下 ITU 口径与工程
+口径数值接近（UE 一直活跃），preset `sys_single_cell_capacity` 实测 53.350 vs
+53.431，差 0.15%。
+
+> **⚠️ 撤回：这个约 0.15% 不是交叉验证，别再当证据用。**
+> 这两个数的**分子是同一份发送净荷记账**——`experience.py` 里 `tr.transmit()`
+> 返回的那个 `payload`，一边累进 `served_measured`、一边塞进 `TxEvent`。
+> 只有分母不同：一个除观测窗长，一个除首传到末次窗内发送的跨度。满缓冲下 UE 从头忙到
+> 尾，两个分母本就重合，**所以吻合是必然的**。它能证明的只有"满缓冲确实让每个 UE
+> 全程活跃"，这是关于话务模型的陈述，**不是关于记账正确性的**。
+> 历史 pre-#18 反例：把净荷记账整体放大 10%，小区吞吐从 618.10 错成 683.93
+> （错 10.6%），而两个同源指标的相对差仍约 0.16%，一个报警都不响。
+>
+> **那什么能抓住记账整体缩放？有限话务下的字节守恒。** `accounting_error_pct`
+> 比的是「到达 = 已发 + 积压」，而**到达量由话务模型独立决定**，记账一缩放这个
+> 等式立刻破。**满缓冲下它不可用**（offered 是无界的种子字节），所以
+> `accounting_error_pct` 在满缓冲下报 `None` 而不是 `0.0`——报 0.0 是拿漂亮数
+> 冒充测量，跟旧容量分支报 3.7e21 拿垃圾数冒充测量是同一种错。
+> **满缓冲场景的净荷口径正确性，是靠同一套代码在有限话务下过了字节守恒间接保证
+> 的，不是靠满缓冲自己的自查。**
+
+**标准字段绝不能混进在飞样本。** 在飞段确实要报，但另起字段
+（`active_window_goodput_mbps`，`throughput_kind = "engineering_active_window"`，
+名字里不许出现 `rel19`）。理由是右删失：只数已排空的 busy period 会把"慢到没传完"
+的 burst 系统性丢掉，这**不是 full_buffer 特有的**——8 UE / ftp3 20 Hz × 500 kB / 1 s
+的普通过载下，标准字段同样返回 `None`（0 个 burst 传完）。
+**偏差方向不固定**：实测既见过只数已完成偏乐观（11.59 → 含在飞 8.78），
+也见过偏悲观（126.0 → 131.9），取决于慢 burst 属于差信道还是好信道用户，
+所以**不许声称"只数已完成一定偏乐观"**。样本构成由
+`drb_throughput_completed_bursts` / `_inflight_bursts` / `_inflight_share` 如实上报。
+
+**在飞段不能冒充标准样本。** #21 之后 buffer 在首传发送时扣减，重传对 DRB 队列是
+空操作。最小反例是在同一个 busy period 到达 101 B、只首传 100 B：虽然首传已发生，
+buffer 仍剩 1 B，没有 `buffer-emptied` 事件；它只能形成
+`engineering_active_window`，不能进入 28.552。把最后 1 B 也发走后才形成标准边界。
+
+full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst 真的传完**：
+`cell_experienced_completed_only_mbps`、`cell_head_inclusive_experienced_mbps`
+（需要该 busy period 起始于窗内）、完成时延分位数、`pdb_miss_ratio`。
+
+`ue_served_*` **无条件计算，不按话务模型分支**——任何话务下它都有意义，
+这也是它不构成「为 full_buffer 开特例」的原因。
+
+容量工况还要看 `cell_served_mbps`、`serving_cell_prb_utilization`、
+`avg_mcs_first_tx`、`bler_first_tx`。
+
+### 多小区数据集：挑哪个小区是物理选择，不是随便挑一个
+
+3GPP TR 36.814 的标准撒点密度是每扇区 10 个 UE，21 扇区共 210 个；而仿真器一次
+只调度一个小区，所以 `sr_system_sim(serving_cell=<编号>)` 必须挑一批出来。
+
+**撒点没有 wrap-around，边缘小区的邻区不完整、干扰被系统性低估。**
+挑被邻区包围最完整的那个（几何 SIR 中位最低）。实测同一份 210 UE 数据集，
+只换 `serving_cell`、其余逐字相同（preset `sys_multicell_center_cell` ↔
+`sys_multicell_edge_cell`）：
+
+| | 中心站（小区 1） | 边缘站（小区 11） | 差 |
+|---|---|---|---|
+| 几何 SIR 中位 | 4.22 dB | 16.25 dB | 12.0 dB |
+| IoT 中位（仿真） | 23.23 dB | 16.78 dB | 低估 6.45 dB |
+| `cell_served_mbps` | 534.23 | 688.13 | **高估 28.8%** |
+| `ue_served_p5_mbps` | 24.03 | 61.56 | **高估 156%** |
+| `bler_first_tx` | 0.1024（1.02×） | 0.0342（**0.34×**） | |
+
+**边缘站那一列同时说明「信道太好的场景不能当外环锚点」**：它的
+`avg_mcs_first_tx` 是 26.08，已经贴着表 3 的最高档 27，`olla_db_mean` 为 **+1.43 dB**
+（外环在往上推却推不动），于是 BLER 只能低于目标。中心站是 21.54 档 / −3.07 dB，
+外环在正常回退。**MCS 撞天花板 ⇒ 外环失去调节余量 ⇒ BLER 偏低**，这不是 bug，
+是场景选错。
+
+`serving_cell_selection` 会把判断依据一起回报：选中小区的几何 SIR 中位与 IoT 中位
+（`IoT = SIR/(SIR−SINR)`，与结果里的 `iot_db_median` 同一公式）。
+算不出来时给 `selected_interference_note` 说明原因，**不留哑 `None`**。
+它与 `rb_power_control_enabled` 同开硬失败（逐 RB 功控的几何量不随样本筛选走）。
+
+随容量分支一起下线的配置，给了都硬失败、不静默降级：
+`evaluation_mode`、`traffic_model="bimodal"`（连同 `p_small_rbg`/`p_full_rbg`/
+`p_idle_tti`/`expected_prb_util`）、`KpiConfig.trim`/`min_burst_tti`、
+`mu_accounting="se_ratio_legacy"`、`pf_accounting="legacy_best_se"`、
+`max_mu_users`/`mu_rank_per_user` 的非 2 取值、`simulate(mu_se_ratio=...)`。
+现网两头高中间低的话务画像迁到 `traffic_model="cdf"`，CDF 文件在
+`presets/traffic_cdf/`，由 `scripts/make_field_bimodal_cdf.py` 生成。
+
 ## 加东西的地方
 
 - 新的 3GPP 校准量 → `calibration.py`，按条款号标注来源
@@ -1556,8 +1704,8 @@ Chromium 会把含 SVG `foreignObject` 的 Canvas 标成 tainted，本地 HTML �
 - 新的表驱动 BLER → 原始常量放独立数据模块，必须有 SHA-256、全 MCS 覆盖、
   横轴/BLER 单调、目标门限覆盖检查；来源不是标准就不能塞进 `verify_tables`
 - 新的门禁判据 → `gates.py`（门 2/门 3）或 `validate.py`（门 1，会自动进门 1）
-- 新的 rank 策略 / HARQ 反馈时序 → `amc_policy.py`；两条评估路径共用同一份实现，
-  别在 `system.py` 和 `experience.py` 里各写一套
+- 新的 rank 策略 / HARQ 反馈时序 → `amc_policy.py`；只有一条评估路径，实现只该有
+  一份，别在 `system.py` 和 `experience.py` 里各写一套
 - 新的随机流 → `rng.register_stream(名字, 用途)`，**别直接改 `STREAMS` 的顺序**
   （流键来自名字的 crc32，加流不会扰动已有流；改顺序也不会，但改用途会）。
   统计判决一律走 `rng.compare_replications`，它复用 `gates.py`，不要另写

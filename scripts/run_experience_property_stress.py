@@ -116,7 +116,6 @@ def _run_case(case_id: int) -> dict[str, Any]:
         mu_precoder="zf" if case_id % 2 == 0 else "rzf",
     )
     system = sy.SystemConfig(
-        evaluation_mode="experience",
         duration_s=0.30,
         scs_khz=scs,
         num_rbg=17,

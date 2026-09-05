@@ -374,7 +374,7 @@ def system_flow_svg() -> str:
 <g class="flow-box"><rect x="565" y="410" width="220" height="88"/><text x="675" y="439"><tspan>③ 取 snapshot/rank</tspan><tspan x="675" dy="22">CQI + BF + OLLA → MCS</tspan></text></g>
 <g class="flow-box"><rect x="830" y="410" width="195" height="88"/><text x="928" y="439"><tspan>④ PF / QoS-PF</tspan><tspan x="928" dy="22">按 full-band potential 排序</tspan></text></g>
 <g class="flow-box"><rect x="830" y="570" width="195" height="95"/><text x="928" y="598"><tspan>⑤ TBS 反查 n*</tspan><tspan x="928" dy="21">searchsorted(left)</tspan><tspan x="928" dy="21">最多取剩余 RBG</tspan></text></g>
-<g class="flow-box"><rect x="565" y="570" width="220" height="95"/><text x="675" y="598"><tspan>⑥ BLER + CRN ACK</tspan><tspan x="675" dy="21">ACK 扣队列；NACK 留队</tspan><tspan x="675" dy="21">无 HARQ combining</tspan></text></g>
+<g class="flow-box"><rect x="565" y="570" width="220" height="95"/><text x="675" y="598"><tspan>⑥ BLER + CRN ACK</tspan><tspan x="675" dy="21">首传发送即扣队列</tspan><tspan x="675" dy="21">重传只占资源</tspan></text></g>
 <g class="flow-box"><rect x="300" y="570" width="220" height="95"/><text x="410" y="598"><tspan>⑦ 更新 OLLA / PF</tspan><tspan x="410" dy="21">A: actual scheduled TBS</tspan><tspan x="410" dy="21">B: fault full-band TBS</tspan></text></g>
 <g class="flow-diamond"><polygon points="145,558 255,617 145,676 35,617"/><text x="145" y="609"><tspan>⑧ 还有 RBG</tspan><tspan x="145" dy="20">和候选 UE？</tspan></text></g>
 <g class="flow-box"><rect x="35" y="750" width="250" height="110"/><text x="160" y="780"><tspan>⑨ burst / arrival KPI</tspan><tspan x="160" dy="22">等待、完成、PDB、Rel-19</tspan><tspan x="160" dy="22">过期未完成=miss；未到期=右删失</tspan></text></g>

@@ -420,7 +420,7 @@ check(_rep.runs[0].config["rng"]["master_seed"] == 0
 # 所有重复的固定标签。
 _mixed_rep = sy.simulate_replications(
     _T[:2], num_replications=4, master_seed=0,
-    sys_cfg=sy.SystemConfig(evaluation_mode="experience", duration_s=0.1),
+    sys_cfg=sy.SystemConfig(duration_s=0.1),
     traffic=sy.TrafficConfig(
         model="mixed", small_ue_share=0.5,
         small_arrival_rate_hz=200.0, arrival_rate_hz=20.0),

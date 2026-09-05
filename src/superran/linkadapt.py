@@ -411,8 +411,8 @@ class PdschOverhead:
 
     以前主调度路径直接按 ``12 子载波 × 12 符号 = 144 RE/PRB`` 算 TBS，
     等于假设 DM-RS 与 PDCCH 都不占资源，TBS 偏大约 12%。这个类把口径集中到
-    一处，让 ``system`` 的 legacy 主循环与 ``experience`` 的 ``TbsLookup``
-    用**同一个**换算，不会各自算各自的。
+    一处，由系统级唯一主循环的 ``experience.TbsLookup`` 与链路级工具共同消费，
+    不会各自算各自的。
 
     三个参数的物理含义：
 

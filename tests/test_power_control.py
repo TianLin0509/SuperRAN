@@ -293,7 +293,7 @@ def test_simulation_rejects_profile_mislabel_and_cross_cell_resource_pool() -> N
         sysm.simulate(
             tables,
             sys_cfg=sysm.SystemConfig(
-                evaluation_mode="experience", num_rbg=1, rb_per_rbg=16,
+                num_rbg=1, rb_per_rbg=16,
                 duration_s=0.01, rb_power_control=shaped),
             traffic=sysm.TrafficConfig(model="full_buffer"),
             sched=sysm.SchedulerConfig(mu_enabled=False),
@@ -303,7 +303,7 @@ def test_simulation_rejects_profile_mislabel_and_cross_cell_resource_pool() -> N
         sysm.simulate(
             tables,
             sys_cfg=sysm.SystemConfig(
-                evaluation_mode="experience", num_rbg=1, rb_per_rbg=16,
+                num_rbg=1, rb_per_rbg=16,
                 duration_s=0.01, rb_power_control=uniform),
             traffic=sysm.TrafficConfig(model="full_buffer"),
             sched=sysm.SchedulerConfig(mu_enabled=False),
