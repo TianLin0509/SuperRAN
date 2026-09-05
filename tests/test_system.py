@@ -495,9 +495,10 @@ check(abs(expm._bler_lookup(15, float("inf"))
 
 # --- bug B：S 时隙的 RE 与 dl_ratio 必须用同一个系数 ---
 check(abs(sysm.S_SLOT_DL_FRACTION - 0.7) < 1e-9, "S 时隙折合系数 0.7")
-check('frac = 1.0 if str(slot).upper() == "D" else self.s_slot_fraction'
-      in _insp.getsource(expm.TbsLookup),
-      "TBS 按时隙类型取 RE，不是所有时隙一个数")
+_slot_lut = expm.TbsLookup.build(17, 16, sysm.S_SLOT_DL_FRACTION)
+check(int(_slot_lut.values[1, 12, 1, -1])
+      < int(_slot_lut.values[0, 12, 1, -1]),
+      "TBS 按 D/S 时隙各自的可用 RE 计算，不是所有时隙一个数")
 _dd = sysm.SystemConfig(tdd_pattern="DDDD").dl_ratio
 _ds = sysm.SystemConfig(tdd_pattern="DDDS").dl_ratio
 check(abs(_dd - 1.0) < 1e-9 and abs(_ds - (3 + 0.7) / 4) < 1e-9,
@@ -2749,8 +2750,7 @@ try:
             lambda m, s, _p=_bd_retx_p, **kw: _bd_retx_bler(m, s, _v=_p, **kw))
         _bd_runs[_bd_name] = sysm.simulate(
             [_bd_point],
-            sys_cfg=sysm.SystemConfig(evaluation_mode="experience",
-                                      duration_s=1.0, tdd_pattern="D",
+            sys_cfg=sysm.SystemConfig(duration_s=1.0, tdd_pattern="D",
                                       seed=230823),
             traffic=sysm.TrafficConfig(model="full_buffer"),
             sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
@@ -2832,8 +2832,7 @@ try:
         expm._bler_lookup = lambda _m, _s, _v=_rt_p: _v
         _rt_runs[_rt_p] = sysm.simulate(
             [_rt_point],
-            sys_cfg=sysm.SystemConfig(evaluation_mode="experience",
-                                      duration_s=3.0, tdd_pattern="DDDSU"),
+            sys_cfg=sysm.SystemConfig(duration_s=3.0, tdd_pattern="DDDSU"),
             traffic=sysm.TrafficConfig(model="ftp3", file_bytes=2_000_000,
                                        arrival_rate_hz=0.8),
             sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
