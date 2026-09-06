@@ -161,6 +161,49 @@ class WorkflowContract(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assert_clean_base()
 
+    def test_new_staged_work_survives_successful_checks(self):
+        self.assert_new_staged_work_survives(0)
+
+    def test_new_staged_work_survives_failed_checks(self):
+        self.assert_new_staged_work_survives(7)
+
+    def assert_new_staged_work_survives(self, exit_code):
+        self.amend_check(
+            "from pathlib import Path\nimport subprocess\n"
+            "Path('concurrent.txt').write_text('owned by another task',encoding='utf-8')\n"
+            "subprocess.run(['git','add','concurrent.txt'],check=True)\n"
+            f"raise SystemExit({exit_code})\n")
+        result = self.merge()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), self.base)
+        self.assertEqual(self.git("rev-parse", "MERGE_HEAD").stdout.strip(), self.head)
+        self.assertEqual((self.repo / "concurrent.txt").read_text(encoding="utf-8"),
+                         "owned by another task")
+        self.assertEqual(self.git("show", ":concurrent.txt").stdout, "owned by another task")
+        self.assertIn("未执行 merge --abort", result.stdout)
+
+    def test_unstaged_work_survives_failed_checks(self):
+        self.amend_check(
+            "from pathlib import Path\n"
+            "Path('src/fixture.txt').write_text('concurrent tracked edit',encoding='utf-8')\n"
+            "raise SystemExit(7)\n")
+        result = self.merge()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual((self.repo / "src/fixture.txt").read_text(encoding="utf-8"),
+                         "concurrent tracked edit")
+        self.assertEqual(self.git("rev-parse", "MERGE_HEAD").stdout.strip(), self.head)
+
+    def test_merge_conflict_is_preserved(self):
+        (self.repo / "src/fixture.txt").write_text("trunk changed\n", encoding="utf-8")
+        self.git("add", "src/fixture.txt")
+        self.git("-c", "core.hooksPath=", "commit", "-m", "conflicting trunk")
+        self.base = self.git("rev-parse", "HEAD").stdout.strip()
+        result = self.merge()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), self.base)
+        self.assertTrue(self.git("ls-files", "--unmerged").stdout)
+        self.assertEqual(self.git("rev-parse", "MERGE_HEAD").stdout.strip(), self.head)
+
     def test_merge_lock_rejects_concurrent_runner(self):
         lock = open(self.repo / ".git/hub-merge-task.lock", "w+b")
         try:

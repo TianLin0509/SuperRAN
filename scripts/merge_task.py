@@ -156,10 +156,21 @@ def main():
 
     bypass = {"HUB_ALLOW_MAIN_COMMIT": "1"}
     merged_sha = None
+    merged_tree = None
 
     def rollback():
         """只撤销本次未提交合并；异常状态保留现场，绝不 reset。"""
-        if run(["git", "rev-parse", "--verify", "MERGE_HEAD"], check=False).returncode == 0:
+        merge_state = run(["git", "rev-parse", "--verify", "MERGE_HEAD"], check=False)
+        if merge_state.returncode == 0:
+            # merge --abort 也会删除测试期间被别人新暂存的文件。
+            # 只有现场仍等于本次已知的试合结果，才允许自动撤销。
+            if (merged_tree is None
+                    or git("rev-parse", "HEAD") != original
+                    or merge_state.stdout.strip() != candidate
+                    or git("write-tree") != merged_tree
+                    or git("diff", "--name-only")
+                    or git("ls-files", "--others", "--exclude-standard")):
+                raise RuntimeError("合并现场存在未知变化或冲突；未执行 merge --abort，已保留索引、文件和合并状态。")
             run(["git", "merge", "--abort"])
         if git("rev-parse", "HEAD") != original or git("status", "--porcelain"):
             raise RuntimeError("回滚后工作区或 HEAD 与原状态不同；已保留现场，请人工核对。")
@@ -178,7 +189,7 @@ def main():
         #
         #    改成 --no-commit 之后：测试期间主干的提交历史根本没动过，
         #    工作区处于 git 自己认得的 MERGING 状态，被杀了也一眼看得出、
-        #    一条 `git merge --abort` 就能清干净。
+        #    只有现场未被额外修改时才允许自动 merge --abort；否则保留现场。
         # 已经合过的分支：--no-commit 下 git 只会说 "Already up to date"，
         # 不产生待提交内容，后面的 commit 就会报个莫名其妙的错。
         # 用户重跑一次合并是很正常的事，得给句人话。
@@ -194,19 +205,16 @@ def main():
         say("   已合进工作区，主干提交历史暂未改变")
 
         # ⑤ 亲自跑测试 —— 不采信任何 Agent 的说法
-        if not tests:
-            say("③ 项目没配测试命令，跳过（建议补上）")
-        else:
-            say(f"③ 跑测试（{len(tests)} 条）")
-            for i, t in enumerate(tests, 1):
-                say(f"   [{i}/{len(tests)}] {t}")
-                test_env = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-                if (REPO / "src").is_dir():
-                    test_env["PYTHONPATH"] = str(REPO / "src")
-                r = run(t, env=test_env, check=False, capture=False)
-                if r.returncode != 0:
-                    raise RuntimeError(f"测试没过：{t}")
-            say("   全部通过")
+        say(f"③ 跑测试（{len(tests)} 条）")
+        for i, t in enumerate(tests, 1):
+            say(f"   [{i}/{len(tests)}] {t}")
+            test_env = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+            if (REPO / "src").is_dir():
+                test_env["PYTHONPATH"] = str(REPO / "src")
+            r = run(t, env=test_env, check=False, capture=False)
+            if r.returncode != 0:
+                raise RuntimeError(f"测试没过：{t}")
+        say("   全部通过")
 
         if (git("rev-parse", "HEAD") != original
                 or git("rev-parse", f"refs/heads/{branch}") != candidate
