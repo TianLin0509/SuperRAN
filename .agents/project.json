@@ -4,16 +4,21 @@
   "name": "SuperRAN",
   "trunk": "develop",
 
-  "$comment_protected": "develop 和 main 长期保持相等，两条都不许直推。pre-push 挡的是 trunk + protectedBranches + 兜底名单的并集。",
+  "$comment_protected": "develop 是开发主线；main 只在维护者明确发起发布时更新。两条都不许直接推送。",
   "protectedBranches": ["main"],
 
-  "$comment_test": "合并脚本亲自跑这些，不采信 Agent 的说法。退出码非 0 就不合。用 run_test_matrix 而不是 pytest：pytest 只收集到 29 个测试文件里的 18 个，另外 11 个是脚本式测试，在 pytest 下收集到 0 个用例（见 .agents/TESTING.md 坑 2）。",
+  "$comment_test": "先验隔离 Git 闸门，再按直接入口运行所有仿真测试文件。run_test_matrix 会核对文件发现集与注册集；不要依赖历史 pytest 收集数量。2026-09-06 原基线 29/29，500.052 秒。",
   "test": [
+    "python scripts/verify_project_workflow.py",
     "python scripts/run_test_matrix.py --tier full"
   ],
 
   "$comment_afterMerge": "留空是刻意的。给内网打审核 zip 不是流水线的一环，是两个独立任务之间的动作，由维护者在他想送审时手动做。",
   "afterMerge": [],
+
+  "$comment_version": "本次只整理开发流程，不改 Python API 包版本；完整代码身份用 Git SHA。未来发布的版本策略由维护者单独发起，不套用 npm 版本脚本。",
+  "versionFiles": [],
+  "versionBump": [],
 
   "contracts": {
     "author": ".agents/AUTHOR.md",

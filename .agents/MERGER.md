@@ -53,11 +53,15 @@ git diff develop...<分支>
 
 ## 三、亲自跑验证（不采信工作位报的任何结果）
 
+先记下 `git rev-parse <分支>` 和 `git rev-parse develop` 的完整结果。两次命令必须使用
+同一对已经亲自审核的 SHA；不能在正式合并前重新取值后直接当成已审核。
+
 ```bash
-python scripts/merge_task.py <分支> --dry-run
+python scripts/merge_task.py <分支> --expected-head <任务完整SHA> --expected-trunk <主干完整SHA> --dry-run
 ```
 
-这条命令会：对齐主干 → 试合（不提交）→ **亲自跑 `.agents/project.json` 里的测试** → 回滚。
+这条命令会：核对本地主干与任务 SHA → 试合（不提交）→ **亲自跑 `.agents/project.json` 里的测试** → 回滚。
+远端与发布分支不参与日常合并。主工作目录不干净或已有合并锁时会拒绝，保留现场。
 退出码 0 才算过。**工作位说测试通过不算数，这一步跑出来的才算。**
 
 必须在**主工作目录** `C:\Vibe\Wireless\SuperRAN` 跑——脚本自己也会拦。
@@ -68,13 +72,10 @@ python scripts/merge_task.py <分支> --dry-run
 如果这个分支修的是**物理 bug**，SuperRAN 铁律要求它补一条「revert 掉会变红」的测试
 （在 `tests/test_physics_invariants.py`）。**你要亲自反证这条测试真的抓得住 bug：**
 
-```bash
-# 把新测试拿去跑未修复的主干，它必须红
-git stash list                       # 确认工作区干净
-git checkout develop -- src/         # 只回退源码，留下新测试
-python scripts/run_test_matrix.py --only test_physics_invariants.py    # 期望：非 0
-git checkout <分支> -- src/          # 复原
-```
+反证必须在 Reviewer 自己的隔离 worktree 做：从本次记录的未修复主干创建 detached
+worktree，只带入任务的新测试，设置 `PYTHONPATH` 指向这份未修复源码并确认 import 路径，
+运行相应直接测试入口，期望非 0。不得在主工作目录用 checkout 覆盖 `src/` 制造红态。
+记录反证的测试、源码 SHA 与失败原因，随后退出该隔离目录；不得误删其他在途 worktree。
 
 **跑不红 = 这条测试没抓住 bug**，判 FAIL，写进 BLOCKERS。
 只有「修复后绿、未修复红」两个方向都成立，棘轮才算装上。
@@ -84,7 +85,7 @@ git checkout <分支> -- src/          # 复原
 ## 四、PASS 才合
 
 ```bash
-python scripts/merge_task.py <分支>
+python scripts/merge_task.py <分支> --expected-head <同一任务完整SHA> --expected-trunk <同一主干完整SHA>
 ```
 
 合完自己确认一遍：
@@ -122,3 +123,7 @@ NEXT: 无，或下一步建议
 - **不建 PR、不推 GitHub。** 同步 GitHub 是维护者明确说了才做的独立动作，见 `.agents/SYNC.md`。
 - **不改代码。** 你是审的。唯一允许你写的是合并提交本身。
   发现问题写 BLOCKERS 交回工作位，不要自己顺手修——你修的东西没人审。
+
+黄档需要 1 个独立 Reviewer；红档按 `RISK.md` 必须另外落实 Physics 与 Integration
+两个独立审阅角色，不能因为群聊只有两个席位就省略。可由合并位启动独立审阅 Agent，
+最终合并仍只有一个执行者。合并脚本内置的提交放行变量仅在测过后的提交生效，不允许人工预设绕过闸门。
