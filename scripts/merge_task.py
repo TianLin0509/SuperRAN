@@ -14,8 +14,8 @@
     AI HUB 没这个问题，但统一走同一条路，少一种情况要记。
 
 用法：
-    python scripts/merge_task.py <分支名>
-    python scripts/merge_task.py <分支名> --dry-run    # 只验不合
+    python scripts/merge_task.py <分支名> --expected-head <SHA> --expected-trunk <SHA>
+    # 加 --dry-run 只验不合；本地入口不执行 fetch/push 或推进发布分支。
 
 项目差异全部读 .agents/project.json，本脚本对项目一无所知。
 """
@@ -105,7 +105,9 @@ def main_worktree():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("branch", help="要合并的任务分支")
-    ap.add_argument("--dry-run", action="store_true", help="只 rebase 和跑测试，不真合")
+    ap.add_argument("--dry-run", action="store_true", help="试合并和跑测试，不提交")
+    ap.add_argument("--expected-head", required=True, help="亲自审核的完整任务 SHA")
+    ap.add_argument("--expected-trunk", required=True, help="亲自审核的完整主干 SHA")
     args = ap.parse_args()
 
     cfg = load_config()
@@ -132,89 +134,51 @@ def main():
         say("  原因：worktree 里的测试可能解析到主仓库的代码，结果不可信。")
         sys.exit(2)
 
-    # ③ 分支必须存在（要先确认，下面算改动集要用它）
-    if run(["git", "rev-parse", "--verify", branch], check=False).returncode != 0:
-        say(f"✗ 分支不存在：{branch}")
-        sys.exit(2)
+    if not isinstance(tests, list) or not tests or any(
+        not isinstance(t, str) or not t.strip() for t in tests
+    ):
+        say("✗ 项目必须配置非空测试命令，不能无测试合并。")
+        return 2
+    if git("branch", "--show-current") != trunk:
+        say(f"✗ 主工作目录必须已在 {trunk}，本脚本不切换别人的工作分支。")
+        return 2
+    original = git("rev-parse", f"refs/heads/{trunk}")
+    candidate = git("rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}")
+    if original != args.expected_trunk or candidate != args.expected_head:
+        say("✗ 任务或主干 SHA 已变化，必须重新审核当前版本。")
+        return 2
+    # 保守拒绝整个脏工作区；既不覆盖，也不把别人已暂存的文件带入合并提交。
+    if git("status", "--porcelain"):
+        say("✗ 主工作目录有未提交内容，保留原状；请在归属明确后重试。")
+        return 2
 
-    # ② 别人的未提交改动：只拦真会被踩到的，不搞一刀切
-    #
-    #    老版本是「工作区一脏就拒绝」。听起来安全，实际后果是：
-    #    任何人在主目录留一份忘了提交的半成品，整个合并闸门就**永久瘫痪**
-    #    （实测真发生了：两个文件躺了一天多，所有合并都跑不了）。
-    #
-    #    但也不能简单放宽 —— 失败回滚原本用 `git reset --hard`，
-    #    那会连别人的在途改动一起抹掉。放宽判据必须同时把回滚改成按路径回滚。
-    # 注意：这里不能用 git()，它会对整段输出 strip，把第一行开头的空格吃掉
-    #（未暂存修改是 " M path"，被 strip 成 "M path" 后按列取路径会错位成 "ath"）。
-    # 这个 bug 让重叠检测整个失效过一次，测试才抓到。
-    dirty_raw = run(["git", "status", "--porcelain"]).stdout
-    dirty_paths = set()
-    for ln in dirty_raw.splitlines():
-        if len(ln) < 4:
-            continue
-        p = ln[3:].strip().strip('"')
-        if " -> " in p:              # 重命名取目标路径
-            p = p.split(" -> ", 1)[1].strip().strip('"')
-        if p:
-            dirty_paths.add(p)
-
-    merge_paths = [p for p in git("diff", "--name-only", f"{trunk}...{branch}").splitlines() if p]
-    overlap = sorted(dirty_paths & set(merge_paths))
-
-    if overlap:
-        say("✗ 本次合并会碰到你未提交的这些文件，先处理掉再合：")
-        for p in overlap[:10]:
-            say(f"    {p}")
-        say("  （合下去会覆盖你还没保存的工作，本脚本不替你决定怎么处理。）")
-        sys.exit(2)
-
-    unrelated_dirty = sorted(dirty_paths - set(merge_paths))
-    if unrelated_dirty:
-        say(f"⚠ 主目录还有 {len(unrelated_dirty)} 个与本次合并无关的未提交改动：")
-        for p in unrelated_dirty[:5]:
-            say(f"    {p}")
-        say("  它们不在本次改动范围内，会原样保留（回滚也只回滚本次涉及的文件）。")
-        say()
-
-    original = git("rev-parse", trunk)
     say(f"① 记下回滚点：{trunk} = {original[:12]}")
 
-    bypass = {"HUB_ALLOW_MAIN_COMMIT": "1", "HUB_ALLOW_TRUNK_PUSH": "1"}
+    bypass = {"HUB_ALLOW_MAIN_COMMIT": "1"}
     merged_sha = None
+    merged_tree = None
 
     def rollback():
-        """撤销本次合并，回到 original。
-
-        因为合并用的是 --no-commit，绝大多数情况下工作区处于 MERGING 状态，
-        `git merge --abort` 就能干净收场 —— 而且它本身就会尽量保留与合并无关的本地改动，
-        比按路径手动还原更稳。上面的重叠检查保证了无关改动确实能被重建。
-
-        只有极少数情况 HEAD 已经前进（比如中断发生在 commit 之后），才需要退 HEAD。
-        那时也**不能用 `git reset --hard`** —— 它会连别人的在途改动一起抹掉。
-        """
-        run(["git", "merge", "--abort"], check=False)
-        head = run(["git", "rev-parse", "HEAD"], check=False).stdout.strip()
-        if head and head != original:
-            if unrelated_dirty:
-                run(["git", "reset", "--soft", original], env=bypass, check=False)
-                if merge_paths:
-                    run(["git", "checkout", original, "--", *merge_paths], env=bypass, check=False)
-                run(["git", "reset"], env=bypass, check=False)   # 清索引，别把还原留成暂存
-            else:
-                run(["git", "reset", "--hard", original], env=bypass, check=False)
+        """只撤销本次未提交合并；异常状态保留现场，绝不 reset。"""
+        merge_state = run(["git", "rev-parse", "--verify", "MERGE_HEAD"], check=False)
+        if merge_state.returncode == 0:
+            # merge --abort 也会删除测试期间被别人新暂存的文件。
+            # 只有现场仍等于本次已知的试合结果，才允许自动撤销。
+            if (merged_tree is None
+                    or git("rev-parse", "HEAD") != original
+                    or merge_state.stdout.strip() != candidate
+                    or git("write-tree") != merged_tree
+                    or git("diff", "--name-only")
+                    or git("ls-files", "--others", "--exclude-standard")):
+                raise RuntimeError("合并现场存在未知变化或冲突；未执行 merge --abort，已保留索引、文件和合并状态。")
+            run(["git", "merge", "--abort"])
+        if git("rev-parse", "HEAD") != original or git("status", "--porcelain"):
+            raise RuntimeError("回滚后工作区或 HEAD 与原状态不同；已保留现场，请人工核对。")
 
     try:
         git("checkout", trunk, env=bypass)
 
-        # ④ 主干可能已经被别的任务推进过 —— 这是并行开发唯一新增的复杂度
-        if run(["git", "remote", "get-url", "origin"], check=False).returncode == 0:
-            if run(["git", "fetch", "origin", trunk], check=False).returncode == 0:
-                behind = git("rev-list", "--count", f"{trunk}..origin/{trunk}")
-                if behind != "0":
-                    say(f"   主干落后远端 {behind} 个提交，先对齐")
-                    git("merge", "--ff-only", f"origin/{trunk}", env=bypass)
-                    original = git("rev-parse", trunk)
+        # 远端同步是维护者另行授权的动作；本次验证只绑定已记录的本地主干。
 
         # ② 先合进工作区但**不提交** —— 崩溃安全的关键。
         #
@@ -225,31 +189,40 @@ def main():
         #
         #    改成 --no-commit 之后：测试期间主干的提交历史根本没动过，
         #    工作区处于 git 自己认得的 MERGING 状态，被杀了也一眼看得出、
-        #    一条 `git merge --abort` 就能清干净。
+        #    只有现场未被额外修改时才允许自动 merge --abort；否则保留现场。
         # 已经合过的分支：--no-commit 下 git 只会说 "Already up to date"，
         # 不产生待提交内容，后面的 commit 就会报个莫名其妙的错。
         # 用户重跑一次合并是很正常的事，得给句人话。
-        if run(["git", "merge-base", "--is-ancestor", branch, trunk], check=False).returncode == 0:
+        if run(["git", "merge-base", "--is-ancestor", candidate, original], check=False).returncode == 0:
             say(f"② {branch} 已经在 {trunk} 里了，无需重复合并")
             say()
             say(f"✓ 已是最新：{trunk} @ {original[:12]}")
             return 0
 
         say(f"② 合并 {branch}（先不提交，测过了再落）")
-        git("merge", "--no-ff", "--no-commit", branch, env=bypass)
+        git("merge", "--no-ff", "--no-commit", candidate, env=bypass)
+        merged_tree = git("write-tree")
         say("   已合进工作区，主干提交历史暂未改变")
 
         # ⑤ 亲自跑测试 —— 不采信任何 Agent 的说法
-        if not tests:
-            say("③ 项目没配测试命令，跳过（建议补上）")
-        else:
-            say(f"③ 跑测试（{len(tests)} 条）")
-            for i, t in enumerate(tests, 1):
-                say(f"   [{i}/{len(tests)}] {t}")
-                r = run(t, check=False, capture=False)
-                if r.returncode != 0:
-                    raise RuntimeError(f"测试没过：{t}")
-            say("   全部通过")
+        say(f"③ 跑测试（{len(tests)} 条）")
+        for i, t in enumerate(tests, 1):
+            say(f"   [{i}/{len(tests)}] {t}")
+            test_env = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+            if (REPO / "src").is_dir():
+                test_env["PYTHONPATH"] = str(REPO / "src")
+            r = run(t, env=test_env, check=False, capture=False)
+            if r.returncode != 0:
+                raise RuntimeError(f"测试没过：{t}")
+        say("   全部通过")
+
+        if (git("rev-parse", "HEAD") != original
+                or git("rev-parse", f"refs/heads/{branch}") != candidate
+                or git("rev-parse", "MERGE_HEAD") != candidate
+                or git("write-tree") != merged_tree
+                or git("diff", "--name-only")
+                or git("ls-files", "--others", "--exclude-standard")):
+            raise RuntimeError("测试期间 SHA、索引或工作区发生额外变化，拒绝提交。")
 
         if args.dry_run:
             say()
@@ -265,27 +238,22 @@ def main():
         merged_sha = git("rev-parse", "HEAD")
         say(f"   已提交 {merged_sha[:12]}")
 
-    except Exception as ex:
+    except (Exception, KeyboardInterrupt) as ex:
         say()
         say(f"✗ {ex}")
         say()
         say(f"回滚 {trunk} → {original[:12]}")
-        rollback()
-        if unrelated_dirty:
-            say(f"已回滚（按路径，保留了 {len(unrelated_dirty)} 个无关的未提交改动）。")
-        else:
-            say("已回滚，主干没有被污染。")
+        try:
+            rollback()
+        except Exception as rollback_error:
+            say(f"✗ 无法确认完整回滚：{rollback_error}")
+            return 2
+        say("已回滚，主干没有被污染。")
         say()
         say("这个分支还在，改完再跑一次本脚本即可。")
         return 1
 
-    # ⑥ 推远端（有就推，没有也不算失败 —— 远端只是备份，不是关卡）
-    say("④ 推远端")
-    if run(["git", "remote", "get-url", "origin"], check=False).returncode == 0:
-        r = run(["git", "push", "origin", trunk], env=bypass, check=False)
-        say("   已推送" if r.returncode == 0 else f"   推送失败（本地已合，不影响）：{(r.stderr or '').strip()[:200]}")
-    else:
-        say("   没配 origin，跳过")
+    say("④ 本地合并完成；远端及发布分支保持独立，由维护者另行发起同步。")
 
     # ⑦ 合并后动作 —— 项目专属的东西全在这里，脚本本身不知道是什么
     if after:

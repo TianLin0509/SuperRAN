@@ -52,8 +52,8 @@ python -c "import superran; print(superran.__file__)"
 ## 三、自测
 
 聚合入口是 `scripts/run_test_matrix.py`。它按**直接入口**跑每个测试文件、逐文件超时、
-全绿才返回 0。**不要用 `pytest tests/` 当判据**——它只收集到 29 个文件里的 18 个，
-另外 11 个是脚本式测试，在 pytest 下收集到 0 个用例（见 `TESTING.md` 坑 2）。
+核对发现集与注册集，全绿才返回 0。不要用 pytest 的历史收集数量替代当前文件覆盖；
+`TESTING.md` 中的坑仍需注意，数量以实际盘点为准。
 
 ```bash
 python scripts/run_test_matrix.py --only test_scheduler_edf.py --only test_system.py   # 相关的，几秒到 2 分钟
@@ -61,7 +61,10 @@ python scripts/run_test_matrix.py --tier quick    # 快档 18 个文件，约 4.
 python scripts/run_test_matrix.py --tier full     # 全量 29 个文件，约 7 分钟
 ```
 
-（2026-09-05 在主目录实测：全量 29/29 通过，421 秒。最慢的是 `test_system.py` 132 秒。）
+（2026-09-06 在明确绑定本份源码的隔离 worktree 实测：全量 29/29，500.052 秒。）
+
+流程脚本改动另跑 `python scripts/verify_project_workflow.py`，它只在临时仓库检验钩子、
+失败回滚、版本绑定和并发锁，不触碰生产仓库。
 
 **合并闸门跑的是 `--tier full`。** 你自测跑快档没问题，但心里要清楚：
 合并位那一步会把全量跑一遍，物理档那 11 个文件你没跑过的，到那时会暴露。
@@ -76,15 +79,10 @@ python scripts/run_test_matrix.py --tier full     # 全量 29 个文件，约 7 
 
 ## 四、交给合并位
 
-```bash
-git push -u origin <你的分支>
-```
-
-推 `develop` / `main` 会被 `pre-push` 挡住——**这是对的**，主干只有一个入口（合并脚本）。
-你的活是把分支推上去，不是自己合。
-
-推完在群里说一句：**「分支 `<名字>` 可以审了」**，然后停下等合并位。
-**不要**自己去建 PR、不要动主干、不要替合并位跑合并。
+在自己的 worktree 本地提交，并读取 `git rev-parse HEAD` 和 `git rev-parse develop`。
+把本地分支名、任务完整 SHA、基于哪个主干 SHA、风险档和报告交给合并位。
+共享 Git 仓库能直接读取本地分支，无需远端传递。任务交付后保持该提交不变，等审核意见。
+工作位不执行合并；远端同步只在维护者明确授权后另走 `SYNC.md`。
 
 ---
 
@@ -109,4 +107,4 @@ REPORT: HTML 报告的绝对路径；没有就写「无」
 合并位判 FAIL 会给你一份 `BLOCKERS`。**只修 BLOCKERS 里列的东西**，
 别顺手改别的——那会让下一轮审查失去对照，也会让你自己说不清是哪一处修好的。
 
-改完推**同一个分支**，再在群里说一句可以审了。
+改完提交到**同一个本地分支**，交新的完整 SHA，旧审核结论随之失效。
