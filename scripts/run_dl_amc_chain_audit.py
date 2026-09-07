@@ -482,9 +482,12 @@ def experiment_capacity_mu_accounting() -> dict:
         graph_rejection = str(exc)
     assert "UE 1 缺边 [2]" in graph_rejection
 
-    # Positive OLLA counterexample: the pre-OLLA MCS passes a step BLER model,
-    # then one MU ACK adds +3 MCS.  Admission must use that final sending MCS and
-    # reject the next pair when predicted BLER crosses 0.5.
+    # OLLA counterexample: admission must use the post-OLLA sending MCS.  The
+    # historical predicted-BLER gate was removed when the pairing admission was
+    # aligned to the field (only min pairing MCS + correlation remain), so the
+    # counterexample now hangs on the min-pairing-MCS gate: set the threshold to
+    # the pre-OLLA sending MCS and force every TB to fail, so the outer loops walk
+    # the sending MCS below it.
     pair01 = indep[0].mu_links[1]
     base_mcs = []
     for user in (0, 1):
@@ -494,22 +497,21 @@ def experiment_capacity_mu_accounting() -> dict:
                      + float(pair01.power_loss_db[side]))
         base_mcs.append(int(la.select_mcs(
             predicted, table=3, target_bler=0.1).index))
-    bler_step_mcs = max(base_mcs) + 1
-    assert bler_step_mcs <= 27
+    pair_gate_mcs = min(base_mcs)
+    assert 0 < pair_gate_mcs <= 27
     old_lookup = sy._bler_lookup
     try:
-        sy._bler_lookup = lambda mcs, _sinr: (
-            0.9 if int(mcs) >= bler_step_mcs else 0.0)
+        sy._bler_lookup = lambda _mcs, _sinr: 1.0
         olla_admission = sy.simulate(
             indep,
             sys_cfg=sy.SystemConfig(
-                duration_s=0.01,
+                duration_s=0.05,
                 tdd_pattern="DDDSU", seed=313),
             traffic=sy.TrafficConfig(model="full_buffer"),
             sched=sy.SchedulerConfig(
                 mu_enabled=True, mu_accounting="pair_table",
-                mu_corr_threshold=1.0, mu_olla_step_up_db=3.0,
-                olla_max_db=6.0),
+                mu_corr_threshold=1.0, min_pairing_mcs=pair_gate_mcs,
+                olla_min_db=-6.0),
             kpi=sy.KpiConfig(warmup_s=0.0),
             rng=rg.RngBook(313, 0))
     finally:
@@ -517,9 +519,9 @@ def experiment_capacity_mu_accounting() -> dict:
     assert olla_admission.cell["mu_share"] > 0
     # 拒配原因改由 mu_candidate_scoring.rejection_reasons 上报（更细），
     # 容量分支的标量计数 mu_pair_rejects 随该分支一起下线。
-    assert sum(int(v) for v in
-               olla_admission.cell["mu_candidate_scoring"][
-                   "rejection_reasons"].values()) > 0
+    _reasons = olla_admission.cell["mu_candidate_scoring"]["rejection_reasons"]
+    assert int(_reasons.get("pair_mcs_below_min_pairing", 0)) > 0
+    assert "predicted_bler_gt_0.5" not in _reasons
     assert pair.cell["avg_mcs_first_tx"] < su.cell["avg_mcs_first_tx"]
     assert corr.cell["mu_share"] < 0.05
     assert legacy_rejected
@@ -538,7 +540,7 @@ def experiment_capacity_mu_accounting() -> dict:
         "missing_1_2_edge_rejection": graph_rejection,
         "positive_olla_admission_counterexample": {
             "pre_olla_mcs": base_mcs,
-            "step_bler_reject_mcs": bler_step_mcs,
+            "min_pairing_mcs_gate": pair_gate_mcs,
             "mu_share": round(float(olla_admission.cell["mu_share"]), 4),
             "mu_candidate_rejection_reasons": dict(
             olla_admission.cell["mu_candidate_scoring"]["rejection_reasons"]),
