@@ -1183,10 +1183,16 @@ def mu_link_performance_lmmse(
             rbg_boundaries=rbg_boundaries)
         for u in range(n_k)])
     sinr_user_db = np.mean(sinr_user_rbg_db, axis=1)
+    # **报告的加载必须与 mu_precoder 实际用的逐位相同。**
+    # 它内部按**逐流**平均噪声算（``np.repeat(noise_user, ranks)``），这里
+    # 原来按**逐用户**平均重算了一遍：每个用户流数相同时两者恰好相等，所以
+    # 一直没暴露；异 rank 时流多的用户权重更大，报告值就对不上实际发射权，
+    # 拿它去重构 W 会得到另一个矩阵。口径统一到逐流。
     reg_diag = (
         robust_rzf_regularization(
             n_stream=n_str, n_bs=n_bs,
-            mean_noise_power=float(np.mean(noise_user)), total_power=total_power,
+            mean_noise_power=float(np.mean(np.repeat(noise_user, ranks))),
+            total_power=total_power,
             csi_error_variance=csi_error_variance, alpha=alpha,
         ).as_dict()
         if precoder == "rzf" else None

@@ -1697,6 +1697,19 @@ def _build_su_plan(
         clears_all_queues=(useful_total == total_q))
 
 
+def _mu_layers(table: Any, su_rank: int, global_cap: int) -> int:
+    """该 UE 这个 TTI 在 MU 里实际发几层。
+
+    ``min(当下的 SU rank, 该 UE 建表时的上限, 调度配置的全局上限)``。
+    链路表没记上限（历史表/手工构造）时只用后两项。
+    """
+    layers = min(int(su_rank), int(global_cap))
+    table_cap = getattr(table, "mu_rank_cap", None)
+    if table_cap is not None:
+        layers = min(layers, int(table_cap))
+    return max(1, layers)
+
+
 def _mu_pair_link_for_ranks(
     table: Any, partner: int, ranks: tuple[int, int],
 ) -> Any:
@@ -1885,10 +1898,12 @@ def _build_mu_plan(
             cached_pair = pair_evaluation_cache.get(cache_key)
             if cached_pair is not None:
                 return replace(cached_pair, pf_order=int(pf_order))
-        # 每个 UE 的 MU 层数 = min(它当下的 SU rank, 配对上限)。SU 只发一层的
-        # 用户在 MU 里也只发一层，两个用户因此可以层数不同。
-        pair_ranks = (min(int(rank_of[anchor]), mu_rank_cap),
-                      min(int(rank_of[partner]), mu_rank_cap))
+        # 每个 UE 的 MU 层数 = min(它当下的 SU rank, 它自己的建表上限,
+        # 调度配置里的全局上限)。SU 只发一层的用户在 MU 里也只发一层，两个
+        # 用户因此可以层数不同；**逐用户上限必须读链路表里那一份**，否则
+        # 只按 1 层建过表的 UE 会被按全局上限去查表，查不到就整批拒配。
+        pair_ranks = (_mu_layers(tables[anchor], rank_of[anchor], mu_rank_cap),
+                      _mu_layers(tables[partner], rank_of[partner], mu_rank_cap))
         if any(r < 1 for r in pair_ranks):
             return _reject(anchor, partner, pf_order, "mu_rank_below_one")
         link = _mu_pair_link_for_ranks(tables[anchor], partner, pair_ranks)
@@ -2420,8 +2435,17 @@ def simulate_experience(
         if table_power != cfg_power:
             raise ValueError(
                 f"UE {i} 链路表功率约束 {table_power} 与系统配置 {cfg_power} 不一致")
-        if bool(sched.mu_enabled) and table.sinr_db.shape[1] < 2:
-            raise ValueError(f"UE {i} 不支持 MU rank2")
+        if bool(sched.mu_enabled):
+            # 早先这里写死「开了 MU 就必须支持 rank2」。放开逐用户层数之后
+            # 这条不成立：只有单层能力的终端（例如 1 收）照样可以配对，
+            # 它在 MU 里发一层。真正要守的是「建表时给它备的层数，它的
+            # SU 链路表撑得住」——撑不住说明两者不是同一批数据。
+            table_cap = getattr(table, "mu_rank_cap", None)
+            if table_cap is not None and table.sinr_db.shape[1] < int(table_cap):
+                raise ValueError(
+                    f"UE {i} 的 MU 层数上限 {int(table_cap)} 超过它 SU 链路表的"
+                    f" {table.sinr_db.shape[1]} 层；请用 build_link_tables"
+                    "(..., mu_enabled=True) 重新预计算")
     if bool(sched.mu_enabled):
         try:
             mu_pair_graph = smu.validate_pair_graph(tables)

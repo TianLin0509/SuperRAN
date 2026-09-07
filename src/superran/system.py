@@ -1274,6 +1274,11 @@ class UeLinkTable:
     h_prec_rbg: np.ndarray | None = field(default=None, repr=False)  # [S,F,BS,UE]
     noise_power_by_snapshot: np.ndarray | None = field(default=None, repr=False)
     mu_links: dict[int, MuPairLink] = field(default_factory=dict, repr=False)
+    #: 本 UE 的 MU 层数上限，由最近一次配对建表写入。运行时实际层数是
+    #: ``min(当下 SU rank, 这个上限, 调度配置里的全局上限)``——**逐用户上限
+    #: 必须从建表贯通到运行时**，否则建表只备了 1 层的 UE 会在运行时被按
+    #: 全局上限去查表，查不到就整批拒配。``None`` 表示没建过 MU 表。
+    mu_rank_cap: int | None = None
     #: ``{对方在表里的位置: {(我的层数, 对方层数): link}}``。运行时每个 UE 的
     #: MU 层数是 ``min(当下 SU rank, 配对上限)``，逐 TTI 会变，所以每种组合
     #: 都预先建好。``mu_links`` 仍指向两边都取上限的那一张。
@@ -2395,6 +2400,14 @@ def build_mu_pair_tables(
             tx_dir_cache[key] = cached
         return cached
 
+    # **先把上一次建表的结果清干净。** 同一批链路表被重新建表时（换上限、
+    # 换预编码、换 CSI 误差），旧组合如果留着，运行时可能查中一张已经不该
+    # 存在的表——比如上限已经压到 1 层，却仍按残留的两层组合发送。这属于
+    # 陈旧状态冒充当前状态，比越限本身更难查：KPI 完全看不出来。
+    for u, table in enumerate(tables):
+        table.mu_links.clear()
+        table.mu_links_by_rank.clear()
+        table.mu_rank_cap = int(caps[u])
     pair_count = 0
     link_count = 0
     combos_seen: set[tuple[int, int]] = set()

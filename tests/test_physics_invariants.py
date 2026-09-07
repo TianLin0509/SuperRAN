@@ -946,6 +946,147 @@ test_mu_layers_follow_min_su_rank_and_pairing_cap()
 test_mu_supports_mixed_layer_pairing()
 
 
+# ---------------------------------------------------------------------------
+# MU 层数上限必须从建表一路贯通到发送，中间不许有第二个真相源
+#
+# 三个踩过的坑，都是"上限只在一半路径上生效"的不同表现：
+#   1. 仿真入口写死"开了 MU 就必须支持两层"，于是只有单层能力的终端（1 收）
+#      根本进不了门，哪怕它完全可以在 MU 里发一层。
+#   2. 逐用户上限只活在建表阶段，运行时仍拿调度配置里那个全局标量去查表；
+#      给 UE0 只备了一层的表，运行时却按两层去找，找不到就整批拒配。
+#   3. 重新建表时旧的层数组合没清掉，运行时可能查中一张**已经不该存在**的表，
+#      比如上限已经压到一层却仍按残留的两层组合发送。KPI 上完全看不出来。
+# ---------------------------------------------------------------------------
+def _mu_cap_fixture(n_rx: int, seed: int, *, max_rank: int, mu: bool = True):
+    rng = np.random.default_rng(seed)
+    snap = 4
+    chans = [((rng.standard_normal((snap, 17, 32, n_rx))
+               + 1j * rng.standard_normal((snap, 17, 32, n_rx))) / np.sqrt(2))
+             for _ in range(2)]
+    return sy.build_link_tables(
+        chans, [15.0, 13.0], num_snapshots=snap, rb_per_rbg=1,
+        csi=ca.CsiConfig(enabled=False), max_rank=max_rank, mu_enabled=mu)
+
+
+def _mu_grant_layers(tables, *, cap: int, fixed_rank: int, seed: int = 7):
+    run = sy.simulate(
+        tables,
+        sys_cfg=sy.SystemConfig(duration_s=0.02, tdd_pattern="DDDSU", seed=seed),
+        traffic=sy.TrafficConfig(model="full_buffer"),
+        sched=sy.SchedulerConfig(
+            mu_enabled=True, mu_rank_per_user=cap,
+            rank=ap.RankConfig(mode="fixed", fixed_rank=fixed_rank)),
+        kpi=sy.KpiConfig(warmup_tti=0, tti_trace_mode="full"),
+        rng=rg.RngBook(seed, 0))
+    groups: dict[int, dict[int, int]] = {}
+    for row in run.diagnostics["tti_trace"]["rows"]:
+        for grant in row.get("grants", ()):
+            if grant.get("transmission_mode") == "MU":
+                groups.setdefault(int(grant["mu_group_id"]), {})[
+                    int(grant["ue"])] = int(grant["rank"])
+    return run, groups
+
+
+def test_single_layer_terminals_can_pair() -> None:
+    """只有单层能力的终端必须能进 MU，并且只发一层。"""
+    tables = _mu_cap_fixture(1, 20260907, max_rank=1)
+    check(all(t.sinr_db.shape[1] == 1 for t in tables),
+          "夹具确实只有单层链路表")
+    run, groups = _mu_grant_layers(tables, cap=1, fixed_rank=1)
+    layers = sorted({v for d in groups.values() for v in d.values()})
+    print(f"  单层终端：MU 组 {len(groups)} 个，逐用户层数 {layers}，"
+          f"配对占比 {run.cell['mu_share']:.3f}")
+    check(bool(groups) and layers == [1],
+          "单层能力的终端照样能配对，每人发一层（旧实现在入口就报错拒绝入场）")
+
+    # 全局上限调大也不能突破该 UE 的建表能力。
+    run2, groups2 = _mu_grant_layers(tables, cap=2, fixed_rank=2)
+    layers2 = sorted({v for d in groups2.values() for v in d.values()})
+    print(f"  全局上限调到 2：层数仍是 {layers2}")
+    check(bool(groups2) and layers2 == [1],
+          "全局上限调大也不能突破该 UE 自己的建表上限")
+
+
+def test_per_ue_cap_reaches_the_air_and_rebuild_clears_stale_combinations() -> None:
+    tables = _mu_cap_fixture(4, 4242, max_rank=2, mu=False)
+    sy.build_mu_pair_tables(tables, rank_per_user=2)
+    first = sorted(tables[0].mu_links_by_rank[1])
+    check(first == [(1, 1), (1, 2), (2, 1), (2, 2)],
+          f"上限 2 时四种层数组合都建好了（实得 {first}）")
+
+    # 同一批表换成逐用户上限 (1,2) 重建：旧的 (2,*) 必须消失。
+    sy.build_mu_pair_tables(tables, rank_per_user=(1, 2))
+    after = sorted(tables[0].mu_links_by_rank[1])
+    caps = [getattr(t, "mu_rank_cap", None) for t in tables]
+    print(f"  重建为逐用户上限 (1,2)：组合 {after}，链路表记录的上限 {caps}")
+    check(after == [(1, 1), (1, 2)],
+          "重建配对表会清掉上一次的组合，不留下已经不该存在的两层表")
+    check(caps == [1, 2],
+          "每个 UE 的层数上限记在它自己的链路表上，供运行时读取")
+    check(tuple(tables[0].mu_links[1].rank_per_user) == (1, 2),
+          "默认那张表指向本次上限的组合，不是上一次的")
+
+    # 运行时：全局上限给 2、SU 也给 2，但 UE0 的表只备了一层 —— 必须发 (1,2)，
+    # 既不能越限发两层，也不能因为查不到表而整批拒配。
+    run, groups = _mu_grant_layers(tables, cap=2, fixed_rank=2)
+    rejects = run.cell["mu_candidate_scoring"]["rejection_reasons"]
+    print(f"  运行时：配对占比 {run.cell['mu_share']:.3f}，拒配 {rejects}，"
+          f"逐组层数样例 {list(groups.items())[:2]}")
+    check(bool(groups) and all(d == {0: 1, 1: 2} for d in groups.values()),
+          "逐用户上限贯通到空口：UE0 发一层、UE1 发两层")
+    check("missing_pair_link" not in rejects,
+          "逐用户上限不齐时不会因为查不到表而整批拒配")
+
+
+def test_rzf_reported_loading_equals_the_one_actually_used() -> None:
+    """报告的正则化加载必须能重构出实际用的发射权。
+
+    正则化迫零的对角加载由**逐流**平均噪声决定（预编码内部就是这么算的）。
+    报告那一份原来按**逐用户**平均重算：每人流数相同时两者恰好相等，所以一直
+    没暴露；异 rank 时流多的用户权重更大，报告值就对不上实际发射权。
+    """
+    rng = np.random.default_rng(4242)
+    chans = [((rng.standard_normal((5, 16, 4))
+               + 1j * rng.standard_normal((5, 16, 4))) / np.sqrt(2))
+             for _ in range(2)]
+    noise = np.array([0.02, 0.20])          # 两个用户噪声差一个数量级
+    worst = 0.0
+    for ranks in ([1, 2], [2, 1], [2, 2], [1, 1]):
+        res = mu.mu_link_performance_lmmse(
+            chans, chans, noise_power=noise, streams_per_user=ranks,
+            precoder="rzf", power_constraint="nebf", rb_per_rbg=1)
+        reported = float(res.rzf_regularization["total_loading"])
+        actual = mu.robust_rzf_regularization(
+            n_stream=int(sum(ranks)), n_bs=16,
+            mean_noise_power=float(np.mean(np.repeat(noise, ranks))),
+            total_power=1.0, csi_error_variance=0.0, alpha=None).total_loading
+        worst = max(worst, abs(reported - float(actual)))
+        if ranks == [1, 2]:
+            print(f"  异 rank [1,2]：报告 {reported:.6f} / 实际 {float(actual):.6f}")
+    check(worst == 0.0,
+          f"RZF 报告的对角加载与实际使用的逐位相同（最大差 {worst:.3e}）")
+
+    # 等 rank 时两种平均**数学上恒等**，但求和顺序不同，浮点上差一个末位。
+    # 说清楚哪个变了：真正进入发射权计算的加载一直是逐流平均，一个字节没动；
+    # 变的只是**报告**出来的那个数，且只在最后一位。不要写成「逐位不变」。
+    equal_rank = mu.mu_link_performance_lmmse(
+        chans, chans, noise_power=noise, streams_per_user=2,
+        precoder="rzf", power_constraint="nebf", rb_per_rbg=1)
+    legacy = float(mu.robust_rzf_regularization(
+        n_stream=4, n_bs=16, mean_noise_power=float(np.mean(noise)),
+        total_power=1.0, csi_error_variance=0.0, alpha=None).total_loading)
+    now = float(equal_rank.rzf_regularization["total_loading"])
+    rel = abs(now - legacy) / max(abs(legacy), 1e-300)
+    print(f"  等 rank：新报告 {now!r} vs 旧报告 {legacy!r}，相对差 {rel:.2e}")
+    check(rel <= 4e-16,
+          "等 rank 时报告值与历史只差浮点末位（数学恒等，求和顺序不同）")
+
+
+test_single_layer_terminals_can_pair()
+test_per_ue_cap_reaches_the_air_and_rebuild_clears_stale_combinations()
+test_rzf_reported_loading_equals_the_one_actually_used()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")
