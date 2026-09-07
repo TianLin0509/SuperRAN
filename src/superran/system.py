@@ -498,7 +498,7 @@ class SchedulerConfig:
     pf_gain_threshold: float = 0.0
     # none=不做相关性筛选；select=当前门限筛选；schmidt 尚未实现并硬失败。
     orthogonalization_mode: str = "select"
-    mu_precoder: str = "zf"
+    mu_precoder: str = "ezf"
     # RZF 的每个复信道系数 CSI 误差方差。它必须来自估计器协方差或离线标定，
     # 不能在运行时偷看 h_true 逐快照反推；0.0 精确保持历史 ZF/RZF 噪声加载口径。
     mu_csi_error_variance: float = 0.0
@@ -621,8 +621,8 @@ class SchedulerConfig:
         if self.mu_accounting != "pair_table":
             raise ValueError(
                 f"mu_accounting 只支持 pair_table，收到 {self.mu_accounting!r}")
-        if self.mu_precoder not in ("zf", "rzf"):
-            raise ValueError("mu_precoder 只支持 zf / rzf")
+        if self.mu_precoder not in ("ezf", "zf", "rzf"):
+            raise ValueError("mu_precoder 只支持 ezf / zf / rzf")
         if (not np.isfinite(self.mu_csi_error_variance)
                 or float(self.mu_csi_error_variance) < 0):
             raise ValueError("mu_csi_error_variance 必须是有限非负数")
@@ -1501,7 +1501,7 @@ def build_link_tables(
     power_constraint: str = "nebf",
     mu_enabled: bool = False,
     mu_rank_per_user: int = mu.MU_MAX_RANK,
-    mu_precoder: str = "zf",
+    mu_precoder: str = "ezf",
     mu_csi_error_variance: float = 0.0,
     rb_power_control: pc.RbPowerControlConfig | None = None,
     power_geometry: pc.DownlinkPowerGeometry | None = None,
@@ -2286,7 +2286,7 @@ def _su_tx_directions(h_prec_rbg: np.ndarray, rank: int,
 
 def build_mu_pair_tables(
     tables: list[UeLinkTable], *, rank_per_user: int = mu.MU_MAX_RANK,
-    precoder: str = "zf", power_constraint: str = "nebf",
+    precoder: str = "ezf", power_constraint: str = "nebf",
     csi_error_variance: float = 0.0,
 ) -> dict[str, Any]:
     """预计算所有两用户 MU 链路及 ``CorrLoss + powerLoss`` 分解。
@@ -2299,8 +2299,8 @@ def build_mu_pair_tables(
     rank = int(rank_per_user)
     if rank != mu.MU_MAX_RANK:
         raise ValueError(f"当前 MU 体验基线固定每用户 rank{mu.MU_MAX_RANK}")
-    if precoder not in ("zf", "rzf"):
-        raise ValueError("MU 体验基线的 precoder 只支持 zf / rzf")
+    if precoder not in ("ezf", "zf", "rzf"):
+        raise ValueError("MU 体验基线的 precoder 只支持 ezf / zf / rzf")
     if not np.isfinite(csi_error_variance) or float(csi_error_variance) < 0:
         raise ValueError("csi_error_variance 必须是有限非负数")
     n_snap = int(tables[0].sinr_db.shape[0])
@@ -2464,7 +2464,7 @@ def measure_mu_gain(
     rb_per_rbg: int = 16,
     rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
     power_constraint: str = "nebf",
-    mu_precoder: str = "zf",
+    mu_precoder: str = "ezf",
     mu_csi_error_variance: float = 0.0,
     min_pairing_mcs: int = 4,
     pf_gain_threshold: float = 0.0,
@@ -2513,8 +2513,8 @@ def measure_mu_gain(
             raise ValueError(f"{name} 必须是至少为 1 的整数")
     if not np.isfinite(snapshot_ms) or float(snapshot_ms) <= 0:
         raise ValueError("snapshot_ms 必须是有限正数")
-    if mu_precoder not in ("zf", "rzf"):
-        raise ValueError("mu_precoder 只支持 zf / rzf")
+    if mu_precoder not in ("ezf", "zf", "rzf"):
+        raise ValueError("mu_precoder 只支持 ezf / zf / rzf")
     if (not np.isfinite(mu_csi_error_variance)
             or float(mu_csi_error_variance) < 0):
         raise ValueError("mu_csi_error_variance 必须是有限非负数")

@@ -33,7 +33,9 @@ _EPS = 1e-30
 
 PairingCriterion = Literal["sus", "greedy_sum_rate", "all", "best_single"]
 OrthogonalizationMode = Literal["none", "select", "schmidt"]
-MuPrecoder = Literal["zf", "rzf", "mrt"]
+MuPrecoder = Literal["ezf", "zf", "rzf", "mrt"]
+#: 现场口径 MU 求逆的对角加载常数（加在归一化 Gram 矩阵上，1/1024）。
+EZF_DIAGONAL_LOADING = 1.0 / 1024.0
 PowerAllocation = Literal["equal", "waterfilling"]
 
 # 工程约定（用户 2026-08-02 给的现场口径）
@@ -674,6 +676,12 @@ def mu_precoder(
     ``W`` 形状 ``[RB, BS_ant, N_stream]`` 且**每列单位范数**，
     ``p`` 形状 ``[RB, N_stream]`` 且逐 RB 满足 ``Σp = total_power``。
 
+    * ``"ezf"`` 现场口径的 MU 求逆：先把 H 的每条流除以自己的范数，
+      再在**归一化后**的 Gram 矩阵上加 ``1/1024`` 对角加载求逆。列归一化
+      本身会被后面的「列各自归一」吸收掉（与 ZF 的方向逐位相同），真正起
+      作用的是那个 ε：它让加载量与各流信道强度**无关**，强弱用户混配时
+      不会出现「弱流被加载淹掉、强流几乎没加载」的失衡。ε=0 时 EZF 退化
+      成 ZF。
     * ``"zf"``  ``W ∝ H^H (H H^H)^{-1}`` —— 完全消除用户间干扰，代价是噪声放大
     * ``"rzf"`` ``W ∝ H^H (H H^H + αI)^{-1}`` —— α 的噪声项默认
       ``N_stream·σ²/P``；声明每系数 CSI 误差方差 ``sigma_e²`` 时，再加
@@ -698,7 +706,7 @@ def mu_precoder(
     **不能照搬 Sionna 的 ``tr(GG^H)=K``**，那会让 MU 白拿 K 倍功率。
     """
     hs = np.asarray(h_eff_sel)
-    if method not in ("zf", "rzf", "mrt"):
+    if method not in ("ezf", "zf", "rzf", "mrt"):
         raise ValueError(f"未知 MU 预编码 {method!r}")
     if power_allocation not in ("equal", "waterfilling"):
         raise ValueError(f"未知 MU 功率分配 {power_allocation!r}")
@@ -742,6 +750,17 @@ def mu_precoder(
     h_all_h = np.conj(np.transpose(h_all, (0, 2, 1)))    # [RB, BS, N_str]
     if method == "mrt":
         w_all = h_all_h
+    elif method == "ezf":
+        # 现场口径的 MU 求逆：第 1 步取 Gram 对角（每条流的信道能量），
+        # Step 2 逐流归一化，Step 3 在归一化后的 Gram 上加 1/1024，
+        # Step 4 求逆。归一化后 Gram 对角恒为 1，所以 ε 对每条流等权。
+        gram = h_all @ h_all_h                           # [RB, N_str, N_str]
+        energy = np.real(np.diagonal(gram, axis1=1, axis2=2))   # [RB, N_str]
+        h_norm = h_all / np.sqrt(np.maximum(energy, _EPS))[:, :, None]
+        h_norm_h = np.conj(np.transpose(h_norm, (0, 2, 1)))     # [RB, BS, N_str]
+        a = h_norm @ h_norm_h
+        w_all = h_norm_h @ np.linalg.pinv(
+            a + EZF_DIAGONAL_LOADING * np.eye(n_str))
     else:
         a = h_all @ h_all_h                              # [RB, N_str, N_str]
         reg = 0.0 if method == "zf" else reg_info.total_loading

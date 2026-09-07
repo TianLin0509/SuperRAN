@@ -2281,8 +2281,8 @@ def simulate_experience(
             raise ValueError("experience_v2 当前 MU 基线固定两用户配对（max_mu_users=2）")
         if int(getattr(sched, "mu_rank_per_user", 2)) != 2:
             raise ValueError("experience_v2 当前 MU 基线固定每用户 rank2")
-        if str(getattr(sched, "mu_precoder", "zf")) not in ("zf", "rzf"):
-            raise ValueError("experience_v2 的 MU precoder 只支持 zf / rzf")
+        if str(getattr(sched, "mu_precoder", "ezf")) not in ("ezf", "zf", "rzf"):
+            raise ValueError("experience_v2 的 MU precoder 只支持 ezf / zf / rzf")
     if str(traffic_cfg.model) not in (
             "mixed", "cdf", "ftp3", "full_buffer", "cbr"):
         raise ValueError(f"不支持的话务模型 {traffic_cfg.model!r}")

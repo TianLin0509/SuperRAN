@@ -1974,7 +1974,7 @@ def sr_system_sim(
     edf_starvation_hol_ms: float | None = None,
     mu_enabled: bool = False,
     mu_accounting: str = "pair_table",
-    mu_precoder: str = "zf",
+    mu_precoder: str = "ezf",
     mu_csi_error_variance: float = 0.0,
     mu_corr_threshold: float = 0.7,
     min_pairing_mcs: int = 4,
@@ -2039,10 +2039,14 @@ def sr_system_sim(
     单用户口径，配对代价只表现为 TBS 乘一个标量——「包变小但不更容易错」，
     结果系统性乐观）。现在传这个值会直接报错，不再静默退回。
 
-    ``mu_precoder`` 可选 ``zf`` 或 ``rzf``。RZF 的
+    ``mu_precoder`` 可选 ``ezf`` / ``zf`` / ``rzf``。默认 ``ezf``：先把每条流的
+    信道除以自己的范数，再在归一化后的 Gram 矩阵上加 ``1/1024`` 对角加载求逆
+    （现场口径）。列归一化本身会被后面的逐列归一吸收，EZF 与 ZF 的差别**全部**
+    来自那个 ε——它让加载量与各流信道强度无关，强弱用户混配时不会失衡。
+    ``zf`` 保留为历史基线；RZF 的
     ``mu_csi_error_variance`` 是每个复信道系数的估计误差方差，加载项为
     ``N_BS·sigma_e²``；它应来自估计器协方差或离线标定，不能在运行时逐快照
-    偷看 ``h_true``。默认 ``zf`` / ``0.0`` 保持旧结果。
+    偷看 ``h_true``。
 
     **Rank 是显式策略，默认固定 rank2。** ``rank_mode='fixed'``（默认，配
     ``fixed_rank``）是现网基线；链路表里的逐快照 ``best_rank`` 是瞬时谱效最优

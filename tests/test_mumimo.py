@@ -493,6 +493,94 @@ for _u, _hx in enumerate(_hb_list):
 check(np.array_equal(_he_b, _ref_he),
       "effective_user_channels 的堆叠 SVD 与逐 RB 循环逐位相同")
 
+sect("13  现场对齐：EZF 预编码与残留相关性连乘")
+
+# --- 13.1 残留相关性连乘 ---
+# 三个已知答案的极端：完全正交无损失、完全同向损失趋于负无穷、
+# 相关度 0.5 恰好 -3.01 dB。这三点把公式 10log10(prod(1-rho)) 钉死。
+_F, _BS = 4, 8
+_w_a = np.zeros((_F, _BS, 2), dtype=complex)
+_w_a[:, 0, 0] = 1.0
+_w_a[:, 1, 1] = 1.0
+_w_b = np.zeros((_F, _BS, 2), dtype=complex)
+_w_b[:, 2, 0] = 1.0
+_w_b[:, 3, 1] = 1.0
+_loss_orth = mu.residual_correlation_loss_db([_w_a, _w_b], rb_per_rbg=1)
+check(bool(np.allclose(_loss_orth, 0.0)),
+      "两束波完全正交时残留相关性损失为 0 dB")
+
+_loss_same = mu.residual_correlation_loss_db([_w_a, _w_a.copy()], rb_per_rbg=1)
+check(bool(np.all(_loss_same < -100.0)),
+      "两束波完全同向时残留相关性钳到机器下限而不是 -inf")
+
+_v0 = np.zeros((_F, _BS, 1), dtype=complex)
+_v0[:, 0, 0] = 1.0
+_v1 = np.zeros((_F, _BS, 1), dtype=complex)
+_v1[:, 0, 0] = 1.0 / np.sqrt(2.0)
+_v1[:, 1, 0] = 1.0 / np.sqrt(2.0)
+_loss_half = mu.residual_correlation_loss_db([_v0, _v1], rb_per_rbg=1)
+print(f"  相关度 0.5 的残留相关性损失 {float(_loss_half[0, 0]):.4f} dB")
+check(abs(float(_loss_half[0, 0]) + 3.0102999566) < 1e-9,
+      "相关度 0.5 精确给出 10log10(1-0.5) = -3.0103 dB")
+
+# 相关矩阵的对角线必须恒为 1：列范数在函数内部归一，功率差不能混进相关度。
+_corr_mat = mu.su_weight_correlation_matrix([_v0, 3.7 * _v1])
+check(bool(np.allclose(np.diagonal(_corr_mat, axis1=1, axis2=2), 1.0)),
+      "相关矩阵对角恒为 1：列范数已归一，发射功率不混进相关度")
+
+# 异 rank：rank1 用户只有 1 条流，rank2 用户有 2 条流，形状必须自适应。
+_mixed = mu.residual_correlation_loss_db([_v0, _w_b], rb_per_rbg=1)
+check(_mixed.shape == (2, _F), "残留相关性连乘天然支持异 rank 配对")
+
+# RBG 聚合的顺序：先在 RBG 内对相关度平均，再连乘（现场实现的顺序）。
+_rng_rc = np.random.default_rng(20260907)
+_w_c = _rng_rc.standard_normal((4, _BS, 1)) + 1j * _rng_rc.standard_normal((4, _BS, 1))
+_w_d = _rng_rc.standard_normal((4, _BS, 1)) + 1j * _rng_rc.standard_normal((4, _BS, 1))
+_agg = mu.residual_correlation_loss_db([_w_c, _w_d], rb_per_rbg=4)
+_rho_rb = mu.su_weight_correlation_matrix([_w_c, _w_d])[:, 0, 1]
+_ref_agg = 10.0 * np.log10(1.0 - float(np.mean(_rho_rb)))
+check(abs(float(_agg[0, 0]) - _ref_agg) < 1e-12,
+      "RBG 内先平均相关度再连乘，不是先连乘再平均")
+
+# --- 13.2 EZF 预编码 ---
+_rng_ez = np.random.default_rng(20260907)
+_h_ez = ((_rng_ez.standard_normal((2, 2, 3, 8))
+          + 1j * _rng_ez.standard_normal((2, 2, 3, 8))) / np.sqrt(2))
+_h_ez[1] *= 0.05          # 两个用户信道强度差 26 dB，专门暴露加载失衡
+_w_zf, _ = mu.mu_precoder(_h_ez, method="zf", power_constraint="ebf")
+_w_ez, _ = mu.mu_precoder(_h_ez, method="ezf", power_constraint="ebf")
+check(not np.allclose(_w_ez, _w_zf),
+      "EZF 与标准 ZF 给出不同的权：1/1024 对角加载确实起作用")
+check(bool(np.allclose(np.linalg.norm(_w_ez, axis=1), 1.0)),
+      "EZF 的权仍是单位列（方向与功率解耦的约定没被破坏）")
+
+_h_all_ez = np.transpose(_h_ez, (2, 0, 1, 3)).reshape(3, 4, 8)
+_g_zf = _h_all_ez @ _w_zf
+_g_ez = _h_all_ez @ _w_ez
+_off = ~np.eye(4, dtype=bool)
+print(f"  用户间残余泄漏 ZF {np.max(np.abs(_g_zf[:, _off])):.2e} → "
+      f"EZF {np.max(np.abs(_g_ez[:, _off])):.2e}")
+check(float(np.max(np.abs(_g_ez[:, _off]))) > float(np.max(np.abs(_g_zf[:, _off]))),
+      "EZF 用一点残余用户间干扰换取更稳的求逆——这正是对角加载的取舍")
+
+# 关键机制：列归一化本身被后面的逐列归一吸收，EZF 与 ZF 的差别**全部**来自 eps。
+_saved_eps = mu.EZF_DIAGONAL_LOADING
+try:
+    mu.EZF_DIAGONAL_LOADING = 0.0
+    _w_ez0, _ = mu.mu_precoder(_h_ez, method="ezf", power_constraint="ebf")
+finally:
+    mu.EZF_DIAGONAL_LOADING = _saved_eps
+_align = np.abs(np.sum(np.conj(_w_zf) * _w_ez0, axis=1))
+check(bool(np.allclose(_align, 1.0, atol=1e-9)),
+      "eps 置 0 时 EZF 与 ZF 方向逐列重合：差别全部来自对角加载，不是列归一化")
+
+_bad_precoder = ""
+try:
+    mu.mu_precoder(_h_ez, method="not_a_precoder")
+except ValueError as _exc:
+    _bad_precoder = str(_exc)
+check("not_a_precoder" in _bad_precoder, "未知预编码名硬失败")
+
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:
