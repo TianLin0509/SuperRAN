@@ -1159,6 +1159,9 @@ class MuPairLink:
     corr_loss_tx_rbg_db: np.ndarray | None = None    # [snapshot,2,RBG]
     corr_loss_true_rbg_db: np.ndarray | None = None  # [snapshot,2,RBG]
     receiver: str = "per_user_lmmse"
+    #: 基站**发射侧**预测配对 SINR 用的模型。``residual_correlation_product``
+    #: 是现场口径：SU 波束互相关连乘，不含接收端联合检测增益。
+    prediction_model: str = "residual_correlation_product"
     csi_error_variance: float = 0.0
     power_diagnostics: list[dict[str, Any]] = field(default_factory=list)
     rzf_regularization: list[dict[str, Any]] = field(default_factory=list)
@@ -1175,6 +1178,7 @@ class MuPairLink:
             "users": list(self.users), "rank_per_user": self.rank_per_user,
             "power_loss_db": [round(float(x), 6) for x in
                               np.atleast_1d(self.power_loss_db)],
+            "prediction_model": self.prediction_model,
             "power_loss_scope": (
                 "equal stream-power split per user: 10log10(rank_ue / total_layers); "
                 "two rank-2 MU users give P/4 per stream versus rank-2 SU P/2; "
@@ -2266,6 +2270,20 @@ def build_link_tables(
     return out
 
 
+def _su_tx_directions(h_prec_rbg: np.ndarray, rank: int,
+                     power_constraint: str) -> np.ndarray:
+    """该用户单独发射时会用的物理波束方向 ``[F, BS, rank]``。
+
+    就是 SU 链路那条路真正会打出去的权：先由陈旧 CSI 做 SVD，再施加
+    每天线功率约束（默认 NEBF）。与现场实现取 SU 波束权的口径一致。
+    列范数由 :func:`mumimo.su_weight_correlation_matrix` 归一，这里不动。
+    """
+    w_full = ca.svd_precoder(np.asarray(h_prec_rbg))
+    q, _w, _diag = bf.equal_power_weights(
+        w_full[:, :, :int(rank)], mode=power_constraint, total_power=1.0)
+    return np.asarray(q)
+
+
 def build_mu_pair_tables(
     tables: list[UeLinkTable], *, rank_per_user: int = mu.MU_MAX_RANK,
     precoder: str = "zf", power_constraint: str = "nebf",
@@ -2340,6 +2358,7 @@ def build_mu_pair_tables(
             pred_sinr = np.zeros((n_snap, 2), dtype=float)
             true_sinr_rbg = np.zeros((n_snap, 2, n_rbg), dtype=float)
             pred_sinr_rbg = np.zeros((n_snap, 2, n_rbg), dtype=float)
+            corr_loss_pred_rbg = np.zeros((n_snap, 2, n_rbg), dtype=float)
             corr = np.zeros(n_snap, dtype=float)
             leakage = np.zeros(n_snap, dtype=float)
             pred_leakage = np.zeros(n_snap, dtype=float)
@@ -2363,23 +2382,30 @@ def build_mu_pair_tables(
                     power_constraint=power_constraint, rb_per_rbg=rows_per_rbg,
                     rbg_boundaries=rbg_boundaries,
                     csi_error_variance=float(csi_error_variance))
-                rp = mu.mu_link_performance_lmmse(
-                    [ti.h_prec_rbg[s], tj.h_prec_rbg[s]],
-                    [ti.h_prec_rbg[s], tj.h_prec_rbg[s]],
-                    noise_power=noise, streams_per_user=rank, precoder=precoder,
-                    power_constraint=power_constraint, rb_per_rbg=rows_per_rbg,
-                    rbg_boundaries=rbg_boundaries,
-                    csi_error_variance=float(csi_error_variance))
                 true_sinr[s] = rt.sinr_per_user_db
-                pred_sinr[s] = rp.sinr_per_user_db
                 assert rt.sinr_per_user_rbg_db is not None
-                assert rp.sinr_per_user_rbg_db is not None
                 true_sinr_rbg[s] = rt.sinr_per_user_rbg_db
-                pred_sinr_rbg[s] = rp.sinr_per_user_rbg_db
                 leakage[s] = rt.leakage_ratio
-                pred_leakage[s] = rp.leakage_ratio
                 pdiag.append(dict(rt.power_diagnostics or {}))
                 regdiag.append(dict(rt.rzf_regularization or {}))
+                # **基站预测侧：残留相关性连乘，不跑联合检测。**
+                # 现场基站在决定配不配、发哪一档 MCS 的时候，手上只有两个
+                # 用户各自的 SU 波束方向，没有终端接收机。所以预测 SINR 是
+                # 解析式的三层叠加：SU 基线 + 残留相关性损失 + 功率分摊。
+                # 原来这里跑一遍完整 LMMSE 联合检测，等于让基站预知接收端
+                # 能解出多少——配对代价被系统性低估，MU 专用 OLLA 也就没东西
+                # 可修。真实解码 SINR（上面的 rt）仍走 LMMSE，不变。
+                corr_loss_rbg = mu.residual_correlation_loss_db(
+                    [_su_tx_directions(ti.h_prec_rbg[s], rank, power_constraint),
+                     _su_tx_directions(tj.h_prec_rbg[s], rank, power_constraint)],
+                    rb_per_rbg=rows_per_rbg, rbg_boundaries=rbg_boundaries)
+                pair_su_pred_rbg = np.stack(
+                    (su_pred_rbg[i, s], su_pred_rbg[j, s]))      # [2, RBG]
+                corr_loss_pred_rbg[s] = corr_loss_rbg
+                pred_sinr_rbg[s] = (pair_su_pred_rbg + corr_loss_rbg
+                                    + power_loss[:, None])
+                pred_sinr[s] = np.mean(pred_sinr_rbg[s], axis=1)
+                pred_leakage[s] = 0.0  # 解析式不产生残余干扰功率比这个量
                 g = mu._wideband_user_vectors(hp)
                 denom = max(float(np.linalg.norm(g[0]) * np.linalg.norm(g[1])), _EPS)
                 corr[s] = abs(complex(g[0].conj() @ g[1])) / denom
@@ -2389,21 +2415,17 @@ def build_mu_pair_tables(
             assert ti.sinr_rbg_db is not None and tj.sinr_rbg_db is not None
             su_true_rbg = np.stack((ti.sinr_rbg_db[:, rank - 1],
                                     tj.sinr_rbg_db[:, rank - 1]), axis=1)
-            su_pred_pair = np.column_stack((su_pred[i], su_pred[j]))
-            su_pred_pair_rbg = np.stack((su_pred_rbg[i], su_pred_rbg[j]), axis=1)
             link = MuPairLink(
                 users=(i, j), rank_per_user=rank,
                 true_sinr_db=true_sinr, predicted_sinr_db=pred_sinr,
-                corr_loss_tx_db=pred_sinr - su_pred_pair - power_loss[None, :],
+                corr_loss_tx_db=np.mean(corr_loss_pred_rbg, axis=2),
                 corr_loss_true_db=true_sinr - su_true - power_loss[None, :],
                 power_loss_db=power_loss.copy(), correlation=corr,
                 leakage_ratio=leakage, predicted_leakage_ratio=pred_leakage,
                 power_constraint=str(power_constraint).lower(), precoder=precoder,
                 true_sinr_rbg_db=true_sinr_rbg,
                 predicted_sinr_rbg_db=pred_sinr_rbg,
-                corr_loss_tx_rbg_db=(
-                    pred_sinr_rbg - su_pred_pair_rbg
-                    - power_loss[None, :, None]),
+                corr_loss_tx_rbg_db=corr_loss_pred_rbg,
                 corr_loss_true_rbg_db=(
                     true_sinr_rbg - su_true_rbg - power_loss[None, :, None]),
                 csi_error_variance=float(csi_error_variance),
@@ -2417,6 +2439,10 @@ def build_mu_pair_tables(
         "power_loss_db": [float(x) for x in power_loss],
         "total_layers": int(total_layers),
         "precoder": precoder, "power_constraint": str(power_constraint).lower(),
+        "prediction_model": "residual_correlation_product",
+        "prediction_scope": (
+            "gNB-side analytic MU SINR: SU baseline + 10log10(prod(1-|w_k^H w_q|^2)) "
+            "+ 10log10(rank_ue/total_layers); no receiver-side joint detection"),
         "csi_error_variance": float(csi_error_variance),
     }
 

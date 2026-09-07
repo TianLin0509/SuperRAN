@@ -557,6 +557,104 @@ def _zf_sum_rate(he_sel: np.ndarray, noise_power: float) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# 2.5 · 残留相关性：基站在发射侧预测配对代价（现场口径）
+# ---------------------------------------------------------------------------
+def su_weight_correlation_matrix(w_su_users: list[np.ndarray]) -> np.ndarray:
+    """各用户 SU 发射权之间的功率相关矩阵 ``|w_k^H w_q|²``。
+
+    ``w_su_users`` 每项形状 ``[F, BS_ant, rank_u]``（列为单位范数的发射方向，
+    与 :func:`csi_aging.svd_precoder` 同一约定）；返回
+    ``[F, N_stream, N_stream]``，``N_stream = Σ rank_u``，流的排列顺序是
+    用户内先 rank、用户间按入参顺序（与 :func:`mu_precoder` 一致）。
+
+    对齐现场口径：把各用户的 SU 发射权拼成一个矩阵，取它的 Gram 矩阵
+    再取模方。列范数在这里显式归一：现场实现拿到的 SU 波束权本来就是单位列，
+    本仓的 PEBF/NEBF 权是「单位方向 × 显式功率」分解后的物理矩阵，直接取模方
+    会把功率差混进相关度。归一后对角线恒为 1，与现场的相关度矩阵同义。
+    """
+    if len(w_su_users) < 2:
+        raise ValueError("残留相关性至少需要两个用户")
+    mats = []
+    for w in w_su_users:
+        a = np.asarray(w)
+        if a.ndim != 3:
+            raise ValueError(f"SU 发射权应为 [F,BS,rank]，收到 {a.shape}")
+        col = np.linalg.norm(a, axis=1, keepdims=True)
+        mats.append(a / np.maximum(col, _EPS))
+    shapes = {(m.shape[0], m.shape[1]) for m in mats}
+    if len(shapes) > 1:
+        raise ValueError(f"各用户的 [F, BS] 必须一致，实得 {sorted(shapes)}")
+    w_all = np.concatenate(mats, axis=2)                       # [F, BS, N_str]
+    gram = np.conj(np.transpose(w_all, (0, 2, 1))) @ w_all     # [F, N_str, N_str]
+    return np.abs(gram) ** 2
+
+
+def residual_correlation_loss_db(
+    w_su_users: list[np.ndarray],
+    *,
+    rb_per_rbg: int = RB_PER_RBG,
+    rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
+) -> np.ndarray:
+    """现场的残留相关性连乘法：配对后每个用户的 SINR 损失（dB，≤0）。
+
+    返回 ``[K, RBG]``，逐用户逐 RBG。做法分三步，与
+    ``GDlSerialScheduler::calcSpatialPairSe`` / ``calcMuSinrCorrLoss`` 对齐：
+
+    1. **RBG 内先平均相关度。** 现场实现在 RBG 内逐 RB 累加 ``|w_k^H w_q|²``
+       再除以 RB 数，得到该 RBG 的一份 CorrMat，之后才连乘。顺序不能反过来
+       （先逐 RB 连乘再平均是另一个量）。
+    2. **逐流连乘 ``(1−ρ)``。** 第 k 条流对所有**别的用户**的每条流各乘一个
+       ``1−ρ``，得到残留相关系数 ``RemCorr_k``；乘出非正数时钳到机器 eps
+       （现场实现同样有一个下限兜底），否则 dB 会变 ``-inf``。
+    3. **折成 dB 再压成单码字。** ``10log10(RemCorr_k)`` 是该流的损失；
+       本仓一个用户一个 TTI 只发一个码字，所以用**逐流 dB 算术平均**压成一个
+       用户级数值——与 :func:`rbg_sinr_db` / :func:`user_sinr_db` 的单码字口径
+       完全一致。现场实现的对应片段写的是逐层求和；两者在 rank2 上差整整一倍，
+       口径归属尚未与维护者确认，本仓先按自己的单码字约定实现。
+
+    **它替代的是什么。** 这是基站在**发射侧**用两个用户各自的 SU 波束方向
+    解析算出来的配对代价，不需要知道终端用什么接收机。它不是接收端联合检测
+    的结果——那条路（LMMSE）留给真实解码 SINR。
+    """
+    if len(w_su_users) < 2:
+        raise ValueError("残留相关性至少需要两个用户")
+    ranks = [int(np.asarray(w).shape[2]) for w in w_su_users]
+    corr_rb = su_weight_correlation_matrix(w_su_users)          # [F, N, N]
+    n_rb = int(corr_rb.shape[0])
+    step = max(1, min(int(rb_per_rbg), n_rb))
+    bounds = (
+        carrier_grid.validate_boundaries(n_rb, rbg_boundaries)
+        if rbg_boundaries is not None
+        else carrier_grid.uniform_boundaries(n_rb, step)
+    )
+    if rbg_boundaries is None and step == 1:
+        corr = corr_rb
+    elif rbg_boundaries is None and n_rb % step == 0:
+        corr = corr_rb.reshape(len(bounds), step, *corr_rb.shape[1:]).mean(axis=1)
+    else:
+        corr = np.stack([corr_rb[start:stop].mean(axis=0)
+                         for start, stop in bounds])             # [RBG, N, N]
+    n_rbg = int(corr.shape[0])
+    start = [0]
+    for r in ranks:
+        start.append(start[-1] + r)
+    out = np.zeros((len(ranks), n_rbg), dtype=float)
+    for i, rank_i in enumerate(ranks):
+        stream_db = np.zeros((rank_i, n_rbg), dtype=float)
+        for k in range(rank_i):
+            rem = np.ones(n_rbg, dtype=float)
+            for j, rank_j in enumerate(ranks):
+                if j == i:
+                    continue
+                for q in range(rank_j):
+                    rem *= (1.0 - corr[:, start[i] + k, start[j] + q])
+            rem = np.maximum(rem, _EPS)
+            stream_db[k] = 10.0 * np.log10(rem)
+        out[i] = np.mean(stream_db, axis=0)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 3 · 多用户预编码
 # ---------------------------------------------------------------------------
 def mu_precoder(
