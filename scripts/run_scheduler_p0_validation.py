@@ -71,7 +71,7 @@ def _pair_link(
         users=(left, right), rank_per_user=2,
         true_sinr_db=true, predicted_sinr_db=true.copy(),
         corr_loss_tx_db=corr.copy(), corr_loss_true_db=corr.copy(),
-        power_loss_db=float(power_loss),
+        power_loss_db=np.array([power_loss, power_loss], dtype=float),
         correlation=np.array([correlation], dtype=float),
         leakage_ratio=np.array([0.01]), predicted_leakage_ratio=np.array([0.01]),
         power_constraint="nebf", precoder="zf",

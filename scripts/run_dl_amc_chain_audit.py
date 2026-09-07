@@ -455,11 +455,12 @@ def experiment_capacity_mu_accounting() -> dict:
     delta_db = float(np.mean(link.true_sinr_db
                              - np.column_stack((indep[0].sinr_db[:, 1],
                                                 indep[1].sinr_db[:, 1]))))
-    shift = link.corr_loss_tx_db + link.power_loss_db
+    shift = link.corr_loss_tx_db + link.power_loss_db[None, :]
     identity_ok = bool(np.allclose(
         shift,
         link.predicted_sinr_db
-        - (link.predicted_sinr_db - link.corr_loss_tx_db - link.power_loss_db),
+        - (link.predicted_sinr_db - link.corr_loss_tx_db
+           - link.power_loss_db[None, :]),
         atol=1e-9))
 
     # Three-UE complete-graph negative control.  Each UE still has a neighbour
@@ -490,7 +491,7 @@ def experiment_capacity_mu_accounting() -> dict:
         side = pair01.side(user)
         predicted = (float(indep[user].sinr_tx_db[0, 1])
                      + float(pair01.corr_loss_tx_db[0, side])
-                     + float(pair01.power_loss_db))
+                     + float(pair01.power_loss_db[side]))
         base_mcs.append(int(la.select_mcs(
             predicted, table=3, target_bler=0.1).index))
     bler_step_mcs = max(base_mcs) + 1
@@ -531,7 +532,7 @@ def experiment_capacity_mu_accounting() -> dict:
             "MU_pair_table_corr0.999": _cell(corr),
         },
         "pair_true_minus_su_true_db": round(delta_db, 3),
-        "power_loss_db": round(float(link.power_loss_db), 4),
+        "power_loss_db": [round(float(x), 4) for x in link.power_loss_db],
         "mcs_shift_identity_holds": identity_ok,
         "pair_graph": pair_graph,
         "missing_1_2_edge_rejection": graph_rejection,

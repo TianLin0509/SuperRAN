@@ -999,13 +999,15 @@ _mu_tables = sysm.build_link_tables(
 _pair = _mu_tables[0].mu_links[1]
 _recon = np.column_stack((_mu_tables[0].sinr_db[:, 1],
                           _mu_tables[1].sinr_db[:, 1])) \
-    + _pair.power_loss_db + _pair.corr_loss_true_db
+    + _pair.power_loss_db[None, :] + _pair.corr_loss_true_db
 check(np.allclose(_recon, _pair.true_sinr_db, atol=1e-10),
       "MU true SINR 可逐点重构为 SU SINR + powerLoss + CorrLoss")
-check(abs(_pair.power_loss_db + 10 * np.log10(2)) < 1e-12,
+check(_pair.power_loss_db.shape == (2,),
+      "MU powerLoss 是逐用户量：异 rank 配对时两侧不同")
+check(bool(np.all(np.abs(_pair.power_loss_db + 10 * np.log10(2)) < 1e-12)),
       "两个 rank2 UE 相对 SU rank2 的功率损失精确为 -3.0103 dB")
-check("P/4" in _pair.as_dict()["power_loss_scope"],
-      "MU powerLoss 输出显式限定为 rank2+rank2 等功率分流口径")
+check("rank_ue / total_layers" in _pair.as_dict()["power_loss_scope"],
+      "MU powerLoss 输出显式声明按总层数实时分摊，不再是写死的口径")
 check(_pair.as_dict()["receiver"] == "per_user_lmmse",
       "MU pair 表显式记录逐用户 LMMSE 接收机，不再冒充固定标量接收基")
 
@@ -3042,7 +3044,7 @@ for _u in (0, 1):
     _side = int(_olla_link.side(_u))
     _pred = (float(_T_indep[_u].sinr_tx_db[0, 1])
              + float(_olla_link.corr_loss_tx_db[0, _side])
-             + float(_olla_link.power_loss_db))
+             + float(_olla_link.power_loss_db[_side]))
     _olla_base_mcs.append(int(la.select_mcs(
         _pred, table=3, target_bler=0.1).index))
 _olla_bler_step = max(_olla_base_mcs) + 1
@@ -3119,7 +3121,7 @@ for _s in range(_MU_SNAP):
     for _side, _u in ((0, 0), (1, 1)):
         _base = float(_T_indep[_u].sinr_tx_db[_s, 1])
         _shift = (float(_link.corr_loss_tx_db[_s, _side])
-                  + float(_link.power_loss_db))
+                  + float(_link.power_loss_db[_side]))
         _m = int(la.select_mcs(_base + _shift, table=3, target_bler=0.1).index)
         _su_true = float(_T_indep[_u].sinr_db[_s, 1])
         _mu_true = float(_link.true_sinr_db[_s, _side])
@@ -3136,9 +3138,9 @@ check(float(np.mean(_bler_mu)) > float(np.mean(_bler_su)),
 # **MCS 决策平移量的恒等式**：CorrLoss + powerLoss == pred_MU − pred_SU。
 # 也就是 −3.01 这个常数标签在决策里精确抵消，实际用的是矩阵算出来的差。
 _su_pred_back = (_link.predicted_sinr_db - _link.corr_loss_tx_db
-                 - _link.power_loss_db)
+                 - _link.power_loss_db[None, :])
 check(bool(np.allclose(
-    _link.corr_loss_tx_db + _link.power_loss_db,
+    _link.corr_loss_tx_db + _link.power_loss_db[None, :],
     _link.predicted_sinr_db - _su_pred_back, atol=1e-9)),
     "MU 决策平移量恒等于 pred_MU − pred_SU，3.01 dB 只是记账标签")
 

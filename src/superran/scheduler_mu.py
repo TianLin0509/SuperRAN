@@ -102,8 +102,9 @@ def validate_pair_graph(tables: Iterable[Any]) -> dict[str, Any]:
             for name in vector_fields:
                 _finite_array(getattr(link, name, None), (n_snap,),
                               f"{i}<->{j}.{name}")
-            if not np.isfinite(float(getattr(link, "power_loss_db", np.nan))):
-                raise ValueError(f"MU pair {i}<->{j}.power_loss_db 非有限")
+            _finite_array(np.atleast_1d(
+                np.asarray(getattr(link, "power_loss_db", np.nan), dtype=float)),
+                (2,), f"{i}<->{j}.power_loss_db")
             optional = [getattr(link, name, None) for name in rbg_fields]
             present = [value is not None for value in optional]
             if any(present) and not all(present):

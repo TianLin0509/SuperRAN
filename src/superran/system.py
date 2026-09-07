@@ -1146,7 +1146,9 @@ class MuPairLink:
     predicted_sinr_db: np.ndarray        # [snapshot,2]，基站 CSI 视角
     corr_loss_tx_db: np.ndarray          # [snapshot,2]，MCS 公式中的 CorrLoss
     corr_loss_true_db: np.ndarray        # [snapshot,2]，物理对账
-    power_loss_db: float
+    #: [2]，逐用户等分功率分摊 ``10log10(rank_ue / Σrank)``（现场口径）。
+    #: 异 rank 配对时两侧不同。
+    power_loss_db: np.ndarray
     correlation: np.ndarray              # [snapshot] 宽带归一化相关系数
     leakage_ratio: np.ndarray            # [snapshot] 真实残余 MU 干扰
     predicted_leakage_ratio: np.ndarray  # [snapshot]
@@ -1171,10 +1173,12 @@ class MuPairLink:
     def as_dict(self) -> dict[str, Any]:
         return {
             "users": list(self.users), "rank_per_user": self.rank_per_user,
-            "power_loss_db": round(float(self.power_loss_db), 6),
+            "power_loss_db": [round(float(x), 6) for x in
+                              np.atleast_1d(self.power_loss_db)],
             "power_loss_scope": (
-                "equal stream-power split: two rank-2 MU users use P/4 per stream "
-                "versus rank-2 SU P/2; normalization residual is in CorrLoss"),
+                "equal stream-power split per user: 10log10(rank_ue / total_layers); "
+                "two rank-2 MU users give P/4 per stream versus rank-2 SU P/2; "
+                "normalization residual is in CorrLoss"),
             "correlation_mean": float(np.mean(self.correlation)),
             "correlation_max": float(np.max(self.correlation)),
             "corr_loss_tx_db_mean": [float(x) for x in np.mean(
@@ -2317,7 +2321,13 @@ def build_mu_pair_tables(
             su_pred_rbg[u, s] = np.asarray(
                 rc.candidates[rank - 1]["sinr_rbg_db"], dtype=float)
 
-    power_loss = -10.0 * np.log10(2.0)  # 2 个 rank2 UE：每流 P/4 vs SU 的 P/2
+    # 等分功率按**总层数**分摊，逐用户算，对齐现场口径。
+    # 2 用户 × rank2 时两侧都是
+    # -3.0103 dB（与历史硬编码逐位相同）；层数一变（rank1 配对、异 rank
+    # 配对、将来的 3 用户配对）这里自动跟着变，不再是只在一种配置下正确的常数。
+    total_layers = 2 * rank
+    power_loss = np.array(
+        [10.0 * np.log10(rank / total_layers)] * 2, dtype=float)
     pair_count = 0
     for i in range(len(tables)):
         for j in range(i + 1, len(tables)):
@@ -2384,17 +2394,18 @@ def build_mu_pair_tables(
             link = MuPairLink(
                 users=(i, j), rank_per_user=rank,
                 true_sinr_db=true_sinr, predicted_sinr_db=pred_sinr,
-                corr_loss_tx_db=pred_sinr - su_pred_pair - power_loss,
-                corr_loss_true_db=true_sinr - su_true - power_loss,
-                power_loss_db=float(power_loss), correlation=corr,
+                corr_loss_tx_db=pred_sinr - su_pred_pair - power_loss[None, :],
+                corr_loss_true_db=true_sinr - su_true - power_loss[None, :],
+                power_loss_db=power_loss.copy(), correlation=corr,
                 leakage_ratio=leakage, predicted_leakage_ratio=pred_leakage,
                 power_constraint=str(power_constraint).lower(), precoder=precoder,
                 true_sinr_rbg_db=true_sinr_rbg,
                 predicted_sinr_rbg_db=pred_sinr_rbg,
                 corr_loss_tx_rbg_db=(
-                    pred_sinr_rbg - su_pred_pair_rbg - power_loss),
+                    pred_sinr_rbg - su_pred_pair_rbg
+                    - power_loss[None, :, None]),
                 corr_loss_true_rbg_db=(
-                    true_sinr_rbg - su_true_rbg - power_loss),
+                    true_sinr_rbg - su_true_rbg - power_loss[None, :, None]),
                 csi_error_variance=float(csi_error_variance),
                 power_diagnostics=pdiag, rzf_regularization=regdiag)
             ti.mu_links[j] = link
@@ -2402,7 +2413,9 @@ def build_mu_pair_tables(
             pair_count += 1
     return {
         "pairs": pair_count, "snapshots": n_snap,
-        "rank_per_user": rank, "power_loss_db": float(power_loss),
+        "rank_per_user": rank,
+        "power_loss_db": [float(x) for x in power_loss],
+        "total_layers": int(total_layers),
         "precoder": precoder, "power_constraint": str(power_constraint).lower(),
         "csi_error_variance": float(csi_error_variance),
     }

@@ -95,7 +95,7 @@ def _candidate(**overrides) -> CandidateGrant:
     base = dict(
         mode="SU", users=(0,), rbg_indices=(0, 1), ranks=(1,),
         base_predicted_sinr_db=(10.0,), receive_sinr_db=(9.0,),
-        corr_loss_db=(0.0,), power_loss_db=0.0, olla_mcs=(1.0,),
+        corr_loss_db=(0.0,), power_loss_db=(0.0,), olla_mcs=(1.0,),
         queue_bytes=(10_000,), required_rbg=(2,), fits_in_fullband=(True,),
         potential_fullband_bytes=(20_000,),
     )
@@ -140,7 +140,7 @@ def test_finalizer_mu_formula_and_harq_identity() -> None:
     mu = _candidate(
         mode="MU", users=(0, 1), ranks=(2, 2),
         base_predicted_sinr_db=(16.0, 15.0), receive_sinr_db=(12.0, 11.0),
-        corr_loss_db=(-2.0, -3.0), power_loss_db=-3.0103,
+        corr_loss_db=(-2.0, -3.0), power_loss_db=(-3.0103, -3.0103),
         olla_mcs=(0.0, 0.0), queue_bytes=(20_000, 20_000),
         required_rbg=(2, 2), fits_in_fullband=(True, True),
         potential_fullband_bytes=(20_000, 20_000))

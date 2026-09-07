@@ -742,7 +742,7 @@ class _PlannedGrant:
     mcs_without_olla: tuple[int, ...]
     true_sinr_db: tuple[float, ...]
     corr_loss_db: tuple[float, ...]
-    power_loss_db: float
+    power_loss_db: tuple[float, ...]
     required_rbg: tuple[int, ...]
     fits_in_fullband: tuple[bool, ...]
     tbs_bytes: tuple[int, ...]
@@ -1390,7 +1390,7 @@ def _frequency_mu_values(
         base = _subset_db(base_rows[snap, rank - 1], indices)
         corr = _subset_db(pair_link.corr_loss_tx_rbg_db[snap, side], indices)
         true = _subset_db(pair_link.true_sinr_rbg_db[snap, side], indices)
-        no_olla_sinr = base + corr + float(pair_link.power_loss_db)
+        no_olla_sinr = base + corr + float(pair_link.power_loss_db[side])
         no_olla_mcs = _select_mcs(no_olla_sinr, lookup)
         mcs = (
             int(la.apply_olla_mcs(
@@ -1674,7 +1674,7 @@ def _build_su_plan(
             base_tx_sinr_db=(base_tx,),
             mcs_without_olla=(no_olla_mcs,),
             true_sinr_db=(true_sinr,), corr_loss_db=(0.0,),
-            power_loss_db=0.0, required_rbg=(int(full_need),),
+            power_loss_db=(0.0,), required_rbg=(int(full_need),),
             fits_in_fullband=(bool(full_fits),), tbs_bytes=(int(tbs),),
             useful_bytes=(int(useful),),
             potential_fullband_bytes=(int(full_potential),),
@@ -1807,7 +1807,7 @@ def _build_mu_plan(
             mode="SU", users=(user,), rbg_indices=indices, n_rbg=len(indices),
             ranks=(rank,), mcs=(mcs,), base_tx_sinr_db=(base_tx,),
             mcs_without_olla=(no_olla,), true_sinr_db=(true_sinr,),
-            corr_loss_db=(0.0,), power_loss_db=0.0,
+            corr_loss_db=(0.0,), power_loss_db=(0.0,),
             required_rbg=(int(full_need),),
             fits_in_fullband=(bool(full_fits),),
             tbs_bytes=(int(tbs),), useful_bytes=(int(useful),),
@@ -1896,7 +1896,7 @@ def _build_mu_plan(
                 score += (
                     np.asarray(base_rows[snap, mu_rank - 1], dtype=float)
                     + np.asarray(link.corr_loss_tx_rbg_db[snap, side], dtype=float)
-                    + float(link.power_loss_db))
+                    + float(link.power_loss_db[side]))
 
             trial_cache: dict[tuple[int, ...], dict[str, Any]] = {}
 
@@ -1975,7 +1975,7 @@ def _build_mu_plan(
                              else tables[user].sinr_db)
                 base = float(base_rows[snap, mu_rank - 1])
                 corr = float(link.corr_loss_tx_db[snap, side])
-                mcs_input = base + corr + float(link.power_loss_db)
+                mcs_input = base + corr + float(link.power_loss_db[side])
                 no_olla = _select_mcs(mcs_input, lookup)
                 mcs = (int(la.apply_olla_mcs(
                     no_olla, float(su_olla_db[user]) + float(mu_olla_db[user]),
@@ -2015,16 +2015,19 @@ def _build_mu_plan(
             return _reject(
                 anchor, partner, pf_order, "pair_mcs_below_min_pairing",
                 correlation=correlation)
+        pair_power_loss = tuple(
+            float(link.power_loss_db[int(link.side(user))]) for user in users)
         predicted_blers = tuple(
             _bler_lookup(
                 int(value["mcs"]),
                 float(value["base"]) + float(value["corr"])
-                + float(link.power_loss_db))
-            for value in actual)
+                + pair_power_loss[side])
+            for side, value in enumerate(actual))
         max_predicted_bler = max(predicted_blers)
         if (not all(np.isfinite(
                 float(value["base"]) + float(value["corr"])
-                + float(link.power_loss_db)) for value in actual)
+                + pair_power_loss[side])
+                for side, value in enumerate(actual))
                 or max_predicted_bler > 0.5):
             return _reject(
                 anchor, partner, pf_order, "predicted_bler_gt_0.5",
@@ -2041,7 +2044,7 @@ def _build_mu_plan(
                 int(value["mcs_without_olla"]) for value in actual),
             true_sinr_db=tuple(float(value["true"]) for value in actual),
             corr_loss_db=tuple(float(value["corr"]) for value in actual),
-            power_loss_db=float(link.power_loss_db),
+            power_loss_db=pair_power_loss,
             required_rbg=tuple(int(value) for value in needs),
             fits_in_fullband=tuple(bool(value) for value in fits_list),
             tbs_bytes=tuple(int(value["tbs"]) for value in actual),
@@ -2183,7 +2186,7 @@ def _finalize_selected_plan(
                 float(value) for value in grant.base_tx_sinr_db),
             receive_sinr_db=tuple(float(value) for value in grant.true_sinr_db),
             corr_loss_db=tuple(float(value) for value in grant.corr_loss_db),
-            power_loss_db=float(grant.power_loss_db),
+            power_loss_db=tuple(float(value) for value in grant.power_loss_db),
             olla_mcs=tuple(olla_values),
             queue_bytes=tuple(int(queue_bytes[int(user)]) for user in grant.users),
             required_rbg=tuple(int(value) for value in grant.required_rbg),
@@ -3250,7 +3253,7 @@ def simulate_experience(
                     mu_group_id=(tti * 100 + group_idx if grant.mode == "MU" else None),
                     partner_ue=(grant.users[1 - side] if grant.mode == "MU" else None),
                     corr_loss_db=float(grant.corr_loss_db[side]),
-                    power_loss_db=float(grant.power_loss_db),
+                    power_loss_db=float(grant.power_loss_db[side]),
                     su_olla_before_db=su_olla_before,
                     mu_olla_before_db=mu_olla_before,
                     su_olla_after_db=float(olla_db[u]),
