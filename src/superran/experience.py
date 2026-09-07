@@ -1697,6 +1697,42 @@ def _build_su_plan(
         clears_all_queues=(useful_total == total_q))
 
 
+def _mu_pair_link_for_ranks(
+    table: Any, partner: int, ranks: tuple[int, int],
+) -> Any:
+    """取「本 UE 层数 = ranks[0]、伙伴层数 = ranks[1]」那张 pair 表。
+
+    运行时每个 UE 的 MU 层数是 ``min(当下 SU rank, 配对上限)``，逐 TTI 会变，
+    所以建表阶段把每种组合都备好了。**找不到对应组合时返回 None**，让调用方
+    显式拒配——绝不能拿别的层数那张表顶替：那会让功率分摊、SINR 与传输块
+    大小用两套层数，而这种不一致在 KPI 上完全看不出来。
+    """
+    want = (int(ranks[0]), int(ranks[1]))
+    by_rank = getattr(table, "mu_links_by_rank", None) or {}
+    entry = by_rank.get(int(partner))
+    if entry:
+        link = entry.get(want)
+        if link is not None:
+            return link
+    # 兼容手工构造/历史链路表：只有 mu_links 时，层数必须恰好对上。
+    fallback = getattr(table, "mu_links", {}).get(int(partner))
+    if fallback is None:
+        return None
+    fb = getattr(fallback, "rank_per_user", None)
+    if isinstance(fb, (int, np.integer)):
+        fb_ranks = (int(fb), int(fb))
+    elif fb is None:
+        return None
+    else:
+        fb_ranks = tuple(int(x) for x in fb)
+    # 只接受**两边层数相同且正好等于所需**的历史表；异 rank 的历史表无法
+    # 从这里判断哪一侧是谁，宁可拒配也不猜。
+    if (len(fb_ranks) == 2 and fb_ranks[0] == fb_ranks[1]
+            and want[0] == want[1] == fb_ranks[0]):
+        return fallback
+    return None
+
+
 def _build_mu_plan(
     ordered_users: Sequence[int], *, queue_bytes: dict[int, int],
     lookup: TbsLookup, slot: str, num_rbg: int,
@@ -1715,7 +1751,9 @@ def _build_mu_plan(
     grants: list[_PlannedGrant] = []
     decisions: list[smu.MuCandidateDecision] = []
     corr_thr = float(getattr(sched, "mu_corr_threshold", 0.7))
-    mu_rank = int(getattr(sched, "mu_rank_per_user", 2))
+    # ``mu_rank_per_user`` 是**上限**，不是固定值：每个 UE 实际的 MU 层数
+    # 取 min(它当下的 SU rank, 上限)，对齐现场的 MU rank 初始化。
+    mu_rank_cap = int(getattr(sched, "mu_rank_per_user", 2))
     olla_enabled = bool(getattr(sched, "olla_enabled", True))
     min_pairing_mcs = int(getattr(sched, "min_pairing_mcs", 4))
     orthogonalization_mode = str(
@@ -1842,11 +1880,18 @@ def _build_mu_plan(
                 float(su_olla_db[anchor]), float(su_olla_db[partner]),
                 float(mu_olla_db[anchor]), float(mu_olla_db[partner]),
                 bool(olla_enabled), bool(frequency_aware),
+                int(rank_of[anchor]), int(rank_of[partner]),
             )
             cached_pair = pair_evaluation_cache.get(cache_key)
             if cached_pair is not None:
                 return replace(cached_pair, pf_order=int(pf_order))
-        link = getattr(tables[anchor], "mu_links", {}).get(partner)
+        # 每个 UE 的 MU 层数 = min(它当下的 SU rank, 配对上限)。SU 只发一层的
+        # 用户在 MU 里也只发一层，两个用户因此可以层数不同。
+        pair_ranks = (min(int(rank_of[anchor]), mu_rank_cap),
+                      min(int(rank_of[partner]), mu_rank_cap))
+        if any(r < 1 for r in pair_ranks):
+            return _reject(anchor, partner, pf_order, "mu_rank_below_one")
+        link = _mu_pair_link_for_ranks(tables[anchor], partner, pair_ranks)
         if link is None:
             return _reject(anchor, partner, pf_order, "missing_pair_link")
         below = [
@@ -1866,13 +1911,6 @@ def _build_mu_plan(
                 anchor, partner, pf_order, "correlation_threshold",
                 correlation=correlation)
         users = (anchor, partner)
-        # 逐用户 MU 层数以 pair 表为准（它是按各 UE 自己的 rank 建的），
-        # 不再假设两边都等于配置里的那一个标量。
-        link_ranks = link.rank_per_user
-        pair_ranks = tuple(
-            int(link_ranks) if isinstance(link_ranks, int)
-            else int(link_ranks[int(link.side(user))])
-            for user in users)
         if sum(pair_ranks) > int(getattr(sched, "max_layers_per_rbg", 4)):
             return _reject(
                 anchor, partner, pf_order, "layer_limit",
@@ -2102,7 +2140,7 @@ def _build_mu_plan(
             continue
         pending.remove(anchor)
         evaluations: list[smu.MuCandidateEvaluation] = []
-        if int(getattr(sched, "max_mu_users", 2)) >= 2 and mu_rank >= 1:
+        if int(getattr(sched, "max_mu_users", 2)) >= 2 and mu_rank_cap >= 1:
             for pf_order, partner in enumerate(ordered):
                 if partner in pending:
                     evaluations.append(_evaluate_pair(anchor, partner, pf_order))

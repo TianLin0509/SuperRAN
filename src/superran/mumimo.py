@@ -676,7 +676,7 @@ def residual_correlation_loss_db(
 # 3 · 多用户预编码
 # ---------------------------------------------------------------------------
 def mu_precoder(
-    h_eff_sel: np.ndarray,
+    h_eff_sel: np.ndarray | Sequence[np.ndarray],
     *,
     method: MuPrecoder = "rzf",
     noise_power: float | np.ndarray = 0.0,
@@ -688,9 +688,12 @@ def mu_precoder(
 ) -> tuple[np.ndarray, np.ndarray]:
     """多用户预编码，返回 ``(方向 W, 功率 p)``。
 
-    ``h_eff_sel`` 是已配对用户的等效信道 ``[K_sel, S, RB, BS]``；
+    ``h_eff_sel`` 是已配对用户的等效信道。等流数时给 ``[K_sel, S, RB, BS]``；
+    **各用户流数不同时给一个列表**，每项 ``[S_u, RB, BS]``（异 rank 配对，
+    例如一个 UE 单层、另一个双层）。两种写法在等流数下逐位相同。
     ``W`` 形状 ``[RB, BS_ant, N_stream]`` 且**每列单位范数**，
     ``p`` 形状 ``[RB, N_stream]`` 且逐 RB 满足 ``Σp = total_power``。
+    流的排列顺序恒为「用户内先流、用户间按入参顺序」。
 
     * ``"ezf"`` 现场口径的 MU 求逆：先把 H 的每条流除以自己的范数，
       再在**归一化后**的 Gram 矩阵上加 ``1/1024`` 对角加载求逆。列归一化
@@ -721,17 +724,33 @@ def mu_precoder(
     总功率仍然是 ``total_power=1``，与 SU 侧口径一致；
     **不能照搬 Sionna 的 ``tr(GG^H)=K``**，那会让 MU 白拿 K 倍功率。
     """
-    hs = np.asarray(h_eff_sel)
     if method not in ("ezf", "zf", "rzf", "mrt"):
         raise ValueError(f"未知 MU 预编码 {method!r}")
     if power_allocation not in ("equal", "waterfilling"):
         raise ValueError(f"未知 MU 功率分配 {power_allocation!r}")
     if not np.isfinite(total_power) or float(total_power) <= 0:
         raise ValueError("total_power 必须是有限正数")
-    if hs.ndim != 4:
-        raise ValueError(f"h_eff_sel 应为 [K,S,RB,BS]，收到 {hs.shape}")
-    n_k, n_s, n_rb, n_bs = hs.shape
-    n_str = n_k * n_s
+    if isinstance(h_eff_sel, (list, tuple)):
+        # 异 rank：逐用户 [S_u, RB, BS]。等 rank 时与四维写法逐位相同，
+        # 因为堆叠顺序仍是「用户内先流」。
+        per_user = [np.asarray(x) for x in h_eff_sel]
+        if not per_user or any(x.ndim != 3 for x in per_user):
+            raise ValueError("逐用户 h_eff_sel 每项应为 [S_u, RB, BS]")
+        if len({x.shape[1:] for x in per_user}) != 1:
+            raise ValueError("各用户的 [RB, BS] 必须一致")
+        stream_counts = [int(x.shape[0]) for x in per_user]
+        n_k = len(per_user)
+        n_rb, n_bs = int(per_user[0].shape[1]), int(per_user[0].shape[2])
+        hs = None
+    else:
+        hs = np.asarray(h_eff_sel)
+        if hs.ndim != 4:
+            raise ValueError(f"h_eff_sel 应为 [K,S,RB,BS]，收到 {hs.shape}")
+        n_k, n_s, n_rb, n_bs = hs.shape
+        stream_counts = [int(n_s)] * int(n_k)
+    n_str = int(sum(stream_counts))
+    if any(s < 1 for s in stream_counts):
+        raise ValueError(f"每个用户至少要有一条流，收到 {stream_counts}")
     if n_str > n_bs:
         raise ValueError(f"流数 {n_str} 超过发射天线数 {n_bs}，ZF/RZF 无解")
 
@@ -739,7 +758,7 @@ def mu_precoder(
     if noise_in.ndim == 0:
         noise_stream = np.full(n_str, float(noise_in))
     elif noise_in.shape == (n_k,):
-        noise_stream = np.repeat(noise_in, n_s)
+        noise_stream = np.repeat(noise_in, stream_counts)
     elif noise_in.shape == (n_str,):
         noise_stream = noise_in.copy()
     else:
@@ -762,7 +781,11 @@ def mu_precoder(
     # 原生成批处理。逐 RB 的 Python 循环在 17 个 RBG × 上千次调用下开销
     # 全在调度上（实测一次 8 UE 建表 22848 次 pinv）。流的排列顺序保持
     # ``u * S + s``，与原来的 ``reshape(n_str, n_bs)`` 逐位一致。
-    h_all = np.transpose(hs, (2, 0, 1, 3)).reshape(n_rb, n_str, n_bs)
+    if hs is None:
+        h_all = np.concatenate(
+            [np.transpose(x, (1, 0, 2)) for x in per_user], axis=1)
+    else:
+        h_all = np.transpose(hs, (2, 0, 1, 3)).reshape(n_rb, n_str, n_bs)
     h_all_h = np.conj(np.transpose(h_all, (0, 2, 1)))    # [RB, BS, N_str]
     if method == "mrt":
         w_all = h_all_h
@@ -1015,7 +1038,7 @@ def mu_link_performance_lmmse(
     h_precode_users: list[np.ndarray],
     *,
     noise_power: float | np.ndarray,
-    streams_per_user: int = MU_MAX_RANK,
+    streams_per_user: int | Sequence[int] = MU_MAX_RANK,
     precoder: MuPrecoder = "zf",
     alpha: float | None = None,
     csi_error_variance: float = 0.0,
@@ -1040,12 +1063,23 @@ def mu_link_performance_lmmse(
 
     这点对有 CSI 误差/老化的 rank>1 尤其关键：真实与估计的 SVD 接收基会
     旋转，本用户另一条可联合解调的数据流不能被误记成 MU 残留干扰。
+
+    ``streams_per_user`` 给标量表示所有用户同流数；**给序列表示逐用户流数**
+    （异 rank 配对，例如一个 UE 单层、另一个双层）。等流数时两种写法逐位相同。
     """
     if not h_eval_users or len(h_eval_users) != len(h_precode_users):
         raise ValueError("评估/预编码信道必须包含相同的非零用户数")
-    rank = int(streams_per_user)
-    if rank < 1:
+    if isinstance(streams_per_user, (int, np.integer)) and not isinstance(
+            streams_per_user, (bool, np.bool_)):
+        ranks = [int(streams_per_user)] * len(h_eval_users)
+    else:
+        ranks = [int(value) for value in streams_per_user]
+        if len(ranks) != len(h_eval_users):
+            raise ValueError(
+                f"逐用户 streams_per_user 长度必须等于用户数 {len(h_eval_users)}")
+    if any(r < 1 for r in ranks):
         raise ValueError("streams_per_user 必须至少为 1")
+    rank = max(ranks)
 
     def _snapshot(h: np.ndarray, label: str) -> np.ndarray:
         x = np.asarray(h)
@@ -1063,15 +1097,19 @@ def mu_link_performance_lmmse(
         if he_u.shape != hp_u.shape:
             raise ValueError(
                 f"UE {u} 的评估/预编码信道形状不一致：{he_u.shape} vs {hp_u.shape}")
-        if he_u.shape[2] < rank:
-            raise ValueError(f"UE {u} 只有 {he_u.shape[2]} 根接收天线，无法检测 rank{rank}")
+        if he_u.shape[2] < ranks[u]:
+            raise ValueError(
+                f"UE {u} 只有 {he_u.shape[2]} 根接收天线，无法检测 rank{ranks[u]}")
     common = {tuple(x.shape[:2]) for x in hv}
     if len(common) != 1:
         raise ValueError("各用户的 RB 数与基站天线数必须一致")
 
     n_k = len(hv)
     n_rb, n_bs = hv[0].shape[:2]
-    n_str = n_k * rank
+    n_str = int(sum(ranks))
+    stream_start = [0]
+    for r in ranks:
+        stream_start.append(stream_start[-1] + r)
     if n_str > n_bs:
         raise ValueError(f"流数 {n_str} 超过发射天线数 {n_bs}")
     noise_in = np.asarray(noise_power, dtype=float)
@@ -1084,8 +1122,11 @@ def mu_link_performance_lmmse(
     if np.any(~np.isfinite(noise_user)) or np.any(noise_user < 0):
         raise ValueError("noise_power 必须是有限非负数")
 
-    he_prec = effective_user_channels(
-        [x[None] for x in hp], streams_per_user=rank)
+    # 逐用户各取自己的流数：等 rank 时这与一次性 effective_user_channels
+    # 逐位相同（同一批 SVD、同一个堆叠顺序），异 rank 时才走参差路径。
+    he_prec = [
+        effective_user_channels([hp[u][None]], streams_per_user=ranks[u])[0]
+        for u in range(n_k)]
     w, pw = mu_precoder(
         he_prec, method=precoder, noise_power=noise_user, alpha=alpha,
         csi_error_variance=csi_error_variance,
@@ -1095,7 +1136,8 @@ def mu_link_performance_lmmse(
     pdiag = bf.physical_matrix_diagnostics(
         q, mode=power_constraint, total_power=total_power)
 
-    sinr = np.zeros((n_k, n_rb, rank), dtype=float)
+    sinr_users: list[np.ndarray] = [
+        np.zeros((n_rb, r), dtype=float) for r in ranks]
     leak_num = 0.0
     leak_den = 0.0
     # 每个用户的接收链在频域上是同一套矩阵运算，只是矩阵不同——整段按 RB 堆叠
@@ -1104,9 +1146,9 @@ def mu_link_performance_lmmse(
     for u in range(n_k):
         h_dl = np.conj(np.transpose(hv[u], (0, 2, 1)))   # [RB, UE_ant, BS_ant]
         g = h_dl @ q                                      # [RB, UE_ant, all streams]
-        own = np.arange(u * rank, (u + 1) * rank)
-        other = np.concatenate((np.arange(0, u * rank),
-                                np.arange((u + 1) * rank, n_str)))
+        own = np.arange(stream_start[u], stream_start[u + 1])
+        other = np.concatenate((np.arange(0, stream_start[u]),
+                                np.arange(stream_start[u + 1], n_str)))
         gd = g[:, :, own]
         gi = g[:, :, other]
         gd_h = np.conj(np.transpose(gd, (0, 2, 1)))
@@ -1122,21 +1164,22 @@ def mu_link_performance_lmmse(
         post_noise = float(noise_user[u]) * np.sum(
             np.abs(filt) ** 2, axis=1)                    # [RB, own]
         post_power = np.abs(coupling) ** 2                # [RB, own, all]
-        signal = post_power[:, np.arange(rank), own]      # [RB, own]
+        signal = post_power[:, np.arange(ranks[u]), own]  # [RB, own]
         interference = np.sum(post_power, axis=2) - signal
-        sinr[u] = signal / np.maximum(interference + post_noise, _EPS)
+        sinr_users[u] = signal / np.maximum(interference + post_noise, _EPS)
         if other.size:
             leak_num += float(np.sum(post_power[:, :, other]))
         leak_den += float(np.sum(post_power) + np.sum(post_noise))
 
-    se_stream = np.log2(1.0 + np.maximum(sinr, 0.0)).mean(axis=1)
-    se_user = np.sum(se_stream, axis=1)
+    se_user = np.array([
+        float(np.sum(np.log2(1.0 + np.maximum(x, 0.0)).mean(axis=0)))
+        for x in sinr_users], dtype=float)
     total_se = float(np.sum(se_user))
     jain = (total_se ** 2 / (n_k * float(np.sum(se_user ** 2)))) \
         if np.any(se_user > 0) else 0.0
     sinr_user_rbg_db = np.stack([
         rbg_sinr_db(
-            sinr[u], rb_per_rbg=rb_per_rbg,
+            sinr_users[u], rb_per_rbg=rb_per_rbg,
             rbg_boundaries=rbg_boundaries)
         for u in range(n_k)])
     sinr_user_db = np.mean(sinr_user_rbg_db, axis=1)
