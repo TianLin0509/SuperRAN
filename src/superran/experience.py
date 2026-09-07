@@ -2017,22 +2017,22 @@ def _build_mu_plan(
                 correlation=correlation)
         pair_power_loss = tuple(
             float(link.power_loss_db[int(link.side(user))]) for user in users)
-        predicted_blers = tuple(
-            _bler_lookup(
-                int(value["mcs"]),
-                float(value["base"]) + float(value["corr"])
-                + pair_power_loss[side])
+        # **配对准入不再看预测误块率。** 现场只有两道闸：MCS 下限
+        # （上面的 min_pairing_mcs）和波束相关度门限；预测 BLER > 0.5 这道
+        # 是本仓自己加的，它和 MU 专用 OLLA 抢同一件事——OLLA 本来就负责把
+        # 配对后的实际误块率拉回目标，再加一道预测闸会在 OLLA 收敛之前
+        # 提前否掉本来能配的对。预测误块率保留为诊断量，不参与判决。
+        pair_mcs_input = tuple(
+            float(value["base"]) + float(value["corr"]) + pair_power_loss[side]
             for side, value in enumerate(actual))
-        max_predicted_bler = max(predicted_blers)
-        if (not all(np.isfinite(
-                float(value["base"]) + float(value["corr"])
-                + pair_power_loss[side])
-                for side, value in enumerate(actual))
-                or max_predicted_bler > 0.5):
+        if not all(np.isfinite(value) for value in pair_mcs_input):
+            # 数值守卫，不是物理门：NaN/Inf 的 MCS 输入说明上游算坏了。
             return _reject(
-                anchor, partner, pf_order, "predicted_bler_gt_0.5",
-                correlation=correlation,
-                predicted_bler_max=float(max_predicted_bler))
+                anchor, partner, pf_order, "nonfinite_pair_mcs_input",
+                correlation=correlation)
+        max_predicted_bler = max(
+            _bler_lookup(int(value["mcs"]), pair_mcs_input[side])
+            for side, value in enumerate(actual))
         useful = tuple(
             min(int(queue_bytes[user]), int(actual[side]["tbs"]))
             for side, user in enumerate(users))
