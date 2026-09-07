@@ -2033,6 +2033,20 @@ def _build_mu_plan(
         max_predicted_bler = max(
             _bler_lookup(int(value["mcs"]), pair_mcs_input[side])
             for side, value in enumerate(actual))
+        # 配对后的物理谱效：Σ 每个用户 (最终 MCS 的 SE × 该用户层数)。
+        # 这是 现场实现用来在多个候选伙伴之间做选择的量。
+        mcs_rows = la.MCS_TABLES[int(lookup.mcs_table)]
+        pair_se = float(sum(
+            float(mcs_rows[int(value["mcs"])].se) * mu_rank
+            for value in actual))
+        su_se_sum = float(sum(
+            float(mcs_rows[int(la.apply_olla_mcs(
+                _select_mcs(float(value["base"]), lookup),
+                float(su_olla_db[user]),
+                mcs_table=int(lookup.mcs_table))["final_mcs"]
+                if olla_enabled else
+                _select_mcs(float(value["base"]), lookup))].se) * mu_rank
+            for value, user in zip(actual, users, strict=True)))
         useful = tuple(
             min(int(queue_bytes[user]), int(actual[side]["tbs"]))
             for side, user in enumerate(users))
@@ -2066,7 +2080,8 @@ def _build_mu_plan(
             feasible=True, rejection_reason=None, correlation=correlation,
             predicted_bler_max=float(max_predicted_bler),
             useful_bytes=useful_total, used_rbg=len(indices),
-            useful_bytes_per_rbg=density, final_mcs=mcs_list, grant=grant)
+            useful_bytes_per_rbg=density, final_mcs=mcs_list,
+            pair_se=pair_se, su_se_sum=su_se_sum, grant=grant)
         if pair_evaluation_cache is not None and cache_key is not None:
             pair_evaluation_cache[cache_key] = result
         return result
@@ -4106,13 +4121,14 @@ def simulate_experience(
             "candidate_count": int(mu_candidate_count),
             "feasible_count": int(mu_candidate_feasible_count),
             "selected_count": int(mu_candidate_selected_count),
-            "selected_score_mean_useful_bytes_per_rbg": (
+            "selected_score_mean_pair_se": (
                 float(np.mean(mu_candidate_selected_scores))
                 if mu_candidate_selected_scores else None),
             "rejection_reasons": mu_candidate_rejection_reasons,
             "objective": (
-                "PF anchor fixed; maximize queue-limited useful bytes per RBG; "
-                "tie by useful bytes, lower correlation, earlier PF partner"),
+                "PF anchor fixed; maximize paired spectral efficiency "
+                "sum(SE(MCS) x layers); tie by lower correlation, "
+                "earlier PF partner"),
         },
         "mu_pair_graph": (mu_pair_graph if mu_pair_graph is not None else {
             "status": "not_required", "reason": "mu_disabled"}),

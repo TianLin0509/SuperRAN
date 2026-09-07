@@ -157,6 +157,12 @@ class MuCandidateEvaluation:
     used_rbg: int
     useful_bytes_per_rbg: float
     final_mcs: tuple[int, ...]
+    #: 配对后的物理谱效 ``Σ_ue SE(最终 MCS) × 该用户层数``（bit/symbol）。
+    #: 对齐现场口径「每个码字的 MCS 谱效 × 该码字层数」求和，是纯物理量，
+    #: 不含队列状态。
+    pair_se: float = 0.0
+    #: 同两个用户单独发时的谱效之和，只作诊断，不参与排名。
+    su_se_sum: float = 0.0
     grant: Any = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -202,11 +208,17 @@ def choose_mu_candidate(
     anchor_ue: int,
     evaluations: Iterable[MuCandidateEvaluation],
 ) -> MuCandidateDecision:
-    """Choose useful-byte density, then useful bytes, then lower correlation.
+    """Choose the partner with the highest paired spectral efficiency.
 
     PF has already selected the anchor and ordered partners.  The scorer does
-    not replace PF; it prevents the first merely feasible partner from winning
-    when a later candidate delivers more queue-limited useful bytes per RBG.
+    not replace PF; it decides which partner the anchor is paired with.
+
+    对齐现场口径：排名指标是**配对后的谱效**
+    ``Σ_ue SE(MCS) × layer``，一个纯物理量。历史指标是「队列受限的
+    有用字节 / RBG」，那会让「信道差但缓冲区满」的候选压过「信道好但
+    只有小包」的候选——配对本身是空间复用决策，选谁应当看这两束波能不能
+    共存，而不是谁的队列长。队列仍然通过可行性（必须有字节可发）与后续的
+    SU/MU 方案比较起作用。
     """
     rows = tuple(evaluations)
     if any(int(item.anchor_ue) != int(anchor_ue) for item in rows):
@@ -214,7 +226,7 @@ def choose_mu_candidate(
     feasible = [
         item for item in rows
         if item.feasible and item.grant is not None and item.used_rbg > 0
-        and np.isfinite(item.useful_bytes_per_rbg)
+        and item.useful_bytes > 0 and np.isfinite(item.pair_se)
     ]
     if not feasible:
         return MuCandidateDecision(
@@ -224,8 +236,7 @@ def choose_mu_candidate(
     selected = max(
         feasible,
         key=lambda item: (
-            float(item.useful_bytes_per_rbg),
-            int(item.useful_bytes),
+            float(item.pair_se),
             -(float(item.correlation) if item.correlation is not None else 1.0),
             -int(item.pf_order),
             -int(item.partner_ue),
@@ -234,7 +245,7 @@ def choose_mu_candidate(
     return MuCandidateDecision(
         anchor_ue=int(anchor_ue),
         selected_partner_ue=int(selected.partner_ue),
-        selected_score=float(selected.useful_bytes_per_rbg),
+        selected_score=float(selected.pair_se),
         selected_grant=selected.grant,
         evaluations=rows,
     )
@@ -258,11 +269,11 @@ def summarize_mu_audits(
         "candidate_count": len(evaluations),
         "feasible_count": sum(item.feasible for item in evaluations),
         "selected_count": sum(row.selected_partner_ue is not None for row in rows),
-        "selected_score_mean_useful_bytes_per_rbg": (
+        "selected_score_mean_pair_se": (
             float(np.mean(scores)) if scores else None),
         "rejection_reasons": reasons,
         "objective": (
-            "PF anchor fixed; maximize queue-limited useful bytes per physical RBG; "
-            "tie by useful bytes, lower correlation, earlier PF partner"
+            "PF anchor fixed; maximize paired spectral efficiency "
+            "sum(SE(MCS) x layers); tie by lower correlation, earlier PF partner"
         ),
     }

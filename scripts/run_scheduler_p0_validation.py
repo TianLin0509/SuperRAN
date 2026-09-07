@@ -211,8 +211,7 @@ def _mu_experiment() -> dict[str, object]:
     assert run.cell["su_mu_plan"]["mu_selected"] > 0
     evaluations = {
         str(item["partner_ue"]): item for item in decision["evaluations"]}
-    assert evaluations["2"]["useful_bytes_per_rbg"] > \
-        evaluations["1"]["useful_bytes_per_rbg"]
+    assert evaluations["2"]["pair_se"] > evaluations["1"]["pair_se"]
     lookup = exp.TbsLookup.build(17, 16)
     rank_of = {u: int(tables[u].best_rank[0]) for u in (0, 1)}
     mcs_of = {

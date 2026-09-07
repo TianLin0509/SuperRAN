@@ -213,16 +213,59 @@ def test_mu_scorer_selects_later_better_partner_not_first_feasible() -> None:
             anchor_ue=0, partner_ue=1, pf_order=0, feasible=True,
             rejection_reason=None, correlation=0.4, predicted_bler_max=0.1,
             useful_bytes=800, used_rbg=4, useful_bytes_per_rbg=200.0,
-            final_mcs=(10, 10), grant=first_grant),
+            final_mcs=(10, 10), pair_se=4.0, su_se_sum=5.0,
+            grant=first_grant),
         MuCandidateEvaluation(
             anchor_ue=0, partner_ue=2, pf_order=1, feasible=True,
             rejection_reason=None, correlation=0.2, predicted_bler_max=0.1,
             useful_bytes=1400, used_rbg=4, useful_bytes_per_rbg=350.0,
-            final_mcs=(15, 15), grant=better_grant),
+            final_mcs=(15, 15), pair_se=7.0, su_se_sum=8.0,
+            grant=better_grant),
     ])
     assert decision.selected_partner_ue == 2
     assert decision.selected_grant is better_grant
     assert decision.feasible_count == 2
+    assert decision.selected_score == 7.0
+
+
+def test_mu_scorer_ranks_by_spectral_efficiency_not_queue_density() -> None:
+    """配对排名必须是物理谱效，不是队列受限的字节密度。
+
+    反例：伙伴 1 队列满但信道差（低 MCS），伙伴 2 信道好但只有小包。
+    旧口径按「有用字节/RBG」会选 1；现场口径按配对后谱效选 2。
+    这条 revert 回旧排名键就会变红。
+    """
+    queue_heavy = SimpleNamespace(useful_bytes=(4000, 4000), n_rbg=4)
+    channel_good = SimpleNamespace(useful_bytes=(200, 200), n_rbg=4)
+    decision = choose_mu_candidate(0, [
+        MuCandidateEvaluation(
+            anchor_ue=0, partner_ue=1, pf_order=0, feasible=True,
+            rejection_reason=None, correlation=0.4, predicted_bler_max=0.1,
+            useful_bytes=8000, used_rbg=4, useful_bytes_per_rbg=2000.0,
+            final_mcs=(4, 4), pair_se=1.2, su_se_sum=2.0,
+            grant=queue_heavy),
+        MuCandidateEvaluation(
+            anchor_ue=0, partner_ue=2, pf_order=1, feasible=True,
+            rejection_reason=None, correlation=0.2, predicted_bler_max=0.1,
+            useful_bytes=400, used_rbg=4, useful_bytes_per_rbg=100.0,
+            final_mcs=(24, 24), pair_se=9.6, su_se_sum=10.0,
+            grant=channel_good),
+    ])
+    assert decision.selected_partner_ue == 2
+    assert decision.selected_score == 9.6
+
+
+def test_mu_scorer_rejects_zero_useful_bytes_candidate() -> None:
+    """没有字节可发的候选不许因为谱效高而被选中（会白占 RBG）。"""
+    empty = SimpleNamespace(useful_bytes=(0, 0), n_rbg=4)
+    decision = choose_mu_candidate(0, [
+        MuCandidateEvaluation(
+            anchor_ue=0, partner_ue=1, pf_order=0, feasible=True,
+            rejection_reason=None, correlation=0.1, predicted_bler_max=0.1,
+            useful_bytes=0, used_rbg=4, useful_bytes_per_rbg=0.0,
+            final_mcs=(27, 27), pair_se=12.0, su_se_sum=12.0, grant=empty),
+    ])
+    assert decision.selected_partner_ue is None
 
 
 def test_end_to_end_directional_validation_experiments() -> None:
@@ -238,10 +281,10 @@ def test_end_to_end_directional_validation_experiments() -> None:
     assert report["srs"]["pci_mod3_staggered"]["colliding_pair_count"] == 0
     decision = report["mu_candidate_scoring"]["first_tti_decision"]
     assert decision["selected_partner_ue"] == 2
-    densities = {
-        row["partner_ue"]: row["useful_bytes_per_rbg"]
+    pair_se = {
+        row["partner_ue"]: row["pair_se"]
         for row in decision["evaluations"]}
-    assert densities[2] > densities[1]
+    assert pair_se[2] > pair_se[1]
 
 
 # ---------------------------------------------------------------------------
