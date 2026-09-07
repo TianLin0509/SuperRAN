@@ -581,6 +581,33 @@ except ValueError as _exc:
     _bad_precoder = str(_exc)
 check("not_a_precoder" in _bad_precoder, "未知预编码名硬失败")
 
+sect("14  现场对齐：功率分摊按总层数，MU rank 可变")
+
+# 这个 dB 值是「MU 每流功率 / 该用户单发时每流功率」= (P/L)/(P/rank_u)
+# = rank_u/L。总功率在**层**上等分，所以一个用户拿到的份额只由它自己的
+# 层数与配对组总层数决定。历史写死的 -3.01 dB 只有 2 用户 x rank2 才对。
+check(bool(np.allclose(mu.mu_power_split_db((2, 2)), -10.0 * np.log10(2.0))),
+      "2 用户 x rank2 的功率分摊仍精确是 -3.0103 dB（与历史常数逐位一致）")
+check(bool(np.allclose(mu.mu_power_split_db((1, 1)), -10.0 * np.log10(2.0))),
+      "2 用户 x rank1 也是 -3.0103 dB：分母是总层数 2，不是 rank")
+_mixed_split = mu.mu_power_split_db((1, 2))
+print(f"  rank1+rank2 的功率分摊 {_mixed_split.round(4)} dB")
+check(bool(np.allclose(_mixed_split, [-4.7712125472, -1.7609125906])),
+      "异 rank 配对时层多的用户分到更多功率（-4.77 / -1.76 dB）")
+
+# 同一个比值也正好是该用户占总功率的份额，所以线性域求和必须恰好是 1。
+for _ranks in ((1, 2), (2, 2), (2, 2, 2), (1, 2, 2)):
+    _share = float(np.sum(10.0 ** (mu.mu_power_split_db(_ranks) / 10.0)))
+    check(abs(_share - 1.0) < 1e-12,
+          f"层数 {_ranks} 的功率份额求和恰好是 1：没有凭空多出来的功率")
+
+_split_err = ""
+try:
+    mu.mu_power_split_db((2,))
+except ValueError as _exc:
+    _split_err = str(_exc)
+check("至少两个正整数" in _split_err, "单用户不构成配对，功率分摊硬失败")
+
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:

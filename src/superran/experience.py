@@ -1373,14 +1373,14 @@ def _frequency_su_need(
 
 def _frequency_mu_values(
     *, pair_link: Any, users: tuple[int, int], tables: Sequence[Any], snap: int,
-    rank: int, indices: tuple[int, ...], su_olla_db: np.ndarray,
+    ranks: tuple[int, ...], indices: tuple[int, ...], su_olla_db: np.ndarray,
     mu_olla_db: np.ndarray, olla_enabled: bool, lookup: TbsLookup, slot: str,
 ) -> list[dict[str, Any]]:
     if (pair_link.true_sinr_rbg_db is None
             or pair_link.corr_loss_tx_rbg_db is None):
         raise ValueError("RB 功控 + MU 需要逐 RBG pair SINR/CorrLoss")
     out: list[dict[str, Any]] = []
-    for user in users:
+    for user, rank in zip(users, ranks, strict=True):
         side = int(pair_link.side(user))
         table = tables[user]
         if table.sinr_rbg_db is None:
@@ -1865,12 +1865,19 @@ def _build_mu_plan(
             return _reject(
                 anchor, partner, pf_order, "correlation_threshold",
                 correlation=correlation)
-        if 2 * mu_rank > int(getattr(sched, "max_layers_per_rbg", 4)):
+        users = (anchor, partner)
+        # 逐用户 MU 层数以 pair 表为准（它是按各 UE 自己的 rank 建的），
+        # 不再假设两边都等于配置里的那一个标量。
+        link_ranks = link.rank_per_user
+        pair_ranks = tuple(
+            int(link_ranks) if isinstance(link_ranks, int)
+            else int(link_ranks[int(link.side(user))])
+            for user in users)
+        if sum(pair_ranks) > int(getattr(sched, "max_layers_per_rbg", 4)):
             return _reject(
                 anchor, partner, pf_order, "layer_limit",
                 correlation=correlation)
 
-        users = (anchor, partner)
         offset = int(num_rbg) - len(available)
         score_gain = 0.0
         incremental = 0
@@ -1883,7 +1890,7 @@ def _build_mu_plan(
                     anchor, partner, pf_order, "missing_rbg_pair_sinr",
                     correlation=correlation)
             score = np.zeros(int(num_rbg), dtype=float)
-            for user in users:
+            for user, rank_u in zip(users, pair_ranks, strict=True):
                 side = int(link.side(user))
                 table = tables[user]
                 base_rows = (table.sinr_tx_rbg_db
@@ -1894,7 +1901,7 @@ def _build_mu_plan(
                         anchor, partner, pf_order, "missing_rbg_su_sinr",
                         correlation=correlation)
                 score += (
-                    np.asarray(base_rows[snap, mu_rank - 1], dtype=float)
+                    np.asarray(base_rows[snap, rank_u - 1], dtype=float)
                     + np.asarray(link.corr_loss_tx_rbg_db[snap, side], dtype=float)
                     + float(link.power_loss_db[side]))
 
@@ -1911,7 +1918,7 @@ def _build_mu_plan(
                     return cached
                 values = _frequency_mu_values(
                     pair_link=link, users=users, tables=tables, snap=snap,
-                    rank=mu_rank, indices=key,
+                    ranks=pair_ranks, indices=key,
                     su_olla_db=su_olla_db, mu_olla_db=mu_olla_db,
                     olla_enabled=olla_enabled, lookup=lookup, slot=slot)
                 result = {
@@ -1968,12 +1975,12 @@ def _build_mu_plan(
             potentials = []
             remaining_order = sfreq.rotated_order(
                 tuple(available), cursor=cursor, total_rbg=num_rbg)
-            for user in users:
+            for user, rank_u in zip(users, pair_ranks, strict=True):
                 side = int(link.side(user))
                 base_rows = (tables[user].sinr_tx_db
                              if tables[user].sinr_tx_db is not None
                              else tables[user].sinr_db)
-                base = float(base_rows[snap, mu_rank - 1])
+                base = float(base_rows[snap, rank_u - 1])
                 corr = float(link.corr_loss_tx_db[snap, side])
                 mcs_input = base + corr + float(link.power_loss_db[side])
                 no_olla = _select_mcs(mcs_input, lookup)
@@ -1982,9 +1989,9 @@ def _build_mu_plan(
                     mcs_table=int(lookup.mcs_table))["final_mcs"])
                     if olla_enabled else no_olla)
                 need, fits = lookup.required_rbg_for_indices(
-                    slot, mcs, mu_rank, int(queue_bytes[user]), full_order)
+                    slot, mcs, rank_u, int(queue_bytes[user]), full_order)
                 remaining_need, remaining_fit = lookup.required_rbg_for_indices(
-                    slot, mcs, mu_rank, int(queue_bytes[user]), remaining_order)
+                    slot, mcs, rank_u, int(queue_bytes[user]), remaining_order)
                 actual.append({
                     "base": base, "corr": corr,
                     "true": float(link.true_sinr_db[snap, side]),
@@ -1994,7 +2001,7 @@ def _build_mu_plan(
                 remaining_needs.append(int(remaining_need))
                 remaining_fits.append(bool(remaining_fit))
                 potentials.append(int(lookup.tbs_bytes_for_indices(
-                    slot, mcs, mu_rank, full_order)))
+                    slot, mcs, rank_u, full_order)))
             # One MU grant owns a shared RBG bitmap.  The pair must therefore
             # keep allocating until both queues fit (or resources run out).
             # Stopping when the first/small queue fits leaves the larger user
@@ -2003,9 +2010,10 @@ def _build_mu_plan(
             n = min(max(remaining_needs), len(available))
             indices = tuple(remaining_order[:n])
             # 位图定下来之后才知道解码 SINR 该在哪几个 RBG 上取。
-            for value, user in zip(actual, users, strict=True):
+            for value, user, rank_u in zip(
+                    actual, users, pair_ranks, strict=True):
                 value["tbs"] = int(lookup.tbs_bytes_for_indices(
-                    slot, int(value["mcs"]), mu_rank, indices))
+                    slot, int(value["mcs"]), rank_u, indices))
                 value["true"] = _granted_pair_true_sinr_db(
                     link, snap, int(link.side(user)), indices,
                     float(value["true"]))
@@ -2037,22 +2045,23 @@ def _build_mu_plan(
         # 这是 现场实现用来在多个候选伙伴之间做选择的量。
         mcs_rows = la.MCS_TABLES[int(lookup.mcs_table)]
         pair_se = float(sum(
-            float(mcs_rows[int(value["mcs"])].se) * mu_rank
-            for value in actual))
+            float(mcs_rows[int(value["mcs"])].se) * rank_u
+            for value, rank_u in zip(actual, pair_ranks, strict=True)))
         su_se_sum = float(sum(
             float(mcs_rows[int(la.apply_olla_mcs(
                 _select_mcs(float(value["base"]), lookup),
                 float(su_olla_db[user]),
                 mcs_table=int(lookup.mcs_table))["final_mcs"]
                 if olla_enabled else
-                _select_mcs(float(value["base"]), lookup))].se) * mu_rank
-            for value, user in zip(actual, users, strict=True)))
+                _select_mcs(float(value["base"]), lookup))].se) * rank_u
+            for value, user, rank_u in zip(
+                actual, users, pair_ranks, strict=True)))
         useful = tuple(
             min(int(queue_bytes[user]), int(actual[side]["tbs"]))
             for side, user in enumerate(users))
         grant = _PlannedGrant(
             mode="MU", users=users, rbg_indices=indices, n_rbg=len(indices),
-            ranks=(mu_rank, mu_rank), mcs=mcs_list,
+            ranks=pair_ranks, mcs=mcs_list,
             base_tx_sinr_db=tuple(float(value["base"]) for value in actual),
             mcs_without_olla=tuple(
                 int(value["mcs_without_olla"]) for value in actual),
@@ -2093,7 +2102,7 @@ def _build_mu_plan(
             continue
         pending.remove(anchor)
         evaluations: list[smu.MuCandidateEvaluation] = []
-        if int(getattr(sched, "max_mu_users", 2)) >= 2 and mu_rank == 2:
+        if int(getattr(sched, "max_mu_users", 2)) >= 2 and mu_rank >= 1:
             for pf_order, partner in enumerate(ordered):
                 if partner in pending:
                     evaluations.append(_evaluate_pair(anchor, partner, pf_order))
@@ -2279,8 +2288,8 @@ def simulate_experience(
     if bool(sched.mu_enabled):
         if int(getattr(sched, "max_mu_users", 2)) != 2:
             raise ValueError("experience_v2 当前 MU 基线固定两用户配对（max_mu_users=2）")
-        if int(getattr(sched, "mu_rank_per_user", 2)) != 2:
-            raise ValueError("experience_v2 当前 MU 基线固定每用户 rank2")
+        if not 1 <= int(getattr(sched, "mu_rank_per_user", 2)) <= 2:
+            raise ValueError("experience_v2 的 MU 每用户 rank 只支持 1 或 2")
         if str(getattr(sched, "mu_precoder", "ezf")) not in ("ezf", "zf", "rzf"):
             raise ValueError("experience_v2 的 MU precoder 只支持 ezf / zf / rzf")
     if str(traffic_cfg.model) not in (

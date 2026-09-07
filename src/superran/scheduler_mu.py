@@ -91,11 +91,15 @@ def validate_pair_graph(tables: Iterable[Any]) -> dict[str, Any]:
             if len(users) != 2 or set(users) != {i, j}:
                 raise ValueError(
                     f"MU pair graph 身份错配：边 {i}<->{j} 声明 users={users}")
-            rank = int(getattr(link, "rank_per_user", 0))
-            if rank < 1 or any(int(np.asarray(rows[u].sinr_db).shape[1]) < rank
-                               for u in (i, j)):
+            link_ranks = getattr(link, "rank_per_user", None)
+            pair_ranks = ((int(link_ranks), int(link_ranks))
+                          if isinstance(link_ranks, (int, np.integer))
+                          else tuple(int(x) for x in (link_ranks or ())))
+            if len(pair_ranks) != 2 or any(r < 1 for r in pair_ranks) or any(
+                    int(np.asarray(rows[u].sinr_db).shape[1]) < r
+                    for u, r in zip((i, j), pair_ranks)):
                 raise ValueError(
-                    f"MU pair {i}<->{j} 的 rank_per_user={rank} 超出 SU 链路表")
+                    f"MU pair {i}<->{j} 的 rank_per_user={link_ranks} 超出 SU 链路表")
             for name in matrix_fields:
                 _finite_array(getattr(link, name, None), (n_snap, 2),
                               f"{i}<->{j}.{name}")

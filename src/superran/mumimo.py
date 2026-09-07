@@ -21,6 +21,7 @@ MU 相对 SU 白拿 K 倍，"MU 增益"里一大半就成了功率增益。
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -561,6 +562,21 @@ def _zf_sum_rate(he_sel: np.ndarray, noise_power: float) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # 2.5 · 残留相关性：基站在发射侧预测配对代价（现场口径）
 # ---------------------------------------------------------------------------
+def mu_power_split_db(ranks: Sequence[int]) -> np.ndarray:
+    """等分总功率下每个配对用户的功率分摊 ``10log10(rank_u / Σrank)`` dB。
+
+    对齐现场口径「该用户层数 / 配对组总层数」取对数。总功率在**层**
+    上等分，所以一个用户拿到的份额只由它自己的层数与配对组总层数决定：
+    2 用户 × rank2 两侧都是 -3.0103 dB；rank1+rank2 则是
+    ``[-4.7712, -1.7609]`` dB——层多的那个用户分到更多功率。
+    """
+    values = [int(r) for r in ranks]
+    if len(values) < 2 or any(r < 1 for r in values):
+        raise ValueError(f"配对层数必须是至少两个正整数，收到 {list(ranks)}")
+    total = float(sum(values))
+    return np.array([10.0 * np.log10(r / total) for r in values], dtype=float)
+
+
 def su_weight_correlation_matrix(w_su_users: list[np.ndarray]) -> np.ndarray:
     """各用户 SU 发射权之间的功率相关矩阵 ``|w_k^H w_q|²``。
 
