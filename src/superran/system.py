@@ -2371,17 +2371,55 @@ def build_link_tables(
     return out
 
 
+SU_WEIGHT_METHODS = ("svd", "svd_rx_gram", "ezf")
+
+
+def su_weight_directions(h_prec_rbg: np.ndarray, rank: int, *,
+                         method: str = "svd") -> np.ndarray:
+    """单用户发射权的三种取法，列单位范数，``[F, BS, rank]``。
+
+    对齐第三方参考实现的三个 SuType：
+
+    * ``"svd"``（SuType=0）——发射侧协方差 ``H H^H`` 的主特征方向，
+      也就是 :func:`csi_aging.svd_precoder`。本仓一直用的就是它。
+    * ``"svd_rx_gram"``（SuType=2）——先对接收侧 Gram ``H^H H`` 做 SVD 得到
+      ``v``，再把信道投影过去 ``H v``，最后列归一。**它与 SuType=0 张成同一个
+      子空间**（``H v_k = sigma_k u_k``），归一后只差每列一个相位，所以
+      ``|w^H w|^2`` 这类相关度量逐位相同——这不是巧合，是 SVD 的定义。
+      保留它是为了能逐项对上参考实现的分支，不是另一种物理。
+    * ``"ezf"``——正则化迫零 ``H (H^H H + 0.01 I)^-1``，再列归一。
+      参考实现在这一支上把自己 rank 个流之间也做了解耦；对角加载 0.01 是
+      它写死的常数，本仓照抄并显式记下来，不冒充自适应正则化。
+    """
+    if str(method) not in SU_WEIGHT_METHODS:
+        raise ValueError(f"su_weight_method 只支持 {SU_WEIGHT_METHODS}，收到 {method!r}")
+    h = np.asarray(h_prec_rbg)
+    k = int(rank)
+    if str(method) == "svd":
+        return ca.svd_precoder(h)[:, :, :k]
+    gram = np.conj(np.transpose(h, (0, 2, 1))) @ h              # [F, UE, UE]
+    if str(method) == "svd_rx_gram":
+        _u, _sv, vh = np.linalg.svd(gram)
+        v = np.conj(np.transpose(vh, (0, 2, 1)))[:, :, :k]      # [F, UE, k]
+        w = h @ v
+    else:
+        loading = 0.01 * np.eye(gram.shape[-1], dtype=gram.dtype)
+        w = (h @ np.linalg.inv(gram + loading))[:, :, :k]
+    norm = np.linalg.norm(w, axis=1, keepdims=True)
+    return w / np.maximum(norm, _EPS)
+
+
 def _su_tx_directions(h_prec_rbg: np.ndarray, rank: int,
-                     power_constraint: str) -> np.ndarray:
+                     power_constraint: str, method: str = "svd") -> np.ndarray:
     """该用户单独发射时会用的物理波束方向 ``[F, BS, rank]``。
 
-    就是 SU 链路那条路真正会打出去的权：先由陈旧 CSI 做 SVD，再施加
-    每天线功率约束（默认 NEBF）。与现场实现取 SU 波束权的口径一致。
+    就是 SU 链路那条路真正会打出去的权：先由陈旧 CSI 算方向（默认 SVD，
+    见 :func:`su_weight_directions`），再施加每天线功率约束（默认 NEBF）。
     列范数由 :func:`mumimo.su_weight_correlation_matrix` 归一，这里不动。
     """
-    w_full = ca.svd_precoder(np.asarray(h_prec_rbg))
+    w_full = su_weight_directions(np.asarray(h_prec_rbg), int(rank), method=method)
     q, _w, _diag = bf.equal_power_weights(
-        w_full[:, :, :int(rank)], mode=power_constraint, total_power=1.0)
+        w_full, mode=power_constraint, total_power=1.0)
     return np.asarray(q)
 
 
@@ -2391,6 +2429,7 @@ def build_mu_pair_tables(
     rank_cap_per_user: int | Sequence[int] | None = None,
     precoder: str = "ezf", power_constraint: str = "nebf",
     csi_error_variance: float = 0.0,
+    su_weight_method: str = "svd",
 ) -> dict[str, Any]:
     """预计算所有两用户 MU 链路及 ``CorrLoss + powerLoss`` 分解。
 
@@ -2481,7 +2520,8 @@ def build_mu_pair_tables(
         if cached is None:
             hp_u = tables[u].h_prec_rbg
             assert hp_u is not None
-            cached = _su_tx_directions(hp_u[s], r, power_constraint)
+            cached = _su_tx_directions(hp_u[s], r, power_constraint,
+                                       str(su_weight_method))
             tx_dir_cache[key] = cached
         return cached
 

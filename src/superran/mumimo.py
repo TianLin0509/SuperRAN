@@ -607,6 +607,44 @@ def su_weight_correlation_matrix(w_su_users: list[np.ndarray]) -> np.ndarray:
     return np.abs(gram) ** 2
 
 
+def wideband_weight_correlation(
+    w_su_users: list[np.ndarray],
+    *,
+    rb_per_rbg: int = RB_PER_RBG,
+    rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """现场取 SU 权相关矩阵的两级平均，返回 ``(逐 RBG [RBG,N,N], 宽带 [N,N])``。
+
+    与 ``GDlSerialScheduler`` 的顺序逐字对齐：
+
+    1. **逐 RB** 取每个 UE 的 SU 发射权、拼成 ``mxSuBf``，算它的 Gram 模方
+       （:func:`su_weight_correlation_matrix`，对应 ``cov(mxSuBf, true, mxUhU)``）；
+    2. **RBG 内平均**：``mxNormUhU = mxUhU / RB数``；
+    3. **宽带平均**：``mxWbUhU = sum(mxNormUhU) / RBG数``。
+
+    **顺序不能反。** 先在 RB 上做非线性（连乘、取 dB）再平均，和先平均再做
+    非线性是两个不同的量；本仓的残留相关性连乘按第 1~2 步的结果做，宽带矩阵
+    是第 3 步的结果，两者服务于不同的判决（前者定逐 RBG 的配对代价，后者是
+    现场用来做宽带配对预筛的那一个）。
+    """
+    corr_rb = su_weight_correlation_matrix(w_su_users)          # [F, N, N]
+    n_rb = int(corr_rb.shape[0])
+    step = max(1, min(int(rb_per_rbg), n_rb))
+    bounds = (
+        carrier_grid.validate_boundaries(n_rb, rbg_boundaries)
+        if rbg_boundaries is not None
+        else carrier_grid.uniform_boundaries(n_rb, step)
+    )
+    if rbg_boundaries is None and step == 1:
+        corr = corr_rb
+    elif rbg_boundaries is None and n_rb % step == 0:
+        corr = corr_rb.reshape(len(bounds), step, *corr_rb.shape[1:]).mean(axis=1)
+    else:
+        corr = np.stack([corr_rb[start:stop].mean(axis=0)
+                         for start, stop in bounds])             # [RBG, N, N]
+    return corr, corr.mean(axis=0)
+
+
 def residual_correlation_loss_db(
     w_su_users: list[np.ndarray],
     *,
@@ -637,21 +675,8 @@ def residual_correlation_loss_db(
     if len(w_su_users) < 2:
         raise ValueError("残留相关性至少需要两个用户")
     ranks = [int(np.asarray(w).shape[2]) for w in w_su_users]
-    corr_rb = su_weight_correlation_matrix(w_su_users)          # [F, N, N]
-    n_rb = int(corr_rb.shape[0])
-    step = max(1, min(int(rb_per_rbg), n_rb))
-    bounds = (
-        carrier_grid.validate_boundaries(n_rb, rbg_boundaries)
-        if rbg_boundaries is not None
-        else carrier_grid.uniform_boundaries(n_rb, step)
-    )
-    if rbg_boundaries is None and step == 1:
-        corr = corr_rb
-    elif rbg_boundaries is None and n_rb % step == 0:
-        corr = corr_rb.reshape(len(bounds), step, *corr_rb.shape[1:]).mean(axis=1)
-    else:
-        corr = np.stack([corr_rb[start:stop].mean(axis=0)
-                         for start, stop in bounds])             # [RBG, N, N]
+    corr, _wideband = wideband_weight_correlation(
+        w_su_users, rb_per_rbg=rb_per_rbg, rbg_boundaries=rbg_boundaries)
     n_rbg = int(corr.shape[0])
     start = [0]
     for r in ranks:

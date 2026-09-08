@@ -1444,6 +1444,83 @@ def test_weights_only_update_on_new_csi() -> None:
 test_weights_only_update_on_new_csi()
 
 
+# ---------------------------------------------------------------------------
+section("15  SU 权相关矩阵的两级平均顺序必须与现场一致")
+
+# 现场取配对代价的顺序是：逐 RB 算 |w^H w|^2 -> RBG 内平均 -> 宽带平均。
+# 顺序不能反：先在 RB 上做非线性（连乘、取 dB）再平均，与先平均再做非线性是
+# 两个不同的量，数值上能差到一整个 dB 量级，而两种写法都"看起来对"。
+# 本仓此前只做到 RBG 一级，宽带相关矩阵根本没有形成过。
+
+
+def test_su_weight_correlation_averaging_order() -> None:
+    wideband_fn = getattr(mu, "wideband_weight_correlation", None)
+    directions_fn = getattr(sy, "su_weight_directions", None)
+    if wideband_fn is None or directions_fn is None:
+        check(False, "提供宽带 SU 权相关矩阵与三种 SU 权取法")
+        return
+
+    gen = np.random.default_rng(11)
+    chan = ((gen.standard_normal((32, 8, 4))
+             + 1j * gen.standard_normal((32, 8, 4))) / np.sqrt(2))
+    w_a = directions_fn(chan, 2, method="svd")
+    w_b = directions_fn(chan[::-1], 2, method="svd")
+
+    rbg_corr, wideband = wideband_fn([w_a, w_b], rb_per_rbg=16)
+    per_rb = mu.su_weight_correlation_matrix([w_a, w_b])
+    manual_rbg = np.stack([per_rb[0:16].mean(axis=0), per_rb[16:32].mean(axis=0)])
+    check(float(np.max(np.abs(rbg_corr - manual_rbg))) < 1e-12,
+          "第一级是 RBG 内逐 RB 平均（cov(mxSuBf) 累加后除以 RB 数）")
+    check(float(np.max(np.abs(wideband - manual_rbg.mean(axis=0)))) < 1e-12,
+          "第二级是各 RBG 归一相关矩阵的宽带平均（mxWbUhU）")
+
+    # 顺序真的重要：先在 RB 上取 dB 再平均，和先平均再取 dB 不是一个数。
+    eps = 1e-30
+    db_then_mean = float(np.mean(10.0 * np.log10(
+        np.maximum(1.0 - per_rb[:, 0, 2], eps))))
+    mean_then_db = float(10.0 * np.log10(
+        max(1.0 - float(np.mean(per_rb[:, 0, 2])), eps)))
+    print(f"  先取 dB 再平均 {db_then_mean:.3f} dB / 先平均再取 dB "
+          f"{mean_then_db:.3f} dB")
+    check(abs(db_then_mean - mean_then_db) > 1e-6,
+          "两种平均顺序确实不是同一个量（所以顺序必须写死）")
+
+    # 残留相关性连乘必须建立在第一级结果上，不能自己再算一遍相关矩阵。
+    loss = mu.residual_correlation_loss_db([w_a, w_b], rb_per_rbg=16)
+    rebuilt = np.zeros_like(loss)
+    for user, other in ((0, 1), (1, 0)):
+        streams = np.zeros((2, rbg_corr.shape[0]))
+        for k in range(2):
+            rem = np.ones(rbg_corr.shape[0])
+            for q in range(2):
+                rem = rem * (1.0 - rbg_corr[:, user * 2 + k, other * 2 + q])
+            streams[k] = 10.0 * np.log10(np.maximum(rem, np.finfo(float).eps))
+        rebuilt[user] = streams.mean(axis=0)
+    check(float(np.max(np.abs(loss - rebuilt))) < 1e-12,
+          "残留相关性连乘吃的就是第一级的 RBG 相关矩阵，没有第二套算法")
+
+    # 三种 SU 权取法：SuType0 与 SuType2 张成同一子空间，EZF 是另一个解。
+    w_svd = directions_fn(chan, 2, method="svd")
+    w_gram = directions_fn(chan, 2, method="svd_rx_gram")
+    w_ezf = directions_fn(chan, 2, method="ezf")
+    for name, w in (("svd", w_svd), ("svd_rx_gram", w_gram), ("ezf", w_ezf)):
+        check(float(np.max(np.abs(np.linalg.norm(w, axis=1) - 1.0))) < 1e-10,
+              f"{name} 的发射权列是单位范数")
+    g_svd = mu.su_weight_correlation_matrix([w_svd, w_svd])
+    g_gram = mu.su_weight_correlation_matrix([w_gram, w_gram])
+    g_ezf = mu.su_weight_correlation_matrix([w_ezf, w_ezf])
+    print(f"  SuType0 vs SuType2 相关矩阵最大差 "
+          f"{float(np.max(np.abs(g_svd - g_gram))):.2e}；vs EZF "
+          f"{float(np.max(np.abs(g_svd - g_ezf))):.3f}")
+    check(float(np.max(np.abs(g_svd - g_gram))) < 1e-10,
+          "SuType2（接收侧 Gram 再投影）与 SuType0（SVD）张成同一子空间")
+    check(float(np.max(np.abs(g_svd - g_ezf))) > 1e-3,
+          "EZF 是真的另一个解，不是 SVD 的别名")
+
+
+test_su_weight_correlation_averaging_order()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")
