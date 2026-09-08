@@ -1082,9 +1082,112 @@ def test_rzf_reported_loading_equals_the_one_actually_used() -> None:
           "等 rank 时报告值与历史只差浮点末位（数学恒等，求和顺序不同）")
 
 
+def test_mac_throughput_meters_separate_sent_from_received() -> None:
+    """收发两侧 MAC 吞吐与 Head/Body/Tail 分段的守恒关系。
+
+    棘轮守三件事，任何一件被 revert 都会变红：
+
+    1. **分段账守恒。** 一个 busy period 从首次调度到清空 buffer 之间的每一个
+       TTI 都必须落进 Head/Body/Tail 之一，包括没轮到它的 TTI 和上行/保护
+       时隙。漏掉这些 TTI 不会报错，只会让分段速率静默偏高（DDDSU 下漏掉
+       上行时隙就是 +25%）。
+    2. **接收侧只认收对的。** 首传全错时接收侧吞吐必须严格低于发送侧；
+       如果哪天有人把接收侧改回"发送即计"，这两个数会重新相等。
+    3. **发送侧含重传。** 重传把同一份净荷再占一次资源，所以首传全错时
+       发送侧必须严格高于体验口径（后者只记首传、且不看对错）。
+    """
+    n_sample = 40
+    point = sy.UeLinkTable(
+        ue=0, sinr_db=np.full((n_sample, 4), 18.0),
+        mcs=np.full((n_sample, 4), 16),
+        se=np.full((n_sample, 4), la.MCS_TABLE_3[16].se),
+        best_rank=np.ones(n_sample, dtype=int),
+        best_se=np.full(n_sample, la.MCS_TABLE_3[16].se), geo_sinr_db=18.0,
+        outage=np.zeros(n_sample, dtype=bool), mcs_table=3, target_bler=0.1,
+        sinr_rbg_db=np.full((n_sample, 4, 17), 18.0),
+        sinr_tx_db=np.full((n_sample, 4), 18.0),
+        sinr_tx_rbg_db=np.full((n_sample, 4, 17), 18.0))
+    old_lookup = ex._bler_lookup
+    old_retx = la.harq_retransmission_bler
+
+    def _all_lost_retx(mcs, sinr_db, **kw):
+        row = dict(old_retx(mcs, sinr_db, **kw))
+        row["bler"] = 1.0
+        return row
+
+    runs = {}
+    try:
+        for p_bler in (0.0, 1.0):
+            ex._bler_lookup = lambda _m, _s, _v=p_bler: _v
+            runs[p_bler] = sy.simulate(
+                [point],
+                sys_cfg=sy.SystemConfig(duration_s=2.0, tdd_pattern="DDDSU"),
+                traffic=sy.TrafficConfig(model="ftp3", file_bytes=2_000_000,
+                                         arrival_rate_hz=0.8),
+                sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+                kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(3, 0)).cell
+        # 首传与唯一一次重传全部失败：一个 TB 都没送达。
+        ex._bler_lookup = lambda _m, _s: 1.0
+        la.harq_retransmission_bler = _all_lost_retx
+        all_lost = sy.simulate(
+            [point],
+            sys_cfg=sy.SystemConfig(duration_s=2.0, tdd_pattern="DDDSU"),
+            traffic=sy.TrafficConfig(model="ftp3", file_bytes=2_000_000,
+                                     arrival_rate_hz=0.8),
+            sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+            kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(3, 0)).cell
+    finally:
+        ex._bler_lookup = old_lookup
+        la.harq_retransmission_bler = old_retx
+
+    for p_bler, cell in runs.items():
+        seg = cell["burst_segment_rates"]
+        print(f"  首传误块 {p_bler:.0%}：接收 {cell['dl_rx_mac_tput_mbps']:.2f} / "
+              f"体验 {cell['cell_served_mbps']:.2f} / 发送 "
+              f"{cell['dl_tx_mac_tput_mbps']:.2f} Mbps；分段残差 "
+              f"{seg['segment_accounting_error_bytes']} B / "
+              f"{seg['segment_accounting_error_tti']} TTI")
+        check(seg["segment_accounting_error_bytes"] == 0,
+              f"误块 {p_bler:.0%}：分段字节守恒（三段之和 = 已发净荷）")
+        check(seg["segment_accounting_error_tti"] == 0,
+              f"误块 {p_bler:.0%}：分段 TTI 守恒（含空闲与上行时隙）")
+        check(cell["dl_rx_mac_tput_mbps"] <= cell["cell_served_mbps"] + 1e-9
+              <= cell["dl_tx_mac_tput_mbps"] + 1e-9,
+              f"误块 {p_bler:.0%}：接收侧 <= 体验口径 <= 发送侧")
+
+    check(runs[1.0]["dl_rx_mac_tput_mbps"]
+          < runs[1.0]["dl_tx_mac_tput_mbps"] - 1e-9,
+          "首传全错时接收侧严格低于发送侧（接收侧只认 HARQ 收对的 TB）")
+    check(runs[1.0]["dl_tx_mac_tput_mbps"]
+          > runs[1.0]["cell_served_mbps"] + 1e-9,
+          "首传全错时发送侧严格高于体验口径（重传再占一次资源）")
+    check(abs(runs[0.0]["dl_tx_mac_tput_mbps"]
+              - runs[0.0]["cell_served_mbps"]) < 1e-9,
+          "零误码时没有重传，发送侧与体验口径逐值相同")
+    check(runs[0.0]["dl_rx_mac_tput_mbps"]
+          > runs[1.0]["dl_rx_mac_tput_mbps"] + 1e-9,
+          "误码越多接收侧吞吐越低，而体验口径对误码不敏感")
+
+    # 首传与重传全丢：一个 TB 都没送达，接收侧必须是 0。这条钉住"接收侧
+    # 只在 ACK 时记账"——把 ACK 判据去掉，它会立刻变成与体验口径同量级。
+    print(f"  首传+重传全丢：接收 {all_lost['dl_rx_mac_tput_mbps']:.2f} / "
+          f"体验 {all_lost['cell_served_mbps']:.2f} / 发送 "
+          f"{all_lost['dl_tx_mac_tput_mbps']:.2f} Mbps，"
+          f"残余误块 {all_lost['residual_bler']:.3f}")
+    check(all_lost["dl_rx_mac_tput_mbps"] == 0.0,
+          "首传与重传都失败时接收侧 MAC 吞吐恒为 0")
+    check(all_lost["cell_served_mbps"] > 0.0
+          and all_lost["dl_tx_mac_tput_mbps"] > all_lost["cell_served_mbps"],
+          "同一次仿真里体验口径与发送侧照常为正（口径确实互相独立）")
+    check(all_lost["burst_segment_rates"]["segment_accounting_error_bytes"] == 0
+          and all_lost["burst_segment_rates"]["segment_accounting_error_tti"] == 0,
+          "全丢场景下分段账仍然守恒")
+
+
 test_single_layer_terminals_can_pair()
 test_per_ue_cap_reaches_the_air_and_rebuild_clears_stale_combinations()
 test_rzf_reported_loading_equals_the_one_actually_used()
+test_mac_throughput_meters_separate_sent_from_received()
 
 
 print("\n" + "=" * 70)

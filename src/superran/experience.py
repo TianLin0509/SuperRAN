@@ -334,6 +334,20 @@ class BusyPeriod:
     #: 只记首传；重传不带新数据，不进这里
     tx_events: list[TxEvent] = field(default_factory=list)
 
+    # ---- Head / Body / Tail 分段（现场实现口径）--------------------
+    # 一个 busy period 被拆成三段：**Head** 是第一次被调度到的那个 TTI，
+    # **Tail** 是把 buffer 清空的那个 TTI，中间全是 **Body**。Body 的 TTI 数
+    # 还包含 burst 期间**没被调度到**的 TTI（上行/保护时隙也算），因为这里
+    # 要的是墙钟速率——那些 TTI 里数据确实在等着。
+    # 只记首传净荷：重传不带新数据，它的字节在首传时就离开了 buffer，
+    # 把它记进某个 busy period 正是 ``DrbQueue.transmit`` 文档警告的串账。
+    head_sch_bytes: int = 0
+    body_sch_bytes: int = 0
+    tail_sch_bytes: int = 0
+    head_sch_tti: int = 0
+    body_sch_tti: int = 0
+    tail_sch_tti: int = 0
+
     @property
     def completed(self) -> bool:
         return self.bytes_sent >= self.bytes_arrived > 0
@@ -462,6 +476,27 @@ def arrival_item_metrics(item: ArrivalItem, tti_ms: float,
     completion = (item.completion_tti - item.arrival_tti + 1) * float(tti_ms)
     miss = completion > float(pdb_ms) if float(pdb_ms) > 0 else None
     return wait, completion, miss
+
+
+def segment_rate_mbps(payload_bytes: float, n_tti: float, tti_ms: float,
+                      *, extra_delay_ms: float = 0.0) -> float | None:
+    """现场实现的分段速率：净荷 ÷ (TTI 数 × TTI 时长 + 额外时延)。
+
+    三种取法对应 现场实现的三个量：
+
+    * ``WoTail``  —— Head+Body，**去掉清空 buffer 的那个 TTI**。它去掉的是
+      "最后一口数据没装满一个 TB" 造成的虚低，和 SuperRAN 现有体验速率
+      (``burst_metrics`` 的 ``events[:-1]``) 是同一个动机、不同的实现。
+    * ``WiTail``  —— 三段全算，即整个 busy period 的平均速率。
+    * ``WiDelay`` —— 分母再加上"数据到了但还没被调度"的等待时间。
+
+    分母为 0（例如一个 burst 只有 Tail 一个 TTI，去尾后什么都不剩）时返回
+    ``None`` 而不是 0：没有可测的时间窗，报 0 会被当成"速率很低"。
+    """
+    denom_ms = float(n_tti) * float(tti_ms) + float(extra_delay_ms)
+    if payload_bytes <= 0 or denom_ms <= 0:
+        return None
+    return float(payload_bytes) * 8.0 / (denom_ms / 1000.0) / 1e6
 
 
 @dataclass(frozen=True)
@@ -786,6 +821,10 @@ class _HarqTb:
     feedback: ap.FirstTxFeedback
     state: str = "await_feedback"
     final_feedback_tti: int | None = None
+    #: 唯一一次重传的 ACK/NACK。结果在**发送时**抽样，但要等反馈回到 gNB
+    #: 才允许被消费——接收侧 MAC 吞吐就在那一刻记账。首传即 ACK 的 TB 不走
+    #: 重传，这里保持 None（它的结果在 ``feedback.ack`` 里）。
+    final_ack: bool | None = None
 
     @property
     def ready_tti(self) -> int:
@@ -2570,6 +2609,11 @@ def simulate_experience(
     nack_count_measured = np.zeros(n_ue, dtype=int)
     retx_count_measured = np.zeros(n_ue, dtype=int)
     retx_nack_count_measured = np.zeros(n_ue, dtype=int)
+    # **接收侧** MAC 吞吐：只累加 HARQ 最终被收对的 TB（现场实现的接收侧 MAC 计数器）。记账时刻是**反馈到达 gNB 的那一刻**，不是发送
+    # 时刻；归属测量窗按该 TB 的**首传** TTI，与 retx_count_measured 同一条
+    # 归属规则，这样它才是 cell_served_mbps 的严格子集。
+    acked_payload_measured = np.zeros(n_ue, dtype=np.int64)
+    acked_tbs_measured = np.zeros(n_ue, dtype=np.int64)
     # 每个 UE 一张 ``harq_id -> TB`` 的表，外加一个空闲 id 池。
     # ``harq_max_processes=1`` 时退化成历史的"每 UE 一个槽位"，行为逐位一致。
     _max_proc = int(getattr(sys_cfg, "harq_max_processes", 1))
@@ -2585,6 +2629,54 @@ def simulate_experience(
         if int(harq_id) not in ids:
             ids.append(int(harq_id))
             ids.sort()
+
+    # Head/Body/Tail：每个 UE 当前 burst 已经被调度过几个 TTI。
+    # 0 = 还没被调度过（数据可能已经到了，但那段时间属于"首包等待"，
+    # 按现场实现口径不进 Body，只进 first_pkt_delay）。
+    hbt_burst_cur = np.zeros(n_ue, dtype=int)
+
+    def _hbt_tick(payload_by_ue: dict[int, int],
+                  burst_by_ue: dict[int, BusyPeriod]) -> None:
+        """每个 TTI 收尾时给每个 UE 的当前 burst 归一次段。
+
+        ``payload_by_ue`` 只含**首传**净荷。**上行/保护时隙也必须走这里**，
+        否则 burst 的分母漏掉那些 TTI，分段速率会被系统性高估——TDD 下
+        DDDSU 会高估 25%。
+        """
+        for _u_hb in range(n_ue):
+            _p_hb = int(payload_by_ue.get(_u_hb, 0))
+            if _p_hb > 0:
+                _b_hb = burst_by_ue[_u_hb]
+                hbt_burst_cur[_u_hb] += 1
+                if tr.queues[_u_hb].active is not _b_hb:
+                    # 这一次发送把 buffer 清空了，busy period 当场结束 → Tail
+                    _b_hb.tail_sch_bytes += _p_hb
+                    _b_hb.tail_sch_tti += 1
+                    hbt_burst_cur[_u_hb] = 0
+                elif hbt_burst_cur[_u_hb] == 1:
+                    _b_hb.head_sch_bytes += _p_hb
+                    _b_hb.head_sch_tti += 1
+                else:
+                    _b_hb.body_sch_bytes += _p_hb
+                    _b_hb.body_sch_tti += 1
+            elif hbt_burst_cur[_u_hb] > 0:
+                # 已经开始发了、这个 TTI 没轮到它：时间照算，字节不加。
+                _b_idle = tr.queues[_u_hb].active
+                if _b_idle is None:
+                    hbt_burst_cur[_u_hb] = 0
+                else:
+                    _b_idle.body_sch_tti += 1
+
+    def _count_rx_acked(ue: int, tb: _HarqTb) -> None:
+        """这个 TB 最终被对端收对了：记进接收侧 MAC 吞吐。
+
+        两个口径都留：``payload`` 是真正的用户净荷（和体验速率同一个分子），
+        ``tb_bytes`` 是含填充的 TBS（现场实现的接收侧 MAC 计数器 用的就是它）。
+        """
+        if int(tb.first_tti) < warmup:
+            return
+        acked_payload_measured[int(ue)] += int(tb.payload_bytes)
+        acked_tbs_measured[int(ue)] += int(tb.tb_bytes)
 
     def _retx_now(slot_type: str) -> dict[int, _HarqTb]:
         """本时隙每个 UE **最早的**那个可重传 TB。
@@ -2754,7 +2846,13 @@ def simulate_experience(
                         raise RuntimeError("终次 HARQ 反馈状态缺少生效 TTI")
                     if tti >= int(_pending_fb.final_feedback_tti):
                         # 终次反馈只释放这个进程；不再进入首传 OLLA/rank 学习，
-                        # 也不产生第三次传输。
+                        # 也不产生第三次传输。**但接收侧吞吐要在这里记**：
+                        # 重传收对了这份净荷才算真的送达。
+                        if _pending_fb.final_ack is None:
+                            raise RuntimeError(
+                                "终次 HARQ 反馈缺少 ACK/NACK 抽样结果")
+                        if _pending_fb.final_ack:
+                            _count_rx_acked(_u_fb, _pending_fb)
                         _release_id(_u_fb, _id_fb)
                     continue
                 if (_pending_fb.state != "await_feedback"
@@ -2766,6 +2864,7 @@ def simulate_experience(
                     olla_min=float(sched.olla_min_db),
                     olla_max=float(sched.olla_max_db))
                 if _pending_fb.first_ack:
+                    _count_rx_acked(_u_fb, _pending_fb)
                     _release_id(_u_fb, _id_fb)
                 else:
                     # NACK：进程号不还，留给这一次重传用。
@@ -2778,6 +2877,9 @@ def simulate_experience(
                 _olla_rk, sched.olla_min_db), sched.olla_max_db))
         slot = pattern[tti % pattern_len]
         if slot not in ("D", "S"):
+            # 上行/保护时隙没有下行调度，但数据还在 buffer 里等着——
+            # 它们要进 burst 的分母，否则分段速率就不是墙钟速率了。
+            _hbt_tick({}, {})
             continue
         dl_tti_full += 1
         dl_tti += int(in_measurement)
@@ -2790,6 +2892,10 @@ def simulate_experience(
         # 有空闲进程就能发新传；有同类型时隙的重传就绪就能发重传。两者都没有
         # 才真的发不出——这正是单进程时的常态。
         harq_pending = _retx_now(slot)
+        # 本 TTI 每个 UE 的首传净荷，以及它落进了哪个 busy period
+        # （Tail 那一次发送会把 busy period 当场关掉，所以要在发送前抓住它）。
+        hbt_payload_tti: dict[int, int] = {}
+        hbt_burst_tti: dict[int, BusyPeriod] = {}
         cand = [u for u in range(n_ue) if tr.has_data(u)
                 and _can_send(u, slot)
                 and not (tables[u].outage is not None and tables[u].outage[snap])]
@@ -2839,6 +2945,7 @@ def simulate_experience(
                     backlog_bytes_after=int(tr.backlog_bytes),
                     pf_average_after=r_avg,
                 )
+            _hbt_tick(hbt_payload_tti, hbt_burst_tti)
             continue
 
         rank_of: dict[int, int] = {}
@@ -3199,8 +3306,12 @@ def simulate_experience(
                     mode_expected_bler_by_ue[mode][u] += bler
                 # **发送即扣 buffer。** 重传不带新数据（字节在首传时就走了），
                 # 对 DRB 队列完全不记账；资源占用由 retx_count/allocation/PRB 账本记录。
+                _burst_hbt = tr.queues[u].active
                 sent = tr.transmit(u, tti, tb_bytes, payload, ack=ack,
                                    is_retx=is_retx)
+                if not is_retx and sent > 0 and _burst_hbt is not None:
+                    hbt_payload_tti[u] = hbt_payload_tti.get(u, 0) + int(sent)
+                    hbt_burst_tti[u] = _burst_hbt
                 if is_retx:
                     retx_count[u] += 1
                     retx_nack_count[u] += int(not ack)
@@ -3212,6 +3323,7 @@ def simulate_experience(
                     # 末次失败只进 residual_bler，不回队列。
                     harq_inflight[u][int(pending_tb.harq_id)] = replace(
                         pending_tb, state="await_final_feedback",
+                        final_ack=bool(ack),
                         final_feedback_tti=(
                             tti + int(feedback_offsets[tti % pattern_len])))
                 else:
@@ -3445,6 +3557,7 @@ def simulate_experience(
                         if selected_plan.resource_admission is not None else None),
                     mu_candidate_decisions=mu_plan.mu_candidate_decisions,
                 )
+        _hbt_tick(hbt_payload_tti, hbt_burst_tti)
         if progress and tti % 5000 == 0:
             progress(tti, int(sys_cfg.num_tti))
 
@@ -3486,6 +3599,18 @@ def simulate_experience(
     large_pdb_flags: list[bool] = []
     class_arrival_kpis: dict[str, dict[str, Any]] = {}
     measured_bursts = completed_bursts = 0
+    # Head/Body/Tail 分段（现场实现口径）：跨 UE 汇总 + 每 UE 速率分布。
+    seg_totals = {"head_bytes": 0, "body_bytes": 0, "tail_bytes": 0,
+                  "head_tti": 0, "body_tti": 0, "tail_tti": 0}
+    seg_total_delay_ms = 0.0
+    seg_wo_tail_by_ue: list[float] = []
+    seg_wi_tail_by_ue: list[float] = []
+    seg_wi_delay_by_ue: list[float] = []
+    # 分段账的自查：三段字节必须正好等于这些 busy period 已发的净荷，
+    # 三段 TTI 必须正好等于首次调度到清空 buffer 的那段 TTI 跨度。
+    # 漏一个 TTI 不会报错，只会让分段速率悄悄偏高——所以要显式对账。
+    seg_bytes_error = 0
+    seg_tti_error = 0
     completed_burst_count = inflight_burst_count = 0
     active_window_goodputs: list[float] = []
     completed_arrival_objects = 0
@@ -3514,6 +3639,46 @@ def simulate_experience(
             ue_active_goodput = float(active_metric.throughput_mbps)
             active_window_goodputs.append(ue_active_goodput)
             inflight_burst_count += 1
+        # ---- Head/Body/Tail 分段汇总（只用已排空的 busy period，和标准
+        # 体验速率同一个样本集）------------------------------------------
+        seg_head_b = int(sum(b.head_sch_bytes for b in done))
+        seg_body_b = int(sum(b.body_sch_bytes for b in done))
+        seg_tail_b = int(sum(b.tail_sch_bytes for b in done))
+        seg_head_t = int(sum(b.head_sch_tti for b in done))
+        seg_body_t = int(sum(b.body_sch_tti for b in done))
+        seg_tail_t = int(sum(b.tail_sch_tti for b in done))
+        # 首包等待 = busy period 开始到第一次被调度，和 burst_metrics 的
+        # queue_wait_ms 是同一个量，这里按 UE 求和进 WiDelay 的分母。
+        seg_delay_ms = float(sum(
+            max(0, b.first_tx_tti - b.start_tti) * float(sys_cfg.tti_ms)
+            for b in done if b.first_tx_tti >= 0))
+        seg_wo_tail = segment_rate_mbps(
+            seg_head_b + seg_body_b, seg_head_t + seg_body_t, sys_cfg.tti_ms)
+        seg_wi_tail = segment_rate_mbps(
+            seg_head_b + seg_body_b + seg_tail_b,
+            seg_head_t + seg_body_t + seg_tail_t, sys_cfg.tti_ms)
+        seg_wi_delay = segment_rate_mbps(
+            seg_head_b + seg_body_b + seg_tail_b,
+            seg_head_t + seg_body_t + seg_tail_t, sys_cfg.tti_ms,
+            extra_delay_ms=seg_delay_ms)
+        seg_bytes_error += (seg_head_b + seg_body_b + seg_tail_b
+                            - int(sum(b.bytes_sent for b in done)))
+        seg_tti_error += (seg_head_t + seg_body_t + seg_tail_t - int(sum(
+            b.last_tx_tti - b.first_tx_tti + 1 for b in done
+            if b.first_tx_tti >= 0 and b.last_tx_tti >= 0)))
+        seg_totals["head_bytes"] += seg_head_b
+        seg_totals["body_bytes"] += seg_body_b
+        seg_totals["tail_bytes"] += seg_tail_b
+        seg_totals["head_tti"] += seg_head_t
+        seg_totals["body_tti"] += seg_body_t
+        seg_totals["tail_tti"] += seg_tail_t
+        seg_total_delay_ms += seg_delay_ms
+        if seg_wo_tail is not None:
+            seg_wo_tail_by_ue.append(seg_wo_tail)
+        if seg_wi_tail is not None:
+            seg_wi_tail_by_ue.append(seg_wi_tail)
+        if seg_wi_delay is not None:
+            seg_wi_delay_by_ue.append(seg_wi_delay)
         busy_waits = [m.queue_wait_ms for m in metrics if m.queue_wait_ms is not None]
         busy_completes = [m.completion_delay_ms for m in metrics
                           if m.completion_delay_ms is not None]
@@ -3634,6 +3799,32 @@ def simulate_experience(
             "small_burst_head_inclusive_mbps": _mean(shead),
             "served_mbps": float(
                 served_measured[u] * 8 / max(measurement_duration_s, _EPS) / 1e6),
+            # 每 UE 的收发两侧 MAC 吞吐，口径见结果里的 throughput_definitions。
+            "rx_mac_tput_mbps": float(
+                int(acked_payload_measured[u]) * 8
+                / max(measurement_duration_s, _EPS) / 1e6),
+            "rx_mac_tput_tbs_mbps": float(
+                int(acked_tbs_measured[u]) * 8
+                / max(measurement_duration_s, _EPS) / 1e6),
+            "tx_mac_tput_mbps": float(
+                float(attempted_payload_measured[u]) * 8
+                / max(measurement_duration_s, _EPS) / 1e6),
+            # 现场实现的 Head/Body/Tail 分段。比特数与 TTI 数守恒：
+            # 三段字节之和 = 这些 busy period 已发净荷，三段 TTI 之和 =
+            # 从首次调度到清空 buffer 的全部 TTI（含没轮到它的那些）。
+            "burst_segments": {
+                "bursts": len(done),
+                "head_sch_bit": seg_head_b * 8,
+                "body_sch_bit": seg_body_b * 8,
+                "tail_sch_bit": seg_tail_b * 8,
+                "head_sch_tti": seg_head_t,
+                "body_sch_tti": seg_body_t,
+                "tail_sch_tti": seg_tail_t,
+                "first_pkt_delay_ms": seg_delay_ms,
+                "dl_rate_wo_tail_mbps": seg_wo_tail,
+                "dl_rate_wi_tail_mbps": seg_wi_tail,
+                "dl_rate_wi_delay_mbps": seg_wi_delay,
+            },
             "bursts": len(thp),
             "completed_bursts": len(done),
             "completed_arrival_objects": len(done_items),
@@ -3711,6 +3902,8 @@ def simulate_experience(
     backlog = int(tr.backlog_bytes)
     acked_total = int(np.sum(served))
     acked_total_measured = int(np.sum(served_measured))
+    rx_acked_payload_total = int(np.sum(acked_payload_measured))
+    rx_acked_tbs_total = int(np.sum(acked_tbs_measured))
     # **满缓冲下这个检查不成立，必须报 None 而不是 0.0。**
     # 它比的是「到达 = 已发 + 积压」，而 full buffer 的 offered 是无界的种子字节，
     # 差值没有意义。旧容量分支在这里算出 3.7e21（把 1<<62 的种子算进了 offered），
@@ -4000,6 +4193,82 @@ def simulate_experience(
         "pdb_miss_ratio": float(np.mean(pdb_flags)) if pdb_flags else None,
         "cell_served_mbps": float(
             acked_total_measured * 8 / max(measurement_duration_s, _EPS) / 1e6),
+        # 接收侧 MAC 吞吐：只算最终被收对的 TB。它必然 ≤ cell_served_mbps，
+        # 差额 = 两次都传丢的净荷 + 仿真结束时还没等到反馈的那部分（右删失，
+        # 数量见 pending_harq_tb_at_end）。
+        "dl_rx_mac_tput_mbps": float(
+            rx_acked_payload_total * 8 / max(measurement_duration_s, _EPS) / 1e6),
+        "dl_rx_mac_tput_tbs_mbps": float(
+            rx_acked_tbs_total * 8 / max(measurement_duration_s, _EPS) / 1e6),
+        # 发送侧 MAC 吞吐：调度器真正推上空口的净荷，首传与重传都算、不看
+        # ACK/NACK。重传把同一份净荷再占一次资源，所以它 ≥ cell_served_mbps。
+        "dl_tx_mac_tput_mbps": float(
+            attempted_total * 8 / max(measurement_duration_s, _EPS) / 1e6),
+        # Head/Body/Tail 分段（现场实现口径）。**跨 UE 汇总的那三个速率
+        # 是"按 burst 时间加权的每用户速率"，不是小区吞吐**——分母是各 UE
+        # 各自的 burst TTI 之和，同一个 TTI 里两个 UE 都在忙就会被数两次。
+        # 要小区吞吐看 cell_served_mbps / dl_tx_mac_tput_mbps。
+        "burst_segment_rates": {
+            "scope": (
+                "completed busy periods starting inside the measurement window; "
+                "first transmissions only (a retransmission carries no new "
+                "payload and its bytes already left the queue); the TTI counters "
+                "include TTIs where the UE was not scheduled and uplink/special "
+                "slots, so the rates are wall-clock rates"),
+            "ues_with_completed_bursts": len(seg_wi_tail_by_ue),
+            "head_sch_bit": int(seg_totals["head_bytes"]) * 8,
+            "body_sch_bit": int(seg_totals["body_bytes"]) * 8,
+            "tail_sch_bit": int(seg_totals["tail_bytes"]) * 8,
+            "head_sch_tti": int(seg_totals["head_tti"]),
+            "body_sch_tti": int(seg_totals["body_tti"]),
+            "tail_sch_tti": int(seg_totals["tail_tti"]),
+            "first_pkt_delay_ms": float(seg_total_delay_ms),
+            # 两个对账残差恒为 0；非 0 说明分段判定漏了 TTI 或串了 busy period。
+            "segment_accounting_error_bytes": int(seg_bytes_error),
+            "segment_accounting_error_tti": int(seg_tti_error),
+            "dl_rate_wo_tail_mbps": segment_rate_mbps(
+                seg_totals["head_bytes"] + seg_totals["body_bytes"],
+                seg_totals["head_tti"] + seg_totals["body_tti"],
+                sys_cfg.tti_ms),
+            "dl_rate_wi_tail_mbps": segment_rate_mbps(
+                seg_totals["head_bytes"] + seg_totals["body_bytes"]
+                + seg_totals["tail_bytes"],
+                seg_totals["head_tti"] + seg_totals["body_tti"]
+                + seg_totals["tail_tti"], sys_cfg.tti_ms),
+            "dl_rate_wi_delay_mbps": segment_rate_mbps(
+                seg_totals["head_bytes"] + seg_totals["body_bytes"]
+                + seg_totals["tail_bytes"],
+                seg_totals["head_tti"] + seg_totals["body_tti"]
+                + seg_totals["tail_tti"], sys_cfg.tti_ms,
+                extra_delay_ms=seg_total_delay_ms),
+            "dl_rate_wo_tail_mbps_mean": _mean(seg_wo_tail_by_ue),
+            "dl_rate_wi_tail_mbps_mean": _mean(seg_wi_tail_by_ue),
+            "dl_rate_wi_delay_mbps_mean": _mean(seg_wi_delay_by_ue),
+            "dl_rate_wi_tail_mbps_p5": _pct(seg_wi_tail_by_ue, 5),
+        },
+        "throughput_definitions": {
+            "cell_served_mbps": (
+                "send side, first transmissions only: payload bytes that left "
+                "the DRB queue, regardless of ACK/NACK (experience-rate "
+                "numerator)"),
+            "dl_tx_mac_tput_mbps": (
+                "send side, first transmissions + retransmissions: payload "
+                "bytes pushed onto the air interface, regardless of ACK/NACK "
+                "(field send-side MAC counter scope)"),
+            "dl_rx_mac_tput_mbps": (
+                "receive side: payload bytes of TBs whose HARQ feedback finally "
+                "acknowledged them, counted when the feedback reaches the gNB "
+                "(field receive-side MAC counter scope)"),
+            "dl_rx_mac_tput_tbs_mbps": (
+                "same TB set as dl_rx_mac_tput_mbps but counting the full TBS "
+                "including padding (field receive-side MAC counter, raw-TBS variant)"),
+            "measurement_attribution": (
+                "send-side counters are attributed to the TTI of the "
+                "transmission; receive-side counters are attributed to the "
+                "first-transmission TTI of the TB, same rule as retx_attempts"),
+            "expected_ordering": (
+                "dl_rx_mac_tput_mbps <= cell_served_mbps <= dl_tx_mac_tput_mbps"),
+        },
         "avg_mcs": float(
             np.sum(mcs_sum_measured) / max(np.sum(sched_cnt_measured), 1)),
         "avg_mcs_first_tx": float(
@@ -4240,7 +4509,10 @@ def simulate_experience(
             "bler_source": "preset NewTx curves only",
             "identity": "same MCS/RBG-count/rank/TBS as initial TB",
             "timing": "retransmit on the same D/S slot type",
-            "post_failure": "payload remains queued and later becomes a new TB",
+            "post_failure": (
+                "payload dropped; the bytes left the DRB queue at the first "
+                "transmission and are not re-queued on a final NACK; the loss "
+                "is counted by residual_bler only"),
         },
         "class_allocated_rbg": class_alloc_rbg,
         "class_allocated_rbg_scope": (

@@ -3341,16 +3341,18 @@ _rt_point = sysm.UeLinkTable(
     sinr_tx_rbg_db=np.full((_rt_n, 4, 17), 18.0))
 _rt_old_bler = expm._bler_lookup
 _rt_runs = {}
+_rt_results = {}
 try:
     for _rt_p in (0.0, 0.3, 1.0):
         expm._bler_lookup = lambda _m, _s, _v=_rt_p: _v
-        _rt_runs[_rt_p] = sysm.simulate(
+        _rt_results[_rt_p] = sysm.simulate(
             [_rt_point],
             sys_cfg=sysm.SystemConfig(duration_s=3.0, tdd_pattern="DDDSU"),
             traffic=sysm.TrafficConfig(model="ftp3", file_bytes=2_000_000,
                                        arrival_rate_hz=0.8),
             sched=sysm.SchedulerConfig(mu_enabled=False, olla_enabled=False),
-            kpi=sysm.KpiConfig(warmup_tti=0), rng=rg.RngBook(3, 0)).cell
+            kpi=sysm.KpiConfig(warmup_tti=0), rng=rg.RngBook(3, 0))
+        _rt_runs[_rt_p] = _rt_results[_rt_p].cell
 finally:
     expm._bler_lookup = _rt_old_bler
 _rt_rate = [_rt_runs[p]["ue_experienced_median_mbps"] for p in (0.0, 0.3, 1.0)]
@@ -3367,6 +3369,59 @@ check(_rt_delay[0] < _rt_delay[1] < _rt_delay[2],
 check(abs(_rt_runs[0.0]["cell_served_mbps"]
           - _rt_runs[1.0]["cell_served_mbps"]) < 1e-9,
       "已发送字节不随误码变化——发送即计入，KPI 不看这个 TB 对不对")
+
+# --- 收/发两侧 MAC 吞吐：把"推上空口"和"对端收对了"分成两把尺子 ---------
+# cell_served_mbps 是体验速率的分子（首传净荷，不看 ACK/NACK），上面刚证明
+# 它对误码完全不敏感。新增的两个口径必须把这件事分开：
+#   dl_tx_mac_tput_mbps —— 首传+重传的净荷，重传把同一份数据再占一次资源；
+#   dl_rx_mac_tput_mbps —— 只有 HARQ 最终确认收对的净荷。
+_mac0, _mac1 = _rt_runs[0.0], _rt_runs[1.0]
+print(f"  首传误块 0/100%：接收侧 {_mac0['dl_rx_mac_tput_mbps']:.1f}/"
+      f"{_mac1['dl_rx_mac_tput_mbps']:.1f}，体验口径 "
+      f"{_mac0['cell_served_mbps']:.1f}/{_mac1['cell_served_mbps']:.1f}，"
+      f"发送侧 {_mac0['dl_tx_mac_tput_mbps']:.1f}/"
+      f"{_mac1['dl_tx_mac_tput_mbps']:.1f} Mbps")
+check(all(r["dl_rx_mac_tput_mbps"] <= r["cell_served_mbps"] + 1e-9
+          and r["cell_served_mbps"] <= r["dl_tx_mac_tput_mbps"] + 1e-9
+          for r in _rt_runs.values()),
+      "接收侧 <= 体验口径 <= 发送侧，三个误块率下都成立")
+check(abs(_mac0["dl_tx_mac_tput_mbps"] - _mac0["cell_served_mbps"]) < 1e-9,
+      "零误码时没有重传，发送侧与体验口径逐值相同")
+check(_mac1["dl_tx_mac_tput_mbps"] > _mac1["cell_served_mbps"] + 1e-9,
+      "首传全错时发送侧严格更高——重传把同一份净荷又推了一次空口")
+check(_mac0["dl_rx_mac_tput_mbps"] > _mac1["dl_rx_mac_tput_mbps"] + 1e-9,
+      "首传全错时接收侧严格更低，而体验口径纹丝不动（两把尺子确实不同）")
+check(_mac0["dl_rx_mac_tput_tbs_mbps"] >= _mac0["dl_rx_mac_tput_mbps"] - 1e-9,
+      "含填充的 TBS 口径不低于净荷口径")
+check(_mac0["throughput_definitions"]["expected_ordering"]
+      == "dl_rx_mac_tput_mbps <= cell_served_mbps <= dl_tx_mac_tput_mbps",
+      "三个口径的定义与预期大小关系写在结果里，不靠读代码")
+
+# --- Head/Body/Tail 分段：字节与 TTI 必须守恒 ---------------------------
+# 分段判定漏一个 TTI 不会报错，只会让分段速率悄悄偏高，所以要显式对账：
+# 三段字节 = 这些 busy period 已发净荷；三段 TTI = 首次调度到清空 buffer
+# 的全部 TTI（含没轮到它的、以及上行/保护时隙）。
+_seg0 = _mac0["burst_segment_rates"]
+print(f"  分段：Head {_seg0['head_sch_tti']} TTI / Body "
+      f"{_seg0['body_sch_tti']} TTI / Tail {_seg0['tail_sch_tti']} TTI，"
+      f"去尾 {_seg0['dl_rate_wo_tail_mbps']:.1f}、含尾 "
+      f"{_seg0['dl_rate_wi_tail_mbps']:.1f}、含首包等待 "
+      f"{_seg0['dl_rate_wi_delay_mbps']:.1f} Mbps")
+check(_seg0["segment_accounting_error_bytes"] == 0
+      and _seg0["segment_accounting_error_tti"] == 0,
+      "Head/Body/Tail 的字节与 TTI 对账残差为 0")
+check(_seg0["ues_with_completed_bursts"] >= 1 and _seg0["tail_sch_tti"] >= 1,
+      "确实有已排空的 busy period 参与分段统计（不是空样本自动通过）")
+check(_seg0["dl_rate_wi_tail_mbps"] >= _seg0["dl_rate_wi_delay_mbps"],
+      "分母加上首包等待之后速率只会更低")
+check(_seg0["head_sch_tti"] + _seg0["body_sch_tti"] + _seg0["tail_sch_tti"]
+      >= _seg0["ues_with_completed_bursts"],
+      "每个已排空 burst 至少贡献一个 TTI")
+_seg_user = _rt_results[0.0].users[0]["burst_segments"]
+check(_seg_user["head_sch_bit"] + _seg_user["body_sch_bit"]
+      + _seg_user["tail_sch_bit"] > 0
+      and _seg_user["dl_rate_wi_tail_mbps"] is not None,
+      "每 UE 也能拿到自己的分段账与三个分段速率")
 
 print("\n" + "=" * 70)
 if FAILED:
