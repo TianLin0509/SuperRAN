@@ -2030,11 +2030,19 @@ def build_link_tables(
                     )
                     if occasion == previous:
                         continue
-                    age = ca.rbg_sounding_age_occasions(
-                        effective_csi, n_rbg_eff, s * snapshot_ms,
-                        rb_per_rbg=rb_per_rbg, opportunity_offset_ms=offset,
-                        frequency_resource_id=resource_id)
-                    fresh |= age == 0
+                    # **两个快照之间可能跨过不止一次 SRS 机会**（快照间隔比 SRS
+                    # 周期长时就会这样）。只标最后一次那一跳，中间那几跳刚测到的
+                    # CSI 就被静默丢掉——实测快照 20 ms / SRS 10 ms 时每个快照丢
+                    # 一跳。这里把区间 (previous, occasion] 里的每一次机会都标上。
+                    span = min(occasion - previous, int(effective_csi.hop_factor))
+                    for n in range(occasion - span + 1, occasion + 1):
+                        t_n = (offset + n * effective_csi.srs_period_ms
+                               + effective_csi.processing_delay_ms)
+                        age = ca.rbg_sounding_age_occasions(
+                            effective_csi, n_rbg_eff, t_n,
+                            rb_per_rbg=rb_per_rbg, opportunity_offset_ms=offset,
+                            frequency_resource_id=resource_id)
+                        fresh |= age == 0
                 csi_new_seq[s] = fresh
             if aging:
                 assert effective_csi is not None
@@ -2605,14 +2613,15 @@ def build_mu_pair_tables(
                                             + power_loss[:, None])
                         pred_sinr[s] = np.mean(pred_sinr_rbg[s], axis=1)
                         pred_leakage[s] = 0.0  # 解析式不产生残余干扰功率比
-                        hp = mu.effective_user_channels(
-                            [ti.h_prec_rbg[s][None], tj.h_prec_rbg[s][None]],
-                            streams_per_user=max(pair_ranks))
-                        g = mu._wideband_user_vectors(hp)
-                        denom = max(
-                            float(np.linalg.norm(g[0]) * np.linalg.norm(g[1])),
-                            _EPS)
-                        corr[s] = abs(complex(g[0].conj() @ g[1])) / denom
+                        # **配对判决用的相关系数取自宽带 SU 权相关矩阵**
+                        # （现场 mxWbUhU 的跨用户块），与上面的残留相关性连乘
+                        # 同源、同一条两级平均链：逐 RB → RBG 平均 → 宽带平均。
+                        # 旧写法另算一个基于**等效信道**宽带向量的相关系数，
+                        # 与真正打出去的 SU 波束不是同一个量，宽带矩阵则算完丢弃。
+                        corr[s] = mu.wideband_pair_correlation(
+                            [_tx_dir(i, s, rank_i), _tx_dir(j, s, rank_j)],
+                            rb_per_rbg=rows_per_rbg,
+                            rbg_boundaries=rbg_boundaries)
 
                     su_true = np.column_stack((ti.sinr_db[:, rank_i - 1],
                                                tj.sinr_db[:, rank_j - 1]))

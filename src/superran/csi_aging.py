@@ -330,26 +330,39 @@ def hop_order(num_rbg: int, *, rb_per_rbg: int = 16,
     return order, f"superran:{hw.SUPERRAN_SRS_HOPPING_PROFILE_ID}"
 
 
-def usable_srs_occasion_index(cfg: CsiConfig, t_ms: float, *,
-                              opportunity_offset_ms: float = 0.0) -> int:
-    """时刻 ``t_ms`` 上，**真正可用**的那次 SRS 机会的序号（可为负）。
+def srs_occasion_index(t_ms: float, *, period_ms: float,
+                       processing_delay_ms: float = 0.0,
+                       offset_ms: float = 0.0) -> int:
+    """时刻 ``t_ms`` 上真正可用的那次 SRS 机会的序号（可为负）。
+
+    **全仓唯一的 SRS 时序定义。** 信道生成侧（跳频估计在第几跳）与调度侧
+    （CSI 陈旧了多久、这一跳新不新）都必须调它；两边各写一份公式的后果是
+    两个时钟慢慢漂开，而漂开这件事在 KPI 上完全看不出来——实测漂开时
+    20 个快照里两侧标出来的 RBG **一个都对不上**。
 
     处理时延不是“给最新一次 SRS 的年龄机械加一个常数”。时刻 t 真正可用的是
     ``measurement_time <= t - processing_delay`` 的最近一次机会；尤其在周期边界
-    ``t = nT`` 上，本次 SRS 仍在处理，绝不能立即拿来预编码。先按 t 选机会、再把
-    处理时延加到年龄上，会把尚不可用的机会错当成可用，并在跳频场景选错 RBG phase。
-
-    陈旧度（毫秒）与新鲜度（布尔）必须共用这一个时序，否则两者会各自漂移，
-    而这种漂移在 KPI 上完全看不出来。
+    ``t = nT`` 上，本次 SRS 仍在处理，绝不能立即拿来预编码。
     """
-    per = cfg.srs_period_ms
-    offset = float(opportunity_offset_ms)
     if not np.isfinite(t_ms):
         raise ValueError("t_ms 必须是有限数")
+    per = float(period_ms)
+    if not np.isfinite(per) or per <= 0.0:
+        raise ValueError("period_ms 必须是有限正数")
+    offset = float(offset_ms)
     if not np.isfinite(offset) or offset < 0.0 or offset >= per:
-        raise ValueError("opportunity_offset_ms 必须是 [0, srs_period_ms) 内的有限数")
-    usable = float(t_ms) - float(cfg.processing_delay_ms)
+        raise ValueError("offset_ms 必须是 [0, period_ms) 内的有限数")
+    usable = float(t_ms) - float(processing_delay_ms)
     return int(np.floor((usable - offset) / per + 1e-9))
+
+
+def usable_srs_occasion_index(cfg: CsiConfig, t_ms: float, *,
+                              opportunity_offset_ms: float = 0.0) -> int:
+    """:func:`srs_occasion_index` 的 CsiConfig 包装，语义完全相同。"""
+    return srs_occasion_index(
+        t_ms, period_ms=cfg.srs_period_ms,
+        processing_delay_ms=cfg.processing_delay_ms,
+        offset_ms=float(opportunity_offset_ms))
 
 
 def rbg_csi_staleness_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,

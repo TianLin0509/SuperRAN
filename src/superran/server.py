@@ -2575,6 +2575,20 @@ def sr_system_sim(
             periodic_trace_history=float(warmup_s) > 0)
     except ValueError as exc:
         return {"error": str(exc)}
+    # **跳频老化只能算一遍。** 数据集用 ls_hop_* 生成时，逐 RBG 的陈旧度已经
+    # 烘进 h_est 了（未被本跳覆盖的 RBG 保留的是它自己上一次机会的估计值）。
+    # 系统侧再开 srs_hopping，就会在这份已经陈旧的 CSI 上按 stale_channel 再退
+    # 一次，等于把同一个跳频扫描算两遍；而且两侧的 SRS 周期/offset 可以配不同，
+    # 两个时钟一漂开，逐 RBG 的年龄和新鲜度门说的就不是同一件事。KPI 上看不出来。
+    _ds_est_mode = str(ds.config.get("channel_est_mode", "ls_linear"))
+    if _ds_est_mode in ("ls_hop_sequential", "ls_hop_concat") and csi_cfg.enabled             and csi_cfg.hopping:
+        return {"error": (
+            f"数据集用 channel_est_mode={_ds_est_mode!r} 生成，逐 RBG 的跳频陈旧度"
+            "已经在 h_est 里了；系统侧再开 srs_hopping 会把同一个跳频扫描算两遍，"
+            "而且两侧的 SRS 周期/offset 可以配不同，两个时钟会漂开。"
+            "二选一：srs_hopping=False（陈旧度由数据集提供，系统侧只补处理时延与"
+            "周期内相位），或者用 ls_mmse / ls_linear 重新生成数据集"
+            "（全带 SRS 估计，跳频陈旧度由系统侧建模）。")}
     # **h_est 的物理来源必须与 SRS 语义一致。** 系统仿真把 h_est 当基站侧
     # SRS 预编码 CSI（CSI 老化模型的物理语义就是"SRS 探到的信道"）。
     # 比较门已对 csi='srs' 硬校验 provenance，这条更常用的主链路同等对待：

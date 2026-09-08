@@ -532,17 +532,30 @@ def estimate_channel_with_interference(
         contaminated[observed], pilots, math.sqrt(max(n0, 0.0)), rng)
 
     if mode == "ls_hop_concat" and pilot_history:
-        positions = [np.asarray(rb, dtype=np.int64).reshape(-1) for rb, _ in pilot_history]
-        values = [np.asarray(v) for _, v in pilot_history]
-        positions.append(pilots)
-        values.append(pilot_obs)
+        # **本次机会的观测必须赢。** 跳序是 17 个 RBG 的置换，第 18 次机会又会
+        # 回到第 1 次探过的那个 RBG；历史里那条陈旧观测和本次观测落在同一批 RB
+        # 上。曾经的写法把本次观测拼在最后再用 np.unique(return_index=True) 去重
+        # ——它保留的是**首次**出现，于是从第 18 次机会起，刚测到的子带永远被
+        # 17 次机会以前的旧值挤掉（实测：真值 9、LS 观测 9，输出仍是旧的 1）。
+        # 现在显式地先把与本次 RB 重叠的历史条目剔掉，不依赖去重函数的取舍顺序。
+        current = set(int(v) for v in pilots.tolist())
+        positions = [pilots]
+        values = [pilot_obs]
+        for raw_rb, raw_val in pilot_history:
+            rb = np.asarray(raw_rb, dtype=np.int64).reshape(-1)
+            keep_mask = np.asarray([int(v) not in current for v in rb.tolist()])
+            if not bool(np.any(keep_mask)):
+                continue
+            positions.append(rb[keep_mask])
+            values.append(np.asarray(raw_val)[keep_mask])
         merged_pos = np.concatenate(positions)
         merged_val = np.concatenate(values, axis=0)
-        keep = np.unique(merged_pos, return_index=True)[1]
-        order = np.argsort(merged_pos[keep])
-        idx = keep[order]
+        if np.unique(merged_pos).size != merged_pos.size:
+            raise ValueError(
+                "跳频拼接出现重复导频 RB：各跳的 RB 集合必须互不重叠")
+        order = np.argsort(merged_pos)
         full = frequency_interpolate(
-            merged_val[idx], merged_pos[idx], n_rb, est_mode=mode,
+            merged_val[order], merged_pos[order], n_rb, est_mode=mode,
             tau_rms_s=tau_s, delta_f_hz=delta_f, snr_linear=snr_linear)
     else:
         full = frequency_interpolate(
@@ -1239,6 +1252,29 @@ class InternalSimSource:
         self._hop_estimate: dict[tuple[int, str], np.ndarray] = {}
         self._hop_pilots: dict[tuple[int, str], dict[int, tuple[np.ndarray, np.ndarray]]] = {}
         self._hop_last_seen: dict[tuple[int, str], dict[int, int]] = {}
+        self._hop_occasion: dict[tuple[int, str], int] = {}
+
+    def _srs_occasion(self, trajectory_time_s: float, slot_duration_s: float,
+                      srs_offset_slots: int) -> tuple[int, float, float]:
+        """本样本时刻真正可用的那次 SRS 机会，返回 ``(序号, 周期 ms, 时延 ms)``。
+
+        **必须与调度侧共用同一个时序公式**（``csi_aging.srs_occasion_index``）。
+        早先这里按"一个样本一次机会"推进跳序，而调度侧按 SRS 周期 + 处理时延推进，
+        两个时钟从第一个快照起就对不上——实测 20 个快照里两侧标出来的 RBG
+        一个都对不上，估计值的逐 RBG 年龄和调度器的新鲜度门说的是两件事。
+        """
+        from . import csi_aging as ca  # noqa: PLC0415
+
+        period_ms = max(
+            float(self.cfg.get("srs_periodicity", 10) or 10) * float(slot_duration_s) * 1e3,
+            1e-9,
+        )
+        delay_ms = float(self.cfg.get("srs_processing_delay_ms", 2.0) or 0.0)
+        offset_ms = (float(srs_offset_slots) * float(slot_duration_s) * 1e3) % period_ms
+        index = ca.srs_occasion_index(
+            float(trajectory_time_s) * 1e3, period_ms=period_ms,
+            processing_delay_ms=delay_ms, offset_ms=offset_ms)
+        return index, period_ms, delay_ms
 
     def _srs_pilot_rbs(self, n_rb: int, occasion: int, est_mode: str) -> np.ndarray:
         """本次 SRS 机会真正探到的 RB。
@@ -1631,6 +1667,24 @@ class InternalSimSource:
         # 小尺度实现现在按轨迹派生，时间演化全靠多普勒。速度为 0 时多普勒为 0、
         # 位置也不动，于是同一个 UE 的每一轮都是同一个矩阵。它跑得通、meta 自洽、
         # 下游还会把它们当成独立快照——正是最难查的那种假数据。
+        # TDD 图案与 SRS offset 只依赖配置，提到循环外算一次：估计器要在生成
+        # 每个样本之前就知道本条轨迹的 SRS 时序。
+        pattern_name = str(self.cfg.get("tdd_pattern", "DDDSU"))
+        try:
+            slots_pattern = get_tdd_pattern(pattern_name).slots
+        except ValueError:
+            slots_pattern = "".join(ch for ch in pattern_name if ch in "DSU") or "D"
+        paired_dl_rs_slot = next(
+            (idx for idx, direction in enumerate(slots_pattern) if direction in "DS"), 0)
+        paired_ul_srs_slot = next(
+            (idx for idx, direction in enumerate(slots_pattern) if direction in "US"), 0)
+        explicit_srs_offset = self.cfg.get("srs_offset")
+        srs_offset = (
+            int(explicit_srs_offset)
+            if explicit_srs_offset is not None
+            else paired_ul_srs_slot
+        )
+
         rounds = -(-int(self.num_samples) // max(int(self.num_ues), 1))
         if rounds > 1 and doppler <= 0.0:
             raise ValueError(
@@ -1777,6 +1831,9 @@ class InternalSimSource:
             est_hop_index = -1
             est_cold_start = False
             est_rbg_age = None
+            est_srs_occasion = None
+            srs_period_ms = float(self.cfg.get("srs_periodicity", 10) or 10) * slot_duration * 1e3
+            srs_delay_ms = float(self.cfg.get("srs_processing_delay_ms", 2.0) or 0.0)
             if est_mode == "ideal":
                 h_dl_est = h_dl.copy()
                 h_ul_est = h_dl.copy()
@@ -1791,15 +1848,27 @@ class InternalSimSource:
                     min(snr_db, measurement_sir if link == "BOTH" else snr_db),
                     0.1,
                 )
-                # **本次 SRS 机会 = 本样本。** 同一个 UE 的相邻样本相隔
-                # sample_interval_s，跳频序号就是它的轮次。
-                est_pilot_rb = self._srs_pilot_rbs(n_rb, round_index, est_mode)
+                # **一次 SRS 机会才推进一跳，不是一个样本推进一跳。**
+                # 时序取自 csi_aging.srs_occasion_index —— 与调度侧同一个公式、
+                # 同一个周期、同一个处理时延。两次机会之间基站手上没有新测量，
+                # CSI 原样保持。
                 hopping = est_mode in HOP_EST_MODES
+                occasion, srs_period_ms, srs_delay_ms = self._srs_occasion(
+                    trajectory_time_s, slot_duration, srs_offset)
+                est_srs_occasion = occasion
+                est_pilot_rb = self._srs_pilot_rbs(n_rb, occasion, est_mode)
                 mask = np.ones(n_time, dtype=bool)
                 results = []
                 for direction_key, est_rng in (("dl", rng_est), ("ul", rng_est)):
                     key = (ue_id, direction_key)
-                    prior = self._hop_estimate.get(key) if hopping else None
+                    held = self._hop_estimate.get(key)
+                    if (hopping and held is not None
+                            and self._hop_occasion.get(key) == occasion
+                            and held.shape == h_dl.shape):
+                        # 本样本落在同一次 SRS 机会内：没有新测量，保持不变。
+                        results.append(held)
+                        continue
+                    prior = held if hopping else None
                     history = (
                         tuple(self._hop_pilots.get(key, {}).values())
                         if est_mode == "ls_hop_concat" else ()
@@ -1824,21 +1893,21 @@ class InternalSimSource:
                         est_cold_start = est_cold_start or (
                             key not in self._hop_estimate)
                         self._hop_estimate[key] = out.h_est
+                        self._hop_occasion[key] = occasion
                         # 键是**被探到的 RBG**，不是机会序号：跳序是一个置换，
                         # 第 o 次机会探的是 _COMPANY_HOP_ORDER[o % 17] 号 RBG。
-                        hop_rbg = int(_COMPANY_HOP_ORDER[int(round_index) % 17])
+                        hop_rbg = int(_COMPANY_HOP_ORDER[occasion % 17])
                         self._hop_pilots.setdefault(key, {})[hop_rbg] = (
                             out.pilot_rb, out.h_pilot)
-                        self._hop_last_seen.setdefault(key, {})[hop_rbg] = int(
-                            round_index)
+                        self._hop_last_seen.setdefault(key, {})[hop_rbg] = occasion
                     results.append(out.h_est)
                 h_dl_est, h_ul_est = results
                 if hopping:
                     seen = self._hop_last_seen.get((ue_id, "dl"), {})
-                    est_hop_index = int(_COMPANY_HOP_ORDER[int(round_index) % 17])
+                    est_hop_index = int(_COMPANY_HOP_ORDER[occasion % 17])
                     # 每个 RBG 的 CSI 已经陈旧了多少次 SRS 机会；-1 = 还没探到过。
                     est_rbg_age = [
-                        (int(round_index) - seen[k]) if k in seen else -1
+                        (occasion - seen[k]) if k in seen else -1
                         for k in range(17)
                     ]
             h_ul = h_dl.copy()  # canonical v2: physical transpose, same stored BS/UE tensor
@@ -1913,25 +1982,6 @@ class InternalSimSource:
                 max(int(self.cfg.get("num_interfering_ues", 0) or 0), 1)), -20.0)
             ul_sinr = -10.0 * math.log10(
                 10.0 ** (-snr_db / 10.0) + 10.0 ** (-ul_measure_sir / 10.0)
-            )
-            pattern_name = str(self.cfg.get("tdd_pattern", "DDDSU"))
-            try:
-                slots_pattern = get_tdd_pattern(pattern_name).slots
-            except ValueError:
-                slots_pattern = "".join(ch for ch in pattern_name if ch in "DSU") or "D"
-            paired_dl_rs_slot = next(
-                (idx for idx, direction in enumerate(slots_pattern) if direction in "DS"),
-                0,
-            )
-            paired_ul_srs_slot = next(
-                (idx for idx, direction in enumerate(slots_pattern) if direction in "US"),
-                0,
-            )
-            explicit_srs_offset = self.cfg.get("srs_offset")
-            srs_offset = (
-                int(explicit_srs_offset)
-                if explicit_srs_offset is not None
-                else paired_ul_srs_slot
             )
             antenna_profile = (
                 f"fixed_1to{elements_per_port}_vertical_subarray_{n_bs}T"
@@ -2018,6 +2068,11 @@ class InternalSimSource:
                 "channel_est_full_band_srs": bool(
                     int(np.asarray(est_pilot_rb).size) == n_rb),
                 "srs_hop_index": est_hop_index,
+                "srs_occasion_index": est_srs_occasion,
+                "srs_estimation_period_ms": srs_period_ms,
+                "srs_estimation_processing_delay_ms": srs_delay_ms,
+                "srs_estimation_timing_source": "csi_aging.srs_occasion_index",
+                "csi_aging_already_in_estimate": bool(est_mode in HOP_EST_MODES),
                 "srs_hop_profile": (
                     "superran-c63-b1-bhop0-17x16" if est_hop_index >= 0 else None),
                 "channel_est_cold_start": est_cold_start,

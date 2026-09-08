@@ -645,6 +645,30 @@ def wideband_weight_correlation(
     return corr, corr.mean(axis=0)
 
 
+def wideband_pair_correlation(
+    w_su_users: list[np.ndarray],
+    *,
+    rb_per_rbg: int = RB_PER_RBG,
+    rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
+) -> float:
+    """两个用户之间的**宽带**归一化波束相关系数，取值 [0,1]。
+
+    这是 :func:`wideband_weight_correlation` 第二级输出（现场的 ``mxWbUhU``）
+    的跨用户块：把两个用户各自的流之间的 ``|w_k^H w_q|^2`` 取平均，再开方折回
+    幅度量纲，好和 ``mu_corr_threshold`` 这类幅度门限直接比较。
+
+    **它就是配对判决要用的那个数。** 现场的顺序是"逐 RB 取互相关 → RBG 内平均
+    → 宽带平均 → 决定配不配"，宽带矩阵算出来不是为了看，是为了在这一步用。
+    """
+    ranks = [int(np.asarray(w).shape[2]) for w in w_su_users]
+    if len(ranks) != 2:
+        raise ValueError("宽带配对相关系数只定义在两个用户之间")
+    _rbg, wideband = wideband_weight_correlation(
+        w_su_users, rb_per_rbg=rb_per_rbg, rbg_boundaries=rbg_boundaries)
+    block = wideband[:ranks[0], ranks[0]:ranks[0] + ranks[1]]
+    return float(np.sqrt(max(float(np.mean(block)), 0.0)))
+
+
 def residual_correlation_loss_db(
     w_su_users: list[np.ndarray],
     *,
