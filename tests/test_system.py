@@ -3384,7 +3384,9 @@ print(f"  首传误块 0/100%：接收侧 {_mac0['dl_rx_mac_tput_mbps']:.1f}/"
 check(all(r["dl_rx_mac_tput_mbps"] <= r["cell_served_mbps"] + 1e-9
           and r["cell_served_mbps"] <= r["dl_tx_mac_tput_mbps"] + 1e-9
           for r in _rt_runs.values()),
-      "接收侧 <= 体验口径 <= 发送侧，三个误块率下都成立")
+      "接收侧 <= 体验口径 <= 发送侧，三个误块率下都成立"
+      "（本夹具 warmup=0，测量窗没有前沿；有预热期时接收侧按反馈到达时刻"
+      "归属，前沿项见 dl_rx_mac_tput_pre_window_mbps）")
 check(abs(_mac0["dl_tx_mac_tput_mbps"] - _mac0["cell_served_mbps"]) < 1e-9,
       "零误码时没有重传，发送侧与体验口径逐值相同")
 check(_mac1["dl_tx_mac_tput_mbps"] > _mac1["cell_served_mbps"] + 1e-9,
@@ -3393,9 +3395,13 @@ check(_mac0["dl_rx_mac_tput_mbps"] > _mac1["dl_rx_mac_tput_mbps"] + 1e-9,
       "首传全错时接收侧严格更低，而体验口径纹丝不动（两把尺子确实不同）")
 check(_mac0["dl_rx_mac_tput_tbs_mbps"] >= _mac0["dl_rx_mac_tput_mbps"] - 1e-9,
       "含填充的 TBS 口径不低于净荷口径")
-check(_mac0["throughput_definitions"]["expected_ordering"]
-      == "dl_rx_mac_tput_mbps <= cell_served_mbps <= dl_tx_mac_tput_mbps",
-      "三个口径的定义与预期大小关系写在结果里，不靠读代码")
+check("dl_rx_mac_tput_pre_window_mbps"
+      in _mac0["throughput_definitions"]["expected_ordering"]
+      and "only when the measurement window is long"
+      in _mac0["throughput_definitions"]["expected_ordering"],
+      "结果里写明大小关系的成立条件与前沿项的出处，不写成无条件恒等式")
+check(_mac0["dl_rx_mac_tput_pre_window_mbps"] == 0.0,
+      "warmup=0 时不存在跨窗 TB，前沿项为 0")
 
 # --- Head/Body/Tail 分段：字节与 TTI 必须守恒 ---------------------------
 # 分段判定漏一个 TTI 不会报错，只会让分段速率悄悄偏高，所以要显式对账：

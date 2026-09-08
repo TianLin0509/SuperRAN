@@ -2609,11 +2609,20 @@ def simulate_experience(
     nack_count_measured = np.zeros(n_ue, dtype=int)
     retx_count_measured = np.zeros(n_ue, dtype=int)
     retx_nack_count_measured = np.zeros(n_ue, dtype=int)
-    # **接收侧** MAC 吞吐：只累加 HARQ 最终被收对的 TB（现场实现的接收侧 MAC 计数器）。记账时刻是**反馈到达 gNB 的那一刻**，不是发送
-    # 时刻；归属测量窗按该 TB 的**首传** TTI，与 retx_count_measured 同一条
-    # 归属规则，这样它才是 cell_served_mbps 的严格子集。
+    # **接收侧** MAC 吞吐：只累加 HARQ 最终被收对的 TB。记账时刻与归属窗口
+    # **都是反馈到达 gNB 的那一刻**——接收侧问的是"这段时间里收对了多少"，
+    # 什么时候发的不影响它属于哪个窗。
+    #
+    # 早先按该 TB 的**首传** TTI 归属，为的是让它成为 cell_served_mbps 的严格
+    # 子集。那是拿数据换一条好看的大小关系：预热期发出、测量窗内才被确认的
+    # 净荷会被整段丢掉——实测 2 ms 短窗下接收侧报 0，而体验口径 637 Mbps。
+    # 现在不丢字节，代价是大小关系不再无条件成立（见 throughput_definitions
+    # 的 expected_ordering），跨窗那部分由下面的计数器如实报出来。
     acked_payload_measured = np.zeros(n_ue, dtype=np.int64)
     acked_tbs_measured = np.zeros(n_ue, dtype=np.int64)
+    # 其中"首传发生在预热期、却在测量窗内被确认"的那部分。它是接收侧可能
+    # 高于发送侧的**唯一**来源，必须能独立核对，不能只在文字里承认。
+    acked_payload_from_pre_window = np.zeros(n_ue, dtype=np.int64)
     # 每个 UE 一张 ``harq_id -> TB`` 的表，外加一个空闲 id 池。
     # ``harq_max_processes=1`` 时退化成历史的"每 UE 一个槽位"，行为逐位一致。
     _max_proc = int(getattr(sys_cfg, "harq_max_processes", 1))
@@ -2667,16 +2676,24 @@ def simulate_experience(
                 else:
                     _b_idle.body_sch_tti += 1
 
-    def _count_rx_acked(ue: int, tb: _HarqTb) -> None:
+    def _count_rx_acked(ue: int, tb: _HarqTb, feedback_tti: int) -> None:
         """这个 TB 最终被对端收对了：记进接收侧 MAC 吞吐。
 
+        ``feedback_tti`` 是**反馈到达 gNB 的那个 TTI**，它同时决定"算不算数"
+        和"算进哪个窗"。落在预热期的反馈不计；落在测量窗内的一律计入，
+        **包括在预热期就已经发出去的 TB**——接收侧问的是这段时间收对了多少，
+        不是这段时间发了多少。
+
         两个口径都留：``payload`` 是真正的用户净荷（和体验速率同一个分子），
-        ``tb_bytes`` 是含填充的 TBS（现场实现的接收侧 MAC 计数器 用的就是它）。
+        ``tb_bytes`` 是含填充的 TBS（现场实现的接收侧计数器用的就是它）。
         """
-        if int(tb.first_tti) < warmup:
+        if int(feedback_tti) < warmup:
             return
         acked_payload_measured[int(ue)] += int(tb.payload_bytes)
         acked_tbs_measured[int(ue)] += int(tb.tb_bytes)
+        if int(tb.first_tti) < warmup:
+            acked_payload_from_pre_window[int(ue)] += int(tb.payload_bytes)
+
 
     def _retx_now(slot_type: str) -> dict[int, _HarqTb]:
         """本时隙每个 UE **最早的**那个可重传 TB。
@@ -2852,7 +2869,7 @@ def simulate_experience(
                             raise RuntimeError(
                                 "终次 HARQ 反馈缺少 ACK/NACK 抽样结果")
                         if _pending_fb.final_ack:
-                            _count_rx_acked(_u_fb, _pending_fb)
+                            _count_rx_acked(_u_fb, _pending_fb, tti)
                         _release_id(_u_fb, _id_fb)
                     continue
                 if (_pending_fb.state != "await_feedback"
@@ -2864,7 +2881,7 @@ def simulate_experience(
                     olla_min=float(sched.olla_min_db),
                     olla_max=float(sched.olla_max_db))
                 if _pending_fb.first_ack:
-                    _count_rx_acked(_u_fb, _pending_fb)
+                    _count_rx_acked(_u_fb, _pending_fb, tti)
                     _release_id(_u_fb, _id_fb)
                 else:
                     # NACK：进程号不还，留给这一次重传用。
@@ -3806,6 +3823,9 @@ def simulate_experience(
             "rx_mac_tput_tbs_mbps": float(
                 int(acked_tbs_measured[u]) * 8
                 / max(measurement_duration_s, _EPS) / 1e6),
+            "rx_mac_tput_pre_window_mbps": float(
+                int(acked_payload_from_pre_window[u]) * 8
+                / max(measurement_duration_s, _EPS) / 1e6),
             "tx_mac_tput_mbps": float(
                 float(attempted_payload_measured[u]) * 8
                 / max(measurement_duration_s, _EPS) / 1e6),
@@ -3904,6 +3924,7 @@ def simulate_experience(
     acked_total_measured = int(np.sum(served_measured))
     rx_acked_payload_total = int(np.sum(acked_payload_measured))
     rx_acked_tbs_total = int(np.sum(acked_tbs_measured))
+    rx_acked_pre_window_total = int(np.sum(acked_payload_from_pre_window))
     # **满缓冲下这个检查不成立，必须报 None 而不是 0.0。**
     # 它比的是「到达 = 已发 + 积压」，而 full buffer 的 offered 是无界的种子字节，
     # 差值没有意义。旧容量分支在这里算出 3.7e21（把 1<<62 的种子算进了 offered），
@@ -4193,13 +4214,22 @@ def simulate_experience(
         "pdb_miss_ratio": float(np.mean(pdb_flags)) if pdb_flags else None,
         "cell_served_mbps": float(
             acked_total_measured * 8 / max(measurement_duration_s, _EPS) / 1e6),
-        # 接收侧 MAC 吞吐：只算最终被收对的 TB。它必然 ≤ cell_served_mbps，
-        # 差额 = 两次都传丢的净荷 + 仿真结束时还没等到反馈的那部分（右删失，
-        # 数量见 pending_harq_tb_at_end）。
+        # 接收侧 MAC 吞吐：测量窗内反馈确认收对的那些 TB。三个方向会让它
+        # 低于 cell_served_mbps：两次都传丢的净荷、仿真结束时还没等到反馈的
+        # 那部分（右删失，数量见 pending_harq_tb_at_end）。**一个方向会让它
+        # 反过来更高**：预热期发出、窗内才被确认的净荷（见
+        # dl_rx_mac_tput_pre_window_mbps）。窗长远大于 HARQ 反馈时延时这一项
+        # 可以忽略，短窗下不能。
         "dl_rx_mac_tput_mbps": float(
             rx_acked_payload_total * 8 / max(measurement_duration_s, _EPS) / 1e6),
         "dl_rx_mac_tput_tbs_mbps": float(
             rx_acked_tbs_total * 8 / max(measurement_duration_s, _EPS) / 1e6),
+        # 上一项里"首传在预热期、确认在窗内"的那部分，单独报出来供核对。
+        "dl_rx_mac_tput_pre_window_mbps": float(
+            rx_acked_pre_window_total * 8
+            / max(measurement_duration_s, _EPS) / 1e6),
+        "dl_rx_mac_tput_pre_window_share": float(
+            rx_acked_pre_window_total / max(rx_acked_payload_total, 1)),
         # 发送侧 MAC 吞吐：调度器真正推上空口的净荷，首传与重传都算、不看
         # ACK/NACK。重传把同一份净荷再占一次资源，所以它 ≥ cell_served_mbps。
         "dl_tx_mac_tput_mbps": float(
@@ -4264,10 +4294,20 @@ def simulate_experience(
                 "including padding (field receive-side MAC counter, raw-TBS variant)"),
             "measurement_attribution": (
                 "send-side counters are attributed to the TTI of the "
-                "transmission; receive-side counters are attributed to the "
-                "first-transmission TTI of the TB, same rule as retx_attempts"),
+                "transmission; receive-side counters are attributed to the TTI "
+                "at which the HARQ feedback reaches the gNB, so a TB "
+                "transmitted during warm-up and acknowledged inside the window "
+                "is counted in full (no bytes are dropped at the window edge)"),
             "expected_ordering": (
-                "dl_rx_mac_tput_mbps <= cell_served_mbps <= dl_tx_mac_tput_mbps"),
+                "cell_served_mbps <= dl_tx_mac_tput_mbps always. "
+                "dl_rx_mac_tput_mbps <= cell_served_mbps only when the "
+                "measurement window is long compared with the HARQ feedback "
+                "delay: the two counters are attributed at different instants, "
+                "so a short window can acknowledge bytes that were transmitted "
+                "before it started. The size of that leading-edge term is "
+                "reported as dl_rx_mac_tput_pre_window_mbps; the trailing edge "
+                "(TBs still awaiting feedback at the end) is "
+                "pending_harq_tb_at_end"),
         },
         "avg_mcs": float(
             np.sum(mcs_sum_measured) / max(np.sum(sched_cnt_measured), 1)),

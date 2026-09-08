@@ -1167,6 +1167,8 @@ def test_mac_throughput_meters_separate_sent_from_received() -> None:
     check(runs[0.0]["dl_rx_mac_tput_mbps"]
           > runs[1.0]["dl_rx_mac_tput_mbps"] + 1e-9,
           "误码越多接收侧吞吐越低，而体验口径对误码不敏感")
+    # 上面四条都在 warmup=0 下成立（测量窗从第一个 TTI 就开始，没有前沿）。
+    # 有预热期时接收侧的归属规则见下一条棘轮。
 
     # 首传与重传全丢：一个 TB 都没送达，接收侧必须是 0。这条钉住"接收侧
     # 只在 ACK 时记账"——把 ACK 判据去掉，它会立刻变成与体验口径同量级。
@@ -1187,7 +1189,80 @@ def test_mac_throughput_meters_separate_sent_from_received() -> None:
 test_single_layer_terminals_can_pair()
 test_per_ue_cap_reaches_the_air_and_rebuild_clears_stale_combinations()
 test_rzf_reported_loading_equals_the_one_actually_used()
+def test_receive_side_counts_acknowledgements_not_transmissions() -> None:
+    """接收侧按**反馈到达时刻**归属测量窗，跨窗的净荷一个字节都不能丢。
+
+    这条棘轮钉住一次真实的漏计：早先按"这个 TB 的首传发生在哪"归属，
+    为的是让接收侧成为体验口径的严格子集。代价是**预热期发出、测量窗内
+    才被确认的净荷被整段丢掉**——2 ms 短窗下接收侧报 0，而同一次仿真的
+    体验口径是 637 Mbps。那不是保守，是丢数据。
+
+    改回按首传归属，第一条就会红。
+
+    顺带钉住"前沿项是个固定量"：同一批信道下，把窗从 2 ms 拉到 1900 ms，
+    跨窗字节数**逐值不变**（它只取决于 HARQ 反馈时延，与窗长无关），
+    占比从 100% 掉到 0.13%。所以窗长远大于反馈时延时才能说
+    接收侧 <= 体验口径。
+    """
+    n_sample = 40
+    point = sy.UeLinkTable(
+        ue=0, sinr_db=np.full((n_sample, 4), 18.0),
+        mcs=np.full((n_sample, 4), 16),
+        se=np.full((n_sample, 4), la.MCS_TABLE_3[16].se),
+        best_rank=np.ones(n_sample, dtype=int),
+        best_se=np.full(n_sample, la.MCS_TABLE_3[16].se), geo_sinr_db=18.0,
+        outage=np.zeros(n_sample, dtype=bool), mcs_table=3, target_bler=0.1,
+        sinr_rbg_db=np.full((n_sample, 4, 17), 18.0),
+        sinr_tx_db=np.full((n_sample, 4), 18.0),
+        sinr_tx_rbg_db=np.full((n_sample, 4, 17), 18.0))
+
+    def _run(duration_s: float, warmup_tti: int) -> dict:
+        return sy.simulate(
+            [point],
+            sys_cfg=sy.SystemConfig(duration_s=duration_s, tdd_pattern="DDDSU"),
+            traffic=sy.TrafficConfig(model="full_buffer"),
+            sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+            kpi=sy.KpiConfig(warmup_tti=warmup_tti), rng=rg.RngBook(3, 0)).cell
+
+    old_lookup = ex._bler_lookup
+    try:
+        ex._bler_lookup = lambda _m, _s: 0.0      # 首传全部收对
+        # 极短窗：预热 40 TTI、总共 44 TTI。DDDSU 下反馈要等上行时隙，
+        # 所以窗内到达的每一份反馈都对应预热期发出的 TB。
+        short = _run(0.022, 40)
+        long_run = _run(2.0, 200)
+    finally:
+        ex._bler_lookup = old_lookup
+
+    def _bytes(cell: dict, key: str) -> int:
+        return int(round(cell[key] * 1e6 * cell["measurement_duration_s"] / 8))
+
+    short_rx = _bytes(short, "dl_rx_mac_tput_mbps")
+    short_pre = _bytes(short, "dl_rx_mac_tput_pre_window_mbps")
+    long_pre = _bytes(long_run, "dl_rx_mac_tput_pre_window_mbps")
+    print(f"  2 ms 窗：接收侧 {short['dl_rx_mac_tput_mbps']:.1f} Mbps "
+          f"（{short_rx} B），其中跨窗 {short_pre} B、"
+          f"占比 {short['dl_rx_mac_tput_pre_window_share']:.0%}")
+    print(f"  1900 ms 窗：跨窗 {long_pre} B、"
+          f"占比 {long_run['dl_rx_mac_tput_pre_window_share']:.2%}，"
+          f"接收侧 {long_run['dl_rx_mac_tput_mbps']:.1f} / 体验 "
+          f"{long_run['cell_served_mbps']:.1f} Mbps")
+
+    check(short_rx > 0 and short["cell_served_mbps"] > 0,
+          "短窗下窗内确认收到的净荷必须被记进接收侧，不能因为它发在预热期就归零")
+    check(short["dl_rx_mac_tput_pre_window_share"] == 1.0 and short_pre == short_rx,
+          "短窗下接收侧全部来自跨窗 TB，且这部分被单独报出来可核对")
+    check(short_pre == long_pre,
+          f"前沿项只由 HARQ 反馈时延决定，与窗长无关（两个窗都是 {short_pre} B）")
+    check(long_run["dl_rx_mac_tput_pre_window_share"] < 0.01,
+          "窗长远大于反馈时延时跨窗项可忽略（实测占比 < 1%）")
+    check(long_run["dl_rx_mac_tput_mbps"] <= long_run["cell_served_mbps"] + 1e-9
+          <= long_run["dl_tx_mac_tput_mbps"] + 1e-9,
+          "长窗下接收侧 <= 体验口径 <= 发送侧仍然成立")
+
+
 test_mac_throughput_meters_separate_sent_from_received()
+test_receive_side_counts_acknowledgements_not_transmissions()
 
 
 print("\n" + "=" * 70)
