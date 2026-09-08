@@ -73,6 +73,13 @@ _VECTOR_META_FIELDS = (
     "dl_interference_power_per_slot_per_cell_mw",
 )
 
+# h_interferers 的逐干扰源身份（最强优先）。它是"每干扰源"向量而不是
+# "每小区"向量，所以不能混进 _VECTOR_META_FIELDS——那一组的语义是 [N, 小区数]。
+_INTERFERER_ID_FIELDS = (
+    "interferer_cell_ids",
+    "interferer_rx_power_dbm",
+)
+
 # 逐样本收集的顶层标量字段
 #
 # ``ul_sir_dB`` / ``dl_sir_dB`` 是**测量域**的量（导频上的信干比），和业务域的
@@ -530,6 +537,7 @@ def _collect(
     }
     metas: dict[str, list[Any]] = {k: [] for k in _SCALAR_META_FIELDS}
     cross_ids: dict[str, list[np.ndarray]] = {k: [] for k in _CROSS_LINK_ID_FIELDS}
+    intf_ids: dict[str, list[np.ndarray]] = {k: [] for k in _INTERFERER_ID_FIELDS}
     vector_metas: dict[str, list[np.ndarray]] = {k: [] for k in _VECTOR_META_FIELDS}
     ssb_rsrp: list[list[float]] = []
     ssb_sinr: list[list[float]] = []
@@ -604,6 +612,9 @@ def _collect(
 
         hi_arr = getattr(sample, "h_interferers", None)
         if hi_arr is not None:
+            for key in _INTERFERER_ID_FIELDS:
+                if key in meta:
+                    intf_ids[key].append(np.asarray(meta[key]))
             # [cell, symbol, RB, BS, UE] -> keep one symbol, preserving axis.
             h_intf.append(
                 _slot_snapshot(
@@ -695,6 +706,16 @@ def _collect(
         payload["h_dl_est"] = np.stack(h_dl_est)
     if len(h_intf) == accepted and h_intf and all(a.shape == h_intf[0].shape for a in h_intf):
         payload["h_interferers"] = np.stack(h_intf)
+        n_cells_kept = payload["h_interferers"].shape[1]
+        for key, vals in intf_ids.items():
+            if not vals:
+                continue
+            if len(vals) != accepted or any(a.shape != (n_cells_kept,) for a in vals):
+                raise RuntimeError(
+                    f"干扰源身份 {key} 与 h_interferers 的干扰小区轴对不上："
+                    f"{len(vals)}/{accepted} 个样本，期望每样本 {n_cells_kept} 项。"
+                )
+            payload[f"interferer__{key.removeprefix('interferer_')}"] = np.stack(vals)
     if h_ul_cross:
         # 与 h_interferers 不同，这个张量不允许"缺就丢"：丢掉之后数据集看起来
         # 就是一次干净的单小区 SRS 实验，没有任何线索说明污染源没落盘。

@@ -1083,6 +1083,108 @@ def test_rzf_reported_loading_equals_the_one_actually_used() -> None:
           "等 rank 时报告值与历史只差浮点末位（数学恒等，求和顺序不同）")
 
 
+def test_mac_throughput_meters_separate_sent_from_received() -> None:
+    """收发两侧 MAC 吞吐与 Head/Body/Tail 分段的守恒关系。
+
+    棘轮守三件事，任何一件被 revert 都会变红：
+
+    1. **分段账守恒。** 一个 busy period 从首次调度到清空 buffer 之间的每一个
+       TTI 都必须落进 Head/Body/Tail 之一，包括没轮到它的 TTI 和上行/保护
+       时隙。漏掉这些 TTI 不会报错，只会让分段速率静默偏高（DDDSU 下漏掉
+       上行时隙就是 +25%）。
+    2. **接收侧只认收对的。** 首传全错时接收侧吞吐必须严格低于发送侧；
+       如果哪天有人把接收侧改回"发送即计"，这两个数会重新相等。
+    3. **发送侧含重传。** 重传把同一份净荷再占一次资源，所以首传全错时
+       发送侧必须严格高于体验口径（后者只记首传、且不看对错）。
+    """
+    n_sample = 40
+    point = sy.UeLinkTable(
+        ue=0, sinr_db=np.full((n_sample, 4), 18.0),
+        mcs=np.full((n_sample, 4), 16),
+        se=np.full((n_sample, 4), la.MCS_TABLE_3[16].se),
+        best_rank=np.ones(n_sample, dtype=int),
+        best_se=np.full(n_sample, la.MCS_TABLE_3[16].se), geo_sinr_db=18.0,
+        outage=np.zeros(n_sample, dtype=bool), mcs_table=3, target_bler=0.1,
+        sinr_rbg_db=np.full((n_sample, 4, 17), 18.0),
+        sinr_tx_db=np.full((n_sample, 4), 18.0),
+        sinr_tx_rbg_db=np.full((n_sample, 4, 17), 18.0))
+    old_lookup = ex._bler_lookup
+    old_retx = la.harq_retransmission_bler
+
+    def _all_lost_retx(mcs, sinr_db, **kw):
+        row = dict(old_retx(mcs, sinr_db, **kw))
+        row["bler"] = 1.0
+        return row
+
+    runs = {}
+    try:
+        for p_bler in (0.0, 1.0):
+            ex._bler_lookup = lambda _m, _s, _v=p_bler: _v
+            runs[p_bler] = sy.simulate(
+                [point],
+                sys_cfg=sy.SystemConfig(duration_s=2.0, tdd_pattern="DDDSU"),
+                traffic=sy.TrafficConfig(model="ftp3", file_bytes=2_000_000,
+                                         arrival_rate_hz=0.8),
+                sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+                kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(3, 0)).cell
+        # 首传与唯一一次重传全部失败：一个 TB 都没送达。
+        ex._bler_lookup = lambda _m, _s: 1.0
+        la.harq_retransmission_bler = _all_lost_retx
+        all_lost = sy.simulate(
+            [point],
+            sys_cfg=sy.SystemConfig(duration_s=2.0, tdd_pattern="DDDSU"),
+            traffic=sy.TrafficConfig(model="ftp3", file_bytes=2_000_000,
+                                     arrival_rate_hz=0.8),
+            sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+            kpi=sy.KpiConfig(warmup_tti=0), rng=rg.RngBook(3, 0)).cell
+    finally:
+        ex._bler_lookup = old_lookup
+        la.harq_retransmission_bler = old_retx
+
+    for p_bler, cell in runs.items():
+        seg = cell["burst_segment_rates"]
+        print(f"  首传误块 {p_bler:.0%}：接收 {cell['dl_rx_mac_tput_mbps']:.2f} / "
+              f"体验 {cell['cell_served_mbps']:.2f} / 发送 "
+              f"{cell['dl_tx_mac_tput_mbps']:.2f} Mbps；分段残差 "
+              f"{seg['segment_accounting_error_bytes']} B / "
+              f"{seg['segment_accounting_error_tti']} TTI")
+        check(seg["segment_accounting_error_bytes"] == 0,
+              f"误块 {p_bler:.0%}：分段字节守恒（三段之和 = 已发净荷）")
+        check(seg["segment_accounting_error_tti"] == 0,
+              f"误块 {p_bler:.0%}：分段 TTI 守恒（含空闲与上行时隙）")
+        check(cell["dl_rx_mac_tput_mbps"] <= cell["cell_served_mbps"] + 1e-9
+              <= cell["dl_tx_mac_tput_mbps"] + 1e-9,
+              f"误块 {p_bler:.0%}：接收侧 <= 体验口径 <= 发送侧")
+
+    check(runs[1.0]["dl_rx_mac_tput_mbps"]
+          < runs[1.0]["dl_tx_mac_tput_mbps"] - 1e-9,
+          "首传全错时接收侧严格低于发送侧（接收侧只认 HARQ 收对的 TB）")
+    check(runs[1.0]["dl_tx_mac_tput_mbps"]
+          > runs[1.0]["cell_served_mbps"] + 1e-9,
+          "首传全错时发送侧严格高于体验口径（重传再占一次资源）")
+    check(abs(runs[0.0]["dl_tx_mac_tput_mbps"]
+              - runs[0.0]["cell_served_mbps"]) < 1e-9,
+          "零误码时没有重传，发送侧与体验口径逐值相同")
+    check(runs[0.0]["dl_rx_mac_tput_mbps"]
+          > runs[1.0]["dl_rx_mac_tput_mbps"] + 1e-9,
+          "误码越多接收侧吞吐越低，而体验口径对误码不敏感")
+    # 上面四条都在 warmup=0 下成立（测量窗从第一个 TTI 就开始，没有前沿）。
+    # 有预热期时接收侧的归属规则见下一条棘轮。
+
+    # 首传与重传全丢：一个 TB 都没送达，接收侧必须是 0。这条钉住"接收侧
+    # 只在 ACK 时记账"——把 ACK 判据去掉，它会立刻变成与体验口径同量级。
+    print(f"  首传+重传全丢：接收 {all_lost['dl_rx_mac_tput_mbps']:.2f} / "
+          f"体验 {all_lost['cell_served_mbps']:.2f} / 发送 "
+          f"{all_lost['dl_tx_mac_tput_mbps']:.2f} Mbps，"
+          f"残余误块 {all_lost['residual_bler']:.3f}")
+    check(all_lost["dl_rx_mac_tput_mbps"] == 0.0,
+          "首传与重传都失败时接收侧 MAC 吞吐恒为 0")
+    check(all_lost["cell_served_mbps"] > 0.0
+          and all_lost["dl_tx_mac_tput_mbps"] > all_lost["cell_served_mbps"],
+          "同一次仿真里体验口径与发送侧照常为正（口径确实互相独立）")
+    check(all_lost["burst_segment_rates"]["segment_accounting_error_bytes"] == 0
+          and all_lost["burst_segment_rates"]["segment_accounting_error_tti"] == 0,
+          "全丢场景下分段账仍然守恒")
 # ---------------------------------------------------------------------------
 # SRS 导频污染：谁污染由 SRS 资源分配决定，不是由 PCI 颜色决定
 #
@@ -1106,7 +1208,7 @@ def _cross_link_cfg(**extra):
         num_rb=_SRS_RB, num_bs_tx_ant=8, num_ue_rx_ant=4, num_ue_tx_ant=4,
         subcarrier_spacing=30000.0, topology="hex", num_sites=7,
         sectors_per_site=3, isd_m=300.0, scenario="UMa_NLOS",
-        channel_model="CDL-C", link="BOTH", num_ues=4, num_samples=6, seed=11,
+        channel_model="CDL-C", link="BOTH", num_ues=63, num_samples=6, seed=11,
         channel_est_mode="ls_linear", num_interfering_ues=3,
     )
     cfg.update(extra)
@@ -1133,7 +1235,37 @@ def test_srs_ul_cross_link_and_pilot_contamination() -> None:
     check(single.h_interferers is None,
           "单小区场景不生成干扰信道（行为与修复前一致）")
     check(off[0].h_interferers.shape[0] == 3,
-          f"默认只保留最强 3 个邻区（实得 {off[0].h_interferers.shape[0]}），不是全部邻区")
+          f"默认只保留 3 个邻区（实得 {off[0].h_interferers.shape[0]}），不是全部邻区")
+    worst_gap = 0.0
+    strongest_ok = True
+    for s in off:
+        rx = np.asarray(s.meta["rx_power_all_dbm"])
+        serving = int(s.meta["serving_cell_index"])
+        # 稳定排序：同站三扇区位置相同、方向图对称，接收电平会精确打平，
+        # 用默认快排的话参考值本身就不确定。
+        want = [
+            int(k) for k in np.argsort(-rx, kind="stable") if k != serving
+        ][:3]
+        got = [int(v) for v in np.asarray(s.meta["interferer_cell_ids"])]
+        strongest_ok = strongest_ok and want == got
+        by_index = [k for k in range(len(rx)) if k != serving][:3]
+        worst_gap = max(worst_gap, float(rx[want[0]] - rx[by_index[0]]))
+    print(f"  按编号取前三个时，最强邻区会被漏掉最多 {worst_gap:.1f} dB")
+    check(strongest_ok,
+          "保留的三个邻区就是接收电平最强的三个（按小区编号取前三个会选错人）")
+    check(all(
+        np.asarray(s.meta["interferer_cell_ids"]).shape[0]
+        == np.asarray(s.h_interferers).shape[0] for s in off),
+        "h_interferers 的每一根都带着它属于哪个邻区，选择结果可独立复核")
+    aligned = True
+    for s in off:
+        rx = np.asarray(s.meta["rx_power_all_dbm"])
+        ids = np.asarray(s.meta["interferer_cell_ids"])
+        pw = np.asarray(s.meta["interferer_rx_power_dbm"])
+        aligned = aligned and np.allclose(pw, [rx[k] for k in ids])
+        aligned = aligned and bool(np.all(np.diff(pw) <= 1e-12))
+    check(aligned,
+          "身份的小区号与电平两列同序且按电平降序（分别取一遍会错位）")
 
     # 2. 上行交叉链路仍是显式打开的（它只服务导频污染实验）
     check(all(s.h_ul_cross is None for s in off), "上行交叉链路默认不生成")
@@ -1159,17 +1291,32 @@ def test_srs_ul_cross_link_and_pilot_contamination() -> None:
           f"干扰 UE 到本站最近 {min(d_victim):.0f} m > 100 m（服务小区一致性拒绝采样生效）")
 
     # 5. 上行交叉链路与下行干扰信道是两根不同的链路
-    sample = on[0]
-    dl = np.asarray(sample.h_interferers)
-    ul = np.asarray(sample.h_ul_cross)
-    overlap = 0.0
-    for a in range(ul.shape[0]):
-        for b in range(dl.shape[0]):
-            x, y = ul[a].ravel(), dl[b].ravel()
-            overlap = max(overlap, abs(np.vdot(x, y)) / (
-                np.linalg.norm(x) * np.linalg.norm(y)))
-    check(overlap < 0.2,
-          f"上行交叉链路与下行干扰信道最大重合度 {overlap:.3f} < 0.2（两根不同的链路）")
+    def _corr(x, y):
+        x, y = np.asarray(x).ravel(), np.asarray(y).ravel()
+        return abs(np.vdot(x, y)) / (np.linalg.norm(x) * np.linalg.norm(y))
+
+    # 判据必须自校准：同一套 CDL 时延剖面生成的任意两根信道本来就有相关性，
+    # 实测两根下行干扰信道之间就能到 0.34。所以"上下行是两根不同的链路"只能
+    # 表述为"跨类相关性不超过同类相关性"，拿一个拍脑袋的常数当门槛没有意义。
+    same_class, cross_class = [], []
+    for sample in on:
+        dl = np.asarray(sample.h_interferers)
+        ul = np.asarray(sample.h_ul_cross)
+        for a in range(dl.shape[0]):
+            for b in range(a + 1, dl.shape[0]):
+                same_class.append(_corr(dl[a], dl[b]))
+        for a in range(ul.shape[0]):
+            for b in range(a + 1, ul.shape[0]):
+                same_class.append(_corr(ul[a], ul[b]))
+            for b in range(dl.shape[0]):
+                cross_class.append(_corr(ul[a], dl[b]))
+    same_max = float(np.max(same_class))
+    cross_max = float(np.max(cross_class))
+    print(f"  信道相关性：同类最大 {same_max:.3f}，跨类（上行交叉链路 vs 下行干扰"
+          f"信道）最大 {cross_max:.3f}")
+    check(cross_max <= same_max + 0.05 and cross_max < 0.9,
+          "上行交叉链路与下行干扰信道的相似度不超过同类信道之间的相似度"
+          "（两根不同的链路，互相替代不成立）")
 
     # 6. 污染只落在本次 SRS 探测的 16 个 RB 上，不碰撞的邻区一个 RB 都不碰
     touched = []
@@ -1277,6 +1424,34 @@ def test_srs_ul_cross_link_and_pilot_contamination() -> None:
             bad += 1
     check(bad == 3, "越界或长度不符的导频残留相关系数一律硬失败")
 
+    # 10b. 移动 UE 换小区后，SRS 资源必须来自新的服务小区
+    # 每个 UE 必须被采样多次才可能观察到切换：样本按 UE 轮转，
+    # num_samples 要显著大于 num_ues。
+    moving = list(InternalSimSource(_cross_link_cfg(
+        num_ues=4, num_samples=12, mobility_mode="linear", ue_speed_kmh=200.0,
+        sample_interval_s=0.5,
+        measurements={"srs_cross_link_channels": True},
+        srs_pilot_contamination_rho=1.0)).iter_samples())
+    handovers = 0
+    seen_cell = {}
+    for s in moving:
+        ue = int(s.meta["ue_id"])
+        now = int(s.meta["srs_serving_cell_id"])
+        if seen_cell.setdefault(ue, now) != now:
+            handovers += 1
+            seen_cell[ue] = now
+    mismatched = [
+        (int(s.meta["ue_id"]), int(s.meta["srs_serving_cell_id"]),
+         int(s.meta["srs_victim_cell_id"]))
+        for s in moving
+        if int(s.meta["srs_victim_cell_id"]) != int(s.meta["srs_serving_cell_id"])
+    ]
+    print(f"  移动场景里发生 {handovers} 次换小区，SRS 资源仍绑在旧小区的样本 "
+          f"{len(mismatched)} 个")
+    check(handovers > 0, "构造出的移动场景确实发生了换小区（否则这条检查是空的）")
+    check(not mismatched,
+          "换小区后 SRS 资源来自新的服务小区，不再绑着旧小区（否则碰撞会被漏掉）")
+
     # 11. SRS 资源计划不许随分块方式改变，否则并行生成会换一套碰撞结构
     hop = dict(channel_est_mode="ls_hop_sequential",
                measurements={"srs_cross_link_channels": True},
@@ -1301,6 +1476,80 @@ def test_srs_ul_cross_link_and_pilot_contamination() -> None:
 test_single_layer_terminals_can_pair()
 test_per_ue_cap_reaches_the_air_and_rebuild_clears_stale_combinations()
 test_rzf_reported_loading_equals_the_one_actually_used()
+def test_receive_side_counts_acknowledgements_not_transmissions() -> None:
+    """接收侧按**反馈到达时刻**归属测量窗，跨窗的净荷一个字节都不能丢。
+
+    这条棘轮钉住一次真实的漏计：早先按"这个 TB 的首传发生在哪"归属，
+    为的是让接收侧成为体验口径的严格子集。代价是**预热期发出、测量窗内
+    才被确认的净荷被整段丢掉**——2 ms 短窗下接收侧报 0，而同一次仿真的
+    体验口径是 637 Mbps。那不是保守，是丢数据。
+
+    改回按首传归属，第一条就会红。
+
+    顺带钉住"前沿项是个固定量"：同一批信道下，把窗从 2 ms 拉到 1900 ms，
+    跨窗字节数**逐值不变**（它只取决于 HARQ 反馈时延，与窗长无关），
+    占比从 100% 掉到 0.13%。所以窗长远大于反馈时延时才能说
+    接收侧 <= 体验口径。
+    """
+    n_sample = 40
+    point = sy.UeLinkTable(
+        ue=0, sinr_db=np.full((n_sample, 4), 18.0),
+        mcs=np.full((n_sample, 4), 16),
+        se=np.full((n_sample, 4), la.MCS_TABLE_3[16].se),
+        best_rank=np.ones(n_sample, dtype=int),
+        best_se=np.full(n_sample, la.MCS_TABLE_3[16].se), geo_sinr_db=18.0,
+        outage=np.zeros(n_sample, dtype=bool), mcs_table=3, target_bler=0.1,
+        sinr_rbg_db=np.full((n_sample, 4, 17), 18.0),
+        sinr_tx_db=np.full((n_sample, 4), 18.0),
+        sinr_tx_rbg_db=np.full((n_sample, 4, 17), 18.0))
+
+    def _run(duration_s: float, warmup_tti: int) -> dict:
+        return sy.simulate(
+            [point],
+            sys_cfg=sy.SystemConfig(duration_s=duration_s, tdd_pattern="DDDSU"),
+            traffic=sy.TrafficConfig(model="full_buffer"),
+            sched=sy.SchedulerConfig(mu_enabled=False, olla_enabled=False),
+            kpi=sy.KpiConfig(warmup_tti=warmup_tti), rng=rg.RngBook(3, 0)).cell
+
+    old_lookup = ex._bler_lookup
+    try:
+        ex._bler_lookup = lambda _m, _s: 0.0      # 首传全部收对
+        # 极短窗：预热 40 TTI、总共 44 TTI。DDDSU 下反馈要等上行时隙，
+        # 所以窗内到达的每一份反馈都对应预热期发出的 TB。
+        short = _run(0.022, 40)
+        long_run = _run(2.0, 200)
+    finally:
+        ex._bler_lookup = old_lookup
+
+    def _bytes(cell: dict, key: str) -> int:
+        return int(round(cell[key] * 1e6 * cell["measurement_duration_s"] / 8))
+
+    short_rx = _bytes(short, "dl_rx_mac_tput_mbps")
+    short_pre = _bytes(short, "dl_rx_mac_tput_pre_window_mbps")
+    long_pre = _bytes(long_run, "dl_rx_mac_tput_pre_window_mbps")
+    print(f"  2 ms 窗：接收侧 {short['dl_rx_mac_tput_mbps']:.1f} Mbps "
+          f"（{short_rx} B），其中跨窗 {short_pre} B、"
+          f"占比 {short['dl_rx_mac_tput_pre_window_share']:.0%}")
+    print(f"  1900 ms 窗：跨窗 {long_pre} B、"
+          f"占比 {long_run['dl_rx_mac_tput_pre_window_share']:.2%}，"
+          f"接收侧 {long_run['dl_rx_mac_tput_mbps']:.1f} / 体验 "
+          f"{long_run['cell_served_mbps']:.1f} Mbps")
+
+    check(short_rx > 0 and short["cell_served_mbps"] > 0,
+          "短窗下窗内确认收到的净荷必须被记进接收侧，不能因为它发在预热期就归零")
+    check(short["dl_rx_mac_tput_pre_window_share"] == 1.0 and short_pre == short_rx,
+          "短窗下接收侧全部来自跨窗 TB，且这部分被单独报出来可核对")
+    check(short_pre == long_pre,
+          f"前沿项只由 HARQ 反馈时延决定，与窗长无关（两个窗都是 {short_pre} B）")
+    check(long_run["dl_rx_mac_tput_pre_window_share"] < 0.01,
+          "窗长远大于反馈时延时跨窗项可忽略（实测占比 < 1%）")
+    check(long_run["dl_rx_mac_tput_mbps"] <= long_run["cell_served_mbps"] + 1e-9
+          <= long_run["dl_tx_mac_tput_mbps"] + 1e-9,
+          "长窗下接收侧 <= 体验口径 <= 发送侧仍然成立")
+
+
+test_mac_throughput_meters_separate_sent_from_received()
+test_receive_side_counts_acknowledgements_not_transmissions()
 test_srs_ul_cross_link_and_pilot_contamination()
 
 

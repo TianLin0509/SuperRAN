@@ -512,9 +512,6 @@ _STORE_INTERFERER_CHANNELS_DEFAULT = True
 _STORE_SRS_CROSS_LINK_DEFAULT = False
 # Strongest-N neighbours kept per UE; matches the documented storage contract.
 _MAX_PER_UE_INTF_CELLS_DEFAULT = 3
-# UE-id namespace for the synthetic cross-link interferers, kept clear of the
-# real UE ids so one allocator batch can hold both.
-_SRS_INTF_UE_BASE = 100_000
 
 PORT_LAYOUT_CONTRACT_VERSION = "pol_h_v-top_to_bottom-v1"
 
@@ -1442,7 +1439,9 @@ class InternalSimSource:
             from .srs_resource import resources_collide as _rc  # noqa: PLC0415
 
             _resources_collide = _rc
-            _, plan = self._srs_network_plan(sites, scenario, elements_per_port)
+            plan, slots_per_cell, _ = self._srs_network_plan(
+                sites, scenario, elements_per_port
+            )
         for k in candidates:
             if len(rows) >= n_cross:
                 break
@@ -1451,8 +1450,12 @@ class InternalSimSource:
             # Which reserved interferer slot in that neighbour cell this UE
             # occupies.  Different slots mean different SRS leaves, which is
             # exactly what makes some same-colour neighbours harmless.
-            slots = max(self._srs_cross_link_slots(len(sites)), 1)
-            intf_ue = int((global_index + k) % slots)
+            # This interferer is the neighbour cell's n-th served UE, so it
+            # draws from that cell's own slot pool.
+            n_slots = 1 if plan is None else int(
+                slots_per_cell.get(int(sites[k].cell_id), 1)
+            )
+            intf_ue = int((global_index + k) % max(n_slots, 1))
             drop_rng = np.random.default_rng(
                 np.random.SeedSequence(
                     [self._seed, 0x5C10, int(sites[k].cell_id), intf_ue]
@@ -1582,23 +1585,27 @@ class InternalSimSource:
 
     def _srs_network_plan(
         self, sites: list[Cell], scenario: str, elements_per_port: int
-    ) -> tuple[dict[int, Any], dict[tuple[int, int], Any]]:
+    ) -> tuple[dict[tuple[int, int], Any], dict[tuple[int, int], Any], list[int]]:
         """One network-wide SRS resource plan, allocated once per source.
 
-        Two dictionaries: the real UEs keyed by ``ue_id`` (each holds one
-        assignment in the cell that actually serves it), and a small pool of
-        interfering-UE slots per cell for the cross-link experiment.
+        Each **cell** owns a pool of UE slots; a UE occupies its slot in
+        whichever cell is currently serving it.  That matters the moment UEs
+        move: an SRS resource belongs to the serving cell's PCI-mod-3 pool, so
+        a handed-over UE must draw from the *target* cell.  Keying the plan by
+        UE alone froze it in the UE's first cell and quietly lost collisions.
 
-        Contamination is decided by this *allocator*, not by PCI colour.  Two
-        cells sharing a colour draw from the same pool, but the allocator then
-        gives them different frequency-resource phases, cyclic shifts or
-        symbols; a same-colour neighbour on a different leaf transmits on
-        other resource elements and contributes exactly zero contamination.
-        Colour only narrows the candidate list.
+        Static scenarios size each cell's pool to exactly the UEs it serves,
+        which reproduces the per-UE plan bit for bit.  Mobile scenarios
+        reserve the same slot count in every cell so a UE keeps its slot
+        across a handover.
 
-        The pool is deliberately the size of the real network.  Padding it
-        with phantom UEs would push ``adaptive_period`` onto a longer global
-        SRS period and silently change who collides with whom.
+        Contamination is decided by this *allocator*, not by PCI colour: two
+        same-colour cells share a pool, but the allocator then hands out
+        different frequency phases, cyclic shifts or symbols, and a neighbour
+        on a different leaf contributes exactly zero.  Colour only narrows the
+        candidate list.
+
+        Returns ``(victim_slots, interferer_slots, slot_of_ue)``.
         """
         cached = getattr(self, "_srs_plan_cache", None)
         if cached is not None:
@@ -1612,19 +1619,34 @@ class InternalSimSource:
             self._serving_cell_index(sites, positions[u], scenario, elements_per_port)
             for u in range(self.num_ues)
         ]
-        slots = max(int(self._srs_cross_link_slots(len(sites))), 0)
+        per_cell: list[list[int]] = [[] for _ in sites]
+        for u in range(self.num_ues):
+            per_cell[home[u]].append(u)
+        slot_of_ue = [0] * self.num_ues
+        for members in per_cell:
+            for rank, u in enumerate(members):
+                slot_of_ue[u] = rank
+
+        mobile = str(self.cfg.get("mobility_mode", "static")).strip().lower() != "static"
+        uniform = max((len(m) for m in per_cell), default=0)
 
         ue_ids: list[int] = []
         cell_ids: list[int] = []
-        # Deterministic order: cell by cell, real UEs first, then that cell's
-        # interferer slots.  Sample order and worker count cannot change it.
+        slots_by_cell: list[int] = []
+        # Deterministic order: cell by cell, slot by slot.  Sample order and
+        # worker count cannot change it.
+        #
+        # There is deliberately no separate pool for the cross-link
+        # interferers: an interfering UE is just a UE served by that
+        # neighbour cell, so it draws from the same slot list.  Giving them
+        # their own reserved slots put them after every victim slot, so a
+        # victim's leaf could never match an interferer's and cross-cell
+        # collisions became impossible.
         for index, cell in enumerate(sites):
-            for u in range(self.num_ues):
-                if home[u] == index:
-                    ue_ids.append(int(u))
-                    cell_ids.append(int(cell.cell_id))
-            for j in range(slots):
-                ue_ids.append(int(_SRS_INTF_UE_BASE + j))
+            n_slots = max(uniform if mobile else len(per_cell[index]), 1)
+            slots_by_cell.append(n_slots)
+            for slot in range(n_slots):
+                ue_ids.append(int(slot))
                 cell_ids.append(int(cell.cell_id))
         plan = allocate_basic_srs_resources(
             ue_ids,
@@ -1633,23 +1655,15 @@ class InternalSimSource:
             hopping=True,
             adaptive_period=True,
         )
-        victims: dict[int, Any] = {}
-        interferers: dict[tuple[int, int], Any] = {}
-        for a in plan:
-            if int(a.ue_id) >= _SRS_INTF_UE_BASE:
-                interferers[(int(a.cell_id), int(a.ue_id) - _SRS_INTF_UE_BASE)] = a
-            else:
-                victims[int(a.ue_id)] = a
-        table = (victims, interferers)
+        victims: dict[tuple[int, int], Any] = {
+            (int(a.cell_id), int(a.ue_id)): a for a in plan
+        }
+        slots_per_cell = {
+            int(cell.cell_id): slots_by_cell[i] for i, cell in enumerate(sites)
+        }
+        table = (victims, slots_per_cell, slot_of_ue)
         self._srs_plan_cache = table
         return table
-
-    def _srs_cross_link_slots(self, n_sites: int) -> int:
-        """How many interfering-UE SRS slots each cell needs to reserve."""
-        requested = self.cfg.get("max_srs_cross_link_ues")
-        if requested is None:
-            requested = self.cfg.get("num_interfering_ues", 0) or 0
-        return max(min(int(requested), max(n_sites - 1, 0)), 0)
 
     def _srs_estimate_from_occasions(
         self,
@@ -2115,6 +2129,7 @@ class InternalSimSource:
             # sounded, and which neighbour UEs share that exact leaf.
             srs_occurrence = int(round_index)
             victim_assignment = None
+            srs_slot = -1
             srs_pilot_rb = np.arange(n_rb, dtype=np.int64)
             # The SRS plan is needed whenever anything downstream has to know
             # which resource this UE sounded: the hopping estimators, the
@@ -2128,10 +2143,18 @@ class InternalSimSource:
                 or self.cfg.get("srs_pilot_contamination_rho") is not None
             )
             if needs_srs_plan and len(sites) >= 1:
-                victims, _ = self._srs_network_plan(
+                victims, _, slot_of_ue = self._srs_network_plan(
                     sites, scenario, elements_per_port
                 )
-                victim_assignment = victims[int(ue_id)]
+                srs_slot = int(slot_of_ue[int(ue_id)])
+                key = (int(serving_cell.cell_id), srs_slot)
+                if key not in victims:
+                    raise RuntimeError(
+                        f"UE {ue_id} 切换到小区 {serving_cell.cell_id} 后没有对应的 "
+                        f"SRS 槽位 {srs_slot}；移动场景下每个小区都应预留同样多的 "
+                        "槽位，请检查 SRS 资源计划的构建。"
+                    )
+                victim_assignment = victims[key]
                 if n_rb == 272:
                     from .srs_waveform import (  # noqa: PLC0415
                         assignment_rb_indices as _arb,
@@ -2236,6 +2259,8 @@ class InternalSimSource:
             ]
 
             h_intf = None
+            intf_cells: list[int] = []
+            intf_rx: list[float] = []
             if keep_interferer_h and len(sites) > 1:
                 rows = []
                 # The documented contract is "keep the 3 strongest by
@@ -2249,11 +2274,20 @@ class InternalSimSource:
                 if raw_cap is None:
                     raw_cap = _MAX_PER_UE_INTF_CELLS_DEFAULT
                 max_cells = max(min(int(raw_cap), len(sites) - 1), 0)
-                for k in range(len(sites)):
+                # "Keep the strongest N" has to mean strongest, not
+                # lowest-numbered.  Iterating cells in index order and
+                # stopping at N silently kept cells 0,1,2 -- on a 7-site
+                # layout that picked a neighbour up to 22 dB weaker than the
+                # real dominant interferer, so the equalizer saw the wrong
+                # interference directions.  Ties break on cell index so the
+                # order never depends on sort stability.
+                ranked = sorted(
+                    (k for k in range(len(sites)) if k != serving),
+                    key=lambda k: (-float(rx_all[k]), k),
+                )
+                for k in ranked:
                     if max_cells <= 0:
                         break
-                    if k == serving:
-                        continue
                     scale = math.sqrt(max(per_cell_i[k] / max(signal_mw, _EPS), _EPS))
                     cross_delta = position - sites[k].position
                     cross_horizontal = max(float(np.linalg.norm(cross_delta[:2])), _EPS)
@@ -2287,6 +2321,8 @@ class InternalSimSource:
                         role="interferer",
                     )
                     rows.append((cross * scale).astype(np.complex64))
+                    intf_cells.append(int(sites[k].cell_id))
+                    intf_rx.append(float(rx_all[k]))
                     if len(rows) >= max_cells:
                         break
                 if rows:
@@ -2382,6 +2418,13 @@ class InternalSimSource:
                 "dl_interference_power_per_slot_per_cell_mw": per_cell_i.reshape(1, -1),
                 "dl_power_decomposition_version": "superran-prebeam-per-rb-sni-v1",
                 **cross_meta,
+                # Which neighbours h_interferers actually holds, strongest
+                # first.  Without it "the strongest 3" is unverifiable and a
+                # selection bug stays invisible.
+                "interferer_cell_ids": np.asarray(intf_cells, dtype=np.int64),
+                # 必须与 interferer_cell_ids 同序（都按保留顺序，最强优先）；
+                # 按小区编号另取一遍会让两列错位。
+                "interferer_rx_power_dbm": np.asarray(intf_rx, dtype=np.float64),
                 "srs_occurrence_index": srs_occurrence,
                 "srs_victim_rb_start": int(srs_pilot_rb[0]),
                 "srs_victim_rb_count": int(srs_pilot_rb.size),
@@ -2390,7 +2433,15 @@ class InternalSimSource:
                     else int(victim_assignment.frequency_resource_id)
                 ),
                 "srs_victim_ue_id": int(ue_id),
-                "srs_victim_cell_id": int(serving_cell.cell_id),
+                "srs_victim_slot": srs_slot,
+                # The cell the assignment really came from.  Reporting the
+                # serving cell here regardless would hide exactly the
+                # handover mis-binding this key exists to expose.
+                "srs_victim_cell_id": (
+                    -1 if victim_assignment is None
+                    else int(victim_assignment.cell_id)
+                ),
+                "srs_serving_cell_id": int(serving_cell.cell_id),
                 "ul_geometry_sir_dB": sir_db,
                 "ul_geometry_sir_model": "shared_dl_geometry_sir_symmetric_neighbour_power_v1",
                 "effective_channel_model": effective_model,

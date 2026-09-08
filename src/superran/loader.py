@@ -212,6 +212,20 @@ class Dataset:
         return self._npz["h_interferers"] if "h_interferers" in self._npz.files else None
 
     @cached_property
+    def interferer_identity(self) -> dict[str, np.ndarray]:
+        """``h_interferers`` 每一根属于哪个邻区，形状 ``[N, 保留的邻区数]``。
+
+        保留的是接收电平**最强**的前 N 个（不是小区编号最小的前 N 个），
+        ``cell_ids`` 与 ``rx_power_dbm`` 让这个选择可以独立复核。
+        """
+        out: dict[str, np.ndarray] = {}
+        prefix = "interferer__"
+        for key in self._npz.files:
+            if key.startswith(prefix):
+                out[key.removeprefix(prefix)] = self._npz[key]
+        return out
+
+    @cached_property
     def srs_cross_link(self) -> dict[str, np.ndarray]:
         """每根上行交叉链路的身份，形状 ``[N, 干扰UE]``，与 ``h_ul_cross`` 同轴。
 
