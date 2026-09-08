@@ -42,6 +42,7 @@ import os
 import time
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -498,7 +499,7 @@ class SchedulerConfig:
     pf_gain_threshold: float = 0.0
     # none=不做相关性筛选；select=当前门限筛选；schmidt 尚未实现并硬失败。
     orthogonalization_mode: str = "select"
-    mu_precoder: str = "zf"
+    mu_precoder: str = "ezf"
     # RZF 的每个复信道系数 CSI 误差方差。它必须来自估计器协方差或离线标定，
     # 不能在运行时偷看 h_true 逐快照反推；0.0 精确保持历史 ZF/RZF 噪声加载口径。
     mu_csi_error_variance: float = 0.0
@@ -593,9 +594,10 @@ class SchedulerConfig:
                 f"收到 {self.max_mu_users!r}")
         if (isinstance(self.mu_rank_per_user, (bool, np.bool_))
                 or not isinstance(self.mu_rank_per_user, (int, np.integer))
-                or int(self.mu_rank_per_user) != 2):
+                or not 1 <= int(self.mu_rank_per_user) <= mu.MU_MAX_RANK):
             raise ValueError(
-                "mu_rank_per_user 当前只支持 2：pair 表是按每用户 rank2 建的，"
+                f"mu_rank_per_user 必须是 1..{mu.MU_MAX_RANK} 的整数："
+                "配对组的总层数由它决定（对应现场实现的初始配对 rank 上限），"
                 f"收到 {self.mu_rank_per_user!r}")
         if (not np.isfinite(self.mu_corr_threshold)
                 or not 0.0 <= float(self.mu_corr_threshold) <= 1.0):
@@ -621,8 +623,8 @@ class SchedulerConfig:
         if self.mu_accounting != "pair_table":
             raise ValueError(
                 f"mu_accounting 只支持 pair_table，收到 {self.mu_accounting!r}")
-        if self.mu_precoder not in ("zf", "rzf"):
-            raise ValueError("mu_precoder 只支持 zf / rzf")
+        if self.mu_precoder not in ("ezf", "zf", "rzf"):
+            raise ValueError("mu_precoder 只支持 ezf / zf / rzf")
         if (not np.isfinite(self.mu_csi_error_variance)
                 or float(self.mu_csi_error_variance) < 0):
             raise ValueError("mu_csi_error_variance 必须是有限非负数")
@@ -1141,12 +1143,16 @@ class MuPairLink:
     """两个 UE 在各快照下的 MU rank-2 链路差分；TTI 主循环只查表。"""
 
     users: tuple[int, int]
-    rank_per_user: int
+    #: [2]，逐用户 MU 层数。允许异 rank 配对（现场实现的 MU 侧层数取
+    #: ``min(初始配对 rank, 该 UE 的 SU rank)``）。
+    rank_per_user: tuple[int, int]
     true_sinr_db: np.ndarray             # [snapshot,2]，用于 BLER
     predicted_sinr_db: np.ndarray        # [snapshot,2]，基站 CSI 视角
     corr_loss_tx_db: np.ndarray          # [snapshot,2]，MCS 公式中的 CorrLoss
     corr_loss_true_db: np.ndarray        # [snapshot,2]，物理对账
-    power_loss_db: float
+    #: [2]，逐用户等分功率分摊 ``10log10(rank_ue / Σrank)``（现场口径）。
+    #: 异 rank 配对时两侧不同。
+    power_loss_db: np.ndarray
     correlation: np.ndarray              # [snapshot] 宽带归一化相关系数
     leakage_ratio: np.ndarray            # [snapshot] 真实残余 MU 干扰
     predicted_leakage_ratio: np.ndarray  # [snapshot]
@@ -1157,6 +1163,9 @@ class MuPairLink:
     corr_loss_tx_rbg_db: np.ndarray | None = None    # [snapshot,2,RBG]
     corr_loss_true_rbg_db: np.ndarray | None = None  # [snapshot,2,RBG]
     receiver: str = "per_user_lmmse"
+    #: 基站**发射侧**预测配对 SINR 用的模型。``residual_correlation_product``
+    #: 是现场口径：SU 波束互相关连乘，不含接收端联合检测增益。
+    prediction_model: str = "residual_correlation_product"
     csi_error_variance: float = 0.0
     power_diagnostics: list[dict[str, Any]] = field(default_factory=list)
     rzf_regularization: list[dict[str, Any]] = field(default_factory=list)
@@ -1170,11 +1179,16 @@ class MuPairLink:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "users": list(self.users), "rank_per_user": self.rank_per_user,
-            "power_loss_db": round(float(self.power_loss_db), 6),
+            "users": list(self.users),
+            "rank_per_user": [int(x) for x in self.rank_per_user],
+            "total_layers": int(sum(int(x) for x in self.rank_per_user)),
+            "power_loss_db": [round(float(x), 6) for x in
+                              np.atleast_1d(self.power_loss_db)],
+            "prediction_model": self.prediction_model,
             "power_loss_scope": (
-                "equal stream-power split: two rank-2 MU users use P/4 per stream "
-                "versus rank-2 SU P/2; normalization residual is in CorrLoss"),
+                "equal stream-power split per user: 10log10(rank_ue / total_layers); "
+                "two rank-2 MU users give P/4 per stream versus rank-2 SU P/2; "
+                "normalization residual is in CorrLoss"),
             "correlation_mean": float(np.mean(self.correlation)),
             "correlation_max": float(np.max(self.correlation)),
             "corr_loss_tx_db_mean": [float(x) for x in np.mean(
@@ -1260,6 +1274,16 @@ class UeLinkTable:
     h_prec_rbg: np.ndarray | None = field(default=None, repr=False)  # [S,F,BS,UE]
     noise_power_by_snapshot: np.ndarray | None = field(default=None, repr=False)
     mu_links: dict[int, MuPairLink] = field(default_factory=dict, repr=False)
+    #: 本 UE 的 MU 层数上限，由最近一次配对建表写入。运行时实际层数是
+    #: ``min(当下 SU rank, 这个上限, 调度配置里的全局上限)``——**逐用户上限
+    #: 必须从建表贯通到运行时**，否则建表只备了 1 层的 UE 会在运行时被按
+    #: 全局上限去查表，查不到就整批拒配。``None`` 表示没建过 MU 表。
+    mu_rank_cap: int | None = None
+    #: ``{对方在表里的位置: {(我的层数, 对方层数): link}}``。运行时每个 UE 的
+    #: MU 层数是 ``min(当下 SU rank, 配对上限)``，逐 TTI 会变，所以每种组合
+    #: 都预先建好。``mu_links`` 仍指向两边都取上限的那一张。
+    mu_links_by_rank: dict[int, dict[tuple[int, int], MuPairLink]] = field(
+        default_factory=dict, repr=False)
 
     @property
     def amc_predicted_sinr_db(self) -> np.ndarray | None:
@@ -1493,7 +1517,7 @@ def build_link_tables(
     power_constraint: str = "nebf",
     mu_enabled: bool = False,
     mu_rank_per_user: int = mu.MU_MAX_RANK,
-    mu_precoder: str = "zf",
+    mu_precoder: str = "ezf",
     mu_csi_error_variance: float = 0.0,
     rb_power_control: pc.RbPowerControlConfig | None = None,
     power_geometry: pc.DownlinkPowerGeometry | None = None,
@@ -2262,23 +2286,53 @@ def build_link_tables(
     return out
 
 
+def _su_tx_directions(h_prec_rbg: np.ndarray, rank: int,
+                     power_constraint: str) -> np.ndarray:
+    """该用户单独发射时会用的物理波束方向 ``[F, BS, rank]``。
+
+    就是 SU 链路那条路真正会打出去的权：先由陈旧 CSI 做 SVD，再施加
+    每天线功率约束（默认 NEBF）。与现场实现取 SU 波束权的口径一致。
+    列范数由 :func:`mumimo.su_weight_correlation_matrix` 归一，这里不动。
+    """
+    w_full = ca.svd_precoder(np.asarray(h_prec_rbg))
+    q, _w, _diag = bf.equal_power_weights(
+        w_full[:, :, :int(rank)], mode=power_constraint, total_power=1.0)
+    return np.asarray(q)
+
+
 def build_mu_pair_tables(
-    tables: list[UeLinkTable], *, rank_per_user: int = mu.MU_MAX_RANK,
-    precoder: str = "zf", power_constraint: str = "nebf",
+    tables: list[UeLinkTable], *,
+    rank_per_user: int | Sequence[int] = mu.MU_MAX_RANK,
+    rank_cap_per_user: int | Sequence[int] | None = None,
+    precoder: str = "ezf", power_constraint: str = "nebf",
     csi_error_variance: float = 0.0,
 ) -> dict[str, Any]:
     """预计算所有两用户 MU 链路及 ``CorrLoss + powerLoss`` 分解。
 
-    第一版只做两用户、每用户 rank2。它不在 TTI 循环做矩阵运算；PF 顺序和
-    队列状态仍逐 TTI 决定“哪一对”被拿来查表。
+    两用户配对。``rank_per_user``（或同义的 ``rank_cap_per_user``）是每个 UE
+    的 MU 层数**上限**，不是固定值：运行时每个 UE 的 MU 层数取
+    ``min(它当下的 SU rank, 上限)``，所以这里把 1..上限 的每一种组合都建好，
+    TTI 主循环仍然只查表、不做矩阵运算。cap=2 的一对 UE 会建 4 张表。
+    PF 顺序和队列状态仍逐 TTI 决定“哪一对”被拿来查表。
     """
     if len(tables) < 2:
         raise ValueError("MU 建表至少需要 2 个 UE")
-    rank = int(rank_per_user)
-    if rank != mu.MU_MAX_RANK:
-        raise ValueError(f"当前 MU 体验基线固定每用户 rank{mu.MU_MAX_RANK}")
-    if precoder not in ("zf", "rzf"):
-        raise ValueError("MU 体验基线的 precoder 只支持 zf / rzf")
+    # 上限可以给一个整数（所有 UE 同上限），也可以逐 UE 给。
+    cap_arg = rank_cap_per_user if rank_cap_per_user is not None else rank_per_user
+    if isinstance(cap_arg, (int, np.integer)) and not isinstance(
+            cap_arg, (bool, np.bool_)):
+        caps = [int(cap_arg)] * len(tables)
+    else:
+        caps = [int(value) for value in cap_arg]
+        if len(caps) != len(tables):
+            raise ValueError(
+                f"逐 UE 的 MU 层数上限长度必须等于 UE 数 {len(tables)}，"
+                f"收到 {len(caps)}")
+    if any(r < 1 or r > mu.MU_MAX_RANK for r in caps):
+        raise ValueError(
+            f"MU 每用户层数上限必须在 1..{mu.MU_MAX_RANK} 内，收到 {caps}")
+    if precoder not in ("ezf", "zf", "rzf"):
+        raise ValueError("MU 体验基线的 precoder 只支持 ezf / zf / rzf")
     if not np.isfinite(csi_error_variance) or float(csi_error_variance) < 0:
         raise ValueError("csi_error_variance 必须是有限非负数")
     n_snap = int(tables[0].sinr_db.shape[0])
@@ -2286,12 +2340,22 @@ def build_mu_pair_tables(
     rbg_boundaries = tables[0].frequency_rbg_boundaries
     n_rbg = int(tables[0].sinr_rbg_db.shape[2]) \
         if tables[0].sinr_rbg_db is not None else 1
-    for t in tables:
+    caps_clamped: list[dict[str, int]] = []
+    for t_idx, t in enumerate(tables):
         if (t.h_true_rbg is None or t.h_prec_rbg is None
                 or t.noise_power_by_snapshot is None):
             raise ValueError("MU 建表缺少 RBG 粒度 true/precoding channel 或逐快照噪声")
-        if t.sinr_db.shape[1] < rank:
-            raise ValueError(f"UE {t.ue} 不支持 MU rank{rank}")
+        # 该 UE 的 SU 链路表撑不到这么多层时，把它的上限压到它撑得住的层数：
+        # 这就是 min(SU 能力, 配对上限) 在建表侧的那一半（2R 终端与 4R 终端
+        # 混在同一小区里就是这种情况）。压过的会写进摘要，不是静默降级。
+        supported = int(t.sinr_db.shape[1])
+        if supported < 1:
+            raise ValueError(f"UE {t.ue} 的 SU 链路表没有任何 rank")
+        if supported < caps[t_idx]:
+            caps_clamped.append(
+                {"ue": int(t.ue), "requested": int(caps[t_idx]),
+                 "supported": supported})
+            caps[t_idx] = supported
         if t.sinr_db.shape[0] != n_snap:
             raise ValueError("MU 各 UE 的 snapshot 数必须一致")
         if int(t.frequency_rows_per_rbg) != rows_per_rbg:
@@ -2301,24 +2365,52 @@ def build_mu_pair_tables(
         if t.sinr_rbg_db is None or int(t.sinr_rbg_db.shape[2]) != n_rbg:
             raise ValueError("MU 建表缺少一致的逐 RBG SU SINR")
 
-    # 基站视角的 SU rank2 物理 SINR 只与 UE/快照有关，先缓存，避免每个 pair 重算。
-    su_pred = np.zeros((len(tables), n_snap), dtype=float)
-    su_pred_rbg = np.zeros((len(tables), n_snap, n_rbg), dtype=float)
+    # 基站视角的 SU 物理 SINR 只与 (UE, 快照, 层数) 有关，先把 1..cap 全部缓存。
+    # 一次 rank_adaptation_aged(max_rank=cap) 就返回全部层数的候选，所以这里
+    # **不随组合数翻倍**。
+    su_pred = [np.zeros((caps[u], n_snap), dtype=float) for u in range(len(tables))]
+    su_pred_rbg = [np.zeros((caps[u], n_snap, n_rbg), dtype=float)
+                   for u in range(len(tables))]
     for u, table in enumerate(tables):
         assert table.h_prec_rbg is not None and table.noise_power_by_snapshot is not None
         for s in range(n_snap):
             rc = ca.rank_adaptation_aged(
                 table.h_prec_rbg[s], table.h_prec_rbg[s],
                 noise_power=float(table.noise_power_by_snapshot[s]),
-                max_rank=rank, rb_per_rbg=rows_per_rbg,
+                max_rank=caps[u], rb_per_rbg=rows_per_rbg,
                 rbg_boundaries=rbg_boundaries,
                 power_constraint=power_constraint)
-            su_pred[u, s] = float(rc.candidates[rank - 1]["sinr_db"])
-            su_pred_rbg[u, s] = np.asarray(
-                rc.candidates[rank - 1]["sinr_rbg_db"], dtype=float)
+            for r in range(1, caps[u] + 1):
+                su_pred[u][r - 1, s] = float(rc.candidates[r - 1]["sinr_db"])
+                su_pred_rbg[u][r - 1, s] = np.asarray(
+                    rc.candidates[r - 1]["sinr_rbg_db"], dtype=float)
 
-    power_loss = -10.0 * np.log10(2.0)  # 2 个 rank2 UE：每流 P/4 vs SU 的 P/2
+    # SU 发射方向也只与 (UE, 快照, 层数) 有关。每天线功率约束依赖层数
+    # （功率先在列上等分再受约束），所以不能只做一次 SVD 再切列，必须逐层数算；
+    # 但对同一个 UE 只算一遍，pair 之间复用。
+    tx_dir_cache: dict[tuple[int, int, int], np.ndarray] = {}
+
+    def _tx_dir(u: int, s: int, r: int) -> np.ndarray:
+        key = (u, s, r)
+        cached = tx_dir_cache.get(key)
+        if cached is None:
+            hp_u = tables[u].h_prec_rbg
+            assert hp_u is not None
+            cached = _su_tx_directions(hp_u[s], r, power_constraint)
+            tx_dir_cache[key] = cached
+        return cached
+
+    # **先把上一次建表的结果清干净。** 同一批链路表被重新建表时（换上限、
+    # 换预编码、换 CSI 误差），旧组合如果留着，运行时可能查中一张已经不该
+    # 存在的表——比如上限已经压到 1 层，却仍按残留的两层组合发送。这属于
+    # 陈旧状态冒充当前状态，比越限本身更难查：KPI 完全看不出来。
+    for u, table in enumerate(tables):
+        table.mu_links.clear()
+        table.mu_links_by_rank.clear()
+        table.mu_rank_cap = int(caps[u])
     pair_count = 0
+    link_count = 0
+    combos_seen: set[tuple[int, int]] = set()
     for i in range(len(tables)):
         for j in range(i + 1, len(tables)):
             if (tables[i].serving_cell_index is not None
@@ -2326,84 +2418,128 @@ def build_mu_pair_tables(
                     and tables[i].serving_cell_index != tables[j].serving_cell_index):
                 # One MU precoder cannot span independent serving cells.
                 continue
-            true_sinr = np.zeros((n_snap, 2), dtype=float)
-            pred_sinr = np.zeros((n_snap, 2), dtype=float)
-            true_sinr_rbg = np.zeros((n_snap, 2, n_rbg), dtype=float)
-            pred_sinr_rbg = np.zeros((n_snap, 2, n_rbg), dtype=float)
-            corr = np.zeros(n_snap, dtype=float)
-            leakage = np.zeros(n_snap, dtype=float)
-            pred_leakage = np.zeros(n_snap, dtype=float)
-            pdiag: list[dict[str, Any]] = []
-            regdiag: list[dict[str, Any]] = []
             ti, tj = tables[i], tables[j]
             assert ti.h_true_rbg is not None and tj.h_true_rbg is not None
             assert ti.h_prec_rbg is not None and tj.h_prec_rbg is not None
             assert ti.noise_power_by_snapshot is not None
             assert tj.noise_power_by_snapshot is not None
-            for s in range(n_snap):
-                hp = mu.effective_user_channels(
-                    [ti.h_prec_rbg[s][None], tj.h_prec_rbg[s][None]],
-                    streams_per_user=rank)
-                noise = np.array([ti.noise_power_by_snapshot[s],
-                                  tj.noise_power_by_snapshot[s]], dtype=float)
-                rt = mu.mu_link_performance_lmmse(
-                    [ti.h_true_rbg[s], tj.h_true_rbg[s]],
-                    [ti.h_prec_rbg[s], tj.h_prec_rbg[s]],
-                    noise_power=noise, streams_per_user=rank, precoder=precoder,
-                    power_constraint=power_constraint, rb_per_rbg=rows_per_rbg,
-                    rbg_boundaries=rbg_boundaries,
-                    csi_error_variance=float(csi_error_variance))
-                rp = mu.mu_link_performance_lmmse(
-                    [ti.h_prec_rbg[s], tj.h_prec_rbg[s]],
-                    [ti.h_prec_rbg[s], tj.h_prec_rbg[s]],
-                    noise_power=noise, streams_per_user=rank, precoder=precoder,
-                    power_constraint=power_constraint, rb_per_rbg=rows_per_rbg,
-                    rbg_boundaries=rbg_boundaries,
-                    csi_error_variance=float(csi_error_variance))
-                true_sinr[s] = rt.sinr_per_user_db
-                pred_sinr[s] = rp.sinr_per_user_db
-                assert rt.sinr_per_user_rbg_db is not None
-                assert rp.sinr_per_user_rbg_db is not None
-                true_sinr_rbg[s] = rt.sinr_per_user_rbg_db
-                pred_sinr_rbg[s] = rp.sinr_per_user_rbg_db
-                leakage[s] = rt.leakage_ratio
-                pred_leakage[s] = rp.leakage_ratio
-                pdiag.append(dict(rt.power_diagnostics or {}))
-                regdiag.append(dict(rt.rzf_regularization or {}))
-                g = mu._wideband_user_vectors(hp)
-                denom = max(float(np.linalg.norm(g[0]) * np.linalg.norm(g[1])), _EPS)
-                corr[s] = abs(complex(g[0].conj() @ g[1])) / denom
+            # **每一种层数组合各建一张表。** 运行时每个 UE 的 MU 层数是
+            # ``min(它当下的 SU rank, 配对上限)``，逐 TTI 会变；主循环只能查表，
+            # 所以离线就得把 1..cap 的组合全备齐。cap=2 的两用户配对是 4 张。
+            for rank_i in range(1, caps[i] + 1):
+                for rank_j in range(1, caps[j] + 1):
+                    pair_ranks = (rank_i, rank_j)
+                    combos_seen.add(pair_ranks)
+                    # 等分功率按**总层数**分摊，逐用户算，对齐现场口径。
+                    # 2 用户 × rank2 时两侧都是 -3.0103 dB（与历史硬编码逐位
+                    # 相同）；异 rank 时层多的那个用户分到更多功率。
+                    power_loss = mu.mu_power_split_db(pair_ranks)
+                    true_sinr = np.zeros((n_snap, 2), dtype=float)
+                    pred_sinr = np.zeros((n_snap, 2), dtype=float)
+                    true_sinr_rbg = np.zeros((n_snap, 2, n_rbg), dtype=float)
+                    pred_sinr_rbg = np.zeros((n_snap, 2, n_rbg), dtype=float)
+                    corr_loss_pred_rbg = np.zeros((n_snap, 2, n_rbg), dtype=float)
+                    corr = np.zeros(n_snap, dtype=float)
+                    leakage = np.zeros(n_snap, dtype=float)
+                    pred_leakage = np.zeros(n_snap, dtype=float)
+                    pdiag: list[dict[str, Any]] = []
+                    regdiag: list[dict[str, Any]] = []
+                    for s in range(n_snap):
+                        noise = np.array([ti.noise_power_by_snapshot[s],
+                                          tj.noise_power_by_snapshot[s]],
+                                         dtype=float)
+                        rt = mu.mu_link_performance_lmmse(
+                            [ti.h_true_rbg[s], tj.h_true_rbg[s]],
+                            [ti.h_prec_rbg[s], tj.h_prec_rbg[s]],
+                            noise_power=noise, streams_per_user=list(pair_ranks),
+                            precoder=precoder,
+                            power_constraint=power_constraint,
+                            rb_per_rbg=rows_per_rbg,
+                            rbg_boundaries=rbg_boundaries,
+                            csi_error_variance=float(csi_error_variance))
+                        true_sinr[s] = rt.sinr_per_user_db
+                        assert rt.sinr_per_user_rbg_db is not None
+                        true_sinr_rbg[s] = rt.sinr_per_user_rbg_db
+                        leakage[s] = rt.leakage_ratio
+                        pdiag.append(dict(rt.power_diagnostics or {}))
+                        regdiag.append(dict(rt.rzf_regularization or {}))
+                        # **基站预测侧：残留相关性连乘，不跑联合检测。**
+                        # 现场基站在决定配不配、发哪一档 MCS 的时候，手上只有
+                        # 两个用户各自的 SU 波束方向，没有终端接收机。所以预测
+                        # SINR 是解析式的三层叠加：SU 基线 + 残留相关性损失 +
+                        # 功率分摊。真实解码 SINR（上面的 rt）仍走 LMMSE。
+                        corr_loss_rbg = mu.residual_correlation_loss_db(
+                            [_tx_dir(i, s, rank_i), _tx_dir(j, s, rank_j)],
+                            rb_per_rbg=rows_per_rbg,
+                            rbg_boundaries=rbg_boundaries)
+                        pair_su_pred_rbg = np.stack(
+                            (su_pred_rbg[i][rank_i - 1, s],
+                             su_pred_rbg[j][rank_j - 1, s]))      # [2, RBG]
+                        corr_loss_pred_rbg[s] = corr_loss_rbg
+                        pred_sinr_rbg[s] = (pair_su_pred_rbg + corr_loss_rbg
+                                            + power_loss[:, None])
+                        pred_sinr[s] = np.mean(pred_sinr_rbg[s], axis=1)
+                        pred_leakage[s] = 0.0  # 解析式不产生残余干扰功率比
+                        hp = mu.effective_user_channels(
+                            [ti.h_prec_rbg[s][None], tj.h_prec_rbg[s][None]],
+                            streams_per_user=max(pair_ranks))
+                        g = mu._wideband_user_vectors(hp)
+                        denom = max(
+                            float(np.linalg.norm(g[0]) * np.linalg.norm(g[1])),
+                            _EPS)
+                        corr[s] = abs(complex(g[0].conj() @ g[1])) / denom
 
-            su_true = np.column_stack((ti.sinr_db[:, rank - 1],
-                                       tj.sinr_db[:, rank - 1]))
-            assert ti.sinr_rbg_db is not None and tj.sinr_rbg_db is not None
-            su_true_rbg = np.stack((ti.sinr_rbg_db[:, rank - 1],
-                                    tj.sinr_rbg_db[:, rank - 1]), axis=1)
-            su_pred_pair = np.column_stack((su_pred[i], su_pred[j]))
-            su_pred_pair_rbg = np.stack((su_pred_rbg[i], su_pred_rbg[j]), axis=1)
-            link = MuPairLink(
-                users=(i, j), rank_per_user=rank,
-                true_sinr_db=true_sinr, predicted_sinr_db=pred_sinr,
-                corr_loss_tx_db=pred_sinr - su_pred_pair - power_loss,
-                corr_loss_true_db=true_sinr - su_true - power_loss,
-                power_loss_db=float(power_loss), correlation=corr,
-                leakage_ratio=leakage, predicted_leakage_ratio=pred_leakage,
-                power_constraint=str(power_constraint).lower(), precoder=precoder,
-                true_sinr_rbg_db=true_sinr_rbg,
-                predicted_sinr_rbg_db=pred_sinr_rbg,
-                corr_loss_tx_rbg_db=(
-                    pred_sinr_rbg - su_pred_pair_rbg - power_loss),
-                corr_loss_true_rbg_db=(
-                    true_sinr_rbg - su_true_rbg - power_loss),
-                csi_error_variance=float(csi_error_variance),
-                power_diagnostics=pdiag, rzf_regularization=regdiag)
-            ti.mu_links[j] = link
-            tj.mu_links[i] = link
+                    su_true = np.column_stack((ti.sinr_db[:, rank_i - 1],
+                                               tj.sinr_db[:, rank_j - 1]))
+                    assert ti.sinr_rbg_db is not None and tj.sinr_rbg_db is not None
+                    su_true_rbg = np.stack((ti.sinr_rbg_db[:, rank_i - 1],
+                                            tj.sinr_rbg_db[:, rank_j - 1]), axis=1)
+                    link = MuPairLink(
+                        users=(i, j), rank_per_user=pair_ranks,
+                        true_sinr_db=true_sinr, predicted_sinr_db=pred_sinr,
+                        corr_loss_tx_db=np.mean(corr_loss_pred_rbg, axis=2),
+                        corr_loss_true_db=true_sinr - su_true - power_loss[None, :],
+                        power_loss_db=power_loss.copy(), correlation=corr,
+                        leakage_ratio=leakage, predicted_leakage_ratio=pred_leakage,
+                        power_constraint=str(power_constraint).lower(),
+                        precoder=precoder,
+                        true_sinr_rbg_db=true_sinr_rbg,
+                        predicted_sinr_rbg_db=pred_sinr_rbg,
+                        corr_loss_tx_rbg_db=corr_loss_pred_rbg,
+                        corr_loss_true_rbg_db=(
+                            true_sinr_rbg - su_true_rbg
+                            - power_loss[None, :, None]),
+                        csi_error_variance=float(csi_error_variance),
+                        power_diagnostics=pdiag, rzf_regularization=regdiag)
+                    # 两侧各按**自己的视角**存 (我的层数, 对方的层数)，
+                    # 查表时不必再判断谁是 users[0]。
+                    ti.mu_links_by_rank.setdefault(j, {})[(rank_i, rank_j)] = link
+                    tj.mu_links_by_rank.setdefault(i, {})[(rank_j, rank_i)] = link
+                    if pair_ranks == (caps[i], caps[j]):
+                        # ``mu_links`` 保持指向"两边都取上限"那一张：图完整性
+                        # 校验、诊断与历史调用方仍然只认这一个入口。
+                        ti.mu_links[j] = link
+                        tj.mu_links[i] = link
+                    link_count += 1
             pair_count += 1
     return {
-        "pairs": pair_count, "snapshots": n_snap,
-        "rank_per_user": rank, "power_loss_db": float(power_loss),
+        "pairs": pair_count,
+        "links": link_count,
+        "snapshots": n_snap,
+        "rank_cap_per_user": caps,
+        "rank_cap_clamped_to_su_capability": caps_clamped,
+        "rank_combinations": sorted(combos_seen),
+        "rank_selection": (
+            "runtime MU layers per UE = min(current SU rank, per-UE cap); "
+            "every combination is pre-built so the TTI loop stays table-only"),
+        "power_loss_db_by_combination": {
+            str(list(combo)): [float(x) for x in mu.mu_power_split_db(combo)]
+            for combo in sorted(combos_seen)},
         "precoder": precoder, "power_constraint": str(power_constraint).lower(),
+        "prediction_model": "residual_correlation_product",
+        "prediction_scope": (
+            "gNB-side analytic MU SINR: SU baseline + 10log10(prod(1-|w_k^H w_q|^2)) "
+            "+ 10log10(rank_ue/total_layers); no receiver-side joint detection"),
         "csi_error_variance": float(csi_error_variance),
     }
 
@@ -2425,7 +2561,7 @@ def measure_mu_gain(
     rb_per_rbg: int = 16,
     rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
     power_constraint: str = "nebf",
-    mu_precoder: str = "zf",
+    mu_precoder: str = "ezf",
     mu_csi_error_variance: float = 0.0,
     min_pairing_mcs: int = 4,
     pf_gain_threshold: float = 0.0,
@@ -2474,8 +2610,8 @@ def measure_mu_gain(
             raise ValueError(f"{name} 必须是至少为 1 的整数")
     if not np.isfinite(snapshot_ms) or float(snapshot_ms) <= 0:
         raise ValueError("snapshot_ms 必须是有限正数")
-    if mu_precoder not in ("zf", "rzf"):
-        raise ValueError("mu_precoder 只支持 zf / rzf")
+    if mu_precoder not in ("ezf", "zf", "rzf"):
+        raise ValueError("mu_precoder 只支持 ezf / zf / rzf")
     if (not np.isfinite(mu_csi_error_variance)
             or float(mu_csi_error_variance) < 0):
         raise ValueError("mu_csi_error_variance 必须是有限非负数")

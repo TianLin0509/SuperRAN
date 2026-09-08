@@ -26,7 +26,7 @@ class CandidateGrant:
     base_predicted_sinr_db: tuple[float, ...]
     receive_sinr_db: tuple[float, ...]
     corr_loss_db: tuple[float, ...]
-    power_loss_db: float
+    power_loss_db: tuple[float, ...]
     olla_mcs: tuple[float, ...]
     queue_bytes: tuple[int, ...]
     required_rbg: tuple[int, ...]
@@ -86,12 +86,11 @@ class CandidateGrant:
             ("base_predicted_sinr_db", self.base_predicted_sinr_db),
             ("receive_sinr_db", self.receive_sinr_db),
             ("corr_loss_db", self.corr_loss_db),
+            ("power_loss_db", self.power_loss_db),
             ("olla_mcs", self.olla_mcs),
         ):
             if not all(np.isfinite(float(value)) for value in values):
                 raise ValueError(f"{name} must contain only finite values")
-        if not np.isfinite(float(self.power_loss_db)):
-            raise ValueError("power_loss_db must be finite")
         for name, values in (
             ("queue_bytes", self.queue_bytes),
             ("required_rbg", self.required_rbg),
@@ -180,7 +179,7 @@ class FinalGrant:
     mcs_without_olla: tuple[int, ...]
     true_sinr_db: tuple[float, ...]
     corr_loss_db: tuple[float, ...]
-    power_loss_db: float
+    power_loss_db: tuple[float, ...]
     required_rbg: tuple[int, ...]
     fits_in_fullband: tuple[bool, ...]
     tbs_bytes: tuple[int, ...]
@@ -253,7 +252,8 @@ def finalize_candidate_grant(
     for side, _user in enumerate(candidate.users):
         base = float(candidate.base_predicted_sinr_db[side])
         corr = float(candidate.corr_loss_db[side])
-        power = float(candidate.power_loss_db) if str(candidate.mode).upper() == "MU" else 0.0
+        power = (float(candidate.power_loss_db[side])
+                 if str(candidate.mode).upper() == "MU" else 0.0)
         mcs_input = base + corr + power
         no_olla = int(la.select_mcs(
             mcs_input, table=table_id, target_bler=target_bler).index)
@@ -310,7 +310,7 @@ def finalize_candidate_grant(
         mcs_without_olla=tuple(no_olla_mcs),
         true_sinr_db=tuple(float(value) for value in candidate.receive_sinr_db),
         corr_loss_db=tuple(float(value) for value in candidate.corr_loss_db),
-        power_loss_db=float(candidate.power_loss_db),
+        power_loss_db=tuple(float(value) for value in candidate.power_loss_db),
         required_rbg=tuple(int(value) for value in candidate.required_rbg),
         fits_in_fullband=tuple(bool(value) for value in candidate.fits_in_fullband),
         tbs_bytes=tuple(tbs_values),
