@@ -43,9 +43,23 @@ _SCALAR_META_FIELDS = (
     "indexed_slot_rs_schedule_valid", "rs_opportunity_abstraction_used",
     "effective_channel_model",
     "pathloss_model", "pathloss_model_approximate",
+    # SRS occasion this snapshot actually sounded (victim side).
+    "srs_occurrence_index", "srs_victim_rb_start", "srs_victim_rb_count",
+    "srs_victim_frequency_resource_id", "srs_victim_ue_id", "srs_victim_cell_id",
 )
 
 # 每个样本、每个小区/扇区一项的大尺度量。不能塞进 scalar，也不能只留第一条。
+# Per-interferer identity of the UL cross-link tensor.  Without these a
+# stored cross-link cannot be bound back to a neighbour UE or its SRS
+# resource, and the tensor is unusable for a contamination experiment.
+_CROSS_LINK_ID_FIELDS = (
+    "srs_cross_link_cell_ids",
+    "srs_cross_link_ue_ids",
+    "srs_cross_link_collides",
+    "srs_cross_link_frequency_resource_id",
+    "srs_cross_link_ul_sir_db_vec",
+)
+
 _VECTOR_META_FIELDS = (
     "pathloss_all_db",
     "rx_power_all_dbm",
@@ -515,6 +529,7 @@ def _collect(
         k: [] for k in (*_SCALAR_SAMPLE_FIELDS, *_HOOKED_SAMPLE_FIELDS)
     }
     metas: dict[str, list[Any]] = {k: [] for k in _SCALAR_META_FIELDS}
+    cross_ids: dict[str, list[np.ndarray]] = {k: [] for k in _CROSS_LINK_ID_FIELDS}
     vector_metas: dict[str, list[np.ndarray]] = {k: [] for k in _VECTOR_META_FIELDS}
     ssb_rsrp: list[list[float]] = []
     ssb_sinr: list[list[float]] = []
@@ -604,6 +619,13 @@ def _collect(
             if not np.isfinite(hx_snap).all():
                 raise RuntimeError("h_ul_cross 含 NaN 或 Inf，拒绝落盘")
             h_ul_cross.append(hx_snap)
+            for key in _CROSS_LINK_ID_FIELDS:
+                if key not in meta:
+                    raise RuntimeError(
+                        f"样本带了 h_ul_cross 却缺少干扰源身份字段 {key}；"
+                        "没有身份就无法把每根交叉链路绑回邻区 UE 与它的 SRS 资源。"
+                    )
+                cross_ids[key].append(np.asarray(meta[key]))
 
         pos = getattr(sample, "ue_position", None)
         positions.append(
@@ -686,6 +708,18 @@ def _collect(
                 "上行交叉链路不允许静默丢弃，请固定 max_srs_cross_link_ues。"
             )
         payload["h_ul_cross"] = np.stack(h_ul_cross)
+        n_intf = payload["h_ul_cross"].shape[1]
+        for key, vals in cross_ids.items():
+            if len(vals) != accepted or any(
+                a.shape != (n_intf,) for a in vals
+            ):
+                raise RuntimeError(
+                    f"干扰源身份 {key} 与 h_ul_cross 的干扰 UE 轴对不上："
+                    f"{len(vals)}/{accepted} 个样本，期望每样本 {n_intf} 项。"
+                )
+            payload[f"srs_cross_link__{key.removeprefix('srs_cross_link_')}"] = (
+                np.stack(vals)
+            )
     for k, vals in scalars.items():
         payload[f"scalar__{k}"] = np.asarray(vals, dtype=np.float64)
     for k, vals in metas.items():

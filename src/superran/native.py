@@ -497,12 +497,24 @@ def estimate_channel_with_interference(
 # Array, topology and codebook primitives
 # ---------------------------------------------------------------------------
 
-# Storage defaults.  Both tensors cost one extra full small-scale channel
-# synthesis per interferer per sample, so turning either on by default
-# multiplies both generation time and dataset size; flipping them is a
-# product decision, not a code detail.
-_STORE_INTERFERER_CHANNELS_DEFAULT = False
+# Storage defaults.  Each tensor costs one extra full small-scale channel
+# synthesis per interferer per sample, so both generation time and dataset
+# size scale with the interferer count.
+#
+# The downlink interferer channel is ON by default (2026-09-08 maintainer
+# ruling): a multi-cell dataset that silently ships without it looks like a
+# clean single-cell experiment to every downstream consumer.  Cap the cost
+# with ``max_per_ue_intf_cells`` (default 3), or switch it off explicitly.
+#
+# The UL cross-link stays opt-in: it only feeds SRS pilot contamination and
+# nothing consumes it unless that experiment is being run.
+_STORE_INTERFERER_CHANNELS_DEFAULT = True
 _STORE_SRS_CROSS_LINK_DEFAULT = False
+# Strongest-N neighbours kept per UE; matches the documented storage contract.
+_MAX_PER_UE_INTF_CELLS_DEFAULT = 3
+# UE-id namespace for the synthetic cross-link interferers, kept clear of the
+# real UE ids so one allocator batch can hold both.
+_SRS_INTF_UE_BASE = 100_000
 
 PORT_LAYOUT_CONTRACT_VERSION = "pol_h_v-top_to_bottom-v1"
 
@@ -1343,6 +1355,7 @@ class InternalSimSource:
         n_bs: int,
         n_ue: int,
         doppler_hz: float,
+        victim_assignment: Any = None,
     ) -> tuple[np.ndarray | None, dict[str, Any]]:
         """UL cross-link channels: interfering UEs -> *this* serving gNB.
 
@@ -1363,14 +1376,7 @@ class InternalSimSource:
         the amplitude therefore already carries this interferer's UL received
         power relative to the desired UE at the same gNB.
         """
-        measurements = self.cfg.get("measurements") or {}
-        if "srs_cross_link_channels" in measurements:
-            enabled = bool(measurements["srs_cross_link_channels"])
-        elif "store_srs_cross_link_channels" in self.cfg:
-            enabled = bool(self.cfg["store_srs_cross_link_channels"])
-        else:
-            enabled = _STORE_SRS_CROSS_LINK_DEFAULT
-        if not enabled or len(sites) < 2:
+        if not self._srs_cross_link_enabled() or len(sites) < 2:
             return None, {}
         same_colour_only = bool(
             self.cfg.get("srs_cross_link_same_pci_colour_only", True)
@@ -1422,16 +1428,35 @@ class InternalSimSource:
 
         rows: list[np.ndarray] = []
         cells_used: list[int] = []
+        ues_used: list[int] = []
+        collides: list[bool] = []
+        freq_phase: list[int] = []
         sir_db: list[float] = []
         distances: list[float] = []
         los_flags: list[bool] = []
         rejected: list[int] = []
         attempts_used: list[int] = []
+        plan = None
+        _resources_collide = None
+        if victim_assignment is not None:
+            from .srs_resource import resources_collide as _rc  # noqa: PLC0415
+
+            _resources_collide = _rc
+            _, plan = self._srs_network_plan(sites, scenario, elements_per_port)
         for k in candidates:
             if len(rows) >= n_cross:
                 break
+            # A concrete neighbour UE, not an anonymous direction: its SRS
+            # resource is what decides whether it pollutes us at all.
+            # Which reserved interferer slot in that neighbour cell this UE
+            # occupies.  Different slots mean different SRS leaves, which is
+            # exactly what makes some same-colour neighbours harmless.
+            slots = max(self._srs_cross_link_slots(len(sites)), 1)
+            intf_ue = int((global_index + k) % slots)
             drop_rng = np.random.default_rng(
-                np.random.SeedSequence([self._seed, 0x5C10, global_index, k])
+                np.random.SeedSequence(
+                    [self._seed, 0x5C10, int(sites[k].cell_id), intf_ue]
+                )
             )
             # The interfering UE must really be served by cell k, otherwise the
             # drop puts a "neighbour" UE on top of our own site and invents a
@@ -1486,9 +1511,17 @@ class InternalSimSource:
             )
             rows.append((cross * scale).astype(np.complex64))
             cells_used.append(int(sites[k].cell_id))
+            ues_used.append(intf_ue)
             sir_db.append(float(desired_rel_db - rel_db))
             distances.append(d3)
             los_flags.append(bool(los))
+            if plan is None:
+                collides.append(False)
+                freq_phase.append(-1)
+            else:
+                other = plan[(int(sites[k].cell_id), intf_ue)]
+                collides.append(bool(_resources_collide(victim_assignment, other)))
+                freq_phase.append(int(other.frequency_resource_id))
 
         if len(rows) < n_cross:
             # A ragged interferer axis would be silently dropped at write
@@ -1503,6 +1536,13 @@ class InternalSimSource:
             )
         meta = {
             "srs_cross_link_cells": cells_used,
+            "srs_cross_link_cell_ids": np.asarray(cells_used, dtype=np.int64),
+            "srs_cross_link_ue_ids": np.asarray(ues_used, dtype=np.int64),
+            "srs_cross_link_collides": np.asarray(collides, dtype=np.int64),
+            "srs_cross_link_frequency_resource_id": np.asarray(
+                freq_phase, dtype=np.int64
+            ),
+            "srs_cross_link_ul_sir_db_vec": np.asarray(sir_db, dtype=np.float64),
             "srs_cross_link_rejected_cells": rejected,
             "srs_cross_link_drop_attempts": attempts_used,
             "srs_cross_link_pci": [cid % 1008 for cid in cells_used],
@@ -1517,6 +1557,179 @@ class InternalSimSource:
             "srs_cross_link_axes": "[intf_ue,time,rb,gnb_rx_port,ue_port]",
         }
         return np.stack(rows), meta
+
+    def _srs_cross_link_enabled(self) -> bool:
+        """Whether to synthesise UL cross-link channels.  Explicit false wins."""
+        measurements = self.cfg.get("measurements") or {}
+        if "srs_cross_link_channels" in measurements:
+            return bool(measurements["srs_cross_link_channels"])
+        if "store_srs_cross_link_channels" in self.cfg:
+            return bool(self.cfg["store_srs_cross_link_channels"])
+        return _STORE_SRS_CROSS_LINK_DEFAULT
+
+    def _serving_cell_index(
+        self, sites: list[Cell], position: np.ndarray, scenario: str,
+        elements_per_port: int,
+    ) -> int:
+        """Strongest cell for one UE position, same rule as the sample loop."""
+        levels = []
+        for cell in sites:
+            los, _tau, sf, _p = self._large_scale_state(cell, position, scenario)
+            d3 = max(float(np.linalg.norm(np.asarray(position) - cell.position)), 10.0)
+            gain = self._sector_gain_db(cell, position, elements_per_port)
+            levels.append(gain - (self._pathloss(d3, los) + sf))
+        return int(np.argmax(levels))
+
+    def _srs_network_plan(
+        self, sites: list[Cell], scenario: str, elements_per_port: int
+    ) -> tuple[dict[int, Any], dict[tuple[int, int], Any]]:
+        """One network-wide SRS resource plan, allocated once per source.
+
+        Two dictionaries: the real UEs keyed by ``ue_id`` (each holds one
+        assignment in the cell that actually serves it), and a small pool of
+        interfering-UE slots per cell for the cross-link experiment.
+
+        Contamination is decided by this *allocator*, not by PCI colour.  Two
+        cells sharing a colour draw from the same pool, but the allocator then
+        gives them different frequency-resource phases, cyclic shifts or
+        symbols; a same-colour neighbour on a different leaf transmits on
+        other resource elements and contributes exactly zero contamination.
+        Colour only narrows the candidate list.
+
+        The pool is deliberately the size of the real network.  Padding it
+        with phantom UEs would push ``adaptive_period`` onto a longer global
+        SRS period and silently change who collides with whom.
+        """
+        cached = getattr(self, "_srs_plan_cache", None)
+        if cached is not None:
+            return cached
+        from .srs_resource import allocate_basic_srs_resources  # noqa: PLC0415
+
+        positions = self._place_ues(
+            np.random.default_rng(self._ue_seed + 7000), sites, self.num_ues
+        )
+        home = [
+            self._serving_cell_index(sites, positions[u], scenario, elements_per_port)
+            for u in range(self.num_ues)
+        ]
+        slots = max(int(self._srs_cross_link_slots(len(sites))), 0)
+
+        ue_ids: list[int] = []
+        cell_ids: list[int] = []
+        # Deterministic order: cell by cell, real UEs first, then that cell's
+        # interferer slots.  Sample order and worker count cannot change it.
+        for index, cell in enumerate(sites):
+            for u in range(self.num_ues):
+                if home[u] == index:
+                    ue_ids.append(int(u))
+                    cell_ids.append(int(cell.cell_id))
+            for j in range(slots):
+                ue_ids.append(int(_SRS_INTF_UE_BASE + j))
+                cell_ids.append(int(cell.cell_id))
+        plan = allocate_basic_srs_resources(
+            ue_ids,
+            cell_ids=cell_ids,
+            period_ms=float(self.cfg.get("srs_periodicity", 10) or 10),
+            hopping=True,
+            adaptive_period=True,
+        )
+        victims: dict[int, Any] = {}
+        interferers: dict[tuple[int, int], Any] = {}
+        for a in plan:
+            if int(a.ue_id) >= _SRS_INTF_UE_BASE:
+                interferers[(int(a.cell_id), int(a.ue_id) - _SRS_INTF_UE_BASE)] = a
+            else:
+                victims[int(a.ue_id)] = a
+        table = (victims, interferers)
+        self._srs_plan_cache = table
+        return table
+
+    def _srs_cross_link_slots(self, n_sites: int) -> int:
+        """How many interfering-UE SRS slots each cell needs to reserve."""
+        requested = self.cfg.get("max_srs_cross_link_ues")
+        if requested is None:
+            requested = self.cfg.get("num_interfering_ues", 0) or 0
+        return max(min(int(requested), max(n_sites - 1, 0)), 0)
+
+    def _srs_estimate_from_occasions(
+        self,
+        *,
+        truth: np.ndarray,
+        sigma: float,
+        rng: np.random.Generator,
+        mode: str,
+        assignment: Any,
+        occurrence: int,
+        contamination: list[tuple[float, np.ndarray]],
+    ) -> np.ndarray:
+        """LS channel estimate sampled at the real SRS resource positions.
+
+        One SRS occasion sounds **16 RB**, not the whole carrier.  Which RBG
+        that is comes from the assignment's 17-hop phase.
+
+        * ``ls_hop_sequential`` -- only the current occasion is available, so
+          only its 16 RB carry an observation and the rest of the band is
+          extrapolated from them.  This is what a single 2T occasion really
+          gives you.
+        * ``ls_hop_concat`` -- the band is stitched from the last full 17-hop
+          cycle, so every RBG has been sounded, each at its **own** occasion
+          with its own noise realisation and its own contamination state.
+        """
+        from . import hardware as hw  # noqa: PLC0415
+        from .srs_waveform import assignment_rb_indices  # noqa: PLC0415
+
+        n_rb = int(truth.shape[1])
+        if n_rb != hw.COMPANY_NUM_RB:
+            raise ValueError(
+                f"SRS-sampled estimation needs the {hw.COMPANY_NUM_RB}-RB product "
+                f"carrier (the 17-hop RBG map is frozen on it); got {n_rb} RB. "
+                "Use channel_est_mode='ls_linear'/'ls_mmse' on other carriers."
+            )
+        cycle = len(hw.COMPANY_SRS_17_HOP_ORDER_RBG)
+        if mode == "ls_hop_sequential":
+            offsets = [0]
+        elif mode == "ls_hop_concat":
+            offsets = list(range(cycle))
+        else:
+            raise ValueError(f"unknown SRS hopping estimation mode {mode!r}")
+
+        estimate = np.zeros_like(truth, dtype=np.complex64)
+        observed = np.zeros(n_rb, dtype=bool)
+        for offset in offsets:
+            occ = (int(occurrence) - offset) % cycle
+            rb = assignment_rb_indices(assignment, occ)
+            block = truth[:, rb].astype(np.complex128)
+            if sigma > 0.0:
+                noise = (
+                    rng.standard_normal(block.shape)
+                    + 1j * rng.standard_normal(block.shape)
+                ) / math.sqrt(2.0)
+                block = block + sigma * noise
+            for weight, cross in contamination:
+                # A real collision implies the same frequency-resource phase,
+                # so the collider occupies exactly these 16 RB at this
+                # occasion.  Nothing leaks onto the rest of the carrier.
+                block = block + float(weight) * np.asarray(cross)[:, rb]
+            estimate[:, rb] = block.astype(np.complex64)
+            observed[rb] = True
+
+        if not observed.all():
+            # Sequential mode knows one RBG.  Everything else is extrapolated
+            # from it -- explicitly, so nobody reads the untouched band as a
+            # measurement.
+            pilots = np.flatnonzero(observed)
+            grid = np.arange(n_rb)
+            filled = np.empty_like(estimate)
+            for t in range(estimate.shape[0]):
+                for bs in range(estimate.shape[2]):
+                    for ue in range(estimate.shape[3]):
+                        values = estimate[t, pilots, bs, ue]
+                        filled[t, :, bs, ue] = (
+                            np.interp(grid, pilots, values.real)
+                            + 1j * np.interp(grid, pilots, values.imag)
+                        )
+            estimate = filled.astype(np.complex64)
+        return estimate
 
     def _srs_pilot_contamination_rho(
         self, h_ul_cross: np.ndarray | None
@@ -1867,6 +2080,7 @@ class InternalSimSource:
             rx_elevation = math.atan2(float(-link_delta[2]), horizontal_distance)
             link_zod = np.pi / 2.0 - tx_elevation
             link_zoa = np.pi / 2.0 - rx_elevation
+            est_mode_requested = str(self.cfg.get("channel_est_mode", "ls_linear"))
             total_signal_mw = _db_to_mw(rx_all[serving])
             signal_mw = total_signal_mw / max(n_rb, 1)
             per_cell_i = np.asarray([
@@ -1897,6 +2111,33 @@ class InternalSimSource:
                 role="serving",
             )
 
+            # Real SRS resources for this snapshot: which 16 RB this UE
+            # sounded, and which neighbour UEs share that exact leaf.
+            srs_occurrence = int(round_index)
+            victim_assignment = None
+            srs_pilot_rb = np.arange(n_rb, dtype=np.int64)
+            # The SRS plan is needed whenever anything downstream has to know
+            # which resource this UE sounded: the hopping estimators, the
+            # contamination weight, and -- always -- the per-sample identity
+            # of the cross-link interferers, so a consumer can bind each
+            # stored link back to a real neighbour UE and its SRS resource.
+            _cross_on = self._srs_cross_link_enabled()
+            needs_srs_plan = (
+                _cross_on
+                or est_mode_requested in ("ls_hop_concat", "ls_hop_sequential")
+                or self.cfg.get("srs_pilot_contamination_rho") is not None
+            )
+            if needs_srs_plan and len(sites) >= 1:
+                victims, _ = self._srs_network_plan(
+                    sites, scenario, elements_per_port
+                )
+                victim_assignment = victims[int(ue_id)]
+                if n_rb == 272:
+                    from .srs_waveform import (  # noqa: PLC0415
+                        assignment_rb_indices as _arb,
+                    )
+                    srs_pilot_rb = _arb(victim_assignment, srs_occurrence)
+
             h_ul_cross, cross_meta = self._srs_cross_link_ues(
                 sites=sites,
                 serving=serving,
@@ -1912,9 +2153,10 @@ class InternalSimSource:
                 n_bs=n_bs,
                 n_ue=n_ue,
                 doppler_hz=doppler,
+                victim_assignment=victim_assignment,
             )
 
-            est_mode = str(self.cfg.get("channel_est_mode", "ls_linear"))
+            est_mode = est_mode_requested
             if est_mode == "ideal":
                 h_dl_est = h_dl.copy()
                 h_ul_est = h_dl.copy()
@@ -1933,7 +2175,6 @@ class InternalSimSource:
                 noise_dl = (rng_est.standard_normal(h_dl.shape) + 1j * rng_est.standard_normal(h_dl.shape)) / math.sqrt(2)
                 noise_ul = (rng_est.standard_normal(h_dl.shape) + 1j * rng_est.standard_normal(h_dl.shape)) / math.sqrt(2)
                 h_dl_est = (h_dl + sigma * noise_dl).astype(np.complex64)
-                h_ul_est = (h_dl + sigma * noise_ul).astype(np.complex64)
                 # SRS pilot contamination.  A colliding neighbour UE's SRS
                 # survives our despreading with residual correlation rho, so
                 # its *whole channel to our gNB* lands inside our estimate.
@@ -1941,18 +2182,53 @@ class InternalSimSource:
                 # noise: the error points at the interferer's spatial
                 # direction, which is exactly where reciprocity-based
                 # precoding then steers energy.
+                #
+                # Who actually contaminates is decided by the SRS allocator,
+                # not by PCI colour: a same-colour neighbour on a different
+                # frequency-resource phase, comb or cyclic shift lands on
+                # other resource elements and contributes nothing.
                 rho = self._srs_pilot_contamination_rho(h_ul_cross)
+                contamination: list[tuple[float, np.ndarray]] = []
                 if rho is not None:
-                    h_ul_est = (
-                        h_ul_est
-                        + np.tensordot(rho, np.asarray(h_ul_cross), axes=(0, 0))
-                    ).astype(np.complex64)
+                    collides = np.asarray(
+                        cross_meta.get(
+                            "srs_cross_link_collides", np.zeros(0, dtype=np.int64)
+                        )
+                    ).reshape(-1)
+                    for k, weight in enumerate(rho):
+                        if k < collides.size and bool(collides[k]):
+                            contamination.append(
+                                (float(weight), np.asarray(h_ul_cross)[k])
+                            )
                     cross_meta["srs_pilot_contamination_rho"] = [
                         float(v) for v in rho
                     ]
-                    cross_meta["srs_pilot_contamination_applied"] = True
+                    cross_meta["srs_pilot_contamination_applied"] = bool(contamination)
                 elif h_ul_cross is not None:
                     cross_meta["srs_pilot_contamination_applied"] = False
+
+                if est_mode in ("ls_hop_concat", "ls_hop_sequential"):
+                    h_ul_est = self._srs_estimate_from_occasions(
+                        truth=h_dl,
+                        sigma=sigma,
+                        rng=rng_est,
+                        mode=est_mode,
+                        assignment=victim_assignment,
+                        occurrence=srs_occurrence,
+                        contamination=contamination,
+                    )
+                else:
+                    h_ul_est = (h_dl + sigma * noise_ul).astype(np.complex64)
+                    if contamination:
+                        # Only the RBs this SRS occasion actually sounded can
+                        # be polluted; the legacy full-band proxy is not a
+                        # licence to smear one occasion over 272 RB.
+                        pollution = np.zeros_like(h_ul_est)
+                        for weight, cross in contamination:
+                            pollution[:, srs_pilot_rb] += (
+                                weight * np.asarray(cross)[:, srs_pilot_rb]
+                            ).astype(np.complex64)
+                        h_ul_est = (h_ul_est + pollution).astype(np.complex64)
             h_ul = h_dl.copy()  # canonical v2: physical transpose, same stored BS/UE tensor
             site_models = [
                 self._effective_model(configured_model, site_state[cell.site_id][0])
@@ -1962,13 +2238,17 @@ class InternalSimSource:
             h_intf = None
             if keep_interferer_h and len(sites) > 1:
                 rows = []
-                max_cells = max(
-                    int(
-                        self.cfg.get("max_per_ue_intf_cells", len(sites) - 1)
-                        or (len(sites) - 1)
-                    ),
-                    0,
+                # The documented contract is "keep the 3 strongest by
+                # default".  The old code default was "keep every neighbour",
+                # which nobody hit while storage was off; with storage on it
+                # would silently cost one full channel synthesis per cell
+                # (21x on a 7-site hex layout).
+                raw_cap = self.cfg.get(
+                    "max_per_ue_intf_cells", _MAX_PER_UE_INTF_CELLS_DEFAULT
                 )
+                if raw_cap is None:
+                    raw_cap = _MAX_PER_UE_INTF_CELLS_DEFAULT
+                max_cells = max(min(int(raw_cap), len(sites) - 1), 0)
                 for k in range(len(sites)):
                     if max_cells <= 0:
                         break
@@ -2102,6 +2382,15 @@ class InternalSimSource:
                 "dl_interference_power_per_slot_per_cell_mw": per_cell_i.reshape(1, -1),
                 "dl_power_decomposition_version": "superran-prebeam-per-rb-sni-v1",
                 **cross_meta,
+                "srs_occurrence_index": srs_occurrence,
+                "srs_victim_rb_start": int(srs_pilot_rb[0]),
+                "srs_victim_rb_count": int(srs_pilot_rb.size),
+                "srs_victim_frequency_resource_id": (
+                    -1 if victim_assignment is None
+                    else int(victim_assignment.frequency_resource_id)
+                ),
+                "srs_victim_ue_id": int(ue_id),
+                "srs_victim_cell_id": int(serving_cell.cell_id),
                 "ul_geometry_sir_dB": sir_db,
                 "ul_geometry_sir_model": "shared_dl_geometry_sir_symmetric_neighbour_power_v1",
                 "effective_channel_model": effective_model,

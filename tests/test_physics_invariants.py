@@ -1084,22 +1084,29 @@ def test_rzf_reported_loading_equals_the_one_actually_used() -> None:
 
 
 # ---------------------------------------------------------------------------
-# SRS 导频污染：邻区 UE 的 SRS 撞上本站资源时，误差必须指向那个 UE 的方向
+# SRS 导频污染：谁污染由 SRS 资源分配决定，不是由 PCI 颜色决定
 #
 # 反向意义（revert 掉哪一条会变红）：
-#   * 把上行交叉链路换成 h_interferers（邻区 gNB -> 本 UE 的下行链路）——
-#     第 4 条会红，因为两个张量的空间结构不同。
-#   * 去掉 PCI mod3 同色闸门——第 2 条会红，异色小区不该污染本站导频。
-#   * 把污染写成额外的白噪声——第 5 条会红，误差不再对齐干扰方向。
-#   * 把污染默认打开或把开关折成 or 默认值——第 1、6 条会红。
+#   * 多小区默认不再生成下行干扰信道 -> 第 1 条红
+#   * 把上行交叉链路换成 h_interferers（下行链路）-> 第 5 条红
+#   * 拿"同色"当"碰撞"用 -> 第 3 条红（同色候选里必须两种都有，且不碰撞的
+#     邻区一个 RB 都不许污染）
+#   * 污染重新覆盖全带 272 RB 而不是本次探测的 16 RB -> 第 6 条红
+#   * 三种估计模式退回同一条全带代理 -> 第 7 条红
+#   * 落盘丢掉逐样本干扰源身份 -> 第 8 条红
+#   * 把开关折成 or 默认值让显式 false 失效 -> 第 9 条红
 # ---------------------------------------------------------------------------
+
+_SRS_RB = 272
+_SRS_HOP_RB = 16
 
 
 def _cross_link_cfg(**extra):
     cfg = dict(
-        num_rb=24, num_bs_tx_ant=16, num_ue_rx_ant=4, topology="hex",
-        num_sites=7, sectors_per_site=3, isd_m=300.0, scenario="UMa_NLOS",
-        channel_model="CDL-C", link="BOTH", num_ues=4, num_samples=8, seed=11,
+        num_rb=_SRS_RB, num_bs_tx_ant=8, num_ue_rx_ant=4, num_ue_tx_ant=4,
+        subcarrier_spacing=30000.0, topology="hex", num_sites=7,
+        sectors_per_site=3, isd_m=300.0, scenario="UMa_NLOS",
+        channel_model="CDL-C", link="BOTH", num_ues=4, num_samples=6, seed=11,
         channel_est_mode="ls_linear", num_interfering_ues=3,
     )
     cfg.update(extra)
@@ -1108,7 +1115,7 @@ def _cross_link_cfg(**extra):
 
 def test_srs_ul_cross_link_and_pilot_contamination() -> None:
     print()
-    print("[SRS 导频污染] 上行交叉链路与同色闸门")
+    print("[SRS 导频污染] 上行交叉链路、真实资源碰撞与跳频取样")
     from superran.native import InternalSimSource
 
     off = list(InternalSimSource(_cross_link_cfg()).iter_samples())
@@ -1118,28 +1125,41 @@ def test_srs_ul_cross_link_and_pilot_contamination() -> None:
         measurements={"srs_cross_link_channels": True},
         srs_pilot_contamination_rho=1.0)).iter_samples())
 
-    # 1. 默认不生成：多加一根链路要多跑一次完整信道合成，翻默认值是产品决定
-    check(all(s.h_ul_cross is None for s in off),
-          "上行交叉链路默认不生成（多小区场景也一样）")
+    # 1. 多小区默认就要有下行干扰信道；单小区不生成
+    check(all(s.h_interferers is not None for s in off),
+          "多小区场景默认生成下行干扰信道")
+    single = list(InternalSimSource(_cross_link_cfg(
+        num_sites=1, sectors_per_site=1, num_samples=1)).iter_samples())[0]
+    check(single.h_interferers is None,
+          "单小区场景不生成干扰信道（行为与修复前一致）")
+    check(off[0].h_interferers.shape[0] == 3,
+          f"默认只保留最强 3 个邻区（实得 {off[0].h_interferers.shape[0]}），不是全部邻区")
 
-    # 2. 只有同 PCI mod3 颜色的小区才可能占同一套 SRS 资源，异色不得污染
-    same_colour = []
+    # 2. 上行交叉链路仍是显式打开的（它只服务导频污染实验）
+    check(all(s.h_ul_cross is None for s in off), "上行交叉链路默认不生成")
+    check(all(s.h_ul_cross is not None for s in on),
+          "显式打开后每个样本都有上行交叉链路")
+
+    # 3. 同色只筛候选，真正决定污染的是 SRS 资源碰撞
+    colour_ok, collide = [], []
     for s in on:
-        colour = int(s.meta["srs_cross_link_serving_pci_mod3"])
-        same_colour.extend(int(p) % 3 == colour for p in s.meta["srs_cross_link_pci"])
-    check(bool(same_colour) and all(same_colour),
-          "污染小区全部与本小区同 PCI mod3 颜色")
+        c = int(s.meta["srs_cross_link_serving_pci_mod3"])
+        colour_ok.extend(int(p) % 3 == c for p in s.meta["srs_cross_link_pci"])
+        collide.extend(int(v) for v in s.meta["srs_cross_link_collides"])
+    collide = np.asarray(collide)
+    check(bool(colour_ok) and all(colour_ok), "候选全部与本小区同 PCI mod3 颜色")
+    print(f"  同色候选 {collide.size} 个，其中真碰撞 {int(collide.sum())} 个、"
+          f"不碰撞 {int((collide == 0).sum())} 个")
+    check(collide.sum() > 0 and (collide == 0).sum() > 0,
+          "同色候选里碰撞与不碰撞两种都出现（同色不等于碰撞）")
 
-    # 3. 干扰 UE 必须真的被它自己那个小区服务，不能撒到本站头上
+    # 4. 干扰 UE 必须真的被它自己那个小区服务
     d_victim = [d for s in on for d in s.meta["srs_cross_link_distance_to_victim_m"]]
     check(bool(d_victim) and min(d_victim) > 100.0,
-          f"干扰 UE 到本站的最近距离 {min(d_victim):.0f} m > 100 m（服务小区一致性拒绝采样生效）")
+          f"干扰 UE 到本站最近 {min(d_victim):.0f} m > 100 m（服务小区一致性拒绝采样生效）")
 
-    # 4. 交叉链路是上行链路，与下行 h_interferers 不是同一个张量
-    both = list(InternalSimSource(_cross_link_cfg(
-        measurements={"srs_cross_link_channels": True, "interferer_channels": True},
-        max_per_ue_intf_cells=3)).iter_samples())
-    sample = both[0]
+    # 5. 上行交叉链路与下行干扰信道是两根不同的链路
+    sample = on[0]
     dl = np.asarray(sample.h_interferers)
     ul = np.asarray(sample.h_ul_cross)
     overlap = 0.0
@@ -1149,63 +1169,103 @@ def test_srs_ul_cross_link_and_pilot_contamination() -> None:
             overlap = max(overlap, abs(np.vdot(x, y)) / (
                 np.linalg.norm(x) * np.linalg.norm(y)))
     check(overlap < 0.2,
-          f"上行交叉链路与下行干扰信道最大重合度 {overlap:.3f} < 0.2（是两根不同的链路）")
+          f"上行交叉链路与下行干扰信道最大重合度 {overlap:.3f} < 0.2（两根不同的链路）")
 
-    # 5. 生成但不污染 -> CSI 逐位不变；污染后误差指向干扰 UE 的空间方向
-    check(all(np.array_equal(a.h_ul_est, b.h_ul_est) for a, b in zip(off, on)),
-          "只生成不污染时上行 CSI 估计逐位不变")
+    # 6. 污染只落在本次 SRS 探测的 16 个 RB 上，不碰撞的邻区一个 RB 都不碰
+    touched = []
+    for clean, dirty in zip(on, polluted):
+        d = np.abs(np.asarray(dirty.h_ul_est) - np.asarray(clean.h_ul_est))[0]
+        touched.append(int(np.count_nonzero(d.reshape(d.shape[0], -1).max(axis=1) > 0)))
+    print(f"  ls_linear 下被污染改动的 RB 数 = {sorted(set(touched))}"
+          f"（真实 SRS 一跳 = {_SRS_HOP_RB} RB，全带 = {_SRS_RB}）")
+    check(set(touched) <= {0, _SRS_HOP_RB},
+          "污染只作用在本次 SRS 探测的那一跳上，不再抹平整个载波")
 
-    def alignment(samples):
-        out = []
-        for s in samples:
-            err = (np.asarray(s.h_ul_est) - np.asarray(s.h_ul_true)).ravel()
-            for k in range(np.asarray(s.h_ul_cross).shape[0]):
-                hi = np.asarray(s.h_ul_cross[k]).ravel()
-                out.append(abs(np.vdot(hi, err)) / (
-                    np.linalg.norm(hi) * np.linalg.norm(err)))
-        return np.asarray(out)
+    zero_collision_seen = False
+    for clean, dirty in zip(on, polluted):
+        if not int(np.asarray(dirty.meta["srs_cross_link_collides"]).sum()):
+            zero_collision_seen = True
+            check(np.array_equal(clean.h_ul_est, dirty.h_ul_est),
+                  "同色但资源不碰撞的邻区不产生任何导频污染")
+            break
+    if not zero_collision_seen:
+        # 构造一个全不碰撞的对照：把干扰 UE 全部换成另一组资源叶子
+        print("  （本批样本每个都至少有一个碰撞源，改用逐链路对照）")
+        ok = True
+        for clean, dirty in zip(on, polluted):
+            flags = np.asarray(dirty.meta["srs_cross_link_collides"])
+            if int(flags.sum()) == flags.size:
+                continue
+            d = np.abs(np.asarray(dirty.h_ul_est) - np.asarray(clean.h_ul_est))[0]
+            rb_hit = np.flatnonzero(d.reshape(d.shape[0], -1).max(axis=1) > 0)
+            start = int(dirty.meta["srs_victim_rb_start"])
+            width = int(dirty.meta["srs_victim_rb_count"])
+            ok = ok and rb_hit.size == width and int(rb_hit[0]) == start
+        check(ok, "被污染的 RB 恰好等于本 UE 这次探测的那一跳，不多不少")
 
-    clean, dirty = alignment(on), alignment(polluted)
-    white = 1.0 / math.sqrt(float(np.asarray(on[0].h_ul_est).size))
-    print(f"  白噪声理论基准 {white:.4f}；污染前中位 {np.median(clean):.4f}，"
-          f"污染后中位 {np.median(dirty):.4f}，最大 {dirty.max():.4f}")
-    check(float(np.median(clean)) < 2.0 * white,
-          "未污染时估计误差是空间白的（与干扰方向无关）")
-    check(float(np.median(dirty)) > 2.0 * float(np.median(clean)) and dirty.max() > 0.3,
-          "污染后估计误差显著对齐干扰 UE 的空间方向")
+    # 7. 三种估计模式必须走不同的取样路径
+    modes = {}
+    for mode in ("ls_linear", "ls_hop_concat", "ls_hop_sequential"):
+        modes[mode] = np.asarray(list(InternalSimSource(_cross_link_cfg(
+            channel_est_mode=mode, num_samples=1,
+            measurements={"srs_cross_link_channels": True},
+            srs_pilot_contamination_rho=1.0)).iter_samples())[0].h_ul_est)
+    names = list(modes)
+    pairs_differ = True
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            if np.array_equal(modes[names[i]], modes[names[j]]):
+                pairs_differ = False
+                print(f"  {names[i]} 与 {names[j]} 逐位相同")
+    check(pairs_differ, "普通线性、拼接跳频、顺序跳频三种估计不再是同一条全带代理")
 
-    nmse_clean = float(np.mean([
-        np.linalg.norm(np.asarray(s.h_ul_est) - np.asarray(s.h_ul_true)) ** 2
-        / np.linalg.norm(np.asarray(s.h_ul_true)) ** 2 for s in on]))
-    nmse_dirty = float(np.mean([
-        np.linalg.norm(np.asarray(s.h_ul_est) - np.asarray(s.h_ul_true)) ** 2
-        / np.linalg.norm(np.asarray(s.h_ul_true)) ** 2 for s in polluted]))
-    print(f"  CSI NMSE {10 * math.log10(nmse_clean):.2f} dB -> "
-          f"{10 * math.log10(nmse_dirty):.2f} dB")
-    check(nmse_dirty > nmse_clean, "导频污染只会让 CSI 更差，不会更好")
+    # 8. 逐样本干扰源身份必须落盘并能绑回邻区 UE
+    m = on[0].meta
+    n_intf = int(np.asarray(on[0].h_ul_cross).shape[0])
+    id_ok = all(
+        np.asarray(m[k]).shape == (n_intf,)
+        for k in ("srs_cross_link_cell_ids", "srs_cross_link_ue_ids",
+                  "srs_cross_link_collides",
+                  "srs_cross_link_frequency_resource_id",
+                  "srs_cross_link_ul_sir_db_vec")
+    )
+    check(id_ok, "每根交叉链路都带小区号、UE 号、频率相位、碰撞标志与上行 SIR")
+    check(int(m["srs_victim_rb_count"]) == _SRS_HOP_RB
+          and 0 <= int(m["srs_victim_rb_start"]) < _SRS_RB,
+          f"本 UE 这次探测的 RB 区间已记录（起点 {int(m['srs_victim_rb_start'])}，"
+          f"宽 {int(m['srs_victim_rb_count'])}）")
 
-    # 6. 显式 false 必须真的关掉，哪怕默认值被翻成 True
+    # 9. 显式 false 必须真的关掉，哪怕默认值被翻成 True
     import superran.native as _nv
-    saved = _nv._STORE_INTERFERER_CHANNELS_DEFAULT
-    saved_x = _nv._STORE_SRS_CROSS_LINK_DEFAULT
+    saved = (_nv._STORE_INTERFERER_CHANNELS_DEFAULT,
+             _nv._STORE_SRS_CROSS_LINK_DEFAULT)
     try:
         _nv._STORE_INTERFERER_CHANNELS_DEFAULT = True
         _nv._STORE_SRS_CROSS_LINK_DEFAULT = True
-        forced_on = list(InternalSimSource(_cross_link_cfg(num_samples=1)).iter_samples())[0]
+        forced_on = list(InternalSimSource(
+            _cross_link_cfg(num_samples=1)).iter_samples())[0]
         forced_off = list(InternalSimSource(_cross_link_cfg(
             num_samples=1,
             measurements={"interferer_channels": False,
                           "srs_cross_link_channels": False},
         )).iter_samples())[0]
     finally:
-        _nv._STORE_INTERFERER_CHANNELS_DEFAULT = saved
-        _nv._STORE_SRS_CROSS_LINK_DEFAULT = saved_x
+        (_nv._STORE_INTERFERER_CHANNELS_DEFAULT,
+         _nv._STORE_SRS_CROSS_LINK_DEFAULT) = saved
     check(forced_on.h_interferers is not None and forced_on.h_ul_cross is not None,
-          "默认翻成 True 时两个张量都会生成")
+          "默认为 True 时两个张量都会生成")
     check(forced_off.h_interferers is None and forced_off.h_ul_cross is None,
           "配置里写 false 能真正关掉（折成 or 默认值就会关不掉）")
 
-    # 7. rho 是显式的、有界的，不许悄悄给一个未标定的默认值
+    # 10. 污染只会让 CSI 更差；rho 越界硬失败
+    def _nmse(samples):
+        return float(np.mean([
+            np.linalg.norm(np.asarray(s.h_ul_est) - np.asarray(s.h_ul_true)) ** 2
+            / np.linalg.norm(np.asarray(s.h_ul_true)) ** 2 for s in samples]))
+
+    a, b = _nmse(on), _nmse(polluted)
+    print(f"  CSI NMSE {10 * math.log10(a):.2f} dB -> {10 * math.log10(b):.2f} dB")
+    check(b > a, "导频污染只会让 CSI 更差，不会更好")
     bad = 0
     for value in (1.5, -0.1, [1.0, 1.0]):
         try:
@@ -1216,6 +1276,26 @@ def test_srs_ul_cross_link_and_pilot_contamination() -> None:
         except ValueError:
             bad += 1
     check(bad == 3, "越界或长度不符的导频残留相关系数一律硬失败")
+
+    # 11. SRS 资源计划不许随分块方式改变，否则并行生成会换一套碰撞结构
+    hop = dict(channel_est_mode="ls_hop_sequential",
+               measurements={"srs_cross_link_channels": True},
+               srs_pilot_contamination_rho=1.0)
+    whole = list(InternalSimSource(_cross_link_cfg(num_samples=6, **hop)).iter_samples())
+    chunks = []
+    for offset in (0, 3):
+        chunks += list(InternalSimSource(_cross_link_cfg(
+            num_samples=3, sample_index_offset=offset, **hop)).iter_samples())
+    check(
+        all(np.array_equal(a.h_ul_est, b.h_ul_est) for a, b in zip(whole, chunks))
+        and all(
+            np.array_equal(
+                np.asarray(a.meta["srs_cross_link_collides"]),
+                np.asarray(b.meta["srs_cross_link_collides"]),
+            ) for a, b in zip(whole, chunks)
+        ),
+        "串行一整批与分块生成给出同一套 SRS 资源与碰撞结构（并行不变）",
+    )
 
 
 test_single_layer_terminals_can_pair()

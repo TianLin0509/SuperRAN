@@ -212,6 +212,22 @@ class Dataset:
         return self._npz["h_interferers"] if "h_interferers" in self._npz.files else None
 
     @cached_property
+    def srs_cross_link(self) -> dict[str, np.ndarray]:
+        """每根上行交叉链路的身份，形状 ``[N, 干扰UE]``，与 ``h_ul_cross`` 同轴。
+
+        ``cell_ids`` / ``ue_ids`` 指出这根链路属于哪个邻区的哪个 UE，
+        ``collides`` 是它与本 UE 的 SRS 资源**真的**撞在同一个叶子上（同色
+        只是有资格共用资源池，不等于碰撞），``frequency_resource_id`` 是它的
+        17 跳频率相位。没有这些就没法把张量绑回真实的 SRS 资源。
+        """
+        out: dict[str, np.ndarray] = {}
+        prefix = "srs_cross_link__"
+        for key in self._npz.files:
+            if key.startswith(prefix):
+                out[key.removeprefix(prefix)] = self._npz[key]
+        return out
+
+    @cached_property
     def h_ul_cross(self) -> np.ndarray | None:
         """干扰 UE → 本受害 gNB 的上行交叉链路，``[N, 干扰UE, T, RB, BS, UE]``。
 
