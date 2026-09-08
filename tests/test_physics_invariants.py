@@ -1144,6 +1144,56 @@ def test_two_array_responses_share_one_vertical_convention() -> None:
 test_two_array_responses_share_one_vertical_convention()
 
 
+# ---------------------------------------------------------------------------
+section("11  小尺度信道不许认得样本编号")
+
+# 踩过的坑：多天线终端的信道曾被乘上一个混合矩阵
+# ``rho = 0.1 + 0.8*((i*3 % 7)/6)``，rho 以**样本编号 7 为周期**在 0.1~0.9 之间
+# 循环。它不是 38.901 里的任何量：UE 侧的空间相关性本来就该由 UE 天线间距、
+# 角度扩展和极化耦合决定。后果是每 7 个样本信道的条件数就走一遍固定的
+# 好→坏，秩自适应和 MU 配对因此带上一个人造周期，KPI 上完全看不出来。
+# 判据：给定同一套物理输入（角度、多普勒、随机流），信道**逐位**不许随样本
+# 编号改变。
+
+
+def test_small_scale_channel_ignores_the_sample_index() -> None:
+    source = nv.InternalSimSource({
+        "num_samples": 2, "num_ues": 2, "num_rb": 4,
+        "num_slots_per_sample": 2,
+        "num_bs_tx_ant": 4, "num_bs_rx_ant": 4,
+        "num_ue_tx_ant": 4, "num_ue_rx_ant": 4,
+        "scenario": "UMa_NLOS", "channel_model": "CDL-C",
+        "channel_est_mode": "ideal", "link": "DL",
+        "seed": 903, "ue_seed": 904,
+        "measurements": {"ssb_rsrp": False},
+    })
+    profile = nv.get_channel_profile("CDL-C")
+    common = dict(n_time=2, n_rb=4, n_bs=4, n_ue=4, doppler_hz=20.0,
+                  link_aod_rad=0.2, link_aoa_rad=-2.9,
+                  link_zod_rad=1.6, link_zoa_rad=1.5)
+    reference = source._channel(  # noqa: SLF001
+        profile, np.random.default_rng(4242), realization_index=0, **common)
+    worst = 0.0
+    for index in range(1, 15):
+        other = source._channel(  # noqa: SLF001
+            profile, np.random.default_rng(4242),
+            realization_index=index, **common)
+        worst = max(worst, float(np.max(np.abs(other - reference))))
+    print(f"  样本编号 0..14 之间的最大逐点差：{worst:.3e}")
+    check(worst == 0.0, "小尺度信道对样本编号逐位不变（人造 7 周期混合已删除）")
+
+    # UE 侧的相关性还得在：同极化两个 UE 天线之间必须仍由几何产生相关，
+    # 删掉混合矩阵不等于把 UE 天线做成理想独立。
+    h = reference.reshape(-1, reference.shape[-1])
+    gram = np.abs(np.conj(h.T) @ h)
+    off = gram[0, 2] / max(np.sqrt(gram[0, 0] * gram[2, 2]), 1e-30)
+    print(f"  同极化两 UE 端口的几何相关度：{off:.3f}")
+    check(off > 1e-3, "UE 侧空间相关性仍由天线几何与极化耦合产生")
+
+
+test_small_scale_channel_ignores_the_sample_index()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

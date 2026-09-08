@@ -1408,14 +1408,12 @@ class InternalSimSource:
                 projected_fd = float(doppler_hz) * math.cos(rng.uniform(-np.pi, np.pi))
                 time_phase = np.exp(1j * (phase + 2.0 * np.pi * projected_fd * times))
                 h += math.sqrt(float(power) / ray_count) * time_phase[:, None, None, None] * delay_phase[None, :, None, None] * spatial[None, None]
-        # Large-scale realizations also vary UE-side spatial correlation.  The
-        # deterministic cycle is keyed by the global sample index so parallel
-        # slicing is exact while Monte-Carlo batches cover both well- and
-        # poorly-conditioned channels from their first few observations.
-        if n_ue > 1:
-            rho = 0.1 + 0.8 * (((int(realization_index) * 3) % 7) / 6.0)
-            mixing = (1.0 - rho) * np.eye(n_ue) + rho * np.ones((n_ue, n_ue)) / n_ue
-            h = np.einsum("...bu,uv->...bv", h, mixing, optimize=True)
+        # UE-side spatial correlation is produced by the geometry above -- the
+        # UE panel response and the per-ray polarization coupling -- and by
+        # nothing else.  An earlier build multiplied H by a rank-deficient
+        # mixing matrix whose weight cycled with period 7 in the sample index;
+        # that is not a 38.901 quantity and it stamped a deterministic period
+        # onto the conditioning of every multi-antenna channel.
         # Unit average coefficient power keeps link-level SNR semantics stable.
         h /= math.sqrt(max(float(np.mean(np.abs(h) ** 2)), _EPS))
         return h.astype(np.complex64)
