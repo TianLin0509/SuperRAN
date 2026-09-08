@@ -43,9 +43,26 @@ _SCALAR_META_FIELDS = (
     "indexed_slot_rs_schedule_valid", "rs_opportunity_abstraction_used",
     "effective_channel_model",
     "pathloss_model", "pathloss_model_approximate",
+    # SRS occasion this snapshot actually sounded (victim side).
+    "srs_occurrence_index", "srs_victim_rb_start", "srs_victim_rb_count",
+    "srs_victim_frequency_resource_id", "srs_victim_ue_id", "srs_victim_cell_id",
 )
 
 # 每个样本、每个小区/扇区一项的大尺度量。不能塞进 scalar，也不能只留第一条。
+# Per-interferer identity of the UL cross-link tensor.  Without these a
+# stored cross-link cannot be bound back to a neighbour UE or its SRS
+# resource, and the tensor is unusable for a contamination experiment.
+_CROSS_LINK_ID_FIELDS = (
+    "srs_cross_link_cell_ids",
+    "srs_cross_link_ue_ids",
+    "srs_cross_link_collides",
+    # 这个槽位在邻区到底有没有人发射。它不能用「是否与本 UE 碰撞」代替：
+    # 有人但不碰撞、和根本没人，是两种不同的状态，取货端要区别对待。
+    "srs_cross_link_slot_occupied",
+    "srs_cross_link_frequency_resource_id",
+    "srs_cross_link_ul_sir_db_vec",
+)
+
 _VECTOR_META_FIELDS = (
     "pathloss_all_db",
     "rx_power_all_dbm",
@@ -57,6 +74,13 @@ _VECTOR_META_FIELDS = (
     "physical_site_group_ids",
     "effective_channel_model_all",
     "dl_interference_power_per_slot_per_cell_mw",
+)
+
+# h_interferers 的逐干扰源身份（最强优先）。它是"每干扰源"向量而不是
+# "每小区"向量，所以不能混进 _VECTOR_META_FIELDS——那一组的语义是 [N, 小区数]。
+_INTERFERER_ID_FIELDS = (
+    "interferer_cell_ids",
+    "interferer_rx_power_dbm",
 )
 
 # 逐样本收集的顶层标量字段
@@ -508,12 +532,15 @@ def _collect(
     h_dl_est: list[np.ndarray] = []
     precoding_csi_sources: list[str] = []
     h_intf: list[np.ndarray] = []
+    h_ul_cross: list[np.ndarray] = []
     positions: list[np.ndarray] = []
     source_precoder_fields_ignored = 0
     scalars: dict[str, list[float]] = {
         k: [] for k in (*_SCALAR_SAMPLE_FIELDS, *_HOOKED_SAMPLE_FIELDS)
     }
     metas: dict[str, list[Any]] = {k: [] for k in _SCALAR_META_FIELDS}
+    cross_ids: dict[str, list[np.ndarray]] = {k: [] for k in _CROSS_LINK_ID_FIELDS}
+    intf_ids: dict[str, list[np.ndarray]] = {k: [] for k in _INTERFERER_ID_FIELDS}
     vector_metas: dict[str, list[np.ndarray]] = {k: [] for k in _VECTOR_META_FIELDS}
     ssb_rsrp: list[list[float]] = []
     ssb_sinr: list[list[float]] = []
@@ -588,12 +615,31 @@ def _collect(
 
         hi_arr = getattr(sample, "h_interferers", None)
         if hi_arr is not None:
+            for key in _INTERFERER_ID_FIELDS:
+                if key in meta:
+                    intf_ids[key].append(np.asarray(meta[key]))
             # [cell, symbol, RB, BS, UE] -> keep one symbol, preserving axis.
             h_intf.append(
                 _slot_snapshot(
                     hi_arr, time_axis=1, preserve_time=preserve_time
                 )
             )
+
+        # UL cross-link (interfering UE -> this gNB).  Same axis handling as
+        # h_interferers, but a different physical link: never merge the two.
+        hx_arr = getattr(sample, "h_ul_cross", None)
+        if hx_arr is not None:
+            hx_snap = _slot_snapshot(hx_arr, time_axis=1, preserve_time=preserve_time)
+            if not np.isfinite(hx_snap).all():
+                raise RuntimeError("h_ul_cross 含 NaN 或 Inf，拒绝落盘")
+            h_ul_cross.append(hx_snap)
+            for key in _CROSS_LINK_ID_FIELDS:
+                if key not in meta:
+                    raise RuntimeError(
+                        f"样本带了 h_ul_cross 却缺少干扰源身份字段 {key}；"
+                        "没有身份就无法把每根交叉链路绑回邻区 UE 与它的 SRS 资源。"
+                    )
+                cross_ids[key].append(np.asarray(meta[key]))
 
         pos = getattr(sample, "ue_position", None)
         positions.append(
@@ -663,6 +709,41 @@ def _collect(
         payload["h_dl_est"] = np.stack(h_dl_est)
     if len(h_intf) == accepted and h_intf and all(a.shape == h_intf[0].shape for a in h_intf):
         payload["h_interferers"] = np.stack(h_intf)
+        n_cells_kept = payload["h_interferers"].shape[1]
+        for key, vals in intf_ids.items():
+            if not vals:
+                continue
+            if len(vals) != accepted or any(a.shape != (n_cells_kept,) for a in vals):
+                raise RuntimeError(
+                    f"干扰源身份 {key} 与 h_interferers 的干扰小区轴对不上："
+                    f"{len(vals)}/{accepted} 个样本，期望每样本 {n_cells_kept} 项。"
+                )
+            payload[f"interferer__{key.removeprefix('interferer_')}"] = np.stack(vals)
+    if h_ul_cross:
+        # 与 h_interferers 不同，这个张量不允许"缺就丢"：丢掉之后数据集看起来
+        # 就是一次干净的单小区 SRS 实验，没有任何线索说明污染源没落盘。
+        if len(h_ul_cross) != accepted or any(
+            a.shape != h_ul_cross[0].shape for a in h_ul_cross
+        ):
+            raise RuntimeError(
+                "h_ul_cross 只在部分样本上生成或干扰 UE 数不一致："
+                f"{len(h_ul_cross)}/{accepted} 个样本，形状 "
+                f"{sorted({a.shape for a in h_ul_cross})}。"
+                "上行交叉链路不允许静默丢弃，请固定 max_srs_cross_link_ues。"
+            )
+        payload["h_ul_cross"] = np.stack(h_ul_cross)
+        n_intf = payload["h_ul_cross"].shape[1]
+        for key, vals in cross_ids.items():
+            if len(vals) != accepted or any(
+                a.shape != (n_intf,) for a in vals
+            ):
+                raise RuntimeError(
+                    f"干扰源身份 {key} 与 h_ul_cross 的干扰 UE 轴对不上："
+                    f"{len(vals)}/{accepted} 个样本，期望每样本 {n_intf} 项。"
+                )
+            payload[f"srs_cross_link__{key.removeprefix('srs_cross_link_')}"] = (
+                np.stack(vals)
+            )
     for k, vals in scalars.items():
         payload[f"scalar__{k}"] = np.asarray(vals, dtype=np.float64)
     for k, vals in metas.items():
