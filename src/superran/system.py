@@ -1269,6 +1269,13 @@ class UeLinkTable:
     cqi_filter_domain: str = "cqi_index"
     srs_resource_assignment: srsr.SrsResourceAssignment | None = None
     precoding_csi_source: str = "evaluation_channel"
+    #: ``[snapshot, RBG]``：这一刻哪些 RBG 的 CSI 是"新"的（本次 SRS 机会刚探到）。
+    #: 对齐现场的 ``getIsUlCsiNew``；跳频打开时每个机会只有 1/hop_factor 是新的。
+    csi_new_rbg: np.ndarray | None = field(default=None, repr=False)
+    #: 逐快照被消费掉的新鲜 RBG 数（现场的 ``setIsUlCsiNew(false)`` 之前那一刻）。
+    csi_new_rbg_count: np.ndarray | None = field(default=None, repr=False)
+    #: SU 发射权在该快照是重算的还是沿用上一次的。没有新 CSI 就不该重算。
+    su_weight_recomputed: np.ndarray | None = field(default=None, repr=False)
     # MU 建表只保存 RBG 粒度；避免 TTI 主循环反复做 SVD/矩阵求逆。
     h_true_rbg: np.ndarray | None = field(default=None, repr=False)  # [S,F,BS,UE]
     h_prec_rbg: np.ndarray | None = field(default=None, repr=False)  # [S,F,BS,UE]
@@ -1992,8 +1999,43 @@ def build_link_tables(
         _ss = per_snap_sir[i] if i < len(per_snap_sir) else [sir_in[i]]
 
         # 先把每个时刻基站可用的信道建完，PMI 报告才能在后续快照里持有上一份。
+        #
+        # 同时按现场口径记一份**逐 RBG 的二值新鲜度**（getIsUlCsiNew）：跳频打开
+        # 时每次 SRS 机会只探 1/hop_factor 的带宽，只有那部分 RBG 才算"新"。
+        # 权重更新绑在它上面，用完立刻标回陈旧（setIsUlCsiNew(false)）。
         h_prec_seq: list[np.ndarray] = []
+        csi_gate = ca.CsiFreshness(n_rbg_eff)
+        csi_new_seq = np.zeros((n_s, n_rbg_eff), dtype=bool)
         for s in range(n_s):
+            if aging:
+                assert effective_csi is not None
+                offsets = (
+                    tuple(float(leg.offset_ms) for leg in srs_assignments[i].legs)
+                    if srs_assignments is not None else (0.0,)
+                )
+                resource_id = (int(srs_assignments[i].frequency_resource_id)
+                               if srs_assignments is not None else 0)
+                fresh = np.zeros(n_rbg_eff, dtype=bool)
+                for offset in offsets:
+                    # **"新"的定义是"这一跳刚测到"，不是"它是最近一次测到的"。**
+                    # 后者在两次机会之间也永远成立，门就永远开着、等于没有门。
+                    occasion = ca.usable_srs_occasion_index(
+                        effective_csi, s * snapshot_ms,
+                        opportunity_offset_ms=offset)
+                    previous = (
+                        ca.usable_srs_occasion_index(
+                            effective_csi, (s - 1) * snapshot_ms,
+                            opportunity_offset_ms=offset)
+                        if s > 0 else occasion - 1
+                    )
+                    if occasion == previous:
+                        continue
+                    age = ca.rbg_sounding_age_occasions(
+                        effective_csi, n_rbg_eff, s * snapshot_ms,
+                        rb_per_rbg=rb_per_rbg, opportunity_offset_ms=offset,
+                        frequency_resource_id=resource_id)
+                    fresh |= age == 0
+                csi_new_seq[s] = fresh
             if aging:
                 assert effective_csi is not None
                 if srs_assignments is not None:
@@ -2048,6 +2090,15 @@ def build_link_tables(
         # 4 次里有 3 次是重复搜索（码本列选择是建表里最贵的几步之一）。
         # 按 report_s 记忆化，不改任何数值，只是不再算第二遍。
         pmi_by_report: dict[int, np.ndarray] = {}
+
+        # 现场的权重更新门：没有新 CSI 就不重算 SU 发射权。缓存只有在
+        # "门说陈旧" **且** "手上这份 CSI 与上一快照逐位相同" 两条同时成立时
+        # 才敢复用；两者不一致就照常重算并计一次分歧——这种分歧意味着新鲜度
+        # 推导和陈旧信道装配走的不是同一条时序，必须能被看见而不是被吃掉。
+        su_weight_recomputed = np.zeros(n_s, dtype=bool)
+        csi_consumed = np.zeros((n_s, n_rbg_eff), dtype=bool)
+        csi_gate_disagreements = 0
+        w_tx_cache: np.ndarray | None = None
 
         for s, hs in enumerate(snaps):
             _g = _gs[s % len(_gs)]
@@ -2105,7 +2156,30 @@ def build_link_tables(
             # BF Gain 是**实际发射权**相对 PMI 参照权的增益。
             # precoder="type1" 时两者是同一个权，所以它恒为 0——这不是特例处理，
             # 是定义的直接后果：码本发送没有额外的 BF 增益可加。
-            w_tx_prec = w_pmi_s if precoder == "type1" else ca.svd_precoder(h_prec)
+            # SRS 到达 -> 标新；调度器消费 -> 立刻标回陈旧。
+            csi_gate.mark_sounded(
+                csi_new_seq[s] if aging else np.ones(n_rbg_eff, dtype=bool))
+            fresh_now = csi_gate.consume()
+            csi_consumed[s] = fresh_now
+            if precoder == "type1":
+                # 码本权走 CSI 报告周期这条自己的时钟，不受逐 RBG 的 SRS 门管。
+                w_tx_prec = w_pmi_s
+                su_weight_recomputed[s] = bool(report_source[s] == s)
+            else:
+                held = (
+                    w_tx_cache is not None
+                    and not bool(np.any(fresh_now))
+                    and np.array_equal(h_prec, h_prec_seq[s - 1])
+                )
+                if (w_tx_cache is not None and not bool(np.any(fresh_now))
+                        and not held):
+                    csi_gate_disagreements += 1
+                if held:
+                    w_tx_prec = w_tx_cache
+                else:
+                    w_tx_prec = ca.svd_precoder(h_prec)
+                    w_tx_cache = w_tx_prec
+                    su_weight_recomputed[s] = True
             rank_cap = min(max_rank, w_tx_prec.shape[2], w_pmi_s.shape[2])
             for r in range(1, rank_cap + 1):
                 p_per = 1.0 / r
@@ -2279,7 +2353,16 @@ def build_link_tables(
                                   else "evaluation_channel"),
             h_true_rbg=np.asarray(snaps_u), h_prec_rbg=np.asarray(h_prec_seq),
             noise_power_by_snapshot=noise_by_snapshot,
+            csi_new_rbg=csi_consumed,
+            csi_new_rbg_count=csi_consumed.sum(axis=1),
+            su_weight_recomputed=su_weight_recomputed,
         ))
+        if csi_gate_disagreements:
+            warnings.warn(
+                f"UE {i}: CSI 新鲜度门与陈旧信道装配在 {csi_gate_disagreements} "
+                "个快照上不一致（门说没有新 CSI，但预编码信道变了）。"
+                "两者应该出自同一套 SRS 时序，请检查 srs_period_ms 与快照间隔。",
+                RuntimeWarning, stacklevel=2)
     if mu_enabled:
         build_mu_pair_tables(
             out, rank_per_user=int(mu_rank_per_user),

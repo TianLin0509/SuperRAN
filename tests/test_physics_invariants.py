@@ -1372,6 +1372,78 @@ def test_every_estimation_mode_is_a_different_estimator() -> None:
 test_every_estimation_mode_is_a_different_estimator()
 
 
+# ---------------------------------------------------------------------------
+section("14  没有新 CSI 就不许更新波束权（现场的 getIsUlCsiNew 门）")
+
+# 踩过的坑：本仓没有"CSI 新不新"这个概念，每个快照都从头重建一遍 SU 发射权，
+# 靠"陈旧信道的行没变，所以算出来的权也没变"来间接成立。间接成立的东西不是
+# 合同：任何一处让权计算掺进别的时变量（噪声、报告周期、随机数），这条就会
+# 静默失效，而 KPI 完全看不出来。
+# 判据：逐 RBG 的二值新鲜度真的会关（不是永远开着）；非新鲜 RBG 的预编码 CSI
+# 在两个快照之间逐位不变；没有新 CSI 的快照不重算权。
+
+
+def _aging_tables(period_ms: float, n_snap: int = 40):
+    gen = np.random.default_rng(7)
+    shape = (n_snap, 272, 8, 4)
+    users = [((gen.standard_normal(shape) + 1j * gen.standard_normal(shape))
+              / np.sqrt(2)).astype(np.complex64) for _ in range(2)]
+    csi = ca.CsiConfig(srs_period_ms=period_ms, hopping=True,
+                       processing_delay_ms=2.0, srs_resource_allocation=True,
+                       srs_period_adaptive=False)
+    return sy.build_link_tables(users, [12.0] * 2, num_snapshots=n_snap,
+                                max_rank=2, csi=csi, snapshot_ms=5.0)[0], users
+
+
+def test_weights_only_update_on_new_csi() -> None:
+    table, users = _aging_tables(20.0)
+    fresh = getattr(table, "csi_new_rbg", None)
+    recomputed = getattr(table, "su_weight_recomputed", None)
+    if fresh is None or recomputed is None:
+        check(False, "链路表带逐 RBG 的 CSI 新鲜度与权重更新标记")
+        return
+
+    open_ratio = float(np.mean(np.any(fresh, axis=1)))
+    print(f"  SRS 20 ms / 快照 5 ms：有新 CSI 的快照占 {open_ratio:.3f}，"
+          f"新鲜 RBG 均值 {float(np.mean(np.sum(fresh, axis=1))):.2f}/17")
+    check(0.0 < open_ratio < 1.0,
+          f"新鲜度门真的会关（有新 CSI 的快照只占 {open_ratio:.3f}）")
+    check(not np.any(recomputed[~np.any(fresh, axis=1)]),
+          "没有新 CSI 的快照不重算 SU 发射权")
+
+    # 非新鲜 RBG 保留的是**上一周期的那份 CSI**，逐位不变。
+    changed = sum(
+        1 for s in range(1, fresh.shape[0])
+        if not np.array_equal(table.h_prec_rbg[s][~fresh[s]],
+                              table.h_prec_rbg[s - 1][~fresh[s]])
+    )
+    check(changed == 0,
+          f"未被本次 SRS 探到的 RBG，其预编码 CSI 逐位不变（变了 {changed} 次）")
+
+    # 周期越长，门开得越少——这是"跳频扫全带要 hop_factor 个周期"的直接后果。
+    ratios = [float(np.mean(np.any(_aging_tables(p)[0].csi_new_rbg, axis=1)))
+              for p in (10.0, 20.0, 40.0)]
+    print(f"  SRS 10/20/40 ms 的开门比例：{[round(r, 3) for r in ratios]}")
+    check(ratios[0] > ratios[1] > ratios[2],
+          "SRS 周期越长，触发权重更新的快照越少")
+
+    # 关掉老化 = 完美 CSI，每个 RBG 每个快照都是新的。
+    perfect = sy.build_link_tables(users, [12.0] * 2, num_snapshots=40,
+                                   max_rank=2, csi=None, snapshot_ms=5.0)[0]
+    check(bool(np.all(perfect.csi_new_rbg)),
+          "关掉 CSI 老化时每个 RBG 每个快照都是新的（完美 CSI）")
+
+    # 消费即标回陈旧，与现场 setIsUlCsiNew(false) 一致。
+    gate = ca.CsiFreshness(17)
+    gate.mark_sounded(np.eye(17, dtype=bool)[3])
+    first = gate.consume()
+    check(bool(first[3]) and not np.any(gate.is_new()) and not np.any(gate.consume()),
+          "CSI 被消费后立刻标回陈旧，同一份不会被当成两次新的")
+
+
+test_weights_only_update_on_new_csi()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

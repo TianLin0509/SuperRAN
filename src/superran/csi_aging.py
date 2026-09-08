@@ -330,6 +330,28 @@ def hop_order(num_rbg: int, *, rb_per_rbg: int = 16,
     return order, f"superran:{hw.SUPERRAN_SRS_HOPPING_PROFILE_ID}"
 
 
+def usable_srs_occasion_index(cfg: CsiConfig, t_ms: float, *,
+                              opportunity_offset_ms: float = 0.0) -> int:
+    """时刻 ``t_ms`` 上，**真正可用**的那次 SRS 机会的序号（可为负）。
+
+    处理时延不是“给最新一次 SRS 的年龄机械加一个常数”。时刻 t 真正可用的是
+    ``measurement_time <= t - processing_delay`` 的最近一次机会；尤其在周期边界
+    ``t = nT`` 上，本次 SRS 仍在处理，绝不能立即拿来预编码。先按 t 选机会、再把
+    处理时延加到年龄上，会把尚不可用的机会错当成可用，并在跳频场景选错 RBG phase。
+
+    陈旧度（毫秒）与新鲜度（布尔）必须共用这一个时序，否则两者会各自漂移，
+    而这种漂移在 KPI 上完全看不出来。
+    """
+    per = cfg.srs_period_ms
+    offset = float(opportunity_offset_ms)
+    if not np.isfinite(t_ms):
+        raise ValueError("t_ms 必须是有限数")
+    if not np.isfinite(offset) or offset < 0.0 or offset >= per:
+        raise ValueError("opportunity_offset_ms 必须是 [0, srs_period_ms) 内的有限数")
+    usable = float(t_ms) - float(cfg.processing_delay_ms)
+    return int(np.floor((usable - offset) / per + 1e-9))
+
+
 def rbg_csi_staleness_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
                          rb_per_rbg: int = 16,
                          opportunity_offset_ms: float = 0.0,
@@ -355,13 +377,7 @@ def rbg_csi_staleness_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
         )
     if not cfg.enabled:
         return np.zeros(num_rbg)
-    # 处理时延不是“给最新一次 SRS 的年龄机械加一个常数”。时刻 t 真正可用的
-    # 是 measurement_time <= t-processing_delay 的最近一次机会；尤其在周期边界
-    # t=nT 上，本次 SRS 仍在处理，绝不能立即拿来预编码。旧写法先按 t 选机会、
-    # 再把 processing_delay 加到年龄上，会把这个尚不可用的机会错当成可用，并且
-    # 在跳频场景选错 RBG phase。
-    usable_measurement_time = t - float(cfg.processing_delay_ms)
-    n = int(np.floor((usable_measurement_time - offset) / per + 1e-9))
+    n = usable_srs_occasion_index(cfg, t, opportunity_offset_ms=offset)
     measurement_time = offset + n * per
     within = t - measurement_time               # 距真正可用的那次机会过了多久
     if not cfg.hopping:
@@ -382,6 +398,100 @@ def rbg_csi_staleness_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
             hops[int(k)] = min(
                 int(hops[int(k)]), (n - occurrence_mod) % h)
     return hops * per + within
+
+
+def rbg_sounding_age_occasions(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
+                               rb_per_rbg: int = 16,
+                               opportunity_offset_ms: float = 0.0,
+                               frequency_resource_id: int = 0) -> np.ndarray:
+    """时刻 ``t_ms`` 上，每个 RBG 距最近一次**可用**的 SRS 测量过了几次机会。
+
+    ``0`` 表示这一次机会刚探到它——也就是现场的 ``getIsUlCsiNew()==true``。
+    不跳频时每次机会都探全带，所以恒为 0。
+
+    这个量与 :func:`rbg_csi_staleness_ms` 是同一套时序推导的两种读法：
+    陈旧时长 = ``机会数 x SRS 周期 + 周期内相位``。分开给是因为现场基站的
+    权重更新看的是**布尔新鲜度**，不是连续的陈旧毫秒数。
+    """
+    stale = rbg_csi_staleness_ms(
+        cfg, num_rbg, t_ms, rb_per_rbg=rb_per_rbg,
+        opportunity_offset_ms=opportunity_offset_ms,
+        frequency_resource_id=frequency_resource_id)
+    if not cfg.enabled or not cfg.hopping:
+        return np.zeros(int(num_rbg), dtype=int)
+    within = float(np.min(stale))
+    return np.rint((stale - within) / cfg.srs_period_ms).astype(int)
+
+
+class CsiFreshness:
+    """逐 RBG 的二值 CSI 新鲜度门，对齐现场的 ``getIsUlCsiNew`` /
+    ``setIsUlCsiNew``。
+
+    现场基站不是每个 TTI 都重算波束权：只有**这一跳刚探到**的那些 RBG 才触发
+    权重更新，用完立刻标回陈旧，避免同一份 CSI 被反复当成新的。本仓在此之前
+    没有这个概念——每个快照都从头重建一遍权，靠"陈旧信道的行没变，所以算出来
+    的权也没变"来间接成立。**间接成立的东西不是合同**：任何一处让权计算掺进
+    别的时变量（噪声、报告周期、随机数），这条就会静默失效。
+
+    用法与现场一致：``mark_sounded`` 收 SRS，``consume`` 取出本次可用的新鲜
+    掩码并同时标回陈旧。
+    """
+
+    def __init__(self, num_rbg: int) -> None:
+        if (isinstance(num_rbg, (bool, np.bool_))
+                or not isinstance(num_rbg, (int, np.integer))
+                or int(num_rbg) < 1):
+            raise ValueError("num_rbg 必须是至少为 1 的整数")
+        self._new = np.zeros(int(num_rbg), dtype=bool)
+        self.updates = 0
+        self.consumed = 0
+
+    @property
+    def num_rbg(self) -> int:
+        return int(self._new.size)
+
+    def mark_sounded(self, mask: np.ndarray) -> None:
+        """SRS 到达：把被本次跳覆盖的 RBG 标成新。"""
+        flags = np.asarray(mask, dtype=bool).reshape(-1)
+        if flags.size != self._new.size:
+            raise ValueError(
+                f"新鲜度掩码长度必须是 {self._new.size}，收到 {flags.size}")
+        self._new |= flags
+        self.updates += int(np.count_nonzero(flags))
+
+    def is_new(self) -> np.ndarray:
+        """当前的新鲜度掩码（只读快照，不改状态）。"""
+        return self._new.copy()
+
+    def consume(self) -> np.ndarray:
+        """调度器消费 CSI：返回本次的新鲜掩码，并把全部 RBG 标回陈旧。"""
+        mask = self._new.copy()
+        self._new[:] = False
+        self.consumed += int(np.count_nonzero(mask))
+        return mask
+
+
+def hold_stale_rows(previous: np.ndarray | None, measured: np.ndarray,
+                    fresh: np.ndarray) -> np.ndarray:
+    """只把标记为新的 RBG 换成本次测量，其余保留上一周期的**估计值**。
+
+    ``measured`` / ``previous`` 形状 ``[RBG, ...]``；``fresh`` 是 ``[RBG]`` 布尔。
+    冷启动（``previous is None``）时整band 用本次测量填，调用方要把这件事
+    写进结果——那一刻的非新鲜 RBG 拿的是外推，不是真的观测过。
+    """
+    current = np.asarray(measured)
+    flags = np.asarray(fresh, dtype=bool).reshape(-1)
+    if flags.size != current.shape[0]:
+        raise ValueError(
+            f"新鲜度掩码长度必须等于 RBG 数 {current.shape[0]}，收到 {flags.size}")
+    if previous is None:
+        return np.array(current, copy=True)
+    held = np.asarray(previous)
+    if held.shape != current.shape:
+        raise ValueError(f"上一周期估计形状 {held.shape} 与本次 {current.shape} 不符")
+    out = np.array(held, copy=True)
+    out[flags] = current[flags]
+    return out
 
 
 def rbg_age_ms(cfg: CsiConfig, num_rbg: int, t_ms: float, *,
