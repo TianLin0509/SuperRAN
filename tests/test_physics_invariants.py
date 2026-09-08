@@ -1273,12 +1273,18 @@ def test_srs_ul_cross_link_and_pilot_contamination() -> None:
           "显式打开后每个样本都有上行交叉链路")
 
     # 3. 同色只筛候选，真正决定污染的是 SRS 资源碰撞
-    colour_ok, collide = [], []
+    colour_ok = []
     for s in on:
         c = int(s.meta["srs_cross_link_serving_pci_mod3"])
         colour_ok.extend(int(p) % 3 == c for p in s.meta["srs_cross_link_pci"])
-        collide.extend(int(v) for v in s.meta["srs_cross_link_collides"])
-    collide = np.asarray(collide)
+    # 碰撞与否取决于「邻区在我们这个槽位号上有没有人」，样本太少看不到两种，
+    # 所以这一条单独跑一批覆盖每个 UE 一次的数据。
+    from superran.native import InternalSimSource as _S0
+    wide = list(_S0(_cross_link_cfg(
+        num_samples=63, measurements={"srs_cross_link_channels": True},
+    )).iter_samples())
+    collide = np.asarray([
+        int(v) for s in wide for v in s.meta["srs_cross_link_collides"]])
     check(bool(colour_ok) and all(colour_ok), "候选全部与本小区同 PCI mod3 颜色")
     print(f"  同色候选 {collide.size} 个，其中真碰撞 {int(collide.sum())} 个、"
           f"不碰撞 {int((collide == 0).sum())} 个")
@@ -1451,6 +1457,66 @@ def test_srs_ul_cross_link_and_pilot_contamination() -> None:
     check(handovers > 0, "构造出的移动场景确实发生了换小区（否则这条检查是空的）")
     check(not mismatched,
           "换小区后 SRS 资源来自新的服务小区，不再绑着旧小区（否则碰撞会被漏掉）")
+
+    # 10c. 同一小区、同一时刻，两个用户绝不能拿到同一份 SRS 资源
+    #      （两个用户各自在原小区排「槽位 0」，迁入同一小区后仍都拿槽位 0，
+    #       资源就完全重合——这是切换后没有重新配置资源的典型症状）
+    from superran.native import InternalSimSource as _Src
+    dup_total = 0
+    checked = 0
+    for n_ue, speed, n_smp in ((4, 200.0, 24), (63, 200.0, 252), (63, 350.0, 189)):
+        rows = list(_Src(_cross_link_cfg(
+            num_ues=n_ue, num_samples=n_smp, mobility_mode="linear",
+            ue_speed_kmh=speed, sample_interval_s=0.5,
+            measurements={"srs_cross_link_channels": True})).iter_samples())
+        per_instant = {}
+        for r in rows:
+            per_instant.setdefault(int(r.meta["round_idx"]), []).append(
+                (int(r.meta["ue_id"]), int(r.meta["srs_serving_cell_id"]),
+                 int(r.meta["srs_victim_slot"])))
+        for members in per_instant.values():
+            seen = set()
+            for _ue, cell, slot in sorted(members):
+                checked += 1
+                if (cell, slot) in seen:
+                    dup_total += 1
+                seen.add((cell, slot))
+    print(f"  移动场景共核对 {checked} 个用户样本，同小区同槽位重复 {dup_total} 次")
+    check(dup_total == 0,
+          "同一时刻同一小区内，任意两个用户的 SRS 资源必须互异")
+
+    # 10d. 切换进来的用户只能占空闲槽位，不许顶掉已经在这个小区的用户
+    src = _Src(_cross_link_cfg(num_ues=63, num_samples=1, mobility_mode="linear",
+                               ue_speed_kmh=350.0, sample_interval_s=0.5))
+    sites_probe = src._build_sites()
+    evicted = handovers = 0
+    previous = None
+    for step in range(10):
+        assign, _occ = src._srs_slot_state(sites_probe, "UMa_NLOS", 1, step)
+        if previous is not None:
+            for ue, (cell, slot) in assign.items():
+                old_cell, old_slot = previous[ue]
+                if cell != old_cell:
+                    handovers += 1
+                elif slot != old_slot:
+                    evicted += 1
+        previous = assign
+    print(f"  10 个时刻共 {handovers} 次切换，留在原小区却被换掉槽位 {evicted} 次")
+    check(handovers > 0, "构造出的场景确实发生了切换（否则这条检查是空的）")
+    check(evicted == 0,
+          "已经在这个小区的用户不会被切换进来的人顶掉槽位（老用户保槽）")
+
+    # 10e. 槽位池不够时必须硬失败，不许静默让两个人共用
+    exhausted = False
+    try:
+        list(_Src(_cross_link_cfg(
+            num_ues=63, num_samples=6, srs_slots_per_cell=1,
+            mobility_mode="linear", ue_speed_kmh=200.0, sample_interval_s=0.5,
+            measurements={"srs_cross_link_channels": True})).iter_samples())
+    except RuntimeError:
+        exhausted = True
+    check(exhausted,
+          "每小区只留 1 个槽位却有多个用户时硬失败，不静默共用同一份资源")
 
     # 11. SRS 资源计划不许随分块方式改变，否则并行生成会换一套碰撞结构
     hop = dict(channel_est_mode="ls_hop_sequential",

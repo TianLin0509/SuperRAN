@@ -513,6 +513,13 @@ _STORE_SRS_CROSS_LINK_DEFAULT = False
 # Strongest-N neighbours kept per UE; matches the documented storage contract.
 _MAX_PER_UE_INTF_CELLS_DEFAULT = 3
 
+# How many SRS slots one cell can reserve before the allocator has to move to
+# a longer global period.  Measured on the product profile (272 RB / 30 kHz /
+# 17-hop / 4 cyclic shifts): 21 cells x 68 slots still fits the 10 ms period,
+# the 69th slot forces 20 ms.  Reserving up to this many costs nothing in
+# period and does not perturb the resources already handed to lower slots.
+_SRS_SLOTS_AT_BASE_PERIOD = 68
+
 PORT_LAYOUT_CONTRACT_VERSION = "pol_h_v-top_to_bottom-v1"
 
 
@@ -1353,6 +1360,8 @@ class InternalSimSource:
         n_ue: int,
         doppler_hz: float,
         victim_assignment: Any = None,
+        victim_slot: int | None = None,
+        srs_occupancy: list[dict[int, int]] | None = None,
     ) -> tuple[np.ndarray | None, dict[str, Any]]:
         """UL cross-link channels: interfering UEs -> *this* serving gNB.
 
@@ -1427,6 +1436,7 @@ class InternalSimSource:
         cells_used: list[int] = []
         ues_used: list[int] = []
         collides: list[bool] = []
+        occupied_flags: list[bool] = []
         freq_phase: list[int] = []
         sir_db: list[float] = []
         distances: list[float] = []
@@ -1435,11 +1445,11 @@ class InternalSimSource:
         attempts_used: list[int] = []
         plan = None
         _resources_collide = None
-        if victim_assignment is not None:
+        if victim_assignment is not None and srs_occupancy is not None:
             from .srs_resource import resources_collide as _rc  # noqa: PLC0415
 
             _resources_collide = _rc
-            plan, slots_per_cell, _ = self._srs_network_plan(
+            plan, slots_per_cell = self._srs_network_plan(
                 sites, scenario, elements_per_port
             )
         for k in candidates:
@@ -1450,12 +1460,13 @@ class InternalSimSource:
             # Which reserved interferer slot in that neighbour cell this UE
             # occupies.  Different slots mean different SRS leaves, which is
             # exactly what makes some same-colour neighbours harmless.
-            # This interferer is the neighbour cell's n-th served UE, so it
-            # draws from that cell's own slot pool.
-            n_slots = 1 if plan is None else int(
-                slots_per_cell.get(int(sites[k].cell_id), 1)
-            )
-            intf_ue = int((global_index + k) % max(n_slots, 1))
+            # Only one UE in that neighbour can possibly hit us: the one
+            # holding the *same slot index* we hold.  A different slot is a
+            # different cyclic shift or frequency phase, i.e. a different
+            # resource element set, so it cannot pollute our pilots at all.
+            # Whether such a UE exists is read from the neighbour's live
+            # occupancy -- an empty slot means nobody is sounding there.
+            intf_ue = 0 if victim_slot is None else int(victim_slot)
             drop_rng = np.random.default_rng(
                 np.random.SeedSequence(
                     [self._seed, 0x5C10, int(sites[k].cell_id), intf_ue]
@@ -1518,13 +1529,23 @@ class InternalSimSource:
             sir_db.append(float(desired_rel_db - rel_db))
             distances.append(d3)
             los_flags.append(bool(los))
-            if plan is None:
+            other = None if plan is None else plan.get(
+                (int(sites[k].cell_id), intf_ue)
+            )
+            occupied = bool(
+                srs_occupancy is not None and intf_ue in srs_occupancy[k]
+            )
+            if other is None:
+                # That cell does not even reserve this slot.
                 collides.append(False)
                 freq_phase.append(-1)
             else:
-                other = plan[(int(sites[k].cell_id), intf_ue)]
-                collides.append(bool(_resources_collide(victim_assignment, other)))
+                collides.append(
+                    occupied
+                    and bool(_resources_collide(victim_assignment, other))
+                )
                 freq_phase.append(int(other.frequency_resource_id))
+            occupied_flags.append(occupied)
 
         if len(rows) < n_cross:
             # A ragged interferer axis would be silently dropped at write
@@ -1542,6 +1563,9 @@ class InternalSimSource:
             "srs_cross_link_cell_ids": np.asarray(cells_used, dtype=np.int64),
             "srs_cross_link_ue_ids": np.asarray(ues_used, dtype=np.int64),
             "srs_cross_link_collides": np.asarray(collides, dtype=np.int64),
+            "srs_cross_link_slot_occupied": np.asarray(
+                occupied_flags, dtype=np.int64
+            ),
             "srs_cross_link_frequency_resource_id": np.asarray(
                 freq_phase, dtype=np.int64
             ),
@@ -1583,9 +1607,155 @@ class InternalSimSource:
             levels.append(gain - (self._pathloss(d3, los) + sf))
         return int(np.argmax(levels))
 
+    def _ue_position_at(
+        self, base_positions: np.ndarray, ue: int, round_index: int
+    ) -> np.ndarray:
+        """Where UE ``ue`` is at snapshot ``round_index``.
+
+        Mirrors the sample loop's own motion law, so "who is in this cell now"
+        and "which channel did we generate" can never disagree.
+        """
+        position = np.asarray(base_positions[int(ue)], dtype=np.float64).copy()
+        mode = str(self.cfg.get("mobility_mode", "static")).strip().lower()
+        speed = max(float(self.cfg.get("ue_speed_kmh", 3.0) or 0.0), 0.0) / 3.6
+        if mode != "static" and speed > 0.0:
+            heading = math.radians(float(
+                self.cfg.get("ue_heading_deg", self.cfg.get("track_heading_deg", 0.0))
+                or 0.0
+            ))
+            travel = speed * float(
+                self.cfg.get("sample_interval_s", 5e-3) or 5e-3
+            ) * int(round_index)
+            position[0] += travel * math.cos(heading)
+            position[1] += travel * math.sin(heading)
+        return position
+
+    def _srs_slot_state(
+        self, sites: list[Cell], scenario: str, elements_per_port: int,
+        round_index: int,
+    ) -> tuple[dict[int, tuple[int, int]], list[dict[int, int]]]:
+        """Which SRS slot each UE holds at snapshot ``round_index``.
+
+        The rule is the one a real gNB follows on handover: **UEs already in
+        the cell keep their resource, and the arriving UE is given a free
+        one.**  It never displaces a UE that is already sounding, and two UEs
+        in the same cell can therefore never end up on the same resource.
+
+        The state is evolved from snapshot 0 forward, so it is a function of
+        the snapshot index alone.  That matters for parallel generation: if it
+        depended on the order samples happen to arrive, two workers would
+        build two different resource plans for the same instant.  Every worker
+        replays the same history and gets the same answer.
+
+        Returns ``(assignment, occupancy)`` where ``assignment`` maps UE to
+        ``(cell index, slot)`` and ``occupancy`` maps, per cell, slot to UE.
+        """
+        cache = getattr(self, "_srs_slot_cache", None)
+        if cache is None:
+            cache = []
+            self._srs_slot_cache = cache
+        target = int(round_index)
+        if target < 0:
+            raise ValueError("round_index must be non-negative")
+        if target < len(cache):
+            return cache[target]
+
+        base = self._place_ues(
+            np.random.default_rng(self._ue_seed + 7000), sites, self.num_ues
+        )
+        static = str(
+            self.cfg.get("mobility_mode", "static")
+        ).strip().lower() == "static" or max(
+            float(self.cfg.get("ue_speed_kmh", 3.0) or 0.0), 0.0
+        ) <= 0.0
+        pool = self._srs_slots_per_cell(sites, scenario, elements_per_port)
+
+        while len(cache) <= target:
+            step = len(cache)
+            if static and cache:
+                # Nothing moves, so the very first assignment stands forever.
+                cache.append(cache[0])
+                continue
+            serving = [
+                self._serving_cell_index(
+                    sites, self._ue_position_at(base, u, step), scenario,
+                    elements_per_port,
+                )
+                for u in range(self.num_ues)
+            ]
+            previous = cache[step - 1][0] if cache else {}
+            occupancy: list[dict[int, int]] = [{} for _ in sites]
+            assignment: dict[int, tuple[int, int]] = {}
+            # 1) Stayers keep what they already have.
+            for ue in range(self.num_ues):
+                held = previous.get(ue)
+                if held is not None and held[0] == serving[ue]:
+                    occupancy[serving[ue]][held[1]] = ue
+                    assignment[ue] = (serving[ue], held[1])
+            # 2) Arrivals take the lowest free slot, in UE order so the result
+            #    never depends on iteration order.
+            for ue in range(self.num_ues):
+                if ue in assignment:
+                    continue
+                cell_index = serving[ue]
+                used = occupancy[cell_index]
+                slot = next((k for k in range(pool[cell_index]) if k not in used), None)
+                if slot is None:
+                    raise RuntimeError(
+                        f"snapshot {step}: cell {sites[cell_index].cell_id} already "
+                        f"has all {pool[cell_index]} SRS slots occupied, so UE {ue} "
+                        "cannot be given a resource of its own.  Raise "
+                        "srs_slots_per_cell (each cell may reserve up to "
+                        f"{_SRS_SLOTS_AT_BASE_PERIOD} slots without changing the "
+                        "global SRS period), or reduce the UE count."
+                    )
+                used[slot] = ue
+                assignment[ue] = (cell_index, slot)
+            cache.append((assignment, occupancy))
+        return cache[target]
+
+    def _srs_slots_per_cell(
+        self, sites: list[Cell], scenario: str, elements_per_port: int,
+    ) -> list[int]:
+        """Slots each cell reserves.  Must not depend on the sample slice."""
+        cached = getattr(self, "_srs_pool_cache", None)
+        if cached is not None:
+            return cached
+        explicit = self.cfg.get("srs_slots_per_cell")
+        base_positions = self._place_ues(
+            np.random.default_rng(self._ue_seed + 7000), sites, self.num_ues
+        )
+        home = [
+            self._serving_cell_index(
+                sites, base_positions[u], scenario, elements_per_port
+            )
+            for u in range(self.num_ues)
+        ]
+        counts = [0] * len(sites)
+        for cell_index in home:
+            counts[cell_index] += 1
+        if explicit is not None:
+            pool = [max(int(explicit), 1)] * len(sites)
+        elif str(
+            self.cfg.get("mobility_mode", "static")
+        ).strip().lower() == "static" or max(
+            float(self.cfg.get("ue_speed_kmh", 3.0) or 0.0), 0.0
+        ) <= 0.0:
+            # Nothing moves: each cell needs exactly the UEs it serves.
+            pool = [max(c, 1) for c in counts]
+        else:
+            # UEs can pile into one cell, so reserve generously.  Anything up
+            # to the base-period ceiling is free: it neither lengthens the SRS
+            # period nor changes the resource already given to a lower slot.
+            pool = [
+                max(min(int(self.num_ues), _SRS_SLOTS_AT_BASE_PERIOD), 1)
+            ] * len(sites)
+        self._srs_pool_cache = pool
+        return pool
+
     def _srs_network_plan(
         self, sites: list[Cell], scenario: str, elements_per_port: int
-    ) -> tuple[dict[tuple[int, int], Any], dict[tuple[int, int], Any], list[int]]:
+    ) -> tuple[dict[tuple[int, int], Any], dict[int, int]]:
         """One network-wide SRS resource plan, allocated once per source.
 
         Each **cell** owns a pool of UE slots; a UE occupies its slot in
@@ -1594,10 +1764,10 @@ class InternalSimSource:
         a handed-over UE must draw from the *target* cell.  Keying the plan by
         UE alone froze it in the UE's first cell and quietly lost collisions.
 
-        Static scenarios size each cell's pool to exactly the UEs it serves,
-        which reproduces the per-UE plan bit for bit.  Mobile scenarios
-        reserve the same slot count in every cell so a UE keeps its slot
-        across a handover.
+        Which slot a UE holds at a given instant is decided by
+        :meth:`_srs_slot_state`, not here: this method only hands each
+        ``(cell, slot)`` pair its resource.  Pool sizing lives in
+        :meth:`_srs_slots_per_cell`.
 
         Contamination is decided by this *allocator*, not by PCI colour: two
         same-colour cells share a pool, but the allocator then hands out
@@ -1605,7 +1775,7 @@ class InternalSimSource:
         on a different leaf contributes exactly zero.  Colour only narrows the
         candidate list.
 
-        Returns ``(victim_slots, interferer_slots, slot_of_ue)``.
+        Returns ``(slot_resources, slots_per_cell)``.
         """
         cached = getattr(self, "_srs_plan_cache", None)
         if cached is not None:
@@ -1615,24 +1785,10 @@ class InternalSimSource:
         positions = self._place_ues(
             np.random.default_rng(self._ue_seed + 7000), sites, self.num_ues
         )
-        home = [
-            self._serving_cell_index(sites, positions[u], scenario, elements_per_port)
-            for u in range(self.num_ues)
-        ]
-        per_cell: list[list[int]] = [[] for _ in sites]
-        for u in range(self.num_ues):
-            per_cell[home[u]].append(u)
-        slot_of_ue = [0] * self.num_ues
-        for members in per_cell:
-            for rank, u in enumerate(members):
-                slot_of_ue[u] = rank
-
-        mobile = str(self.cfg.get("mobility_mode", "static")).strip().lower() != "static"
-        uniform = max((len(m) for m in per_cell), default=0)
+        slots_by_cell = self._srs_slots_per_cell(sites, scenario, elements_per_port)
 
         ue_ids: list[int] = []
         cell_ids: list[int] = []
-        slots_by_cell: list[int] = []
         # Deterministic order: cell by cell, slot by slot.  Sample order and
         # worker count cannot change it.
         #
@@ -1643,9 +1799,7 @@ class InternalSimSource:
         # victim's leaf could never match an interferer's and cross-cell
         # collisions became impossible.
         for index, cell in enumerate(sites):
-            n_slots = max(uniform if mobile else len(per_cell[index]), 1)
-            slots_by_cell.append(n_slots)
-            for slot in range(n_slots):
+            for slot in range(slots_by_cell[index]):
                 ue_ids.append(int(slot))
                 cell_ids.append(int(cell.cell_id))
         plan = allocate_basic_srs_resources(
@@ -1661,7 +1815,7 @@ class InternalSimSource:
         slots_per_cell = {
             int(cell.cell_id): slots_by_cell[i] for i, cell in enumerate(sites)
         }
-        table = (victims, slots_per_cell, slot_of_ue)
+        table = (victims, slots_per_cell)
         self._srs_plan_cache = table
         return table
 
@@ -2129,6 +2283,7 @@ class InternalSimSource:
             # sounded, and which neighbour UEs share that exact leaf.
             srs_occurrence = int(round_index)
             victim_assignment = None
+            srs_occupancy = None
             srs_slot = -1
             srs_pilot_rb = np.arange(n_rb, dtype=np.int64)
             # The SRS plan is needed whenever anything downstream has to know
@@ -2143,16 +2298,32 @@ class InternalSimSource:
                 or self.cfg.get("srs_pilot_contamination_rho") is not None
             )
             if needs_srs_plan and len(sites) >= 1:
-                victims, _, slot_of_ue = self._srs_network_plan(
+                victims, _ = self._srs_network_plan(
                     sites, scenario, elements_per_port
                 )
-                srs_slot = int(slot_of_ue[int(ue_id)])
+                srs_assign, srs_occupancy = self._srs_slot_state(
+                    sites, scenario, elements_per_port, round_index
+                )
+                held = srs_assign.get(int(ue_id))
+                if held is None:
+                    raise RuntimeError(
+                        f"UE {ue_id} 在快照 {round_index} 上没有 SRS 槽位"
+                    )
+                # The occupancy table and the sample loop must agree on which
+                # cell serves this UE; if they ever diverge the resource would
+                # belong to a different cell than the channel we generated.
+                if int(held[0]) != int(serving):
+                    raise RuntimeError(
+                        f"SRS 占用表认为 UE {ue_id} 在小区 "
+                        f"{sites[held[0]].cell_id}，而本样本的服务小区是 "
+                        f"{serving_cell.cell_id}；两者必须一致"
+                    )
+                srs_slot = int(held[1])
                 key = (int(serving_cell.cell_id), srs_slot)
                 if key not in victims:
                     raise RuntimeError(
-                        f"UE {ue_id} 切换到小区 {serving_cell.cell_id} 后没有对应的 "
-                        f"SRS 槽位 {srs_slot}；移动场景下每个小区都应预留同样多的 "
-                        "槽位，请检查 SRS 资源计划的构建。"
+                        f"小区 {serving_cell.cell_id} 没有槽位 {srs_slot} 的 SRS "
+                        "资源；请检查 srs_slots_per_cell 与占用表是否一致。"
                     )
                 victim_assignment = victims[key]
                 if n_rb == 272:
@@ -2177,6 +2348,8 @@ class InternalSimSource:
                 n_ue=n_ue,
                 doppler_hz=doppler,
                 victim_assignment=victim_assignment,
+                victim_slot=None if srs_slot < 0 else srs_slot,
+                srs_occupancy=srs_occupancy,
             )
 
             est_mode = est_mode_requested
@@ -2434,6 +2607,14 @@ class InternalSimSource:
                 ),
                 "srs_victim_ue_id": int(ue_id),
                 "srs_victim_slot": srs_slot,
+                "srs_slots_reserved_per_cell": (
+                    -1 if victim_assignment is None
+                    else int(self._srs_slots_per_cell(
+                        sites, scenario, elements_per_port)[serving])
+                ),
+                "srs_cell_occupancy": (
+                    -1 if srs_occupancy is None else int(len(srs_occupancy[serving]))
+                ),
                 # The cell the assignment really came from.  Reporting the
                 # serving cell here regardless would hide exactly the
                 # handover mis-binding this key exists to expose.
