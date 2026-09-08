@@ -1278,6 +1278,100 @@ def test_adjacent_samples_follow_the_jakes_correlation() -> None:
 test_adjacent_samples_follow_the_jakes_correlation()
 
 
+# ---------------------------------------------------------------------------
+section("13  五个信道估计档必须真的是五个估计器")
+
+# 踩过的坑：ideal 以外的所有档都走同一句 h_est = h + sigma*noise。真实的
+# LMMSE 估计器就写在同一个文件里，但主生成链一次都没调过；SRS 跳频档连枚举
+# 都进不去。于是"换个估计器再比一次"这类实验，两臂拿到的是**逐位相同**的
+# 数据——比出来的差异只能是噪声，而 KPI 一切正常。
+# 判据：导频观测→频域插值这条链真的跑了，且各档物理上可区分。
+
+
+def _estimator_nmse(mode: str, *, n_round: int = 24, warmup: int = 17):
+    cfg = {
+        "num_samples": n_round, "num_ues": 1, "num_rb": 272,
+        "num_slots_per_sample": 1,
+        "num_bs_tx_ant": 4, "num_bs_rx_ant": 4,
+        "num_ue_tx_ant": 2, "num_ue_rx_ant": 2,
+        "scenario": "UMa_NLOS", "channel_model": "CDL-C",
+        "channel_est_mode": mode, "link": "DL",
+        "seed": 903, "ue_seed": 904, "measurements": {"ssb_rsrp": False},
+        "ue_speed_kmh": 0.3, "carrier_freq_hz": 2.6e9,
+        "sample_interval_s": 5e-3, "mobility_mode": "static", "num_sites": 1,
+        # 测量 SNR 定在 ~4 dB：维纳滤波相对裸 LS 的增益是**信噪比的函数**，
+        # 高 SNR 下滤波器必须保住信号、增益自然趋于 0（实测 14 dB 时只剩
+        # 0.41 dB）。要考的是"估计器真的在估计"，就把工作点放在它该起作用
+        # 的区间，而不是放宽判据。
+        "tx_power_dbm": 36.0,
+    }
+    samples = list(chub.iter_samples("internal_sim", cfg))
+    num = den = 0.0
+    for k, sample in enumerate(samples):
+        if k < warmup:
+            continue
+        truth = np.asarray(sample.h_serving_true)
+        est = np.asarray(sample.h_serving_est)
+        num += float(np.sum(np.abs(est - truth) ** 2))
+        den += float(np.sum(np.abs(truth) ** 2))
+    return 10.0 * np.log10(num / den), samples[-1]
+
+
+def test_every_estimation_mode_is_a_different_estimator() -> None:
+    nmse = {}
+    last = {}
+    for mode in ("ls_linear", "ls_mmse", "ls_lmmse",
+                 "ls_hop_sequential", "ls_hop_concat"):
+        nmse[mode], last[mode] = _estimator_nmse(mode)
+        pilots = last[mode].meta.get("channel_est_pilot_rb_count")
+        print(f"  {mode:18s} NMSE {nmse[mode]:7.2f} dB  导频 RB {pilots}")
+
+    # 1) 频域维纳压噪必须真的压噪：同一批导频、同一个噪声口径，只是多了 PDP
+    #    先验，误差就该明显低于裸 LS。
+    gain = nmse["ls_linear"] - nmse["ls_mmse"]
+    check(gain > 2.0,
+          f"ls_mmse 的估计误差低于 ls_linear（低了 {gain:.2f} dB）")
+
+    # 1b) 跳频的代价必须是负的：同一个维纳估计器，一次只探 1/17 带宽、
+    #     其余 RBG 拿的是几十毫秒前的观测，误差只能比全带 SRS 更大。
+    for hop in ("ls_hop_sequential", "ls_hop_concat"):
+        check(nmse[hop] > nmse["ls_mmse"],
+              f"{hop} 比全带 SRS 的 LMMSE 差（{nmse[hop]:.2f} vs "
+              f"{nmse['ls_mmse']:.2f} dB）")
+
+    # 2) 除了那条写在文档里的别名，任何两档都不许输出逐位相同的估计。
+    modes = list(last)
+    collisions = []
+    for a in range(len(modes)):
+        for b in range(a + 1, len(modes)):
+            same = np.array_equal(np.asarray(last[modes[a]].h_serving_est),
+                                  np.asarray(last[modes[b]].h_serving_est))
+            pair = {modes[a], modes[b]}
+            if same and pair != {"ls_mmse", "ls_lmmse"}:
+                collisions.append(pair)
+    check(not collisions, f"各估计档输出互不相同（碰撞 {collisions}）")
+    check(np.array_equal(np.asarray(last["ls_mmse"].h_serving_est),
+                         np.asarray(last["ls_lmmse"].h_serving_est)),
+          "ls_lmmse 与 ls_mmse 是同一个算法的别名（文档承诺）")
+
+    # 3) 跳频档一次只探 1/17 带宽，非跳频档是显式的全带 SRS 工程上界。
+    check(all(last[hop].meta.get("channel_est_pilot_rb_count") == 16
+              for hop in ("ls_hop_sequential", "ls_hop_concat")),
+          "跳频档每次机会只探 16 个 RB（C_SRS=63/B_SRS=1 的 17x16 profile）")
+    check(last["ls_linear"].meta.get("channel_est_full_band_srs") is True,
+          "非跳频档是全带 SRS，每个 RB 都有导频")
+
+    # 4) 跳频的代价必须真的出现：整band 扫完要 17 次机会，最老的那个 RBG
+    #    就是 16 次机会以前的 CSI。
+    ages = last["ls_hop_sequential"].meta.get("csi_rbg_age_occasions") or []
+    check(bool(ages) and max(ages) == 16 and min(ages) == 0,
+          "逐 RBG 的 CSI 年龄铺满 0~16 次机会（实得 "
+          f"{min(ages) if ages else 'n/a'}~{max(ages) if ages else 'n/a'}）")
+
+
+test_every_estimation_mode_is_a_different_estimator()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

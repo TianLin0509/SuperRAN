@@ -475,6 +475,12 @@ def _parallel_exactness_blocker(
     speed = float(cfg.get("ue_speed_kmh", 0.0) or 0.0)
     if mobility != "static" and speed > 0.0:
         return "移动轨迹跨样本有状态，尚不能无缝分块；为保持连续轨迹改用串行"
+    est_mode = str(cfg.get("channel_est_mode", "ls_linear"))
+    if est_mode in ("ls_hop_sequential", "ls_hop_concat"):
+        return (
+            f"channel_est_mode={est_mode!r} 要跨 SRS 机会攒带宽，估计器逐 UE 有状态；"
+            "分块会让每块从冷启动重来，改用串行"
+        )
     return None
 
 
