@@ -295,6 +295,35 @@ check(
 )
 
 # ---------------------------------------------------------------------------
+sect("6.6  重复次数 ≤5 时判决必须硬标注「判不了」")
+# 双侧 Wilcoxon 符号秩检验最小可达 p 是 2/2^n。n=5 给 0.0625 > 0.05：
+# **无论数据多干净都判不出显著**，而它照样会算出一个漂亮的百分比。
+# 判决因此必须直接判 False 并说明原因，不能只给一个"差一点点"的 p 值；
+# 也不许在这种样本量下退回配对 t 检验（小样本 t 偏乐观，会放行符号秩拦下的结论）。
+_p5 = g.paired_compare(np.arange(10.0, 15.0), np.arange(10.0, 15.0) - 5.0)
+_p6 = g.paired_compare(np.arange(10.0, 16.0), np.arange(10.0, 16.0) - 5.0)
+print(f"  n=5 判决 p={_p5.decision_p_value:.4g}（最小可达 "
+      f"{2 / 2 ** 5:.4g}），n=6 判决 p={_p6.decision_p_value:.4g}")
+check(_p5.n_below_minimum and not _p6.n_below_minimum,
+      "n≤5 被标为低于判决下界，n=6 不再标")
+check(not _p5.decision_significant,
+      "n=5 完全分离的两臂也判不显著（这是样本量的数学上界，不是数据不好）")
+check(_p6.decision_significant,
+      "n=6 同样形态的数据能判显著（下界卡在 6 而不是更高）")
+check(_p5.inconclusive_reason is not None
+      and "2/2^5" in _p5.inconclusive_reason
+      and _p6.inconclusive_reason is None,
+      "n=5 给出可读原因并写明最小可达 p，n=6 不给原因")
+check(_p5.as_dict()["n_below_minimum"] is True
+      and _p5.as_dict()["inconclusive_reason"] is not None,
+      "as_dict 导出样本量不足标记与原因")
+_g5 = g.gate_conclusion(_p5)
+_item5 = next(i for i in _g5.items if i.name == "配对检验显著")
+check(not _item5.passed
+      and "inconclusive_insufficient_replications" in _item5.detail,
+      "门 3 的判据项判不通过并在说明里点名 inconclusive_insufficient_replications")
+
+# ---------------------------------------------------------------------------
 sect("7  配置差分")
 
 cfg1 = {"scenario": "UMa_NLOS", "isd_m": 500.0, "seed": 1, "num_samples": 10}
