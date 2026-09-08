@@ -1518,6 +1518,87 @@ def test_srs_ul_cross_link_and_pilot_contamination() -> None:
     check(exhausted,
           "每小区只留 1 个槽位却有多个用户时硬失败，不静默共用同一份资源")
 
+    # 10f. 空槽不许在取货后变成发射源——必须走真实的落盘与取货，
+    #      只查生成端的占用表会漏掉这个接口。正反两例都要有：
+    #      没人发射 -> 接收机干扰恒为 0；有人发射且资源碰撞 -> 干扰必须还在。
+    import dataclasses as _dc
+
+    from superran import generate as _gen
+    from superran.loader import load as _load
+    from superran.srs_resource import (  # noqa: PLC0415
+        allocate_basic_srs_resources as _alloc,
+    )
+    from superran.srs_waveform import SrsWaveformConfig as _WCfg
+
+    def _dataset(n_ue, n_smp):
+        c = _cross_link_cfg(
+            num_ues=n_ue, num_samples=n_smp, bandwidth_hz=100000000.0,
+            measurements={"srs_cross_link_channels": True})
+        c["source"] = "internal_sim"
+        return _load(_gen.generate(c, num_samples=n_smp, workers=1)["dataset_id"])
+
+    def _receive(ds, index, n_link, forced):
+        victim = _alloc([0], cell_ids=0, adaptive_period=False)[0]
+        if forced:      # 强制资源全同：碰撞的上界
+            others = tuple(_dc.replace(victim, ue_id=100 + k, cell_id=3)
+                           for k in range(n_link))
+        else:
+            others = _alloc(list(range(1, 1 + n_link)), cell_ids=3,
+                            adaptive_period=False)
+        sigs = ds.srs_cross_link_signals(index, others, n_srs_ids=[0] * n_link)
+        rx = ds.srs_waveform(index, victim, n_srs_id=0, interferers=sigs,
+                             config=_WCfg(noise_power_linear=1e-9))
+        return len(sigs), float(np.mean(np.abs(rx.h_est_interference_rb) ** 2))
+
+    ds_idle = _dataset(4, 4)
+    n_link = int(ds_idle.h_ul_cross.shape[1])
+    occ_idle = ds_idle.srs_cross_link.get("slot_occupied")
+    check(occ_idle is not None,
+          "占用状态随张量一起落盘（只留在内存里，取货端就看不到）")
+    empty = [i for i in range(occ_idle.shape[0]) if int(occ_idle[i].sum()) == 0]
+    check(bool(empty), "构造出了三个邻区槽位全空的样本（否则反例是空的）")
+    if empty:
+        idx = empty[0]
+        power = float(np.mean(
+            np.abs(np.asarray(ds_idle.h_ul_cross[idx])) ** 2))
+        check(power == 0.0,
+              f"没人发射时交叉链路信道本身就是零（实测功率 {power:.3e}）")
+        n_sig, energy = _receive(ds_idle, idx, n_link, forced=True)
+        print(f"  反例：三个槽位全空且强制资源全同 -> 发射源 {n_sig} 个，"
+              f"接收机干扰能量 {energy:.3e}")
+        check(n_sig == 0 and energy == 0.0,
+              "没人发射的槽位在取货后不产生任何干扰（否则是凭空造出的污染）")
+
+    ds_busy = _dataset(63, 8)
+    occ_busy = ds_busy.srs_cross_link["slot_occupied"]
+    busy = [i for i in range(occ_busy.shape[0]) if int(occ_busy[i].sum()) > 0]
+    check(bool(busy), "构造出了槽位上真有人发射的样本（否则正例是空的）")
+    if busy:
+        idx = busy[0]
+        n_hit, hit = _receive(ds_busy, idx, n_link, forced=True)
+        _, miss = _receive(ds_busy, idx, n_link, forced=False)
+        print(f"  正例：{int(occ_busy[idx].sum())} 个槽位有人 -> 发射源 {n_hit} 个，"
+              f"资源全同时干扰 {hit:.3e}，资源正交时 {miss:.3e}")
+        check(n_hit > 0 and hit > 0.0,
+              "有人发射且资源碰撞时干扰必须还在（不能连真的一起杀掉）")
+        check(hit > miss * 5.0,
+              "资源碰撞时的干扰显著高于资源正交时（解扩正交性仍然成立）")
+
+    # 数据集没有占用状态时，取货端必须拒绝而不是默认「都在发」
+    refused = False
+    try:
+        ds_idle._npz.files  # noqa: SLF001  仅为触发惰性加载
+        broken = ds_idle.srs_cross_link
+        saved = broken.pop("slot_occupied")
+        try:
+            _receive(ds_idle, 0, n_link, forced=False)
+        finally:
+            broken["slot_occupied"] = saved
+    except ValueError:
+        refused = True
+    check(refused,
+          "旧数据集缺占用状态时取货端硬拒绝，不默认当成「每个槽位都有人在发」")
+
     # 11. SRS 资源计划不许随分块方式改变，否则并行生成会换一套碰撞结构
     hop = dict(channel_est_mode="ls_hop_sequential",
                measurements={"srs_cross_link_channels": True},

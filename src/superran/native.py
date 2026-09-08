@@ -1523,18 +1523,30 @@ class InternalSimSource:
                 is_los=los,
                 role="interferer",
             )
-            rows.append((cross * scale).astype(np.complex64))
-            cells_used.append(int(sites[k].cell_id))
-            ues_used.append(intf_ue)
-            sir_db.append(float(desired_rel_db - rel_db))
-            distances.append(d3)
-            los_flags.append(bool(los))
             other = None if plan is None else plan.get(
                 (int(sites[k].cell_id), intf_ue)
             )
             occupied = bool(
                 srs_occupancy is not None and intf_ue in srs_occupancy[k]
             )
+            # Nobody holding that slot means nobody is transmitting on it, so
+            # the cross-link carries no signal.  Storing the geometry anyway
+            # lets any consumer that forgets to read the occupancy flag hand
+            # a silent UE to the receiver as if it were sounding, and invent
+            # contamination that never happened.  "No transmitter, no
+            # waveform" has to hold in the data itself, not only in a flag.
+            if plan is not None and not occupied:
+                rows.append(np.zeros_like(cross, dtype=np.complex64))
+            else:
+                rows.append((cross * scale).astype(np.complex64))
+            cells_used.append(int(sites[k].cell_id))
+            ues_used.append(intf_ue)
+            sir_db.append(
+                float(desired_rel_db - rel_db) if (plan is None or occupied)
+                else float("-inf")
+            )
+            distances.append(d3)
+            los_flags.append(bool(los))
             if other is None:
                 # That cell does not even reserve this slot.
                 collides.append(False)

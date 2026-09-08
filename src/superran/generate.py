@@ -56,6 +56,9 @@ _CROSS_LINK_ID_FIELDS = (
     "srs_cross_link_cell_ids",
     "srs_cross_link_ue_ids",
     "srs_cross_link_collides",
+    # 这个槽位在邻区到底有没有人发射。它不能用「是否与本 UE 碰撞」代替：
+    # 有人但不碰撞、和根本没人，是两种不同的状态，取货端要区别对待。
+    "srs_cross_link_slot_occupied",
     "srs_cross_link_frequency_resource_id",
     "srs_cross_link_ul_sir_db_vec",
 )

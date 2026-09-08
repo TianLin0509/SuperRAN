@@ -229,6 +229,8 @@ class Dataset:
     def srs_cross_link(self) -> dict[str, np.ndarray]:
         """每根上行交叉链路的身份，形状 ``[N, 干扰UE]``，与 ``h_ul_cross`` 同轴。
 
+        ``slot_occupied`` 指出那个槽位在邻区**是否真的有 UE 在发射**——没人
+        的那一根信道恒为零，不能当发射源；它与 ``collides`` 不是一回事。
         ``cell_ids`` / ``ue_ids`` 指出这根链路属于哪个邻区的哪个 UE，
         ``collides`` 是它与本 UE 的 SRS 资源**真的**撞在同一个叶子上（同色
         只是有资格共用资源池，不等于碰撞），``frequency_resource_id`` 是它的
@@ -451,8 +453,16 @@ class Dataset:
         tx_power_linear: float = 1.0,
         timing_offsets_s: Sequence[float] | None = None,
         cfo_hz: Sequence[float] | None = None,
+        include_idle_slots: bool = False,
     ) -> list[Any]:
         """把本样本的上行交叉链路包成 ``SrsWaveformSignal`` 干扰列表。
+
+        **没人占的槽位不会变成发射源。** 邻区在某个槽位上没有 UE，就没有
+        SRS 发出来；把那一根仍然当作发射信号送进接收机，会凭空造出一份
+        本不存在的导频污染。占用状态来自数据集的 ``slot_occupied``，
+        **不能拿 ``collides`` 代替**——"有人但不撞我们"和"根本没人"是两种
+        不同的状态。需要看空槽那一根的几何时才显式传
+        ``include_idle_slots=True``，届时信道本身也是零。
 
         每个干扰 UE 需要它自己的 SRS 资源分配（决定它落在哪个 slot / 符号 /
         comb / 循环移位），是否真的污染本站导频由 :func:`observe_srs_leg` 按
@@ -485,6 +495,23 @@ class Dataset:
             raise IndexError(
                 f"snapshot index {snapshot_index} outside 0..{block.shape[1] - 1}"
             )
+        identity = self.srs_cross_link
+        occupied = identity.get("slot_occupied")
+        if occupied is None and not include_idle_slots:
+            raise ValueError(
+                "该数据集没有 slot_occupied，无法判断邻区那个槽位上是否真的有 UE "
+                "在发射。请重新生成数据集；或在明确知道后果时传 "
+                "include_idle_slots=True。"
+            )
+        keep = (
+            [True] * n_intf if include_idle_slots
+            else [bool(v) for v in np.asarray(occupied[int(index)]).reshape(-1)]
+        )
+        if len(keep) != n_intf:
+            raise ValueError(
+                f"slot_occupied 与 h_ul_cross 的干扰 UE 轴对不上："
+                f"{len(keep)} vs {n_intf}"
+            )
         return [
             sw.SrsWaveformSignal(
                 assignment=assignments[k],
@@ -497,7 +524,7 @@ class Dataset:
                     f"dataset:{self.dataset_id}:sample:{int(index)}:crosslink:{k}"
                 ),
             )
-            for k in range(n_intf)
+            for k in range(n_intf) if keep[k]
         ]
 
     def srs_waveform_pair(
