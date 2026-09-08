@@ -159,7 +159,7 @@ HARQ 最多一次，默认 IR、可选 CC，空口 MCS/RBG 数/rank/TBS 保持�
 **只有一条评估路径（`experience_v2`），没有模式开关。** 按 TS 28.552 Rel-19 的 DRB
 busy-period 记录事件；用 TBS 单调反查表求“恰够”的 RBG 数，同一 TTI 可服务多个 UE，
 没有需求的尾料留空；PF 平均速率按**实际 scheduled TBS**更新。NACK 后冻结 MCS、
-RBG 数、rank 与 TBS，最多一次 IR/CC 重传；payload 在首传发送时离开 FIFO，
+**PRB 数**（#16：不等长 RBG 栅格下冻结的是 PRB 数，不是 RBG 个数）、rank 与 TBS，每个 TB 最多一次 IR/CC 重传；每 UE 默认 **8 个 HARQ 进程**同时在途（`harq_max_processes`，设 1 退回单进程）；payload 在首传发送时离开 FIFO，
 末次失败只进 `residual_bler`、不回队列。
 
 **"容量仿真"= `traffic_model="full_buffer"`，是这条路径上的一个话务配置，不是另一
@@ -187,8 +187,9 @@ OLLA 通常只配置 `target_bler`。SU/MU 各自的 ACK 步长默认 +0.01 MCS�
 `olla_step_down_db` / `mu_olla_step_down_db` 时才覆盖自动值，结果必须标注来源。
 其中 `*_db` 是历史 API 名，值的单位是 MCS 档。
 
-两种 profile 的 KPI 名即使相似也不可直接拼在一张趋势图里；结果必须连同
-`model_version`、`pf_accounting` 和物理近似一起保存。
+基线在 2026-09-04 变过三次（#18 TBS 扣开销、#21 发送即记账、#20 运行时 CQI），改前改后的 KPI
+不可拼在同一张趋势图里；结果必须连同 `model_version`、`pf_accounting`、`harq_max_processes`、
+`runtime_cqi_enabled` 和物理近似一起保存。
 
 **前置条件：每个 UE 要有多个时间相关的快照。** 生成时 `num_slots_per_sample >= 8`
 （或让 `num_samples` 是 `num_ues` 的 8 倍以上）。first-party source 会原样保留
@@ -233,7 +234,9 @@ ACK piece，并把排队等待另报（历史的 `trim` 口径已下线）。
 `full_buffer`；要研究大小包竞争用 `mixed`）、`rank_mode="fixed"` / `fixed_rank=2`（**rank 默认固定**，链路表的
 逐快照 `best_rank` 不再是发送 rank；`link_table` 模式是历史行为、只作反向对照）、
 `harq_feedback_delay=True`（ACK/NACK 搭下一个 U 时隙，OLLA 与重传从其后第一个
-D/S 生效；图案没有 U 时自动退化成零时延并写进 notes）、`cqi_filter_lambda=0.25`
+D/S 生效；图案没有 U 时自动退化成零时延并写进 notes）、`harq_max_processes=8`、
+`runtime_cqi_enabled=True`（CQI 每 `csi_report_period_ms`=20 ms 由 UE 上报一次，含 3 TTI 处理时延与
+**1.5 dB 未标定**的实现损失；比离线预计算保守约一档，会把 `olla_max_db=3.0` 顶满）、`cqi_filter_lambda=0.25`
 （CQI 一阶 IIR：**0.25 已由负责人确认为工程默认，但尚未经现场测量/设备数据标定；
 必须随结果报出且不得声称现场等价**）、
 `num_replications=8`（**别调到 6 以下**，见上）、

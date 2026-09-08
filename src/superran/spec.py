@@ -742,8 +742,9 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "pair_table：MCS 与误块抽签都读 pair 表真值，是唯一口径。"
      "历史的 se_ratio_legacy（只按标量比值缩 TBS、不进误块抽签）已于 "
      "2026-09-04 删除，它的另一个宿主 legacy 容量主循环也一并下线"),
-    ("mu_precoder", "MU 预编码", "select", ["zf", "rzf"],
-     "ZF 为历史基线；RZF 在噪声加载之外可加入 N_BS·sigma_e² 的 CSI 不确定性加载"),
+    ("mu_precoder", "MU 预编码", "select", ["ezf", "zf", "rzf"],
+     "EZF 为现场对齐口径（逐流归一化后加 1/1024 对角加载）；ZF 是历史基线；"
+     "RZF 在噪声加载之外可加入 N_BS·sigma_e² 的 CSI 不确定性加载"),
     ("mu_csi_error_variance", "MU CSI 误差方差", "number", (0.0, 1.0, 0.001),
      "每个复信道系数的 sigma_e²；必须来自估计器协方差或离线标定，不能偷看 h_true"),
     ("mu_corr_threshold", "MU 相关性门限", "number", (0.0, 1.0, 0.05),
@@ -850,7 +851,7 @@ _SIM_DEFAULTS: dict[str, Any] = {
     "small_burst_policy": "fractional_slot",
     "mu_enabled": "off",
     "mu_accounting": "pair_table",
-    "mu_precoder": "zf",
+    "mu_precoder": "ezf",
     "mu_csi_error_variance": 0.0,
     "mu_corr_threshold": 0.7,
     "min_pairing_mcs": 4,

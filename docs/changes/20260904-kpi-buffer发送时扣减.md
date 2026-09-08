@@ -1,6 +1,6 @@
 # 2026-09-04 KPI 口径 — buffer 在发送时扣减，不看这个 TB 对不对
 
-**分支 / SHA**：`feat/buffer-drain-on-tx-20260904` / `<提交后回填>`　**风险档**：红
+**分支 / SHA**：`feat/buffer-drain-on-tx-20260904` / 审核 HEAD `dc1553ba563ed8eec7fa13e37343692a38db347e`，合入 `develop` 为 `be12da02`（PR #21）　**风险档**：红
 **报告**：`C:\VibeData\Artifacts\Reports\SuperRAN\20260904-buffer-drain-on-tx.html`
 
 ## 改了什么物理机制

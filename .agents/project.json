@@ -1,0 +1,39 @@
+{
+  "$comment": "项目专属配置。AI HUB 的群聊底座是通用的，对项目一无所知——所有项目差异都读这个文件。钩子和合并脚本也读它，不用逐项目改脚本。",
+
+  "name": "SuperRAN",
+  "trunk": "develop",
+
+  "$comment_protected": "develop 是开发主线；main 只在维护者明确发起发布时更新。两条都不许直接推送。",
+  "protectedBranches": ["main"],
+
+  "$comment_test": "先验隔离 Git 闸门，再按直接入口运行所有仿真测试文件。run_test_matrix 会核对文件发现集与注册集；不要依赖历史 pytest 收集数量。2026-09-06 原基线 29/29，500.052 秒。",
+  "test": [
+    "python scripts/verify_project_workflow.py",
+    "python scripts/run_test_matrix.py --tier full"
+  ],
+
+  "$comment_afterMerge": "留空是刻意的。给内网打审核 zip 不是流水线的一环，是两个独立任务之间的动作，由维护者在他想送审时手动做。",
+  "afterMerge": [],
+
+  "$comment_version": "本次只整理开发流程，不改 Python API 包版本；完整代码身份用 Git SHA。未来发布的版本策略由维护者单独发起，不套用 npm 版本脚本。",
+  "versionFiles": [],
+  "versionBump": [],
+
+  "contracts": {
+    "author": ".agents/AUTHOR.md",
+    "merger": ".agents/MERGER.md"
+  },
+
+  "worktreeRoot": "C:/Vibe/Worktrees/SuperRAN",
+  "worktreeHint": "开完先设 PYTHONPATH 指向你自己的 src，否则 import 会解析到主仓库（见 .agents/TESTING.md 坑 1）",
+
+  "$comment_notes": "给 Agent 的硬提醒，写在这里是为了让它们进 zip、跨会话不丢。",
+  "notes": [
+    "editable 安装把 import superran 硬指向主仓库；worktree 里不设 PYTHONPATH，测出来的证据是假的",
+    "合并脚本必须在主工作目录跑，原因同上",
+    "物理 bug 的修复必须补一条 revert 后会变红的测试进 tests/test_physics_invariants.py，合并位要亲自反证",
+    "改动的风险档位查 .agents/RISK.md 的文件路径表，不许自己估",
+    "日常不走 GitHub PR；同步 GitHub 是维护者明确要求时的独立动作，见 .agents/SYNC.md"
+  ]
+}

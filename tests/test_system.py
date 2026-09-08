@@ -352,11 +352,16 @@ with pytest_raises(ValueError) as _exc_pfa:
     sysm.SchedulerConfig(pf_accounting="legacy_best_se")
 check("legacy_best_se" in str(_exc_pfa.raised),
       "legacy PF 记账口径已下线，错误信息点名它")
-# pair 表就是按两用户 × rank2 建的，别的维度不属于合法域
+# pair 表按两用户建，用户数别的取值不属于合法域
 with pytest_raises(ValueError):
     sysm.SchedulerConfig(mu_enabled=True, max_mu_users=4)
+# 每用户层数放开到 1..2（现场实现的初始配对 rank 上限就是 2）；
+# rank1 配对是合法工作点，0 与 3 仍然是硬失败。
+sysm.SchedulerConfig(mu_enabled=True, mu_rank_per_user=1)
 with pytest_raises(ValueError):
-    sysm.SchedulerConfig(mu_enabled=True, mu_rank_per_user=1)
+    sysm.SchedulerConfig(mu_enabled=True, mu_rank_per_user=0)
+with pytest_raises(ValueError):
+    sysm.SchedulerConfig(mu_enabled=True, mu_rank_per_user=3)
 
 # --- 开 MU 走 pair_table 但没建 pair 表要硬失败，不静默降级 -------------
 try:
@@ -999,13 +1004,15 @@ _mu_tables = sysm.build_link_tables(
 _pair = _mu_tables[0].mu_links[1]
 _recon = np.column_stack((_mu_tables[0].sinr_db[:, 1],
                           _mu_tables[1].sinr_db[:, 1])) \
-    + _pair.power_loss_db + _pair.corr_loss_true_db
+    + _pair.power_loss_db[None, :] + _pair.corr_loss_true_db
 check(np.allclose(_recon, _pair.true_sinr_db, atol=1e-10),
       "MU true SINR 可逐点重构为 SU SINR + powerLoss + CorrLoss")
-check(abs(_pair.power_loss_db + 10 * np.log10(2)) < 1e-12,
+check(_pair.power_loss_db.shape == (2,),
+      "MU powerLoss 是逐用户量：异 rank 配对时两侧不同")
+check(bool(np.all(np.abs(_pair.power_loss_db + 10 * np.log10(2)) < 1e-12)),
       "两个 rank2 UE 相对 SU rank2 的功率损失精确为 -3.0103 dB")
-check("P/4" in _pair.as_dict()["power_loss_scope"],
-      "MU powerLoss 输出显式限定为 rank2+rank2 等功率分流口径")
+check("rank_ue / total_layers" in _pair.as_dict()["power_loss_scope"],
+      "MU powerLoss 输出显式声明按总层数实时分摊，不再是写死的口径")
 check(_pair.as_dict()["receiver"] == "per_user_lmmse",
       "MU pair 表显式记录逐用户 LMMSE 接收机，不再冒充固定标量接收基")
 
@@ -3033,43 +3040,55 @@ _T_bad_dim[1].mu_links[2].true_sinr_db = \
 check(_pair_graph_error(_T_bad_dim, "维度不一致"),
       "pair graph 的 snapshot×两用户维度在调度前硬校验")
 
-# MU 准入必须查询叠加 SU+MU OLLA 后的实发 MCS。用一个阶跃 BLER
-# 反例：OLLA 前 MCS 全部可用，第一次 MU ACK 令 MU OLLA +3 档；下一次候选
-# 的实发 MCS 越过 0.5 门，必须拒配。旧实现仍用 OLLA 前 MCS，会继续放行。
+# MU 准入必须查询叠加 SU+MU OLLA 后的**实发** MCS，不是 OLLA 前的基准档。
+# 历史反例挂在「预测误块率 > 0.5」那道闸上；那道闸已于本次对齐删除（现场
+# 只有最低配对 MCS 与相关度两道），所以反例改挂在仍然存在的最低配对 MCS 闸：
+# 把门限设成 OLLA 前的实发档，再强制全部 NACK 让两个外环一起往下走。
+# OLLA 前恰好过门，几次 NACK 之后实发档掉到门下必须拒配。旧实现若用 OLLA 前
+# 的基准档判，会一直放行。SU 侧的档位高得多（22/23 vs 18），所以这里被触发的
+# 只能是 pair 那道闸——两者分开计数正是为了能区分。
 _olla_link = _T_indep[0].mu_links[1]
 _olla_base_mcs = []
 for _u in (0, 1):
     _side = int(_olla_link.side(_u))
     _pred = (float(_T_indep[_u].sinr_tx_db[0, 1])
              + float(_olla_link.corr_loss_tx_db[0, _side])
-             + float(_olla_link.power_loss_db))
+             + float(_olla_link.power_loss_db[_side]))
     _olla_base_mcs.append(int(la.select_mcs(
         _pred, table=3, target_bler=0.1).index))
-_olla_bler_step = max(_olla_base_mcs) + 1
-check(_olla_bler_step <= 27,
-      "MU OLLA 准入反例位于有效 MCS 范围内")
+_olla_su_mcs = [
+    int(la.select_mcs(float(_T_indep[_u].sinr_tx_db[0, 1]),
+                      table=3, target_bler=0.1).index)
+    for _u in (0, 1)]
+_olla_pair_gate = min(_olla_base_mcs)
+check(0 < _olla_pair_gate < min(_olla_su_mcs),
+      f"MU 准入反例的门限落在 pair 档与 SU 档之间"
+      f"（pair {_olla_base_mcs} < SU {_olla_su_mcs}）")
 _old_mu_admission_bler = sysm._bler_lookup
 try:
-    sysm._bler_lookup = lambda mcs, _sinr: (
-        0.9 if int(mcs) >= _olla_bler_step else 0.0)
+    sysm._bler_lookup = lambda _mcs, _sinr: 1.0
     _olla_admission_run = sysm.simulate(
         _T_indep,
         sys_cfg=sysm.SystemConfig(
-            duration_s=0.01,
+            duration_s=0.05,
             tdd_pattern="DDDSU", seed=313),
         traffic=sysm.TrafficConfig(model="full_buffer"),
         sched=sysm.SchedulerConfig(
             mu_enabled=True, mu_accounting="pair_table",
-            mu_corr_threshold=1.0, mu_olla_step_up_db=3.0,
-            olla_max_db=6.0),
+            mu_corr_threshold=1.0, min_pairing_mcs=_olla_pair_gate,
+            olla_min_db=-6.0),
         rng=rg.RngBook(313, 0),
                     kpi=sysm.KpiConfig(warmup_s=0.0))
 finally:
     sysm._bler_lookup = _old_mu_admission_bler
 _olla_rejects = _olla_admission_run.cell["mu_candidate_scoring"]["rejection_reasons"]
 check(_olla_admission_run.cell["mu_share"] > 0
-      and sum(int(v) for v in _olla_rejects.values()) > 0,
-      f"正 MU OLLA 令实发 MCS 的预测 BLER 越过 0.5 后拒绝后续配对（{_olla_rejects}）")
+      and int(_olla_rejects.get("pair_mcs_below_min_pairing", 0)) > 0,
+      f"负 MU OLLA 令实发 MCS 掉到最低配对档以下后拒配（{_olla_rejects}）")
+check("mcs_below_min_pairing" not in _olla_rejects,
+      "触发的是 pair 那道闸而不是 SU 那道：准入用的确实是配对后的实发档")
+check("predicted_bler_gt_0.5" not in _olla_rejects,
+      "预测误块率不再是一道准入闸（现场只有最低配对 MCS 与相关度两道）")
 check(_olla_admission_run.cell["mu_pair_graph"]["status"] == "pass"
       and _olla_admission_run.cell["mu_pair_graph"]["pairs"] == 1,
       "有效 pair graph 的完整性证据随结果交付")
@@ -3081,25 +3100,37 @@ print(f"  独立信道：SU 首传 MCS {_su_arm.cell['avg_mcs_first_tx']:.2f} �
       f"MU 占比 {_mu_arm.cell['mu_share']:.0%}")
 check(_mu_arm.cell["mu_share"] > 0.3, "独立信道下确实发生了配对")
 
-# --- 17.2d 多进程与 MU 的交互：不是 bug，是 OLLA 看到了更多反馈 ----------
-# 放开进程数后同一场景的 MU 占比会**下降**。原因不是配对逻辑变了，而是
-# UE 不再被自己的在途反馈挡住 → 发出的 TB 多出 3 倍 → MU OLLA 收到的反馈
-# 也多 3 倍、偏置爬得更高 → 实发 MCS 的预测 BLER 更容易越过 0.5 准入线 →
-# 更多 TTI 一个可接受的配对都没有。把这条交互显式钉住，免得以后有人看到
-# mu_share 掉了就以为配对坏了。
+# --- 17.2d 多进程与 MU 的交互：不是 bug，是重传占走了 TTI ----------------
+# 放开进程数后同一场景的 MU 占比会**下降**。原因不是配对逻辑变了，也不是
+# 准入把候选挡掉了（这一组里一次拒配都没有）：重传要重放冻结的 MCS 与 rank，
+# 只能单发，所以每一个重传 TTI 都从 MU 占比的分子里扣掉一个。多进程让
+# UE 不再被自己的在途反馈挡住，发得出的 TB 多几倍，重传自然也多几倍。
+# 把这条交互显式钉住，免得以后有人看到 mu_share 掉了就以为配对坏了。
 _mu_arm8 = _mu_run(_T_indep, mu_on=True, processes=8)
 _mu_reject1 = sum(int(v) for v in
                   _mu_arm.cell["mu_candidate_scoring"]["rejection_reasons"].values())
 _mu_reject8 = sum(int(v) for v in
                   _mu_arm8.cell["mu_candidate_scoring"]["rejection_reasons"].values())
+_retx_su8 = int(_mu_arm8.cell["su_mu_plan"]["harq_retx_forced_su"])
+_retx_su1 = int(_mu_arm.cell["su_mu_plan"]["harq_retx_forced_su"])
 print(f"  进程 1→8：已调度 TTI {_mu_arm.cell['scheduled_tti']}→"
       f"{_mu_arm8.cell['scheduled_tti']}，MU 占比 "
       f"{_mu_arm.cell['mu_share']:.3f}→{_mu_arm8.cell['mu_share']:.3f}，"
-      f"配对拒绝记录 {_mu_reject1}→{_mu_reject8}")
+      f"重传占走的 TTI {_retx_su1}→{_retx_su8}，配对拒绝记录 "
+      f"{_mu_reject1}→{_mu_reject8}")
 check(_mu_arm8.cell["scheduled_tti"] > 2 * _mu_arm.cell["scheduled_tti"],
       "8 进程让这两个 UE 发得出 2 倍以上的 TB")
-check(_mu_reject8 > 5 * _mu_reject1,
-      "配对被拒的 TTI 数同步暴涨——MU 占比下降的原因在准入，不在配对逻辑")
+check(_mu_reject1 == 0 and _mu_reject8 == 0,
+      "这一组里准入一次都没触发——MU 占比的变化与配对准入无关")
+check(_retx_su8 > _retx_su1,
+      "多进程发得多，重传也跟着多；重传只能单发")
+for _arm in (_mu_arm, _mu_arm8):
+    _mu_sel = int(_arm.cell["su_mu_plan"]["mu_selected"])
+    _retx = int(_arm.cell["su_mu_plan"]["harq_retx_forced_su"])
+    _tti = int(_arm.cell["scheduled_tti"])
+    check(_mu_sel + _retx == _tti
+          and abs(_arm.cell["mu_share"] - _mu_sel / _tti) < 1e-9,
+          f"MU 占比精确等于 (总 TTI − 重传 TTI)/总 TTI（{_mu_sel}+{_retx}={_tti}）")
 check(_mu_arm8.cell["mu_share"] < _mu_arm.cell["mu_share"],
       "因此 MU 占比下降；这是已知交互，不是配对失效")
 check(_mu_arm8.cell["cell_served_mbps"] > _mu_arm.cell["cell_served_mbps"],
@@ -3119,7 +3150,7 @@ for _s in range(_MU_SNAP):
     for _side, _u in ((0, 0), (1, 1)):
         _base = float(_T_indep[_u].sinr_tx_db[_s, 1])
         _shift = (float(_link.corr_loss_tx_db[_s, _side])
-                  + float(_link.power_loss_db))
+                  + float(_link.power_loss_db[_side]))
         _m = int(la.select_mcs(_base + _shift, table=3, target_bler=0.1).index)
         _su_true = float(_T_indep[_u].sinr_db[_s, 1])
         _mu_true = float(_link.true_sinr_db[_s, _side])
@@ -3136,9 +3167,9 @@ check(float(np.mean(_bler_mu)) > float(np.mean(_bler_su)),
 # **MCS 决策平移量的恒等式**：CorrLoss + powerLoss == pred_MU − pred_SU。
 # 也就是 −3.01 这个常数标签在决策里精确抵消，实际用的是矩阵算出来的差。
 _su_pred_back = (_link.predicted_sinr_db - _link.corr_loss_tx_db
-                 - _link.power_loss_db)
+                 - _link.power_loss_db[None, :])
 check(bool(np.allclose(
-    _link.corr_loss_tx_db + _link.power_loss_db,
+    _link.corr_loss_tx_db + _link.power_loss_db[None, :],
     _link.predicted_sinr_db - _su_pred_back, atol=1e-9)),
     "MU 决策平移量恒等于 pred_MU − pred_SU，3.01 dB 只是记账标签")
 
