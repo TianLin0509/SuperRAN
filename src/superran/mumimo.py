@@ -21,6 +21,7 @@ MU 相对 SU 白拿 K 倍，"MU 增益"里一大半就成了功率增益。
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -577,7 +578,11 @@ def mu_power_split_db(ranks: Sequence[int]) -> np.ndarray:
     return np.array([10.0 * np.log10(r / total) for r in values], dtype=float)
 
 
-def su_weight_correlation_matrix(w_su_users: list[np.ndarray]) -> np.ndarray:
+SU_WEIGHT_RANK_SCALING = ("none", "sqrt_rank")
+
+
+def su_weight_correlation_matrix(
+    w_su_users: list[np.ndarray], *, rank_scaling: str = "none") -> np.ndarray:
     """各用户 SU 发射权之间的功率相关矩阵 ``|w_k^H w_q|²``。
 
     ``w_su_users`` 每项形状 ``[F, BS_ant, rank_u]``（列为单位范数的发射方向，
@@ -589,16 +594,30 @@ def su_weight_correlation_matrix(w_su_users: list[np.ndarray]) -> np.ndarray:
     再取模方。列范数在这里显式归一：现场实现拿到的 SU 波束权本来就是单位列，
     本仓的 PEBF/NEBF 权是「单位方向 × 显式功率」分解后的物理矩阵，直接取模方
     会把功率差混进相关度。归一后对角线恒为 1，与现场的相关度矩阵同义。
+
+    ``rank_scaling`` 对应现场 ``getSubfWeight`` 里那句 ``mxWeight *= sqrt(rank)``。
+    **默认不加，理由是实测而不是偏好**：把它加进互相关之后，rank2 配对下跨用户
+    ``rho`` 最大到 2.87、有 13.45% 的元素 ``>= 1``，``(1-rho)`` 变成非正数，
+    残留相关性连乘与随后的 dB 转换当场失效（单位列时 rho 最大 0.717，从不越界）。
+    所以那个 ``sqrt(rank)`` 携带的是**发射功率**，本仓已经在「单位方向 × 显式
+    功率」的分解里单独记账，再乘一次就是重复计入。``"sqrt_rank"`` 保留为可显式
+    选择的对照口径，供想复现该分支的人使用。
     """
     if len(w_su_users) < 2:
         raise ValueError("残留相关性至少需要两个用户")
+    if str(rank_scaling) not in SU_WEIGHT_RANK_SCALING:
+        raise ValueError(
+            f"rank_scaling 只支持 {SU_WEIGHT_RANK_SCALING}，收到 {rank_scaling!r}")
     mats = []
     for w in w_su_users:
         a = np.asarray(w)
         if a.ndim != 3:
             raise ValueError(f"SU 发射权应为 [F,BS,rank]，收到 {a.shape}")
         col = np.linalg.norm(a, axis=1, keepdims=True)
-        mats.append(a / np.maximum(col, _EPS))
+        unit = a / np.maximum(col, _EPS)
+        if str(rank_scaling) == "sqrt_rank":
+            unit = unit * math.sqrt(float(a.shape[2]))
+        mats.append(unit)
     shapes = {(m.shape[0], m.shape[1]) for m in mats}
     if len(shapes) > 1:
         raise ValueError(f"各用户的 [F, BS] 必须一致，实得 {sorted(shapes)}")
@@ -612,6 +631,7 @@ def wideband_weight_correlation(
     *,
     rb_per_rbg: int = RB_PER_RBG,
     rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
+    rank_scaling: str = "none",
 ) -> tuple[np.ndarray, np.ndarray]:
     """现场取 SU 权相关矩阵的两级平均，返回 ``(逐 RBG [RBG,N,N], 宽带 [N,N])``。
 
@@ -627,7 +647,8 @@ def wideband_weight_correlation(
     是第 3 步的结果，两者服务于不同的判决（前者定逐 RBG 的配对代价，后者是
     现场用来做宽带配对预筛的那一个）。
     """
-    corr_rb = su_weight_correlation_matrix(w_su_users)          # [F, N, N]
+    corr_rb = su_weight_correlation_matrix(
+        w_su_users, rank_scaling=rank_scaling)                   # [F, N, N]
     n_rb = int(corr_rb.shape[0])
     step = max(1, min(int(rb_per_rbg), n_rb))
     bounds = (
@@ -674,6 +695,8 @@ def residual_correlation_loss_db(
     *,
     rb_per_rbg: int = RB_PER_RBG,
     rbg_boundaries: tuple[tuple[int, int], ...] | None = None,
+    wideband_coupling: bool = False,
+    rank_scaling: str = "none",
 ) -> np.ndarray:
     """现场的残留相关性连乘法：配对后每个用户的 SINR 损失（dB，≤0）。
 
@@ -686,6 +709,23 @@ def residual_correlation_loss_db(
     2. **逐流连乘 ``(1−ρ)``。** 第 k 条流对所有**别的用户**的每条流各乘一个
        ``1−ρ``，得到残留相关系数 ``RemCorr_k``；乘出非正数时钳到机器 eps
        （现场实现同样有一个下限兜底），否则 dB 会变 ``-inf``。
+    2b. **宽带相关矩阵再连乘一道**（``wideband_coupling``，**默认关**）。
+       现场第 4~5 步先把逐 RBG 的归一相关矩阵平均成宽带矩阵 ``mxWbUhU``，
+       再"与每 RBG 残差连乘"。这里按那句话的字面实现：每一对流各多乘一个
+       ``1 - rho_wideband``。**默认关掉的理由是实测，不是偏好**：
+
+       * 宽带矩阵按定义就是逐 RBG 矩阵在 RBG 上的平均，再乘一次等于把同一份
+         相关性算两遍。实测配对代价直接翻倍（rank1 −0.561 → −1.122 dB，
+         rank2 −1.133 → −2.263 dB）；
+       * 打开后本仓自己的 MU 夹具里**配对率掉到 0**（平均服务用户数 1.0000），
+         也就是 MU 在任何场景下都不再划算——这不是一个"更精确"的模型该有的
+         行为，更像重复计入。
+
+       宽带矩阵**已经在判决链里**：它的跨用户块就是 ``mu_corr_threshold`` 比较
+       的那个配对相关系数（见 :func:`wideband_pair_correlation`）。
+       **现场参考实现的源码在本机不可得**，所以"连乘"这一步到底乘的是哪两个量
+       无法对着代码核实；开关留在这里，拿到源码后要改的就是这一个默认值。
+
     3. **折成 dB 再压成单码字。** ``10log10(RemCorr_k)`` 是该流的损失；
        本仓一个用户一个 TTI 只发一个码字，所以用**逐流 dB 算术平均**压成一个
        用户级数值——与 :func:`rbg_sinr_db` / :func:`user_sinr_db` 的单码字口径
@@ -699,8 +739,9 @@ def residual_correlation_loss_db(
     if len(w_su_users) < 2:
         raise ValueError("残留相关性至少需要两个用户")
     ranks = [int(np.asarray(w).shape[2]) for w in w_su_users]
-    corr, _wideband = wideband_weight_correlation(
-        w_su_users, rb_per_rbg=rb_per_rbg, rbg_boundaries=rbg_boundaries)
+    corr, wideband = wideband_weight_correlation(
+        w_su_users, rb_per_rbg=rb_per_rbg, rbg_boundaries=rbg_boundaries,
+        rank_scaling=rank_scaling)
     n_rbg = int(corr.shape[0])
     start = [0]
     for r in ranks:
@@ -715,6 +756,12 @@ def residual_correlation_loss_db(
                     continue
                 for q in range(rank_j):
                     rem *= (1.0 - corr[:, start[i] + k, start[j] + q])
+                    if wideband_coupling:
+                        # 现场的第 4~5 步：宽带相关矩阵与每 RBG 的残差**连乘**。
+                        # 物理含义是"这一对用户在整band 上就有多相关"给每个 RBG
+                        # 再压一道——逐 RBG 残差只看本地正交性，宽带那一项把
+                        # 全带的耦合也算进配对代价。
+                        rem *= (1.0 - wideband[start[i] + k, start[j] + q])
             rem = np.maximum(rem, _EPS)
             stream_db[k] = 10.0 * np.log10(rem)
         out[i] = np.mean(stream_db, axis=0)

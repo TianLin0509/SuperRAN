@@ -1507,6 +1507,8 @@ def build_link_tables(
     geo_sinr_db: list[float],
     *,
     h_for_precoding_users: list[np.ndarray] | None = None,
+    csi_rbg_age_samples: list[np.ndarray] | None = None,
+    csi_occasion_samples: list[int] | None = None,
     geo_sir_db: list[float] | None = None,
     neighbor_load: float = 1.0,
     max_rank: int = mu.SU_MAX_RANK,
@@ -1695,6 +1697,8 @@ def build_link_tables(
         groups = group_samples_by_ue(len(h_users), num_ues)
         merged_h, merged_p, merged_g, merged_s = [], [], [], []
         merged_power: list[list[tuple[float, float, np.ndarray, int]]] = []
+        merged_age: list[np.ndarray] = []
+        merged_occ: list[np.ndarray] = []
         for g in groups:
             per_sample = [np.asarray(h_users[i]) for i in g]
             per_prec = [np.asarray(h_precoding_users[i]) for i in g]
@@ -1718,6 +1722,16 @@ def build_link_tables(
                 merged_s.append([float(sir_in[i])
                                  for i, x in zip(g, per_sample, strict=True)
                                  for _ in range(x.shape[0] if x.ndim == 4 else 1)])
+            if csi_rbg_age_samples is not None:
+                merged_age.append(np.stack([
+                    np.asarray(csi_rbg_age_samples[i], dtype=int)
+                    for i, x in zip(g, per_sample, strict=True)
+                    for _ in range(x.shape[0] if x.ndim == 4 else 1)]))
+            if csi_occasion_samples is not None:
+                merged_occ.append(np.asarray([
+                    int(csi_occasion_samples[i])
+                    for i, x in zip(g, per_sample, strict=True)
+                    for _ in range(x.shape[0] if x.ndim == 4 else 1)], dtype=int))
         h_users = merged_h
         h_precoding_users = merged_p
         per_snap_sinr, per_snap_sir = merged_g, merged_s
@@ -1725,6 +1739,10 @@ def build_link_tables(
             per_snap_power = merged_power
         geo_sinr_db = [_nan_safe(np.mean, v) for v in merged_g]
         sir_in = [_nan_safe(np.mean, v) for v in merged_s]
+        if csi_rbg_age_samples is not None:
+            csi_rbg_age_samples = merged_age
+        if csi_occasion_samples is not None:
+            csi_occasion_samples = merged_occ
 
     # **邻区不是 full buffer。** 按 PRB 利用率折算干扰后再建表——
     # 折算必须发生在算 SINR/MCS/rank 之前，事后乘系数是补不回来的。
@@ -2006,7 +2024,38 @@ def build_link_tables(
         h_prec_seq: list[np.ndarray] = []
         csi_gate = ca.CsiFreshness(n_rbg_eff)
         csi_new_seq = np.zeros((n_s, n_rbg_eff), dtype=bool)
+        # **数据集自带逐 RBG 年龄时，一切以它为准。** 跳频估计档的陈旧度是烘进
+        # h_est 的：哪次机会、哪一跳测的，只有生成器知道。系统侧拿自己的
+        # CsiConfig 重算，会把"只更新了一个子带"报成"17 个子带全新、年龄一律
+        # 等于一个周期"——实测就是这样。有这份数据时也不能再套 stale_channel，
+        # 那会在已经陈旧的 CSI 上再退一次。
+        dataset_age = None
+        if csi_rbg_age_samples is not None:
+            dataset_age = np.asarray(csi_rbg_age_samples[i], dtype=int)
+            if dataset_age.ndim != 2 or dataset_age.shape[0] < n_s:
+                raise ValueError(
+                    f"UE {i} 的逐 RBG CSI 年龄应为 [snapshot,RBG] 且快照数不少于 "
+                    f"{n_s}，收到 {dataset_age.shape}")
+            if int(dataset_age.shape[1]) != n_rbg_eff:
+                raise ValueError(
+                    f"数据集的 RBG 数 {dataset_age.shape[1]} 与本次载波栅格 "
+                    f"{n_rbg_eff} 不符；跳频陈旧度无法对齐，拒绝静默套用")
+        dataset_occ = (
+            np.asarray(csi_occasion_samples[i], dtype=int)
+            if csi_occasion_samples is not None else None)
         for s in range(n_s):
+            if dataset_age is not None:
+                # 年龄 0 = **最近一次机会**探到的；-1 = 还没探到过，永远不新鲜。
+                # 但"最近一次探到的"在两次机会之间一直成立——两个快照落在同一次
+                # 机会里时，同一份 CSI 会被重复标新。所以还要求机会序号相对上一
+                # 快照真的前进了，与系统侧自己那条门用的是同一条判据。
+                advanced = (
+                    True if dataset_occ is None
+                    else (s == 0 or int(dataset_occ[s]) != int(dataset_occ[s - 1])))
+                csi_new_seq[s] = (dataset_age[s] == 0) & advanced
+                h_prec_seq.append(prec_snaps_u[s])
+                lag_used[s] = float(np.mean(np.maximum(dataset_age[s], 0)))
+                continue
             if aging:
                 assert effective_csi is not None
                 offsets = (
@@ -2165,8 +2214,11 @@ def build_link_tables(
             # precoder="type1" 时两者是同一个权，所以它恒为 0——这不是特例处理，
             # 是定义的直接后果：码本发送没有额外的 BF 增益可加。
             # SRS 到达 -> 标新；调度器消费 -> 立刻标回陈旧。
+            # 新鲜度的来源有两个：数据集自带的逐 RBG 年龄（跳频估计档），
+            # 或者系统侧的 SRS 老化模型。两个都没有才是"完美 CSI，恒新"。
             csi_gate.mark_sounded(
-                csi_new_seq[s] if aging else np.ones(n_rbg_eff, dtype=bool))
+                csi_new_seq[s] if (aging or dataset_age is not None)
+                else np.ones(n_rbg_eff, dtype=bool))
             fresh_now = csi_gate.consume()
             csi_consumed[s] = fresh_now
             if precoder == "type1":

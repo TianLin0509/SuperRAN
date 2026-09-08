@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 
@@ -1842,6 +1843,188 @@ test_hop_concat_keeps_the_fresh_pilot()
 test_generator_and_scheduler_share_one_srs_clock()
 test_freshness_marks_every_occasion_between_snapshots()
 test_wideband_matrix_reaches_the_pairing_decision()
+
+
+# ---------------------------------------------------------------------------
+section("17  SRS 测量事件的时间语义必须落到观测内容上")
+
+# 踩过的坑：跳序标签按 SRS 时钟对齐了，**观测内容**却还是取当前样本的信道。
+# 于是标着"0 ms 测量"的那份 CSI 与 H(0 ms) 相对差 1.325、与 H(5 ms) 只差 0.196
+# （就是估计噪声）——等于发给调度器一份贴着旧标签的新 CSI，跳频档根本没有老化。
+# 同一处还有两个漏洞：样本间隔比 SRS 周期长时中间那些机会一次都没测；
+# 一个样本里的多个 slot 在没有新 SRS 的情况下也各自重新测一次。
+
+
+def _hop_samples(**over):
+    cfg = {
+        "num_ues": 1, "num_rb": 272, "num_bs_tx_ant": 4, "num_bs_rx_ant": 4,
+        "num_ue_tx_ant": 4, "num_ue_rx_ant": 4, "scenario": "UMa_NLOS",
+        "channel_model": "CDL-C", "link": "DL", "seed": 903, "ue_seed": 904,
+        "measurements": {"ssb_rsrp": False}, "ue_speed_kmh": 30.0,
+        "carrier_freq_hz": 2.6e9, "mobility_mode": "static", "num_sites": 1,
+        "srs_offset": 0, "channel_est_mode": "ls_hop_sequential",
+        "num_samples": 6, "num_slots_per_sample": 1,
+        "sample_interval_s": 5e-3, "srs_periodicity": 10,
+    }
+    cfg.update(over)
+    return list(chub.iter_samples("internal_sim", cfg))
+
+
+def test_estimate_observes_the_channel_at_the_measurement_time() -> None:
+    samples = _hop_samples()
+    truth = [np.asarray(x.h_serving_true)[0] for x in samples]
+
+    def relative(a, b):
+        return float(np.linalg.norm(a - b) / max(np.linalg.norm(b), 1e-12))
+
+    worst_at_measurement = 0.0
+    best_at_sample = 1e9
+    for k, sample in enumerate(samples):
+        occasion = sample.meta.get("srs_occasion_index")
+        hop = sample.meta.get("srs_hop_index")
+        if occasion is None or hop is None or int(hop) < 0:
+            check(False, "跳频样本带机会序号与跳序号")
+            return
+        index = int(occasion)
+        if not 0 <= index < len(truth):
+            continue
+        band = slice(int(hop) * 16, int(hop) * 16 + 16)
+        est = np.asarray(sample.h_serving_est)[0]
+        worst_at_measurement = max(
+            worst_at_measurement, relative(est[band], truth[index][band]))
+        best_at_sample = min(
+            best_at_sample, relative(est[band], truth[k][band]))
+    print(f"  估计 vs H(测量时刻) 最差 {worst_at_measurement:.3f}；"
+          f"vs H(样本时刻) 最好 {best_at_sample:.3f}")
+    check(worst_at_measurement < 0.5,
+          "被探到的子带，估计值贴着**测量时刻**的信道（差值只剩估计噪声）")
+    check(best_at_sample > 1.0,
+          "它明显不是当前样本时刻的信道——差别就是这段时间的 CSI 老化")
+
+
+def test_coarse_sampling_does_not_skip_srs_occasions() -> None:
+    # 样本间隔 20 ms、SRS 周期 5 ms：每个样本跨过 4 次机会，4 个子带都要测到。
+    samples = _hop_samples(sample_interval_s=20e-3, srs_periodicity=10)
+    sounded = [sum(1 for a in x.meta["csi_rbg_age_occasions"] if a >= 0)
+               for x in samples]
+    print(f"  每个样本累计探到过的 RBG 数：{sounded}")
+    gains = [b - a for a, b in zip(sounded[:-1], sounded[1:], strict=True)
+             if b < 17]
+    check(bool(gains) and min(gains) >= 4,
+          f"粗采样时每个样本补测跨过的全部 4 次机会（实得增量 {gains}）")
+
+
+def test_multi_slot_sample_holds_csi_between_occasions() -> None:
+    samples = _hop_samples(num_slots_per_sample=4, sample_interval_s=5e-3,
+                           srs_periodicity=40, num_samples=3)
+    worst = 0.0
+    for sample in samples:
+        est = np.asarray(sample.h_serving_est)
+        occasions = [
+            ca.srs_occasion_index(
+                sample.meta["trajectory_time_s"] * 1e3 + j * 5.0,
+                period_ms=20.0, processing_delay_ms=2.0, offset_ms=0.0)
+            for j in range(est.shape[0])
+        ]
+        for occasion in set(occasions):
+            rows = [j for j, o in enumerate(occasions) if o == occasion]
+            group = est[rows]
+            worst = max(worst, float(np.max(np.abs(group - group[0:1]))))
+    print(f"  同一次 SRS 机会内，各 slot 之间的估计最大差 {worst:.2e}")
+    check(worst == 0.0, "没有新 SRS 时估计逐位不变（一个样本内部也一样）")
+
+
+def test_hop_dataset_freshness_comes_from_the_data() -> None:
+    gen = np.random.default_rng(11)
+    n_snap, n_rbg = 12, 17
+    shape = (n_snap * 2, 272, 8, 4)
+    block = ((gen.standard_normal(shape) + 1j * gen.standard_normal(shape))
+             / np.sqrt(2)).astype(np.complex64)
+    flat = [block[i] for i in range(shape[0])]
+    ages, occasions = [], []
+    for i in range(shape[0]):
+        # 24 个样本轮转到 2 个 UE 上，所以每个 UE 拿到的是 i=0,2,4,... 那一串；
+        # occasion = i//4 让**每个 UE**在同一次机会上落两个快照，
+        # 才测得到"同一次机会不重复标新"。
+        occasion = i // 4                       # SRS 10 ms、样本 5 ms
+        row = [-1] * n_rbg
+        for back in range(min(occasion + 1, n_rbg)):
+            row[(occasion - back) % n_rbg] = back
+        ages.append(np.asarray(row, dtype=int))
+        occasions.append(occasion)
+    try:
+        table = sy.build_link_tables(
+            flat, [12.0] * shape[0], num_ues=2, h_for_precoding_users=flat,
+            num_snapshots=n_snap, max_rank=2, csi=None, snapshot_ms=5.0,
+            csi_rbg_age_samples=ages, csi_occasion_samples=occasions)[0]
+    except TypeError:
+        check(False, "build_link_tables 接受数据集自带的逐 RBG CSI 年龄")
+        return
+    counts = table.csi_new_rbg_count
+    print(f"  读数据集年龄后每快照标新的 RBG 数 {counts.tolist()}")
+    check(int(np.max(counts)) <= 1,
+          f"一次机会只探一个子带的数据不会被报成多子带全新（最大 {int(np.max(counts))}）")
+    check(int(np.min(counts)) == 0, "两个快照落在同一次机会里时不重复标新")
+
+
+def test_rank_scaling_convention_is_settled_by_measurement() -> None:
+    if "rank_scaling" not in inspect.signature(
+            mu.su_weight_correlation_matrix).parameters:
+        check(False, "SU 权互相关提供 rank 缩放口径开关")
+        return
+    gen = np.random.default_rng(5)
+    breached = {"none": 0.0, "sqrt_rank": 0.0}
+    peak = {"none": 0.0, "sqrt_rank": 0.0}
+    for _ in range(8):
+        chans = [((gen.standard_normal((272, 8, 4))
+                   + 1j * gen.standard_normal((272, 8, 4))) / np.sqrt(2))
+                 for _ in range(2)]
+        weights = [sy.su_weight_directions(c, 2, method="svd") for c in chans]
+        for mode in ("none", "sqrt_rank"):
+            gram = mu.su_weight_correlation_matrix(weights, rank_scaling=mode)
+            cross = gram[:, :2, 2:]
+            breached[mode] = max(breached[mode], float(np.mean(cross >= 1.0)))
+            peak[mode] = max(peak[mode], float(np.max(cross)))
+    print(f"  rank2 跨用户 rho 峰值：单位列 {peak['none']:.3f} / "
+          f"sqrt(rank) {peak['sqrt_rank']:.3f}；rho>=1 比例 "
+          f"{breached['none']:.4f} / {breached['sqrt_rank']:.4f}")
+    check(breached["none"] == 0.0,
+          "单位列口径下 rho 恒小于 1，(1-rho) 连乘与取 dB 成立")
+    check(breached["sqrt_rank"] > 0.0,
+          "现场那句 sqrt(rank) 若直接进互相关会让 rho>=1——它携带的是发射功率，"
+          "本仓已在「单位方向 x 显式功率」里单独记账，不能再乘一次")
+
+
+def test_wideband_residual_coupling_is_an_explicit_switch() -> None:
+    if "wideband_coupling" not in inspect.signature(
+            mu.residual_correlation_loss_db).parameters:
+        check(False, "残留相关性连乘提供宽带联动开关")
+        return
+    gen = np.random.default_rng(5)
+    chans = [((gen.standard_normal((272, 8, 4))
+               + 1j * gen.standard_normal((272, 8, 4))) / np.sqrt(2))
+             for _ in range(2)]
+    weights = [sy.su_weight_directions(c, 2, method="svd") for c in chans]
+    off = mu.residual_correlation_loss_db(weights, rb_per_rbg=16,
+                                          wideband_coupling=False)
+    on = mu.residual_correlation_loss_db(weights, rb_per_rbg=16,
+                                         wideband_coupling=True)
+    print(f"  逐 RBG 残差 {float(off.mean()):+.3f} dB；"
+          f"再连乘宽带 {float(on.mean()):+.3f} dB")
+    check(float(on.mean()) < float(off.mean()) - 0.3,
+          "宽带连乘这条通路真的存在且会改变配对代价（不是死开关）")
+    default = mu.residual_correlation_loss_db(weights, rb_per_rbg=16)
+    check(float(np.max(np.abs(default - off))) == 0.0,
+          "默认口径是只用逐 RBG 残差：宽带矩阵按定义就是它的 RBG 平均，"
+          "再乘一次是把同一份相关性算两遍（实测会把 MU 配对率打到 0）")
+
+
+test_estimate_observes_the_channel_at_the_measurement_time()
+test_coarse_sampling_does_not_skip_srs_occasions()
+test_multi_slot_sample_holds_csi_between_occasions()
+test_hop_dataset_freshness_comes_from_the_data()
+test_rank_scaling_convention_is_settled_by_measurement()
+test_wideband_residual_coupling_is_an_explicit_switch()
 
 
 print("\n" + "=" * 70)

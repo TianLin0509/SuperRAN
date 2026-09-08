@@ -1274,7 +1274,106 @@ class InternalSimSource:
         index = ca.srs_occasion_index(
             float(trajectory_time_s) * 1e3, period_ms=period_ms,
             processing_delay_ms=delay_ms, offset_ms=offset_ms)
+        self._srs_offset_ms = offset_ms
         return index, period_ms, delay_ms
+
+    def _hop_estimate_sequence(
+        self, *, ue_id: int, est_mode: str, est_snr: float,
+        rng_est: np.random.Generator, n_time: int, n_rb: int,
+        trajectory_time_s: float, sample_interval_s: float,
+        slot_duration_s: float, srs_offset_slots: int,
+        channel_at: Any, tau_rms_ns: float, subcarrier_spacing: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, bool, list[int], int]:
+        """跳频档的估计：**在每次 SRS 机会自己的测量时刻上取信道**。
+
+        这是"时钟统一"必须落到观测内容上的那一半。只把跳序标签对齐、观测仍取
+        当前样本的信道，等于发给调度器一份贴着旧标签的新 CSI——实测标着 0 ms
+        测量的估计与 H(0 ms) 相对差 1.325、与 H(5 ms) 只差 0.196（就是估计噪声），
+        跳频档因此**根本没有老化**。
+
+        三件事在同一个循环里解决：
+        * 观测在 ``t_m = offset + n*period`` 上取，不是在样本时刻取；
+        * 两个样本之间跨过的**每一次**机会都补测（粗采样时不再漏跳）；
+        * 一个样本内部逐 slot 按各自时刻找机会，同一次机会内估计逐位不变。
+
+        ``channel_at(t_s)`` 由调用方给出，用同一条轨迹的散射体在任意时刻重算
+        小尺度信道（连续轨迹让这件事逐位可复现，实测差 0）。**大尺度几何用的是
+        当前样本的**（角度、路损）：``static`` 场景下完全精确；UE 真的在动时，
+        测量时刻与样本时刻之间的位移没有反映到角度里，这一条写进 meta。
+        """
+        from . import csi_aging as ca  # noqa: PLC0415
+
+        period_ms = max(
+            float(self.cfg.get("srs_periodicity", 10) or 10)
+            * float(slot_duration_s) * 1e3, 1e-9)
+        delay_ms = float(self.cfg.get("srs_processing_delay_ms", 2.0) or 0.0)
+        offset_ms = (float(srs_offset_slots) * float(slot_duration_s) * 1e3) % period_ms
+        hop_cycle = len(_COMPANY_HOP_ORDER)
+
+        slots: dict[str, list[np.ndarray]] = {"dl": [], "ul": []}
+        cold_start = False
+        hop_index = -1
+        pilots = np.arange(int(n_rb), dtype=np.int64)
+        occasion = 0
+        for slot in range(int(n_time)):
+            t_slot = float(trajectory_time_s) + slot * float(sample_interval_s)
+            occasion = ca.srs_occasion_index(
+                t_slot * 1e3, period_ms=period_ms,
+                processing_delay_ms=delay_ms, offset_ms=offset_ms)
+            cursor = self._hop_occasion.get(ue_id)
+            if cursor is None:
+                cursor = occasion - 1
+                cold_start = True
+            # 补测所有漏掉的机会；超过一个完整跳频周期就没必要再往回补了
+            # （那时全带都会被重新扫过一遍）。
+            first = max(cursor + 1, occasion - hop_cycle + 1)
+            for index in range(first, occasion + 1):
+                measured = channel_at((offset_ms + index * period_ms) / 1e3)
+                pilots = self._srs_pilot_rbs(n_rb, index, est_mode)
+                for direction in ("dl", "ul"):
+                    key = (ue_id, direction)
+                    history = (
+                        tuple(self._hop_pilots.get(key, {}).values())
+                        if est_mode == "ls_hop_concat" else ()
+                    )
+                    out = estimate_channel_with_interference(
+                        h_serving_true=measured,
+                        h_interferers=None,
+                        pilots_serving=None,
+                        interferer_cell_ids=None,
+                        direction=direction,
+                        snr_dB=est_snr,
+                        rng=rng_est,
+                        est_mode=est_mode,
+                        valid_symbol_mask=np.ones(1, dtype=bool),
+                        srs_rb_indices=pilots,
+                        tau_rms_ns=tau_rms_ns,
+                        subcarrier_spacing=subcarrier_spacing,
+                        prior_estimate=self._hop_estimate.get(key),
+                        pilot_history=history,
+                    )
+                    self._hop_estimate[key] = out.h_est
+                    rbg = int(_COMPANY_HOP_ORDER[index % hop_cycle])
+                    self._hop_pilots.setdefault(key, {})[rbg] = (
+                        out.pilot_rb, out.h_pilot)
+                    self._hop_last_seen.setdefault(key, {})[rbg] = index
+                self._hop_occasion[ue_id] = index
+                hop_index = int(_COMPANY_HOP_ORDER[index % hop_cycle])
+            for direction in ("dl", "ul"):
+                slots[direction].append(
+                    np.asarray(self._hop_estimate[(ue_id, direction)])[0])
+        # 本样本没有新机会时，跳序号仍应是**当前生效那份 CSI 是哪一跳测的**，
+        # 不是 -1（-1 只表示"非跳频档"）。补测循环不跑时不能把它留空。
+        held_occasion = self._hop_occasion.get(ue_id, occasion)
+        hop_index = int(_COMPANY_HOP_ORDER[held_occasion % hop_cycle])
+        seen = self._hop_last_seen.get((ue_id, "dl"), {})
+        ages = [(occasion - seen[k]) if k in seen else -1
+                for k in range(hop_cycle)]
+        return (
+            np.stack(slots["dl"]).astype(np.complex64),
+            np.stack(slots["ul"]).astype(np.complex64),
+            pilots, hop_index, cold_start, ages, occasion,
+        )
 
     def _srs_pilot_rbs(self, n_rb: int, occasion: int, est_mode: str) -> np.ndarray:
         """本次 SRS 机会真正探到的 RB。
@@ -1850,66 +1949,69 @@ class InternalSimSource:
                 )
                 # **一次 SRS 机会才推进一跳，不是一个样本推进一跳。**
                 # 时序取自 csi_aging.srs_occasion_index —— 与调度侧同一个公式、
-                # 同一个周期、同一个处理时延。两次机会之间基站手上没有新测量，
-                # CSI 原样保持。
+                # 同一个周期、同一个处理时延。
                 hopping = est_mode in HOP_EST_MODES
                 occasion, srs_period_ms, srs_delay_ms = self._srs_occasion(
                     trajectory_time_s, slot_duration, srs_offset)
                 est_srs_occasion = occasion
-                est_pilot_rb = self._srs_pilot_rbs(n_rb, occasion, est_mode)
-                mask = np.ones(n_time, dtype=bool)
-                results = []
-                for direction_key, est_rng in (("dl", rng_est), ("ul", rng_est)):
-                    key = (ue_id, direction_key)
-                    held = self._hop_estimate.get(key)
-                    if (hopping and held is not None
-                            and self._hop_occasion.get(key) == occasion
-                            and held.shape == h_dl.shape):
-                        # 本样本落在同一次 SRS 机会内：没有新测量，保持不变。
-                        results.append(held)
-                        continue
-                    prior = held if hopping else None
-                    history = (
-                        tuple(self._hop_pilots.get(key, {}).values())
-                        if est_mode == "ls_hop_concat" else ()
-                    )
-                    out = estimate_channel_with_interference(
-                        h_serving_true=h_dl,
-                        h_interferers=None,
-                        pilots_serving=None,
-                        interferer_cell_ids=None,
-                        direction=direction_key,
-                        snr_dB=est_snr,
-                        rng=est_rng,
-                        est_mode=est_mode,
-                        valid_symbol_mask=mask,
-                        srs_rb_indices=est_pilot_rb,
-                        tau_rms_ns=ds_all[serving],
-                        subcarrier_spacing=scs,
-                        prior_estimate=prior,
-                        pilot_history=history,
-                    )
-                    if hopping:
-                        est_cold_start = est_cold_start or (
-                            key not in self._hop_estimate)
-                        self._hop_estimate[key] = out.h_est
-                        self._hop_occasion[key] = occasion
-                        # 键是**被探到的 RBG**，不是机会序号：跳序是一个置换，
-                        # 第 o 次机会探的是 _COMPANY_HOP_ORDER[o % 17] 号 RBG。
-                        hop_rbg = int(_COMPANY_HOP_ORDER[occasion % 17])
-                        self._hop_pilots.setdefault(key, {})[hop_rbg] = (
-                            out.pilot_rb, out.h_pilot)
-                        self._hop_last_seen.setdefault(key, {})[hop_rbg] = occasion
-                    results.append(out.h_est)
-                h_dl_est, h_ul_est = results
                 if hopping:
-                    seen = self._hop_last_seen.get((ue_id, "dl"), {})
-                    est_hop_index = int(_COMPANY_HOP_ORDER[occasion % 17])
-                    # 每个 RBG 的 CSI 已经陈旧了多少次 SRS 机会；-1 = 还没探到过。
-                    est_rbg_age = [
-                        (occasion - seen[k]) if k in seen else -1
-                        for k in range(17)
-                    ]
+                    # 同一条轨迹的散射体，在任意时刻重算小尺度信道。连续轨迹让
+                    # 这件事逐位可复现（实测与原样本差 0）。每轮的几何量用默认参数
+                    # 显式绑定，闭包不去捕获循环变量。
+                    def _channel_at(
+                        moment_s: float, *, _ue=ue_id, _prof=profile,
+                        _idx=global_index, _aod=link_aod, _aoa=link_aoa,
+                        _zod=link_zod, _zoa=link_zoa, _cell=serving_cell,
+                        _pos=position, _los=is_los,
+                    ) -> np.ndarray:
+                        trace_rng = np.random.default_rng(
+                            np.random.SeedSequence([self._seed, 211, _ue]))
+                        return self._small_scale_channel(
+                            _prof, trace_rng, n_time=1, n_rb=n_rb,
+                            n_bs=n_bs, n_ue=n_ue, doppler_hz=doppler,
+                            realization_index=_idx,
+                            link_aod_rad=_aod, link_aoa_rad=_aoa,
+                            link_zod_rad=_zod, link_zoa_rad=_zoa,
+                            cell=_cell, ue_position=_pos,
+                            is_los=_los, role="serving",
+                            time_offset_s=moment_s)
+
+                    (h_dl_est, h_ul_est, est_pilot_rb, est_hop_index,
+                     est_cold_start, est_rbg_age, est_srs_occasion) = (
+                        self._hop_estimate_sequence(
+                            ue_id=ue_id, est_mode=est_mode, est_snr=est_snr,
+                            rng_est=rng_est, n_time=n_time, n_rb=n_rb,
+                            trajectory_time_s=trajectory_time_s,
+                            sample_interval_s=sample_interval_s,
+                            slot_duration_s=slot_duration,
+                            srs_offset_slots=srs_offset,
+                            channel_at=_channel_at,
+                            tau_rms_ns=ds_all[serving],
+                            subcarrier_spacing=scs))
+                else:
+                    # 全带 SRS 的**工程上界**："现在就探"，每个样本自己测一次。
+                    # 跳频陈旧度由系统侧的老化模型建模（见 server 侧的守卫），
+                    # 所以这里不做机会锁定，否则周期内相位会被算两遍。
+                    est_pilot_rb = np.arange(n_rb, dtype=np.int64)
+                    mask = np.ones(n_time, dtype=bool)
+                    results = []
+                    for direction_key in ("dl", "ul"):
+                        out = estimate_channel_with_interference(
+                            h_serving_true=h_dl,
+                            h_interferers=None,
+                            pilots_serving=None,
+                            interferer_cell_ids=None,
+                            direction=direction_key,
+                            snr_dB=est_snr,
+                            rng=rng_est,
+                            est_mode=est_mode,
+                            valid_symbol_mask=mask,
+                            srs_rb_indices=est_pilot_rb,
+                            tau_rms_ns=ds_all[serving],
+                            subcarrier_spacing=scs,
+                        )
+                        results.append(out.h_est)
+                    h_dl_est, h_ul_est = results
             h_ul = h_dl.copy()  # canonical v2: physical transpose, same stored BS/UE tensor
             site_models = [
                 self._effective_model(configured_model, site_state[cell.site_id][0])
@@ -2072,11 +2174,18 @@ class InternalSimSource:
                 "srs_estimation_period_ms": srs_period_ms,
                 "srs_estimation_processing_delay_ms": srs_delay_ms,
                 "srs_estimation_timing_source": "csi_aging.srs_occasion_index",
+                "srs_measurement_policy": (
+                    "occasion_locked_measured_at_srs_time"
+                    if est_mode in HOP_EST_MODES else
+                    ("perfect_csi" if est_mode == "ideal"
+                     else "sound_now_full_band_upper_bound")),
+                "srs_measurement_geometry_approximation": (
+                    "large_scale_geometry_taken_from_sample_time"
+                    if est_mode in HOP_EST_MODES else None),
                 "csi_aging_already_in_estimate": bool(est_mode in HOP_EST_MODES),
                 "srs_hop_profile": (
                     "superran-c63-b1-bhop0-17x16" if est_hop_index >= 0 else None),
                 "channel_est_cold_start": est_cold_start,
-                "csi_rbg_age_occasions": est_rbg_age,
                 "small_scale_time_model": "continuous_trajectory_jakes_v1",
                 "small_scale_seed_scope": "per_trajectory_ue",
                 "trajectory_time_s": trajectory_time_s,
@@ -2096,6 +2205,12 @@ class InternalSimSource:
                     "rs_opportunity_model": "indexed-slot TDD and periodicity schedule",
                 },
             }
+            if est_rbg_age is not None:
+                # **逐 RBG 的 CSI 年龄必须落盘。** 跳频档的陈旧度是烘进 h_est 的，
+                # 系统侧没有这一份就只能拿自己的 CsiConfig 重算，而它并不知道
+                # 数据是按哪次机会、哪一跳测的——实测会把"只更新了一个子带"
+                # 报成"17 个子带全新"。
+                meta["csi_rbg_age_occasions"] = list(est_rbg_age)
             paired = link == "BOTH"
             yield ChannelSample(
                 h_serving_true=h_dl,

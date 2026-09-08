@@ -2327,6 +2327,15 @@ def sr_system_sim(
 
     h_users = [np.asarray(h[i]) for i in range(h.shape[0])]
     h_est_users = [np.asarray(h_est[i]) for i in range(h_est.shape[0])]
+    # 跳频估计档随数据落盘的逐 RBG CSI 年龄。有它就以它为准，系统侧不再拿
+    # 自己的 CsiConfig 重算一份并不成立的新鲜度。
+    _hop_state = ds.csi_hop_state
+    csi_rbg_age_samples = (
+        [np.asarray(row, dtype=int) for row in _hop_state["rbg_age_occasions"]]
+        if _hop_state is not None else None)
+    csi_occasion_samples = (
+        [int(v) for v in _hop_state["srs_occasion_index"]]
+        if _hop_state is not None and "srs_occasion_index" in _hop_state else None)
     # **样本数不是用户数。** 数据集里 num_samples 个样本分布在 num_ues 个
     # UE 位置上；不按 UE 合并的话小区里会多出好几倍的人，
     # 每用户谱效被摊薄（实测 40 样本/10 UE 时从 0.32 掉到 0.08）。
@@ -2440,6 +2449,10 @@ def sr_system_sim(
                  for ue in selected_ues]
         h_users = [h_users[i] for i in order]
         h_est_users = [h_est_users[i] for i in order]
+        if csi_rbg_age_samples is not None:
+            csi_rbg_age_samples = [csi_rbg_age_samples[i] for i in order]
+        if csi_occasion_samples is not None:
+            csi_occasion_samples = [csi_occasion_samples[i] for i in order]
         sinr = np.asarray(sinr)[order]
         if sir is not None:
             sir = [sir[i] for i in order]
@@ -2581,7 +2594,7 @@ def sr_system_sim(
     # 一次，等于把同一个跳频扫描算两遍；而且两侧的 SRS 周期/offset 可以配不同，
     # 两个时钟一漂开，逐 RBG 的年龄和新鲜度门说的就不是同一件事。KPI 上看不出来。
     _ds_est_mode = str(ds.config.get("channel_est_mode", "ls_linear"))
-    if _ds_est_mode in ("ls_hop_sequential", "ls_hop_concat") and csi_cfg.enabled             and csi_cfg.hopping:
+    if _ds_est_mode in ("ls_hop_sequential", "ls_hop_concat") and csi_cfg.hopping:
         return {"error": (
             f"数据集用 channel_est_mode={_ds_est_mode!r} 生成，逐 RBG 的跳频陈旧度"
             "已经在 h_est 里了；系统侧再开 srs_hopping 会把同一个跳频扫描算两遍，"
@@ -2731,6 +2744,8 @@ def sr_system_sim(
         tables = sysm.build_link_tables(
             h_users, [float(x) for x in sinr], num_ues=n_ue, geo_sir_db=sir,
             h_for_precoding_users=h_est_users,
+            csi_rbg_age_samples=csi_rbg_age_samples,
+            csi_occasion_samples=csi_occasion_samples,
             target_bler=float(target_bler),
             neighbor_load=float(neighbor_prb_util), csi=csi_cfg, snapshot_ms=snap_ms,
             rb_per_rbg=carrier["rb_per_rbg"],
@@ -2866,6 +2881,44 @@ def sr_system_sim(
         speed_kmh=ue_speed_kmh)
     aging["requested_config"] = csi_cfg.as_dict()
     aging["effective_config"] = effective_csi_cfg.as_dict()
+    # **陈旧度报告也必须以数据为准。** 跳频估计档的逐 RBG 年龄是烘进 h_est 的；
+    # 这里如果继续报 CsiConfig 算出来的画像，就会把"这一次机会只更新了一个子带"
+    # 写成"17 个子带年龄一律等于一个周期"。门控读的是数据、报告读的是配置，
+    # 两者不一致比单纯报错更难查。
+    if csi_rbg_age_samples is not None:
+        _age = np.asarray(csi_rbg_age_samples, dtype=float)     # [N, RBG]
+        _period = float(_hop_state["srs_estimation_period_ms"][0])             if "srs_estimation_period_ms" in _hop_state else float(snap_ms)
+        _delay = float(_hop_state["srs_estimation_processing_delay_ms"][0])             if "srs_estimation_processing_delay_ms" in _hop_state else 0.0
+        _never = _age < 0
+        _stale_ms = np.where(_never, 0.0, _age * _period + _delay)
+        _seen = (~_never).sum(axis=0)
+        # 从未被探到过的 RBG 没有"陈旧多久"可言，报 None 而不是 0——
+        # 报 0 会被读成"最新"，正好和事实相反。
+        _mean_by_rbg = np.where(
+            _seen > 0, _stale_ms.sum(axis=0) / np.maximum(_seen, 1), np.nan)
+        aging["rbg_csi_staleness_ms"] = [
+            (None if not np.isfinite(v) else round(float(v), 2))
+            for v in _mean_by_rbg]
+        aging["rbg_lag_snapshots"] = [
+            (None if not np.isfinite(v) else int(np.ceil(v / max(snap_ms, 1e-9) - 1e-12)))
+            for v in _mean_by_rbg]
+        aging["mean_csi_staleness_ms"] = (
+            None if not np.isfinite(np.nanmean(_mean_by_rbg))
+            else round(float(np.nanmean(_mean_by_rbg)), 2))
+        aging["max_csi_staleness_ms"] = (
+            None if not np.isfinite(np.nanmax(_mean_by_rbg))
+            else round(float(np.nanmax(_mean_by_rbg)), 2))
+        aging["rbg_age_source"] = "dataset_hop_estimate"
+        aging["never_sounded_rbg_fraction"] = round(
+            float(np.mean(_never)), 4)
+        aging["hop_order_source"] = "dataset:" + str(_ds_est_mode)
+        aging.setdefault("warnings", []).append(
+            "逐 RBG 的 CSI 年龄取自数据集（channel_est_mode="
+            f"{_ds_est_mode}），不是由 CsiConfig 重算：跳频陈旧度已经烘进 h_est，"
+            "系统侧不再叠加第二次跳频老化。"
+            + (f" 有 {aging['never_sounded_rbg_fraction']:.1%} 的 (样本, RBG) "
+               "在整条轨迹上还没被 SRS 探到过（冷启动），它们的 CSI 是由已探到的"
+               "子带外推出来的。" if aging["never_sounded_rbg_fraction"] > 0 else ""))
     out["csi_aging"] = aging
     out["carrier"] = carrier
     out["precoder"] = {
