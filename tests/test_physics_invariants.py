@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -1082,9 +1083,145 @@ def test_rzf_reported_loading_equals_the_one_actually_used() -> None:
           "等 rank 时报告值与历史只差浮点末位（数学恒等，求和顺序不同）")
 
 
+# ---------------------------------------------------------------------------
+# SRS 导频污染：邻区 UE 的 SRS 撞上本站资源时，误差必须指向那个 UE 的方向
+#
+# 反向意义（revert 掉哪一条会变红）：
+#   * 把上行交叉链路换成 h_interferers（邻区 gNB -> 本 UE 的下行链路）——
+#     第 4 条会红，因为两个张量的空间结构不同。
+#   * 去掉 PCI mod3 同色闸门——第 2 条会红，异色小区不该污染本站导频。
+#   * 把污染写成额外的白噪声——第 5 条会红，误差不再对齐干扰方向。
+#   * 把污染默认打开或把开关折成 or 默认值——第 1、6 条会红。
+# ---------------------------------------------------------------------------
+
+
+def _cross_link_cfg(**extra):
+    cfg = dict(
+        num_rb=24, num_bs_tx_ant=16, num_ue_rx_ant=4, topology="hex",
+        num_sites=7, sectors_per_site=3, isd_m=300.0, scenario="UMa_NLOS",
+        channel_model="CDL-C", link="BOTH", num_ues=4, num_samples=8, seed=11,
+        channel_est_mode="ls_linear", num_interfering_ues=3,
+    )
+    cfg.update(extra)
+    return cfg
+
+
+def test_srs_ul_cross_link_and_pilot_contamination() -> None:
+    print()
+    print("[SRS 导频污染] 上行交叉链路与同色闸门")
+    from superran.native import InternalSimSource
+
+    off = list(InternalSimSource(_cross_link_cfg()).iter_samples())
+    on = list(InternalSimSource(_cross_link_cfg(
+        measurements={"srs_cross_link_channels": True})).iter_samples())
+    polluted = list(InternalSimSource(_cross_link_cfg(
+        measurements={"srs_cross_link_channels": True},
+        srs_pilot_contamination_rho=1.0)).iter_samples())
+
+    # 1. 默认不生成：多加一根链路要多跑一次完整信道合成，翻默认值是产品决定
+    check(all(s.h_ul_cross is None for s in off),
+          "上行交叉链路默认不生成（多小区场景也一样）")
+
+    # 2. 只有同 PCI mod3 颜色的小区才可能占同一套 SRS 资源，异色不得污染
+    same_colour = []
+    for s in on:
+        colour = int(s.meta["srs_cross_link_serving_pci_mod3"])
+        same_colour.extend(int(p) % 3 == colour for p in s.meta["srs_cross_link_pci"])
+    check(bool(same_colour) and all(same_colour),
+          "污染小区全部与本小区同 PCI mod3 颜色")
+
+    # 3. 干扰 UE 必须真的被它自己那个小区服务，不能撒到本站头上
+    d_victim = [d for s in on for d in s.meta["srs_cross_link_distance_to_victim_m"]]
+    check(bool(d_victim) and min(d_victim) > 100.0,
+          f"干扰 UE 到本站的最近距离 {min(d_victim):.0f} m > 100 m（服务小区一致性拒绝采样生效）")
+
+    # 4. 交叉链路是上行链路，与下行 h_interferers 不是同一个张量
+    both = list(InternalSimSource(_cross_link_cfg(
+        measurements={"srs_cross_link_channels": True, "interferer_channels": True},
+        max_per_ue_intf_cells=3)).iter_samples())
+    sample = both[0]
+    dl = np.asarray(sample.h_interferers)
+    ul = np.asarray(sample.h_ul_cross)
+    overlap = 0.0
+    for a in range(ul.shape[0]):
+        for b in range(dl.shape[0]):
+            x, y = ul[a].ravel(), dl[b].ravel()
+            overlap = max(overlap, abs(np.vdot(x, y)) / (
+                np.linalg.norm(x) * np.linalg.norm(y)))
+    check(overlap < 0.2,
+          f"上行交叉链路与下行干扰信道最大重合度 {overlap:.3f} < 0.2（是两根不同的链路）")
+
+    # 5. 生成但不污染 -> CSI 逐位不变；污染后误差指向干扰 UE 的空间方向
+    check(all(np.array_equal(a.h_ul_est, b.h_ul_est) for a, b in zip(off, on)),
+          "只生成不污染时上行 CSI 估计逐位不变")
+
+    def alignment(samples):
+        out = []
+        for s in samples:
+            err = (np.asarray(s.h_ul_est) - np.asarray(s.h_ul_true)).ravel()
+            for k in range(np.asarray(s.h_ul_cross).shape[0]):
+                hi = np.asarray(s.h_ul_cross[k]).ravel()
+                out.append(abs(np.vdot(hi, err)) / (
+                    np.linalg.norm(hi) * np.linalg.norm(err)))
+        return np.asarray(out)
+
+    clean, dirty = alignment(on), alignment(polluted)
+    white = 1.0 / math.sqrt(float(np.asarray(on[0].h_ul_est).size))
+    print(f"  白噪声理论基准 {white:.4f}；污染前中位 {np.median(clean):.4f}，"
+          f"污染后中位 {np.median(dirty):.4f}，最大 {dirty.max():.4f}")
+    check(float(np.median(clean)) < 2.0 * white,
+          "未污染时估计误差是空间白的（与干扰方向无关）")
+    check(float(np.median(dirty)) > 2.0 * float(np.median(clean)) and dirty.max() > 0.3,
+          "污染后估计误差显著对齐干扰 UE 的空间方向")
+
+    nmse_clean = float(np.mean([
+        np.linalg.norm(np.asarray(s.h_ul_est) - np.asarray(s.h_ul_true)) ** 2
+        / np.linalg.norm(np.asarray(s.h_ul_true)) ** 2 for s in on]))
+    nmse_dirty = float(np.mean([
+        np.linalg.norm(np.asarray(s.h_ul_est) - np.asarray(s.h_ul_true)) ** 2
+        / np.linalg.norm(np.asarray(s.h_ul_true)) ** 2 for s in polluted]))
+    print(f"  CSI NMSE {10 * math.log10(nmse_clean):.2f} dB -> "
+          f"{10 * math.log10(nmse_dirty):.2f} dB")
+    check(nmse_dirty > nmse_clean, "导频污染只会让 CSI 更差，不会更好")
+
+    # 6. 显式 false 必须真的关掉，哪怕默认值被翻成 True
+    import superran.native as _nv
+    saved = _nv._STORE_INTERFERER_CHANNELS_DEFAULT
+    saved_x = _nv._STORE_SRS_CROSS_LINK_DEFAULT
+    try:
+        _nv._STORE_INTERFERER_CHANNELS_DEFAULT = True
+        _nv._STORE_SRS_CROSS_LINK_DEFAULT = True
+        forced_on = list(InternalSimSource(_cross_link_cfg(num_samples=1)).iter_samples())[0]
+        forced_off = list(InternalSimSource(_cross_link_cfg(
+            num_samples=1,
+            measurements={"interferer_channels": False,
+                          "srs_cross_link_channels": False},
+        )).iter_samples())[0]
+    finally:
+        _nv._STORE_INTERFERER_CHANNELS_DEFAULT = saved
+        _nv._STORE_SRS_CROSS_LINK_DEFAULT = saved_x
+    check(forced_on.h_interferers is not None and forced_on.h_ul_cross is not None,
+          "默认翻成 True 时两个张量都会生成")
+    check(forced_off.h_interferers is None and forced_off.h_ul_cross is None,
+          "配置里写 false 能真正关掉（折成 or 默认值就会关不掉）")
+
+    # 7. rho 是显式的、有界的，不许悄悄给一个未标定的默认值
+    bad = 0
+    for value in (1.5, -0.1, [1.0, 1.0]):
+        try:
+            list(InternalSimSource(_cross_link_cfg(
+                num_samples=1,
+                measurements={"srs_cross_link_channels": True},
+                srs_pilot_contamination_rho=value)).iter_samples())
+        except ValueError:
+            bad += 1
+    check(bad == 3, "越界或长度不符的导频残留相关系数一律硬失败")
+
+
 test_single_layer_terminals_can_pair()
 test_per_ue_cap_reaches_the_air_and_rebuild_clears_stale_combinations()
 test_rzf_reported_loading_equals_the_one_actually_used()
+test_srs_ul_cross_link_and_pilot_contamination()
 
 
 print("\n" + "=" * 70)

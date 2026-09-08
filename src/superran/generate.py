@@ -508,6 +508,7 @@ def _collect(
     h_dl_est: list[np.ndarray] = []
     precoding_csi_sources: list[str] = []
     h_intf: list[np.ndarray] = []
+    h_ul_cross: list[np.ndarray] = []
     positions: list[np.ndarray] = []
     source_precoder_fields_ignored = 0
     scalars: dict[str, list[float]] = {
@@ -595,6 +596,15 @@ def _collect(
                 )
             )
 
+        # UL cross-link (interfering UE -> this gNB).  Same axis handling as
+        # h_interferers, but a different physical link: never merge the two.
+        hx_arr = getattr(sample, "h_ul_cross", None)
+        if hx_arr is not None:
+            hx_snap = _slot_snapshot(hx_arr, time_axis=1, preserve_time=preserve_time)
+            if not np.isfinite(hx_snap).all():
+                raise RuntimeError("h_ul_cross 含 NaN 或 Inf，拒绝落盘")
+            h_ul_cross.append(hx_snap)
+
         pos = getattr(sample, "ue_position", None)
         positions.append(
             np.asarray(pos, dtype=np.float64) if pos is not None else np.full(3, np.nan)
@@ -663,6 +673,19 @@ def _collect(
         payload["h_dl_est"] = np.stack(h_dl_est)
     if len(h_intf) == accepted and h_intf and all(a.shape == h_intf[0].shape for a in h_intf):
         payload["h_interferers"] = np.stack(h_intf)
+    if h_ul_cross:
+        # 与 h_interferers 不同，这个张量不允许"缺就丢"：丢掉之后数据集看起来
+        # 就是一次干净的单小区 SRS 实验，没有任何线索说明污染源没落盘。
+        if len(h_ul_cross) != accepted or any(
+            a.shape != h_ul_cross[0].shape for a in h_ul_cross
+        ):
+            raise RuntimeError(
+                "h_ul_cross 只在部分样本上生成或干扰 UE 数不一致："
+                f"{len(h_ul_cross)}/{accepted} 个样本，形状 "
+                f"{sorted({a.shape for a in h_ul_cross})}。"
+                "上行交叉链路不允许静默丢弃，请固定 max_srs_cross_link_ues。"
+            )
+        payload["h_ul_cross"] = np.stack(h_ul_cross)
     for k, vals in scalars.items():
         payload[f"scalar__{k}"] = np.asarray(vals, dtype=np.float64)
     for k, vals in metas.items():

@@ -212,6 +212,15 @@ class Dataset:
         return self._npz["h_interferers"] if "h_interferers" in self._npz.files else None
 
     @cached_property
+    def h_ul_cross(self) -> np.ndarray | None:
+        """干扰 UE → 本受害 gNB 的上行交叉链路，``[N, 干扰UE, T, RB, BS, UE]``。
+
+        这是 SRS 导频污染唯一正确的输入。**不能**用 ``h_interferers`` 代替：
+        那是邻区 gNB → 本 UE 的下行链路，方向、阵列和角度全都不同。
+        """
+        return self._npz["h_ul_cross"] if "h_ul_cross" in self._npz.files else None
+
+    @cached_property
     def w_dl(self) -> np.ndarray | None:
         """历史数据中的外部下行权，仅供诊断旧文件。
 
@@ -401,6 +410,65 @@ class Dataset:
             interferers=interferers,
             config=config,
         )
+
+    def srs_cross_link_signals(
+        self,
+        index: int,
+        assignments: Sequence[Any],
+        *,
+        n_srs_ids: Sequence[int],
+        snapshot_index: int = 0,
+        tx_power_linear: float = 1.0,
+        timing_offsets_s: Sequence[float] | None = None,
+        cfo_hz: Sequence[float] | None = None,
+    ) -> list[Any]:
+        """把本样本的上行交叉链路包成 ``SrsWaveformSignal`` 干扰列表。
+
+        每个干扰 UE 需要它自己的 SRS 资源分配（决定它落在哪个 slot / 符号 /
+        comb / 循环移位），是否真的污染本站导频由 :func:`observe_srs_leg` 按
+        实际资源重叠判定，不在这里预先假定。
+
+        ``assignments`` 与 ``n_srs_ids`` 必须与 ``h_ul_cross`` 的干扰 UE 轴
+        一一对应，顺序即 ``meta['srs_cross_link_cells']`` 的顺序。
+        """
+        from . import srs_waveform as sw  # noqa: PLC0415
+
+        cross = self.h_ul_cross
+        if cross is None:
+            raise ValueError(
+                "该数据集没有 h_ul_cross；生成时请打开 "
+                "measurements.srs_cross_link_channels。不要拿 h_interferers "
+                "（邻区 gNB→本 UE 的下行链路）代替上行交叉链路。"
+            )
+        block = np.asarray(cross[int(index)])
+        n_intf = int(block.shape[0])
+        if len(assignments) != n_intf or len(n_srs_ids) != n_intf:
+            raise ValueError(
+                f"该样本有 {n_intf} 个交叉链路干扰 UE，"
+                f"但收到 {len(assignments)} 个 assignment / {len(n_srs_ids)} 个 n_srs_id"
+            )
+        offsets = list(timing_offsets_s or [0.0] * n_intf)
+        cfos = list(cfo_hz or [0.0] * n_intf)
+        if len(offsets) != n_intf or len(cfos) != n_intf:
+            raise ValueError("timing_offsets_s / cfo_hz 的长度必须等于干扰 UE 数")
+        if not 0 <= int(snapshot_index) < block.shape[1]:
+            raise IndexError(
+                f"snapshot index {snapshot_index} outside 0..{block.shape[1] - 1}"
+            )
+        return [
+            sw.SrsWaveformSignal(
+                assignment=assignments[k],
+                channel_ul_rb=np.asarray(block[k, int(snapshot_index)]),
+                n_srs_id=int(n_srs_ids[k]),
+                tx_power_linear=float(tx_power_linear),
+                timing_offset_s=float(offsets[k]),
+                cfo_hz=float(cfos[k]),
+                label=(
+                    f"dataset:{self.dataset_id}:sample:{int(index)}:crosslink:{k}"
+                ),
+            )
+            for k in range(n_intf)
+        ]
 
     def srs_waveform_pair(
         self,

@@ -431,6 +431,14 @@ def estimate_channel_with_interference(
     The audit helper intentionally exposes only the estimated channel.  It
     consumes the real pilot RB positions and never substitutes ``h_true`` for
     a missing observation.
+
+    ``h_interferers`` is an **audit-only** contamination injection and must be
+    the UL cross-link from each colliding UE to this gNB, already weighted by
+    that UE's residual pilot correlation.  It is not the dataset's
+    ``h_interferers`` tensor, which is the downlink neighbour-gNB -> our-UE
+    channel.  The calibrated end-to-end path is
+    :func:`superran.srs_waveform.observe_srs_leg`, which synthesises real
+    resource elements and despreads them instead of assuming a weight.
     """
     del pilots_serving, interferer_cell_ids, direction, kwargs
     truth = np.asarray(h_serving_true, dtype=np.complex64)
@@ -451,7 +459,14 @@ def estimate_channel_with_interference(
         if h_interferers is not None:
             interference = np.asarray(h_interferers)
             if interference.size:
-                pilot_values = pilot_values + np.mean(interference, axis=0)[observed_symbol, pilots]
+                # Colliding pilots ADD; averaging them would keep K
+                # interferers at the power of one.  ``h_interferers`` here
+                # must already be the UL cross-link (interfering UE -> this
+                # gNB) scaled by its residual pilot correlation -- passing a
+                # downlink neighbour-gNB channel models the wrong link.
+                pilot_values = pilot_values + np.sum(
+                    interference, axis=0
+                )[observed_symbol, pilots]
         if n0 > _EPS:
             noise = (rng.standard_normal(pilot_values.shape) + 1j * rng.standard_normal(pilot_values.shape))
             pilot_values = pilot_values + math.sqrt(n0 / 2.0) * noise
@@ -481,6 +496,13 @@ def estimate_channel_with_interference(
 # ---------------------------------------------------------------------------
 # Array, topology and codebook primitives
 # ---------------------------------------------------------------------------
+
+# Storage defaults.  Both tensors cost one extra full small-scale channel
+# synthesis per interferer per sample, so turning either on by default
+# multiplies both generation time and dataset size; flipping them is a
+# product decision, not a code detail.
+_STORE_INTERFERER_CHANNELS_DEFAULT = False
+_STORE_SRS_CROSS_LINK_DEFAULT = False
 
 PORT_LAYOUT_CONTRACT_VERSION = "pol_h_v-top_to_bottom-v1"
 
@@ -1064,6 +1086,9 @@ class ChannelSample:
     h_serving_true: np.ndarray | None = None
     h_serving_est: np.ndarray | None = None
     h_interferers: np.ndarray | None = None
+    # UL cross-link: interfering UE -> victim gNB, [intf_ue,time,rb,bs,ue].
+    # Never interchangeable with ``h_interferers`` (neighbour gNB -> our UE).
+    h_ul_cross: np.ndarray | None = None
     interference_signal: np.ndarray | None = None
     noise_power_dBm: float = -100.0
     snr_dB: float = 0.0
@@ -1257,6 +1282,280 @@ class InternalSimSource:
         fc_ghz = fc / 1e9
         exponent = 21.0 if is_los else 31.9
         return float(32.4 + 20.0 * math.log10(fc_ghz) + exponent * math.log10(max(distance_3d_m, 1.0)))
+
+    def _large_scale_state(
+        self, cell: Cell, ue_position: np.ndarray, scenario: str
+    ) -> tuple[bool, float, float, float]:
+        """One link's LOS draw, delay spread, shadow fading and LOS probability.
+
+        The law is quantised on the UE position, so the serving loop and the
+        UL cross-link generator draw the *same* random field for the same
+        (site, position) pair.  Duplicating it would let the two drift apart
+        and make an SRS contamination experiment silently non-comparable.
+        """
+        delta = np.asarray(ue_position, dtype=np.float64) - cell.position
+        d2 = max(float(np.linalg.norm(delta[:2])), 10.0)
+        p_los = min(18.0 / d2 + math.exp(-d2 / 63.0) * (1.0 - 18.0 / d2), 1.0)
+        forced = scenario.endswith("_LOS")
+        qx = int(math.floor(float(ue_position[0]) / 10.0))
+        qy = int(math.floor(float(ue_position[1]) / 10.0))
+        los_rng = np.random.default_rng(
+            _seed_from_parts(self._seed, cell.site_id, qx, qy, 0x10A5)
+        )
+        los = bool(forced or los_rng.random() < p_los)
+        tau_ns = float(self.cfg.get("tau_rms_ns", 100.0 if los else 300.0) or 300.0)
+        lsp_rng = np.random.default_rng(
+            _seed_from_parts(self._seed, cell.site_id, qx, qy, 0x15F0)
+        )
+        sf = float(lsp_rng.normal(0.0, 2.0 if los else 3.0))
+        return los, tau_ns, sf, float(p_los)
+
+    def _sector_gain_db(
+        self, cell: Cell, ue_position: np.ndarray, elements_per_port: int
+    ) -> float:
+        """Analog element/subarray gain minus the horizontal sector rolloff."""
+        delta = np.asarray(ue_position, dtype=np.float64) - cell.position
+        bearing = math.degrees(math.atan2(float(delta[1]), float(delta[0])))
+        offset = _circular_delta_deg(bearing, cell.azimuth_deg)
+        effective_array = (
+            str(self.cfg.get("antenna_model_mode", "legacy_64")) == "effective_subarray"
+        )
+        element_gain = (
+            8.0 + 10.0 * math.log10(max(int(elements_per_port), 1))
+            if effective_array else 0.0
+        )
+        return float(element_gain - min(12.0 * (offset / 65.0) ** 2, 30.0))
+
+    def _srs_cross_link_ues(
+        self,
+        *,
+        sites: list[Cell],
+        serving: int,
+        rx_all: list[float],
+        gain_all: list[float],
+        pathloss_all: list[float],
+        global_index: int,
+        scenario: str,
+        configured_model: str,
+        elements_per_port: int,
+        n_time: int,
+        n_rb: int,
+        n_bs: int,
+        n_ue: int,
+        doppler_hz: float,
+    ) -> tuple[np.ndarray | None, dict[str, Any]]:
+        """UL cross-link channels: interfering UEs -> *this* serving gNB.
+
+        This is the quantity SRS pilot contamination actually consumes, and it
+        is **not** ``h_interferers``.  ``h_interferers`` is the downlink
+        neighbour-gNB -> our-UE channel; substituting it here would model the
+        wrong link, the wrong array and the wrong angles.
+
+        Who is allowed to contaminate is decided by the repository's own SRS
+        resource contract: only cells sharing our PCI-mod-3 colour draw from
+        the same SRS resource pool, so only they can occupy the same
+        time/comb/cyclic-shift leaf.  Different-colour neighbours still
+        interfere on data (that lives in the geometry budget) but cannot
+        pollute our SRS pilots.
+
+        Returned tensor is ``[intf_ue, time, RB, gNB_rx_port, UE_port]``,
+        normalised so the *desired* UE's UL link has unit small-scale power;
+        the amplitude therefore already carries this interferer's UL received
+        power relative to the desired UE at the same gNB.
+        """
+        measurements = self.cfg.get("measurements") or {}
+        if "srs_cross_link_channels" in measurements:
+            enabled = bool(measurements["srs_cross_link_channels"])
+        elif "store_srs_cross_link_channels" in self.cfg:
+            enabled = bool(self.cfg["store_srs_cross_link_channels"])
+        else:
+            enabled = _STORE_SRS_CROSS_LINK_DEFAULT
+        if not enabled or len(sites) < 2:
+            return None, {}
+        same_colour_only = bool(
+            self.cfg.get("srs_cross_link_same_pci_colour_only", True)
+        )
+        serving_colour = int(sites[serving].cell_id % 1008) % 3
+        candidates = [
+            k for k in range(len(sites))
+            if k != serving
+            and (
+                not same_colour_only
+                or int(sites[k].cell_id % 1008) % 3 == serving_colour
+            )
+        ]
+        # Strongest neighbours first; ties broken by cell index so the choice
+        # never depends on Python's sort stability across topologies.
+        candidates.sort(key=lambda k: (-float(rx_all[k]), k))
+        requested = self.cfg.get("max_srs_cross_link_ues")
+        if requested is None:
+            requested = self.cfg.get("num_interfering_ues", 0) or 0
+        n_cross = max(min(int(requested), len(candidates)), 0)
+        if n_cross == 0:
+            return None, {
+                "srs_cross_link_cells": [],
+                "srs_cross_link_skipped": (
+                    "no_same_pci_colour_neighbour" if not candidates
+                    else "max_srs_cross_link_ues_is_zero"
+                ),
+            }
+
+        serving_cell = sites[serving]
+        # Desired UE's UL received level at this gNB, with the UE transmit
+        # power cancelled out: equal-power UEs, no uplink power control.
+        desired_rel_db = float(gain_all[serving]) - float(pathloss_all[serving])
+        isd = float(self.cfg.get("isd_m", 500.0) or 500.0)
+        min_d = max(float(self.cfg.get("min_ue_distance_m", 20.0) or 20.0), 10.0)
+        max_d = max(
+            float(self.cfg.get("max_ue_distance_m", isd * 0.7) or isd * 0.7),
+            min_d + 1.0,
+        )
+        height = float(self.cfg.get("ue_height_m", 1.5) or 1.5)
+
+        max_attempts = max(int(self.cfg.get("srs_cross_link_drop_attempts", 24) or 24), 1)
+
+        def _relative_level(cell: Cell, pos: np.ndarray) -> tuple[float, bool, float]:
+            los, _tau, sf, _p = self._large_scale_state(cell, pos, scenario)
+            d3 = max(float(np.linalg.norm(pos - cell.position)), 10.0)
+            gain = self._sector_gain_db(cell, pos, elements_per_port)
+            return gain - (self._pathloss(d3, los) + sf), los, d3
+
+        rows: list[np.ndarray] = []
+        cells_used: list[int] = []
+        sir_db: list[float] = []
+        distances: list[float] = []
+        los_flags: list[bool] = []
+        rejected: list[int] = []
+        attempts_used: list[int] = []
+        for k in candidates:
+            if len(rows) >= n_cross:
+                break
+            drop_rng = np.random.default_rng(
+                np.random.SeedSequence([self._seed, 0x5C10, global_index, k])
+            )
+            # The interfering UE must really be served by cell k, otherwise the
+            # drop puts a "neighbour" UE on top of our own site and invents a
+            # contamination level no scheduler would ever produce.
+            intf_pos = None
+            for attempt in range(max_attempts):
+                radius = math.sqrt(drop_rng.uniform(min_d * min_d, max_d * max_d))
+                angle = drop_rng.uniform(-np.pi, np.pi)
+                trial = np.asarray([
+                    float(sites[k].position[0]) + radius * math.cos(angle),
+                    float(sites[k].position[1]) + radius * math.sin(angle),
+                    height,
+                ], dtype=np.float64)
+                levels = [_relative_level(cell, trial)[0] for cell in sites]
+                if int(np.argmax(levels)) == k:
+                    intf_pos = trial
+                    attempts_used.append(attempt + 1)
+                    break
+            if intf_pos is None:
+                rejected.append(int(sites[k].cell_id))
+                continue
+
+            rel_db, los, d3 = _relative_level(serving_cell, intf_pos)
+            delta = intf_pos - serving_cell.position
+            horizontal = max(float(np.linalg.norm(delta[:2])), _EPS)
+            scale = math.sqrt(max(10.0 ** ((rel_db - desired_rel_db) / 10.0), 0.0))
+
+            aod = math.atan2(float(delta[1]), float(delta[0]))
+            aoa = (aod + 2.0 * np.pi) % (2.0 * np.pi) - np.pi
+            zod = np.pi / 2.0 - math.atan2(float(delta[2]), horizontal)
+            zoa = np.pi / 2.0 - math.atan2(float(-delta[2]), horizontal)
+            cross_rng = np.random.default_rng(
+                np.random.SeedSequence([self._seed, 0x5C11, global_index, k])
+            )
+            cross = self._small_scale_channel(
+                get_channel_profile(self._effective_model(configured_model, los)),
+                cross_rng,
+                n_time=n_time,
+                n_rb=n_rb,
+                n_bs=n_bs,
+                n_ue=n_ue,
+                doppler_hz=doppler_hz,
+                realization_index=global_index * max(len(sites), 1) + k + 0x5C10,
+                link_aod_rad=aod,
+                link_aoa_rad=aoa,
+                link_zod_rad=zod,
+                link_zoa_rad=zoa,
+                cell=serving_cell,
+                ue_position=intf_pos,
+                is_los=los,
+                role="interferer",
+            )
+            rows.append((cross * scale).astype(np.complex64))
+            cells_used.append(int(sites[k].cell_id))
+            sir_db.append(float(desired_rel_db - rel_db))
+            distances.append(d3)
+            los_flags.append(bool(los))
+
+        if len(rows) < n_cross:
+            # A ragged interferer axis would be silently dropped at write
+            # time, and the dataset would then look like a clean single-cell
+            # SRS experiment.  Fail loudly instead.
+            raise RuntimeError(
+                f"sample {global_index}: only {len(rows)} of {n_cross} requested "
+                f"SRS cross-link UEs could be dropped inside their own cell "
+                f"(same-PCI-colour candidates: {len(candidates)}, rejected: "
+                f"{rejected}).  Lower max_srs_cross_link_ues, raise "
+                f"srs_cross_link_drop_attempts, or widen max_ue_distance_m."
+            )
+        meta = {
+            "srs_cross_link_cells": cells_used,
+            "srs_cross_link_rejected_cells": rejected,
+            "srs_cross_link_drop_attempts": attempts_used,
+            "srs_cross_link_pci": [cid % 1008 for cid in cells_used],
+            "srs_cross_link_serving_pci_mod3": serving_colour,
+            "srs_cross_link_same_pci_colour_only": same_colour_only,
+            "srs_cross_link_ul_sir_db": sir_db,
+            "srs_cross_link_distance_to_victim_m": distances,
+            "srs_cross_link_is_los": los_flags,
+            "srs_cross_link_model": (
+                "interfering_ue_to_victim_gnb_equal_ue_power_no_ul_power_control_v1"
+            ),
+            "srs_cross_link_axes": "[intf_ue,time,rb,gnb_rx_port,ue_port]",
+        }
+        return np.stack(rows), meta
+
+    def _srs_pilot_contamination_rho(
+        self, h_ul_cross: np.ndarray | None
+    ) -> np.ndarray | None:
+        """Residual SRS pilot correlation per colliding UE, or ``None``.
+
+        ``rho_k`` is what is left of interferer *k*'s SRS after our gNB
+        despreads with the local ZC sequence and applies the delay gate.
+        ``1.0`` means a full leaf collision (same symbol, comb and cyclic
+        shift): the interferer's channel enters our estimate unattenuated.
+
+        It is **not** calibrated here.  Nothing is applied unless the caller
+        asks for it, and the calibrated per-occasion value comes from the
+        RE-level receiver in :mod:`superran.srs_waveform`, which despreads a
+        real waveform instead of assuming a number.
+        """
+        if h_ul_cross is None:
+            return None
+        raw = self.cfg.get("srs_pilot_contamination_rho")
+        if raw is None or (isinstance(raw, bool) and not raw):
+            return None
+        n = int(np.asarray(h_ul_cross).shape[0])
+        rho = np.asarray(
+            [float(raw)] * n if np.isscalar(raw) or isinstance(raw, (int, float))
+            else list(raw),
+            dtype=np.float64,
+        )
+        if rho.shape != (n,):
+            raise ValueError(
+                "srs_pilot_contamination_rho must be a scalar or one value per "
+                f"cross-link UE ({n}); got shape {rho.shape}"
+            )
+        if not np.all(np.isfinite(rho)) or np.any(rho < 0.0) or np.any(rho > 1.0):
+            raise ValueError(
+                "srs_pilot_contamination_rho must be finite and within [0, 1]"
+            )
+        if not np.any(rho > 0.0):
+            return None
+        return rho
 
     def _effective_model(self, configured: str, is_los: bool) -> str:
         key = configured.upper().replace("_", "-")
@@ -1486,10 +1785,16 @@ class InternalSimSource:
         noise_dbm = -174.0 + 10.0 * math.log10(12.0 * scs) + nf_db
         noise_mw = _db_to_mw(noise_dbm)
         measure_ssb = bool((self.cfg.get("measurements") or {}).get("ssb_rsrp", True))
-        keep_interferer_h = bool(
-            (self.cfg.get("measurements") or {}).get("interferer_channels", False)
-            or self.cfg.get("store_interferer_channels", False)
-        )
+        # An explicit ``false`` must win.  Folding both keys through ``or``
+        # with a shared default makes the off switch unreachable as soon as
+        # the default flips to true, and that failure is silent.
+        _measurements = self.cfg.get("measurements") or {}
+        if "interferer_channels" in _measurements:
+            keep_interferer_h = bool(_measurements["interferer_channels"])
+        elif "store_interferer_channels" in self.cfg:
+            keep_interferer_h = bool(self.cfg["store_interferer_channels"])
+        else:
+            keep_interferer_h = _STORE_INTERFERER_CHANNELS_DEFAULT
         bs_ant = dict(self.cfg.get("bs_antenna") or {})
         subarray = dict(bs_ant.get("fixed_vertical_subarray") or {})
         elements_per_port = int(subarray.get("elements_per_rf_port", 1) or 1)
@@ -1513,7 +1818,7 @@ class InternalSimSource:
             rng_small = np.random.default_rng(np.random.SeedSequence([self._seed, 211, global_index]))
             rng_est = np.random.default_rng(np.random.SeedSequence([self._seed, 307, global_index]))
 
-            site_state: dict[int, tuple[bool, float, float]] = {}
+            site_state: dict[int, tuple[bool, float, float, float]] = {}
             pathloss_all: list[float] = []
             rx_all: list[float] = []
             gain_all: list[float] = []
@@ -1528,32 +1833,11 @@ class InternalSimSource:
                 d3 = max(float(np.linalg.norm(delta)), 10.0)
                 d2 = max(float(np.linalg.norm(delta[:2])), 10.0)
                 if cell.site_id not in site_state:
-                    p_los = min(18.0 / d2 + math.exp(-d2 / 63.0) * (1.0 - 18.0 / d2), 1.0)
-                    forced = scenario.endswith("_LOS")
-                    qx = int(math.floor(float(position[0]) / 10.0))
-                    qy = int(math.floor(float(position[1]) / 10.0))
-                    los_rng = np.random.default_rng(
-                        _seed_from_parts(self._seed, cell.site_id, qx, qy, 0x10A5)
+                    site_state[cell.site_id] = self._large_scale_state(
+                        cell, position, scenario
                     )
-                    los = bool(forced or los_rng.random() < p_los)
-                    tau_ns = float(self.cfg.get("tau_rms_ns", 100.0 if los else 300.0) or 300.0)
-                    lsp_rng = np.random.default_rng(
-                        _seed_from_parts(self._seed, cell.site_id, qx, qy, 0x15F0)
-                    )
-                    sf = float(lsp_rng.normal(0.0, 2.0 if los else 3.0))
-                    site_state[cell.site_id] = (los, tau_ns, sf)
-                los, tau_ns, sf = site_state[cell.site_id]
-                bearing = math.degrees(math.atan2(delta[1], delta[0]))
-                offset = _circular_delta_deg(bearing, cell.azimuth_deg)
-                effective_array = (
-                    str(self.cfg.get("antenna_model_mode", "legacy_64"))
-                    == "effective_subarray"
-                )
-                element_gain = (
-                    8.0 + 10.0 * math.log10(max(elements_per_port, 1))
-                    if effective_array else 0.0
-                )
-                gain = element_gain - min(12.0 * (offset / 65.0) ** 2, 30.0)
+                los, tau_ns, sf, p_los = site_state[cell.site_id]
+                gain = self._sector_gain_db(cell, position, elements_per_port)
                 pl = self._pathloss(d3, los) + sf
                 # Keep the total-carrier received power independent of the
                 # frequency grid.  Per-RB PSD is formed once below; otherwise
@@ -1613,6 +1897,23 @@ class InternalSimSource:
                 role="serving",
             )
 
+            h_ul_cross, cross_meta = self._srs_cross_link_ues(
+                sites=sites,
+                serving=serving,
+                rx_all=rx_all,
+                gain_all=gain_all,
+                pathloss_all=pathloss_all,
+                global_index=global_index,
+                scenario=scenario,
+                configured_model=configured_model,
+                elements_per_port=elements_per_port,
+                n_time=n_time,
+                n_rb=n_rb,
+                n_bs=n_bs,
+                n_ue=n_ue,
+                doppler_hz=doppler,
+            )
+
             est_mode = str(self.cfg.get("channel_est_mode", "ls_linear"))
             if est_mode == "ideal":
                 h_dl_est = h_dl.copy()
@@ -1633,6 +1934,25 @@ class InternalSimSource:
                 noise_ul = (rng_est.standard_normal(h_dl.shape) + 1j * rng_est.standard_normal(h_dl.shape)) / math.sqrt(2)
                 h_dl_est = (h_dl + sigma * noise_dl).astype(np.complex64)
                 h_ul_est = (h_dl + sigma * noise_ul).astype(np.complex64)
+                # SRS pilot contamination.  A colliding neighbour UE's SRS
+                # survives our despreading with residual correlation rho, so
+                # its *whole channel to our gNB* lands inside our estimate.
+                # That is why contamination is not the same thing as extra
+                # noise: the error points at the interferer's spatial
+                # direction, which is exactly where reciprocity-based
+                # precoding then steers energy.
+                rho = self._srs_pilot_contamination_rho(h_ul_cross)
+                if rho is not None:
+                    h_ul_est = (
+                        h_ul_est
+                        + np.tensordot(rho, np.asarray(h_ul_cross), axes=(0, 0))
+                    ).astype(np.complex64)
+                    cross_meta["srs_pilot_contamination_rho"] = [
+                        float(v) for v in rho
+                    ]
+                    cross_meta["srs_pilot_contamination_applied"] = True
+                elif h_ul_cross is not None:
+                    cross_meta["srs_pilot_contamination_applied"] = False
             h_ul = h_dl.copy()  # canonical v2: physical transpose, same stored BS/UE tensor
             site_models = [
                 self._effective_model(configured_model, site_state[cell.site_id][0])
@@ -1781,6 +2101,7 @@ class InternalSimSource:
                 "dl_thermal_noise_power_mw": noise_mw,
                 "dl_interference_power_per_slot_per_cell_mw": per_cell_i.reshape(1, -1),
                 "dl_power_decomposition_version": "superran-prebeam-per-rb-sni-v1",
+                **cross_meta,
                 "ul_geometry_sir_dB": sir_db,
                 "ul_geometry_sir_model": "shared_dl_geometry_sir_symmetric_neighbour_power_v1",
                 "effective_channel_model": effective_model,
@@ -1819,6 +2140,7 @@ class InternalSimSource:
                 h_serving_true=h_dl,
                 h_serving_est=h_dl_est,
                 h_interferers=h_intf,
+                h_ul_cross=h_ul_cross,
                 noise_power_dBm=noise_dbm,
                 snr_dB=snr_db,
                 sir_dB=sir_db,
