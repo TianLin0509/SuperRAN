@@ -670,11 +670,11 @@ SuperRAN 自己的几何与路损仍在原坐标系（距离是平移不变量�
 重建一次场景与 solver）。本仓把 `a/tau/角度` 立刻取回 numpy、自己做频域合成，
 两个问题都不存在：实测连续 60 次求解（7 站 21 小区）RSS 只涨 6 MB、每次 0.06 s。
 
-**两份阵列响应实现的垂直相位符号相反。** `EffectiveArray.effective_tx_steering`
-用 `z0 - v·d_v`（物理 top_to_bottom），`_spatial_panel_response` 用 `+v·d_v`，
-幅度完全一致、相位差一个符号。这是**收编前就存在**的不一致，当前无实际影响
-（`effective_tx_steering` 全仓只被一个审计脚本用来取模方），但两者都号称是同一个
-阵列的响应，谁要拿它做波束赋形之前必须先把这件事定下来。
+**两份阵列响应实现已统一到 `z0 - v·d_v`（物理 top_to_bottom，相位参考点在阵列
+几何中心）。** `EffectiveArray.effective_tx_steering` 一直是这个约定；
+`_spatial_panel_response` 原来用 `+v·d_v`，垂直指向正好相反（2026-09-08 修复）。
+现在两者对同一个方向只差一个全局常数相位，`test_physics_invariants.py` 第 10 节
+逐端口比值是否恒定作棘轮。改任何一份阵列响应都要保住这条。
 
 ### CDL-A~E 表、20-ray 展开与 K 因子都有硬门
 

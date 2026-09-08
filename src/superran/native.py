@@ -1010,14 +1010,24 @@ def _spatial_panel_response(
     horizontal_spacing: float = 0.5,
     vertical_spacing: float = 0.5,
 ) -> np.ndarray:
-    """Separable unit-norm response for one polarization block."""
+    """Separable unit-norm response for one polarization block.
+
+    The vertical index follows the ``top_to_bottom`` port contract: ``v=0`` is
+    the topmost row and the element height *decreases* with ``v``.  The phase
+    reference sits at the geometric centre of the column, so the vertical term
+    is ``(z0 - v * d_v) * sin(el)`` with ``z0 = (n_v - 1) * d_v / 2`` — the same
+    coordinates :meth:`EffectiveArray.physical_positions_lambda` uses.  Both
+    array-response implementations therefore describe one and the same array;
+    an earlier ``+v * d_v`` here pointed the vertical steering the opposite way.
+    """
     elevation = np.pi / 2.0 - float(zenith_rad)
+    z0 = (int(n_v) - 1.0) * float(vertical_spacing) / 2.0
     values = []
     for h in range(int(n_h)):
         for v in range(int(n_v)):
             phase = 2.0 * np.pi * (
                 float(horizontal_spacing) * h * math.cos(elevation) * math.sin(float(azimuth_rad))
-                + float(vertical_spacing) * v * math.sin(elevation)
+                + (z0 - float(vertical_spacing) * v) * math.sin(elevation)
             )
             values.append(np.exp(1j * phase))
     result = np.asarray(values, dtype=np.complex128)

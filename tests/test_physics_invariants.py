@@ -26,6 +26,7 @@ from superran import linkadapt as la  # noqa: E402
 from superran import linklevel as ll  # noqa: E402
 from superran import measure  # noqa: E402
 from superran import mumimo as mu  # noqa: E402
+from superran import native as nv  # noqa: E402
 from superran import rng as rg  # noqa: E402
 from superran import sionna_rt as srt  # noqa: E402
 from superran import system as sy  # noqa: E402
@@ -1085,6 +1086,62 @@ def test_rzf_reported_loading_equals_the_one_actually_used() -> None:
 test_single_layer_terminals_can_pair()
 test_per_ue_cap_reaches_the_air_and_rebuild_clears_stale_combinations()
 test_rzf_reported_loading_equals_the_one_actually_used()
+
+
+# ---------------------------------------------------------------------------
+section("10  同一个阵列只能有一个垂直相位方向")
+
+# 踩过的坑：仓里有两份阵列响应，都自称是同一个 AAU 的响应，但垂直索引一个
+# 从上往下（位置随 v 递减）、一个从下往上（位置随 v 递增）。幅度完全一样，
+# 相位差一个符号 —— 单用户看不出来（全局相位不改变谱效），一旦拿它做多用户
+# 配对或波束指向，两个用户的空间关系就是错的，而且不会报错。
+# 判据：两份实现对同一个方向必须只差**一个**全局常数相位（逐端口比值恒定）。
+
+
+def test_two_array_responses_share_one_vertical_convention() -> None:
+    worst = 0.0
+    for rf_shape in ((2, 4, 2), (8, 4, 2), (4, 1, 2), (1, 8, 2)):
+        for elements_per_port in (1, 3):
+            for downtilt in (0.0, 6.0):
+                array = nv.EffectiveArray(
+                    rf_shape=rf_shape,
+                    elements_per_rf_port=elements_per_port,
+                    horizontal_spacing_lambda=0.5,
+                    ae_vertical_spacing_lambda=0.67,
+                    fixed_downtilt_deg=downtilt,
+                )
+                port_spacing = elements_per_port * 0.67
+                for azimuth, elevation in ((0.4, 0.25), (-1.1, -0.3),
+                                           (0.0, 0.0), (2.0, 0.6)):
+                    zenith = np.pi / 2.0 - elevation
+                    effective = array.effective_tx_steering(
+                        azimuth, elevation, 2.6e9)
+                    panel = nv._spatial_panel_response(
+                        rf_shape[0], rf_shape[1], azimuth, zenith,
+                        horizontal_spacing=0.5, vertical_spacing=port_spacing)
+                    feed = nv.fixed_subarray_response(
+                        zenith,
+                        elements_per_rf_port=elements_per_port,
+                        ae_vertical_spacing_lambda=0.67,
+                        fixed_downtilt_deg=downtilt)
+                    separable = np.tile(panel * feed, rf_shape[2])
+                    ratio = effective / separable
+                    worst = max(worst, float(
+                        np.max(np.abs(ratio / ratio[0] - 1.0))))
+    print(f"  两份实现的逐端口比值最大偏离常数：{worst:.3e}")
+    check(worst < 1e-10,
+          "effective_tx_steering 与 _spatial_panel_response 只差一个全局常数相位")
+
+    # 方向本身也要对：仰角为正时，最上面那一行（v=0）的相位必须超前。
+    up = nv._spatial_panel_response(1, 4, 0.0, np.pi / 2.0 - 0.2,
+                                    horizontal_spacing=0.5,
+                                    vertical_spacing=0.5)
+    steps = np.diff(np.unwrap(np.angle(up)))
+    check(bool(np.all(steps < 0.0)),
+          "top_to_bottom 约定下仰角为正时垂直相位随 v 递减")
+
+
+test_two_array_responses_share_one_vertical_convention()
 
 
 print("\n" + "=" * 70)
