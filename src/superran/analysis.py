@@ -48,6 +48,11 @@ KNOWN_METRICS: dict[str, str] = {
     "cell_head_inclusive_experienced_mbps": "Mbps",
     "ue_experienced_p5_mbps": "Mbps",
     "cell_served_mbps": "Mbps",
+    # 收/发两侧 MAC 吞吐（现场对齐口径）。三者的大小关系恒为
+    # dl_rx <= cell_served <= dl_tx，口径说明见结果里的 throughput_definitions。
+    "dl_rx_mac_tput_mbps": "Mbps",
+    "dl_rx_mac_tput_tbs_mbps": "Mbps",
+    "dl_tx_mac_tput_mbps": "Mbps",
     "first_packet_delay_ms_mean": "ms",
     "first_packet_delay_ms_p95": "ms",
     "serving_cell_prb_utilization": "1",

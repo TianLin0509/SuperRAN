@@ -146,6 +146,12 @@ def _ndtri(p: float) -> float:
     return float(ndtri(p))
 
 
+#: 双侧 Wilcoxon 符号秩检验能够达到 α=0.05 的最小样本数。
+#: 最小可达 p 是 ``2/2^n``：n=5 给 0.0625 > 0.05，**无论数据多干净都判不出显著**；
+#: n=6 给 0.03125，是硬下界。低于它时判决不是"没显著"，是"这个实验判不了"。
+WILCOXON_MIN_N = 6
+
+
 @dataclass
 class PairedResult:
     """配对比较的结果。"""
@@ -199,9 +205,32 @@ class PairedResult:
         return self.wilcoxon_p if self.decision_test == "wilcoxon" else self.p_value
 
     @property
+    def n_below_minimum(self) -> bool:
+        """重复次数低于判决检验能达到显著的下界。"""
+        return bool(int(self.n) < WILCOXON_MIN_N)
+
+    @property
     def decision_significant(self) -> bool:
+        # **n ≤ 5 一律判不显著。** 不是"这次刚好没到"，而是这个样本量下
+        # 符号秩检验数学上到不了 0.05——照报一个 p=0.0625 会让人以为"差一点点、
+        # 再调调就显著了"。退回 t 检验也不行：那正是"判据和文档承诺不一致"
+        # 那条老漏洞的形状（小样本 t 偏乐观，会放行符号秩拦下的结论）。
+        if self.n_below_minimum:
+            return False
         p = self.decision_p_value
         return bool(np.isfinite(p) and p < 0.05)
+
+    @property
+    def inconclusive_reason(self) -> str | None:
+        """判决因为样本量本身不成立时的原因；够用时返回 None。"""
+        if not self.n_below_minimum:
+            return None
+        return (
+            f"n={self.n} < {WILCOXON_MIN_N}：双侧 Wilcoxon 符号秩检验最小可达 "
+            f"p 是 2/2^{self.n} = {2 / 2 ** int(self.n):.4g} > 0.05，"
+            f"这个实验无论跑出什么结果都判不出显著。"
+            f"把 num_replications 提到 ≥{WILCOXON_MIN_N}（推荐 8）。"
+        )
 
     @property
     def ci_excludes_zero(self) -> bool:
@@ -234,6 +263,8 @@ class PairedResult:
                 else None
             ),
             "decision_significant": self.decision_significant,
+            "n_below_minimum": self.n_below_minimum,
+            "inconclusive_reason": self.inconclusive_reason,
             "win_rate": round(self.win_rate, 3),
             "max_single_contribution": round(self.max_single_contribution, 3),
         }
@@ -669,6 +700,11 @@ def gate_conclusion(
         f"配对 t p={paired.p_value:.3g}，Wilcoxon p={paired.wilcoxon_p:.3g}，"
         f"胜率 {paired.win_rate:.0%}"
     )
+    if paired.n_below_minimum:
+        detail += (
+            f" —— **inconclusive_insufficient_replications**："
+            f"{paired.inconclusive_reason}"
+        )
     if not paired.tests_agree:
         detail += (
             f" —— **两个检验结论冲突**（t {'显著' if paired.t_significant else '不显著'}、"
@@ -680,7 +716,8 @@ def gate_conclusion(
             "配对检验显著",
             paired.decision_significant,
             detail,
-            fix="加样本，或换一个方差更小的指标",
+            fix=(paired.inconclusive_reason if paired.n_below_minimum
+                 else "加样本，或换一个方差更小的指标"),
         )
     )
 
