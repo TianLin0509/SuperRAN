@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from superran import amc_policy as ap  # noqa: E402
 from superran import beamforming as bf  # noqa: E402
+from superran import channelhub as chub  # noqa: E402
 from superran import csi_aging as ca  # noqa: E402
 from superran import experience as ex  # noqa: E402
 from superran import generate as gen  # noqa: E402
@@ -1192,6 +1193,89 @@ def test_small_scale_channel_ignores_the_sample_index() -> None:
 
 
 test_small_scale_channel_ignores_the_sample_index()
+
+
+# ---------------------------------------------------------------------------
+section("12  同一个 UE 的相邻样本必须落在同一条物理信道上（Jakes）")
+
+# 踩过的坑：每个样本都用 SeedSequence([seed, 211, global_index]) 把小尺度的
+# 随机源整个重置，于是同一个 UE 的第 r 轮和第 r+1 轮是**两次互不相干的瑞利
+# 实现**，相关系数 0。多普勒只在样本内部的几个 slot 之间有效。
+# 后果：CSI 老化模型失去物理意义——"拿 t-dt 的 CSI 调度 t 时刻的传输"这件事，
+# 在 IID 信道上的损失和真实场景完全不是一回事，而 KPI 看起来一切正常。
+# 判据：相邻样本的复相关系数必须等于 Jakes 的 J0(2*pi*f_d*dt)。
+
+
+def _trajectory_channels(speed_kmh: float, n_ue: int, n_round: int):
+    cfg = {
+        "num_samples": n_ue * n_round, "num_ues": n_ue, "num_rb": 8,
+        "num_slots_per_sample": 1,
+        "num_bs_tx_ant": 4, "num_bs_rx_ant": 4,
+        "num_ue_tx_ant": 2, "num_ue_rx_ant": 2,
+        "scenario": "UMa_NLOS", "channel_model": "CDL-C",
+        "channel_est_mode": "ideal", "link": "DL",
+        "seed": 903, "ue_seed": 904, "measurements": {"ssb_rsrp": False},
+        "ue_speed_kmh": speed_kmh, "carrier_freq_hz": 2.6e9,
+        "sample_interval_s": 5e-3, "mobility_mode": "static", "num_sites": 1,
+    }
+    samples = list(chub.iter_samples("internal_sim", cfg))
+    grid = [[None] * n_round for _ in range(n_ue)]
+    for gi, sample in enumerate(samples):
+        grid[gi % n_ue][gi // n_ue] = np.asarray(
+            sample.h_serving_true).reshape(-1)
+    return samples, grid
+
+
+def test_adjacent_samples_follow_the_jakes_correlation() -> None:
+    from scipy.special import j0  # noqa: PLC0415
+
+    n_ue, n_round, speed = 12, 14, 3.0
+    samples, grid = _trajectory_channels(speed, n_ue, n_round)
+    f_d = speed / 3.6 * 2.6e9 / 3e8
+    worst = 0.0
+    for lag in (1, 2, 3, 5, 8, 12):
+        num = 0.0 + 0.0j
+        den_a = den_b = 0.0
+        for u in range(n_ue):
+            for r in range(n_round - lag):
+                a, b = grid[u][r], grid[u][r + lag]
+                num += np.vdot(b, a)
+                den_a += float(np.vdot(a, a).real)
+                den_b += float(np.vdot(b, b).real)
+        measured = abs(num) / np.sqrt(den_a * den_b)
+        theory = abs(float(j0(2.0 * np.pi * f_d * lag * 5e-3)))
+        worst = max(worst, abs(measured - theory))
+        print(f"  lag {lag:2d} ({lag * 5} ms)：实测 {measured:.3f}  "
+              f"Jakes {theory:.3f}")
+    check(worst < 0.05,
+          f"相邻样本的时间相关性服从 J0(2*pi*f_d*t)（最大偏差 {worst:.3f}）")
+
+    # 轨迹时钟：第 r 轮的时间窗口必须首尾相接，不重叠也不留空。
+    windows = [tuple(s.meta["sample_time_window_s"])
+               for s in samples[::n_ue]]
+    gaps = [windows[k + 1][0] - windows[k][1] for k in range(len(windows) - 1)]
+    check(max(abs(g) for g in gaps) < 1e-12,
+          "同一 UE 相邻两轮的时间窗口首尾相接（位置钟与时间钟同一个）")
+
+    # 速度为 0 时轨迹冻结，多轮样本会逐位重复——必须硬失败，不许静默产出。
+    try:
+        list(chub.iter_samples("internal_sim", {
+            "num_samples": 4, "num_ues": 2, "num_rb": 4,
+            "num_slots_per_sample": 1,
+            "num_bs_tx_ant": 4, "num_bs_rx_ant": 4,
+            "num_ue_tx_ant": 2, "num_ue_rx_ant": 2,
+            "scenario": "UMa_NLOS", "channel_model": "CDL-C",
+            "channel_est_mode": "ideal", "link": "DL",
+            "seed": 903, "ue_seed": 904, "measurements": {"ssb_rsrp": False},
+            "ue_speed_kmh": 0.0, "mobility_mode": "static", "num_sites": 1,
+        }))
+    except ValueError as exc:
+        check("逐位相同" in str(exc), "零速多轮被硬拒绝，不会静默产出重复矩阵")
+    else:
+        check(False, "零速多轮必须硬失败")
+
+
+test_adjacent_samples_follow_the_jakes_correlation()
 
 
 print("\n" + "=" * 70)

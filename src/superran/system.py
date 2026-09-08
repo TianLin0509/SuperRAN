@@ -1486,8 +1486,10 @@ def group_samples_by_ue(n_samples: int, num_ues: int) -> list[list[int]]:
     每用户谱效从应有的 0.32 掉到 0.08，**看起来像边缘用户被饿死**，
     其实是分母大了 4 倍。
 
-    同一个 UE 的多个样本是**时间相关的**（多普勒就是从相邻样本的位移算的），
-    所以它们正好当这个 UE 的信道快照序列用。
+    同一个 UE 的多个样本是**时间相关的**：first-party 信道源给每条轨迹一套固定的
+    散射体，样本之间只推进绝对时刻，所以相邻样本的复相关系数就是 Jakes 的
+    ``J0(2*pi*f_d*dt)``（实测 3 km/h @2.6 GHz、dt=5 ms 时 0.987，与理论差 <0.002）。
+    它们正好当这个 UE 的信道快照序列用，CSI 老化的代价也才有物理意义。
     """
     n_ue = max(1, min(int(num_ues), int(n_samples)))
     return [list(range(u, int(n_samples), n_ue)) for u in range(n_ue)]

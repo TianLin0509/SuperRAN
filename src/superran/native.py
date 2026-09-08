@@ -1278,7 +1278,8 @@ class InternalSimSource:
     def _channel(self, profile: ChannelProfile, rng: np.random.Generator, *,
                  n_time: int, n_rb: int, n_bs: int, n_ue: int, doppler_hz: float,
                  realization_index: int, link_aod_rad: float, link_aoa_rad: float,
-                 link_zod_rad: float, link_zoa_rad: float) -> np.ndarray:
+                 link_zod_rad: float, link_zoa_rad: float,
+                 time_offset_s: float = 0.0) -> np.ndarray:
         powers = 10.0 ** (profile.powers_dB / 10.0)
         powers /= max(float(np.sum(powers)), _EPS)
         tau_rms = float(self.cfg.get("tau_rms_ns", 300.0) or 300.0) * 1e-9
@@ -1286,7 +1287,18 @@ class InternalSimSource:
         scs = float(self.cfg.get("subcarrier_spacing", 30_000.0) or 30_000.0)
         freq = (np.arange(n_rb, dtype=np.float64) - (n_rb - 1.0) / 2.0) * 12.0 * scs
         interval = float(self.cfg.get("sample_interval_s", 5e-3) or 5e-3)
-        times = np.arange(n_time, dtype=np.float64) * interval
+        # **绝对时间轴。** ``time_offset_s`` 是本样本第一个 slot 在这条轨迹上的
+        # 时刻；同一个 UE 的第 r 轮覆盖 ``[r*n_time*dt, (r+1)*n_time*dt)``，
+        # 相邻两轮首尾相接、不重叠。配合"每条轨迹一套散射体"（rng 按 UE 派生，
+        # 见 iter_samples），小尺度衰落就成了时间的连续函数，相邻样本的相关系数
+        # 自动等于 Jakes 的 ``J0(2*pi*f_d*dt)``——因为每条射线的多普勒投影角
+        # 是均匀分布的，而 ``E_theta[exp(j*2*pi*f_d*cos(theta)*dt)] = J0(...)``。
+        #
+        # 这一步对 CDL 正确、对射线追踪**错误**，两者不能照抄：CDL 每条径的相位
+        # 是随机数、位置移动只改簇的角度，时间演化全靠这里的多普勒项；RT 的径
+        # 相位来自真实径长，位置一动几何相位就已经算过一遍，再叠加时间偏移会把
+        # 相位算两遍（sionna_rt.synthesize_channel 里有实测数字）。
+        times = float(time_offset_s) + np.arange(n_time, dtype=np.float64) * interval
         h = np.zeros((n_time, n_rb, n_bs, n_ue), dtype=np.complex128)
         # Each diffuse table component receives 20 independent sub-rays.
         # Per-ray angle offsets, XPR/Jones phases and Doppler projections are
@@ -1437,6 +1449,7 @@ class InternalSimSource:
         ue_position: np.ndarray,
         is_los: bool,
         role: str,
+        time_offset_s: float = 0.0,
     ) -> np.ndarray:
         """One BS-UE link's small-scale channel, shape ``[time, rb, bs, ue]``.
 
@@ -1466,6 +1479,7 @@ class InternalSimSource:
             link_aoa_rad=link_aoa_rad,
             link_zod_rad=link_zod_rad,
             link_zoa_rad=link_zoa_rad,
+            time_offset_s=time_offset_s,
         )
 
     def iter_samples(self) -> Iterator[ChannelSample]:
@@ -1479,6 +1493,7 @@ class InternalSimSource:
         if link == "BOTH" and n_ue_tx != n_ue:
             raise ValueError("paired TDD generation requires num_ue_tx_ant == num_ue_rx_ant")
         n_time = max(int(self.cfg.get("num_slots_per_sample", 1) or 1), 1)
+        sample_interval_s = float(self.cfg.get("sample_interval_s", 5e-3) or 5e-3)
         configured_model = str(self.cfg.get("channel_model", "CDL-C"))
         scenario = str(self.cfg.get("scenario", "UMa_NLOS"))
         scs = float(self.cfg.get("subcarrier_spacing", 30_000.0) or 30_000.0)
@@ -1502,6 +1517,23 @@ class InternalSimSource:
         subarray = dict(bs_ant.get("fixed_vertical_subarray") or {})
         elements_per_port = int(subarray.get("elements_per_rf_port", 1) or 1)
 
+        # **静止 + 零多普勒 + 多轮 = 逐位重复的矩阵，必须硬失败。**
+        # 小尺度实现现在按轨迹派生，时间演化全靠多普勒。速度为 0 时多普勒为 0、
+        # 位置也不动，于是同一个 UE 的每一轮都是同一个矩阵。它跑得通、meta 自洽、
+        # 下游还会把它们当成独立快照——正是最难查的那种假数据。
+        rounds = -(-int(self.num_samples) // max(int(self.num_ues), 1))
+        if rounds > 1 and doppler <= 0.0:
+            raise ValueError(
+                f"ue_speed_kmh={float(self.cfg.get('ue_speed_kmh', 3.0) or 0.0):g}"
+                f" 时多普勒为 0，位置也不动，而每个 UE 有 {rounds} 轮样本："
+                "小尺度衰落按轨迹连续演化后，这些样本会**逐位相同**，"
+                "不是 {n} 个独立信道实现（旧实现靠每样本重掷随机数掩盖了这一点，"
+                "代价是相邻样本毫无时间相关性、CSI 老化失去物理意义）。"
+                "要么给 ue_speed_kmh 一个正值（哪怕 3 km/h 也会让相邻样本按 "
+                "Jakes 去相关），要么把 num_samples 降到 num_ues 以内。"
+                "**不会静默产出重复矩阵。**".format(n=int(self.num_samples))
+            )
+
         for local_index in range(self.num_samples):
             global_index = self._offset + local_index
             ue_id = global_index % self.num_ues
@@ -1509,16 +1541,25 @@ class InternalSimSource:
             round_index = global_index // self.num_ues
             mobility_mode = str(self.cfg.get("mobility_mode", "static")).strip().lower()
             speed_mps = max(float(self.cfg.get("ue_speed_kmh", 3.0) or 0.0), 0.0) / 3.6
+            # **一条轨迹只有一个时钟。** 一个样本横跨 n_time 个 sample_interval_s，
+            # 所以第 r 轮的起始时刻是 r*n_time*dt，位移也必须走同样多的时间。
+            # 旧实现每轮只推进一个 dt，位置钟比时间钟慢 n_time 倍，相邻两轮的
+            # 时间窗口互相重叠（n_time=8 时重叠 7/8），下游还会把它们当独立快照。
+            trajectory_time_s = round_index * n_time * sample_interval_s
             if mobility_mode != "static" and speed_mps > 0.0:
                 heading = math.radians(
                     float(self.cfg.get("ue_heading_deg", self.cfg.get("track_heading_deg", 0.0)) or 0.0)
                 )
-                travel = speed_mps * float(
-                    self.cfg.get("sample_interval_s", 5e-3) or 5e-3
-                ) * round_index
+                travel = speed_mps * trajectory_time_s
                 position[0] += travel * math.cos(heading)
                 position[1] += travel * math.sin(heading)
-            rng_small = np.random.default_rng(np.random.SeedSequence([self._seed, 211, global_index]))
+            # **小尺度的随机源按轨迹派生，不按样本派生。** 同一个 UE 的所有样本
+            # 共用一套散射体（簇/射线的角度、极化相位、多普勒投影角），随时间
+            # 演化的只有多普勒相位；这样相邻样本才是同一条物理信道上的两个时刻，
+            # 而不是两次互不相干的瑞利实现。仍然只依赖 (seed, ue_id, 绝对时刻)，
+            # 与 global_index 的分片方式无关，所以并行切片依旧逐位可复现。
+            rng_small = np.random.default_rng(np.random.SeedSequence([self._seed, 211, ue_id]))
+            # 估计噪声相反：每次测量的热噪声本来就是独立的，仍按样本派生。
             rng_est = np.random.default_rng(np.random.SeedSequence([self._seed, 307, global_index]))
 
             site_state: dict[int, tuple[bool, float, float]] = {}
@@ -1618,7 +1659,7 @@ class InternalSimSource:
                 link_aod_rad=link_aod, link_aoa_rad=link_aoa,
                 link_zod_rad=link_zod, link_zoa_rad=link_zoa,
                 cell=serving_cell, ue_position=position, is_los=is_los,
-                role="serving",
+                role="serving", time_offset_s=trajectory_time_s,
             )
 
             est_mode = str(self.cfg.get("channel_est_mode", "ls_linear"))
@@ -1674,7 +1715,7 @@ class InternalSimSource:
                         float(-cross_delta[2]), cross_horizontal
                     )
                     cross_rng = np.random.default_rng(
-                        np.random.SeedSequence([self._seed, 401, global_index, k])
+                        np.random.SeedSequence([self._seed, 401, ue_id, k])
                     )
                     cross = self._small_scale_channel(
                         get_channel_profile(site_models[k]),
@@ -1693,6 +1734,7 @@ class InternalSimSource:
                         ue_position=position,
                         is_los=bool(los_all[k]),
                         role="interferer",
+                        time_offset_s=trajectory_time_s,
                     )
                     rows.append((cross * scale).astype(np.complex64))
                     if len(rows) >= max_cells:
@@ -1811,6 +1853,14 @@ class InternalSimSource:
                 "rs_opportunity_abstraction_used": False,
                 "channel_generation_mode": "internal_sim",
                 "time_axis_semantics": "slot_snapshots",
+                "small_scale_time_model": "continuous_trajectory_jakes_v1",
+                "small_scale_seed_scope": "per_trajectory_ue",
+                "trajectory_time_s": trajectory_time_s,
+                "sample_time_window_s": [
+                    trajectory_time_s,
+                    trajectory_time_s + n_time * sample_interval_s,
+                ],
+                "sample_interval_s": sample_interval_s,
                 "symbol_grid_approximate": (
                     int(self.cfg.get("num_ofdm_symbols", 14) or 14) < 14
                 ),
