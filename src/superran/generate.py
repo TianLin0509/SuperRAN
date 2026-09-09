@@ -43,6 +43,13 @@ _SCALAR_META_FIELDS = (
     "indexed_slot_rs_schedule_valid", "rs_opportunity_abstraction_used",
     "effective_channel_model",
     "pathloss_model", "pathloss_model_approximate",
+    # SRS 测量事件的时间语义。没有这几个，系统侧拿到 h_est 之后无从知道它是
+    # 哪次机会、哪一跳测的，只能用自己的 CsiConfig 重算一份并不成立的新鲜度。
+    "srs_occasion_index", "srs_hop_index",
+    "srs_estimation_period_ms", "srs_estimation_processing_delay_ms",
+    "csi_aging_already_in_estimate", "channel_est_cold_start",
+    "channel_est_pilot_rb_count", "channel_est_full_band_srs",
+    "srs_measurement_policy", "trajectory_time_s",
     # SRS occasion this snapshot actually sounded (victim side).
     "srs_occurrence_index", "srs_victim_rb_start", "srs_victim_rb_count",
     "srs_victim_frequency_resource_id", "srs_victim_ue_id", "srs_victim_cell_id",
@@ -74,6 +81,21 @@ _VECTOR_META_FIELDS = (
     "physical_site_group_ids",
     "effective_channel_model_all",
     "dl_interference_power_per_slot_per_cell_mw",
+)
+
+# 逐样本的向量，但**不是逐小区量**，而且只有部分配置会产生。
+# 不能并进 _VECTOR_META_FIELDS：那个注册表的合同是"每一项都是逐小区量、
+# 且每个样本都必然有"，有一条测试逐字段核对它。
+#
+# ``csi_rbg_age_occasions``：逐 RBG 的 CSI 已经陈旧了几次 SRS 机会
+# （-1 = 本轨迹还没探到过）。只有 ls_hop_* 估计档会产生它。
+# ``csi_rbg_age_by_slot`` / ``srs_occasion_by_slot``：同样的量，但**逐 slot**。
+# 一个样本内部可能跨过多次 SRS 机会，只留每样本一份会让下游把新鲜度落在
+# 错误的 slot 上（实测 4 个 slot 横跨 3 次机会，meta 只带最后一次）。
+_OPTIONAL_VECTOR_META_FIELDS = (
+    "csi_rbg_age_occasions",
+    "csi_rbg_age_by_slot",
+    "srs_occasion_by_slot",
 )
 
 # h_interferers 的逐干扰源身份（最强优先）。它是"每干扰源"向量而不是
@@ -499,6 +521,12 @@ def _parallel_exactness_blocker(
     speed = float(cfg.get("ue_speed_kmh", 0.0) or 0.0)
     if mobility != "static" and speed > 0.0:
         return "移动轨迹跨样本有状态，尚不能无缝分块；为保持连续轨迹改用串行"
+    est_mode = str(cfg.get("channel_est_mode", "ls_linear"))
+    if est_mode in ("ls_hop_sequential", "ls_hop_concat"):
+        return (
+            f"channel_est_mode={est_mode!r} 要跨 SRS 机会攒带宽，估计器逐 UE 有状态；"
+            "分块会让每块从冷启动重来，改用串行"
+        )
     return None
 
 
@@ -542,6 +570,8 @@ def _collect(
     cross_ids: dict[str, list[np.ndarray]] = {k: [] for k in _CROSS_LINK_ID_FIELDS}
     intf_ids: dict[str, list[np.ndarray]] = {k: [] for k in _INTERFERER_ID_FIELDS}
     vector_metas: dict[str, list[np.ndarray]] = {k: [] for k in _VECTOR_META_FIELDS}
+    optional_vector_metas: dict[str, list[np.ndarray]] = {
+        k: [] for k in _OPTIONAL_VECTOR_META_FIELDS}
     ssb_rsrp: list[list[float]] = []
     ssb_sinr: list[list[float]] = []
 
@@ -679,6 +709,9 @@ def _collect(
         for k in _VECTOR_META_FIELDS:
             if k in meta:
                 vector_metas[k].append(np.asarray(meta[k]))
+        for k in _OPTIONAL_VECTOR_META_FIELDS:
+            if k in meta and meta[k] is not None:
+                optional_vector_metas[k].append(np.asarray(meta[k]))
 
         ssb_rsrp.append(list(getattr(sample, "ssb_rsrp_dBm", None) or []))
         ssb_sinr.append(list(getattr(sample, "ssb_sinr_dB", None) or []))
@@ -753,6 +786,11 @@ def _collect(
         else:
             payload[f"meta__{k}"] = arr
     for k, vals in vector_metas.items():
+        if len(vals) == accepted and vals and all(a.shape == vals[0].shape for a in vals):
+            payload[f"metavec__{k}"] = np.stack(vals)
+    for k, vals in optional_vector_metas.items():
+        # **要么每个样本都有、要么整个字段不落盘。** 半份逐 RBG 年龄比没有更糟：
+        # 下游会拿它当完整的新鲜度依据用。
         if len(vals) == accepted and vals and all(a.shape == vals[0].shape for a in vals):
             payload[f"metavec__{k}"] = np.stack(vals)
     if ssb_rsrp and all(len(x) == len(ssb_rsrp[0]) for x in ssb_rsrp) and ssb_rsrp[0]:

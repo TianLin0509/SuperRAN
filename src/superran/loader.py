@@ -324,6 +324,32 @@ class Dataset:
         return out
 
     @cached_property
+    def csi_hop_state(self) -> dict[str, np.ndarray] | None:
+        """跳频估计档随数据落盘的 CSI 时间语义，没有就返回 ``None``。
+
+        ``rbg_age_occasions`` 形状 ``[N, RBG]``：这个样本上每个 RBG 的 CSI 已经
+        陈旧了几次 SRS 机会（``-1`` 表示这条轨迹还没探到过它）。系统侧必须读它
+        来定新鲜度，**不能**拿自己的 CsiConfig 重算——数据是按哪次机会、哪一跳
+        测的，只有生成器知道。
+        """
+        key = "metavec__csi_rbg_age_occasions"
+        if key not in self._npz.files:
+            return None
+        out: dict[str, np.ndarray] = {"rbg_age_occasions": self._npz[key]}
+        # 逐 slot 的那两份才是下游真正该用的：一个样本内部可能跨过多次 SRS
+        # 机会，按样本平铺会把新鲜度落在错误的 slot 上。
+        for name in ("csi_rbg_age_by_slot", "srs_occasion_by_slot"):
+            vec_key = "metavec__" + name
+            if vec_key in self._npz.files:
+                out[name] = self._npz[vec_key]
+        for name in ("srs_occasion_index", "srs_estimation_period_ms",
+                     "srs_estimation_processing_delay_ms", "srs_hop_index"):
+            scalar_key = "meta__" + name
+            if scalar_key in self._npz.files:
+                out[name] = self._npz[scalar_key]
+        return out
+
+    @cached_property
     def ssb(self) -> dict[str, np.ndarray]:
         """多小区 SSB 测量：每小区 RSRP / SINR，[N, K]。"""
         out = {}

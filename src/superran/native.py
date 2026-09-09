@@ -15,7 +15,7 @@ import hashlib
 import json
 import math
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -410,6 +410,66 @@ def _srs_port_sequences(
     )
 
 
+HOP_EST_MODES = frozenset({"ls_hop_sequential", "ls_hop_concat"})
+LMMSE_EST_MODES = frozenset({"ls_mmse", "ls_lmmse"})
+
+
+def ls_pilot_observation(
+    h_true: np.ndarray,
+    pilot_rb: np.ndarray,
+    sigma: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """LS 观测 ``H_p = H + n``，形状 ``[RB_p, symbol, port, rx]``。
+
+    本仓的信道张量到 RB 为止、没有逐 RE 波形，所以这里是**相干解扩之后**的
+    等效观测：把接收信号除以已知导频（Y/X）的结果就是真值加一个复高斯项，
+    方差由测量 SNR 给定。序列长度带来的处理增益不在这里重复计入——它已经
+    包含在调用方给的 ``snr_dB`` 口径里。这是工程近似，会写进数据集 meta。
+    """
+    obs = np.moveaxis(np.asarray(h_true)[:, pilot_rb], 1, 0).astype(np.complex128)
+    if float(sigma) <= 0.0:
+        return obs
+    noise = rng.standard_normal(obs.shape) + 1j * rng.standard_normal(obs.shape)
+    return obs + (float(sigma) / math.sqrt(2.0)) * noise
+
+
+def frequency_interpolate(
+    values: np.ndarray,
+    positions: np.ndarray,
+    n_rb: int,
+    *,
+    est_mode: str,
+    tau_rms_s: float,
+    delta_f_hz: float,
+    snr_linear: float,
+) -> np.ndarray:
+    """把导频观测铺到全带宽，返回 ``[RB, ...]``。
+
+    * ``ls_linear`` —— 导频之间线性插值，导频以外不做任何平滑。**这是没有
+      先验的基线**：导频铺满全带时它就等于原始 LS，噪声一点没压。
+    * ``ls_mmse`` / ``ls_lmmse`` —— 维纳插值 ``R_tp (R_pp + R_v)^-1 H_p``，
+      ``R`` 由指数功率时延谱和 ``tau_rms`` 给出。即使导频铺满全带它也**压噪**：
+      信道在频域相关而噪声白，这就是它比 LS 好的全部原因。
+    * 跳频档同样走维纳插值：一次只探部分带宽，非导频 RB 必须靠先验补。
+    """
+    grid = np.arange(int(n_rb), dtype=np.float64)
+    if est_mode in LMMSE_EST_MODES or est_mode in HOP_EST_MODES:
+        return lmmse_frequency_interpolate(
+            values, positions, grid, float(tau_rms_s), float(delta_f_hz),
+            float(snr_linear), dtype="complex64")
+    out = np.empty((int(n_rb), *np.asarray(values).shape[1:]), dtype=np.complex64)
+    flat_in = np.asarray(values).reshape(np.asarray(values).shape[0], -1)
+    flat_out = out.reshape(int(n_rb), -1)
+    pos = np.asarray(positions, dtype=np.float64).reshape(-1)
+    for col in range(flat_in.shape[1]):
+        flat_out[:, col] = (
+            np.interp(grid, pos, flat_in[:, col].real)
+            + 1j * np.interp(grid, pos, flat_in[:, col].imag)
+        ).astype(np.complex64)
+    return out
+
+
 def estimate_channel_with_interference(
     *,
     h_serving_true: np.ndarray,
@@ -424,19 +484,28 @@ def estimate_channel_with_interference(
     srs_rb_indices: np.ndarray,
     tau_rms_ns: float = 300.0,
     subcarrier_spacing: float = 30_000.0,
+    prior_estimate: np.ndarray | None = None,
+    pilot_history: Sequence[tuple[np.ndarray, np.ndarray]] = (),
     **kwargs: Any,
 ) -> SimpleNamespace:
-    """Compact first-party SRS/CSI-RS LS or frequency-LMMSE observer.
+    """First-party SRS/CSI-RS 观测器：LS 导频观测 + 频域插值。
 
-    The audit helper intentionally exposes only the estimated channel.  It
-    consumes the real pilot RB positions and never substitutes ``h_true`` for
-    a missing observation.
+    **这是主生成链唯一的估计入口**（``InternalSimSource.iter_samples`` 直接调它）。
+    它消费真实的导频 RB 位置，绝不用 ``h_true`` 顶替缺失的观测。
 
-    ``h_interferers`` is an **audit-only** contamination injection and must be
-    the UL cross-link from each colliding UE to this gNB, already weighted by
-    that UE's residual pilot correlation.  It is not the dataset's
-    ``h_interferers`` tensor, which is the downlink neighbour-gNB -> our-UE
-    channel.  The calibrated end-to-end path is
+    返回 ``h_est``（全带宽估计）、``h_pilot``（本次机会的 LS 观测）和
+    ``pilot_rb``（本次探到的 RB）。后两个给跳频档用来跨机会拼带宽。
+
+    ``prior_estimate`` 是上一次机会留下的全带估计；``ls_hop_sequential`` 只刷新
+    本次探到的那些 RB，其余保留上一次的**估计值**（不是从旧真值快照复制）。
+    ``pilot_history`` 是各跳最近一次的 ``(rb, 观测)``；``ls_hop_concat`` 把它们
+    与本次观测并成一组非均匀导频，做一次联合维纳插值。
+
+    ``h_interferers`` must be the UL cross-link from each colliding UE to this
+    gNB, already weighted by that UE's residual pilot correlation.  It is not
+    the dataset's ``h_interferers`` tensor, which is the downlink
+    neighbour-gNB -> our-UE channel; substituting that models the wrong link,
+    the wrong array and the wrong angles.  The calibrated end-to-end path is
     :func:`superran.srs_waveform.observe_srs_leg`, which synthesises real
     resource elements and despreads them instead of assuming a weight.
     """
@@ -450,47 +519,67 @@ def estimate_channel_with_interference(
     symbols = np.flatnonzero(np.asarray(valid_symbol_mask, dtype=bool))
     if symbols.size == 0:
         raise ValueError("valid_symbol_mask selects no observation")
+    mode = str(est_mode)
+    n_rb = int(truth.shape[1])
     n0 = 10.0 ** (-float(snr_dB) / 10.0)
-    estimate = np.empty_like(truth)
-    grid = np.arange(truth.shape[1])
-    for symbol in range(truth.shape[0]):
-        observed_symbol = int(symbols[np.argmin(np.abs(symbols - symbol))])
-        pilot_values = truth[observed_symbol, pilots].astype(np.complex128)
-        if h_interferers is not None:
-            interference = np.asarray(h_interferers)
-            if interference.size:
-                # Colliding pilots ADD; averaging them would keep K
-                # interferers at the power of one.  ``h_interferers`` here
-                # must already be the UL cross-link (interfering UE -> this
-                # gNB) scaled by its residual pilot correlation -- passing a
-                # downlink neighbour-gNB channel models the wrong link.
-                pilot_values = pilot_values + np.sum(
-                    interference, axis=0
-                )[observed_symbol, pilots]
-        if n0 > _EPS:
-            noise = (rng.standard_normal(pilot_values.shape) + 1j * rng.standard_normal(pilot_values.shape))
-            pilot_values = pilot_values + math.sqrt(n0 / 2.0) * noise
-        if str(est_mode) in {"ls_mmse", "ls_lmmse"}:
-            full = lmmse_frequency_interpolate(
-                pilot_values,
-                pilots,
-                grid,
-                float(tau_rms_ns) * 1e-9,
-                12.0 * float(subcarrier_spacing),
-                1.0 / max(n0, _EPS),
-                dtype="complex64",
-            )
-        else:
-            full = np.empty((truth.shape[1], *truth.shape[2:]), dtype=np.complex64)
-            for port in range(truth.shape[2]):
-                for rx in range(truth.shape[3]):
-                    values = pilot_values[:, port, rx]
-                    full[:, port, rx] = (
-                        np.interp(grid, pilots, values.real)
-                        + 1j * np.interp(grid, pilots, values.imag)
-                    )
-        estimate[symbol] = full
-    return SimpleNamespace(h_est=estimate)
+    snr_linear = 1.0 / max(n0, _EPS)
+    tau_s = float(tau_rms_ns) * 1e-9
+    delta_f = 12.0 * float(subcarrier_spacing)
+
+    # 只有被 valid_symbol_mask 选中的符号上真的有 SRS/CSI-RS；其余符号取
+    # 时间上最近的那次观测，也就是"CSI 在两次机会之间保持不变"。
+    observed = np.asarray(
+        [int(symbols[np.argmin(np.abs(symbols - t))]) for t in range(truth.shape[0])]
+    )
+    contaminated = truth.astype(np.complex128)
+    if h_interferers is not None:
+        interference = np.asarray(h_interferers)
+        if interference.size:
+            # **碰撞的导频是相加，不是取平均。** 取平均会让 K 个干扰者加起来
+            # 只剩一个的功率——污染越多反而越干净，方向完全反了。
+            contaminated = contaminated + np.sum(interference, axis=0)
+    pilot_obs = ls_pilot_observation(
+        contaminated[observed], pilots, math.sqrt(max(n0, 0.0)), rng)
+
+    if mode == "ls_hop_concat" and pilot_history:
+        # **本次机会的观测必须赢。** 跳序是 17 个 RBG 的置换，第 18 次机会又会
+        # 回到第 1 次探过的那个 RBG；历史里那条陈旧观测和本次观测落在同一批 RB
+        # 上。曾经的写法把本次观测拼在最后再用 np.unique(return_index=True) 去重
+        # ——它保留的是**首次**出现，于是从第 18 次机会起，刚测到的子带永远被
+        # 17 次机会以前的旧值挤掉（实测：真值 9、LS 观测 9，输出仍是旧的 1）。
+        # 现在显式地先把与本次 RB 重叠的历史条目剔掉，不依赖去重函数的取舍顺序。
+        current = set(int(v) for v in pilots.tolist())
+        positions = [pilots]
+        values = [pilot_obs]
+        for raw_rb, raw_val in pilot_history:
+            rb = np.asarray(raw_rb, dtype=np.int64).reshape(-1)
+            keep_mask = np.asarray([int(v) not in current for v in rb.tolist()])
+            if not bool(np.any(keep_mask)):
+                continue
+            positions.append(rb[keep_mask])
+            values.append(np.asarray(raw_val)[keep_mask])
+        merged_pos = np.concatenate(positions)
+        merged_val = np.concatenate(values, axis=0)
+        if np.unique(merged_pos).size != merged_pos.size:
+            raise ValueError(
+                "跳频拼接出现重复导频 RB：各跳的 RB 集合必须互不重叠")
+        order = np.argsort(merged_pos)
+        full = frequency_interpolate(
+            merged_val[order], merged_pos[order], n_rb, est_mode=mode,
+            tau_rms_s=tau_s, delta_f_hz=delta_f, snr_linear=snr_linear)
+    else:
+        full = frequency_interpolate(
+            pilot_obs, pilots, n_rb, est_mode=mode,
+            tau_rms_s=tau_s, delta_f_hz=delta_f, snr_linear=snr_linear)
+
+    estimate = np.moveaxis(full, 0, 1).astype(np.complex64)
+    if mode == "ls_hop_sequential" and prior_estimate is not None:
+        held = np.array(prior_estimate, dtype=np.complex64, copy=True)
+        if held.shape != estimate.shape:
+            raise ValueError("prior_estimate 与本次信道张量形状不符")
+        held[:, pilots] = estimate[:, pilots]
+        estimate = held
+    return SimpleNamespace(h_est=estimate, h_pilot=pilot_obs, pilot_rb=pilots)
 
 
 # ---------------------------------------------------------------------------
@@ -1048,14 +1137,24 @@ def _spatial_panel_response(
     horizontal_spacing: float = 0.5,
     vertical_spacing: float = 0.5,
 ) -> np.ndarray:
-    """Separable unit-norm response for one polarization block."""
+    """Separable unit-norm response for one polarization block.
+
+    The vertical index follows the ``top_to_bottom`` port contract: ``v=0`` is
+    the topmost row and the element height *decreases* with ``v``.  The phase
+    reference sits at the geometric centre of the column, so the vertical term
+    is ``(z0 - v * d_v) * sin(el)`` with ``z0 = (n_v - 1) * d_v / 2`` — the same
+    coordinates :meth:`EffectiveArray.physical_positions_lambda` uses.  Both
+    array-response implementations therefore describe one and the same array;
+    an earlier ``+v * d_v`` here pointed the vertical steering the opposite way.
+    """
     elevation = np.pi / 2.0 - float(zenith_rad)
+    z0 = (int(n_v) - 1.0) * float(vertical_spacing) / 2.0
     values = []
     for h in range(int(n_h)):
         for v in range(int(n_v)):
             phase = 2.0 * np.pi * (
                 float(horizontal_spacing) * h * math.cos(elevation) * math.sin(float(azimuth_rad))
-                + float(vertical_spacing) * v * math.sin(elevation)
+                + (z0 - float(vertical_spacing) * v) * math.sin(elevation)
             )
             values.append(np.exp(1j * phase))
     result = np.asarray(values, dtype=np.complex128)
@@ -1183,6 +1282,208 @@ class InternalSimSource:
         self._seed = int(self.cfg.get("seed", 0) or 0)
         self._ue_seed = int(self.cfg.get("ue_seed", self._seed + 1) or (self._seed + 1))
         self._offset = int(self.cfg.get("sample_index_offset", 0) or 0)
+        # 跳频估计档要跨 SRS 机会攒带宽，所以生成器在这两档下**有状态**。
+        # 每个 UE 一份：上一次机会留下的全带估计、以及各跳最近一次的导频观测。
+        # generate._parallel_exactness_blocker 会因此把这两档强制串行。
+        self._hop_estimate: dict[tuple[int, str], np.ndarray] = {}
+        self._hop_pilots: dict[tuple[int, str], dict[int, tuple[np.ndarray, np.ndarray]]] = {}
+        self._hop_last_seen: dict[tuple[int, str], dict[int, int]] = {}
+        self._hop_occasion: dict[tuple[int, str], int] = {}
+        self._hop_last_rbg: dict[int, int] = {}
+
+    def _srs_occasion(self, trajectory_time_s: float, slot_duration_s: float,
+                      srs_offset_slots: int) -> tuple[int, float, float]:
+        """本样本时刻真正可用的那次 SRS 机会，返回 ``(序号, 周期 ms, 时延 ms)``。
+
+        **必须与调度侧共用同一个时序公式**（``csi_aging.srs_occasion_index``）。
+        早先这里按"一个样本一次机会"推进跳序，而调度侧按 SRS 周期 + 处理时延推进，
+        两个时钟从第一个快照起就对不上——实测 20 个快照里两侧标出来的 RBG
+        一个都对不上，估计值的逐 RBG 年龄和调度器的新鲜度门说的是两件事。
+        """
+        from . import csi_aging as ca  # noqa: PLC0415
+
+        period_ms = max(
+            float(self.cfg.get("srs_periodicity", 10) or 10) * float(slot_duration_s) * 1e3,
+            1e-9,
+        )
+        delay_ms = float(self.cfg.get("srs_processing_delay_ms", 2.0) or 0.0)
+        offset_ms = (float(srs_offset_slots) * float(slot_duration_s) * 1e3) % period_ms
+        index = ca.srs_occasion_index(
+            float(trajectory_time_s) * 1e3, period_ms=period_ms,
+            processing_delay_ms=delay_ms, offset_ms=offset_ms)
+        self._srs_offset_ms = offset_ms
+        return index, period_ms, delay_ms
+
+    def _hop_estimate_sequence(
+        self, *, ue_id: int, est_mode: str, est_snr: float,
+        rng_est: np.random.Generator, n_time: int, n_rb: int,
+        trajectory_time_s: float, sample_interval_s: float,
+        slot_duration_s: float, srs_offset_slots: int,
+        channel_at: Any, tau_rms_ns: float, subcarrier_spacing: float,
+        assignment: Any = None, contamination: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, bool, list[int], int,
+               np.ndarray, np.ndarray]:
+        """跳频档的估计：**在每次 SRS 机会自己的测量时刻上取信道**。
+
+        这是"时钟统一"必须落到观测内容上的那一半。只把跳序标签对齐、观测仍取
+        当前样本的信道，等于发给调度器一份贴着旧标签的新 CSI——实测标着 0 ms
+        测量的估计与 H(0 ms) 相对差 1.325、与 H(5 ms) 只差 0.196（就是估计噪声），
+        跳频档因此**根本没有老化**。
+
+        三件事在同一个循环里解决：
+        * 观测在 ``t_m = offset + n*period`` 上取，不是在样本时刻取；
+        * 两个样本之间跨过的**每一次**机会都补测（粗采样时不再漏跳）；
+        * 一个样本内部逐 slot 按各自时刻找机会，同一次机会内估计逐位不变。
+
+        ``channel_at(t_s)`` 由调用方给出，用同一条轨迹的散射体在任意时刻重算
+        小尺度信道（连续轨迹让这件事逐位可复现，实测差 0）。**大尺度几何用的是
+        当前样本的**（角度、路损）：``static`` 场景下完全精确；UE 真的在动时，
+        测量时刻与样本时刻之间的位移没有反映到角度里，这一条写进 meta。
+        """
+        from . import csi_aging as ca  # noqa: PLC0415
+
+        period_ms = max(
+            float(self.cfg.get("srs_periodicity", 10) or 10)
+            * float(slot_duration_s) * 1e3, 1e-9)
+        delay_ms = float(self.cfg.get("srs_processing_delay_ms", 2.0) or 0.0)
+        offset_ms = (float(srs_offset_slots) * float(slot_duration_s) * 1e3) % period_ms
+        hop_cycle = len(_COMPANY_HOP_ORDER)
+
+        slots: dict[str, list[np.ndarray]] = {"dl": [], "ul": []}
+        cold_start = False
+        hop_index = -1
+        occasion = 0
+        # **逐 slot 记，不是逐样本记。** 一个样本内部可能跨过多次 SRS 机会
+        # （实测 4 个 slot 横跨 3 次机会）；只留最后一次会让下游把新鲜度落在
+        # 错误的 slot 上，而且前面几个 slot 的年龄整条都是错的。
+        age_by_slot: list[list[int]] = []
+        occasion_by_slot: list[int] = []
+        for slot in range(int(n_time)):
+            t_slot = float(trajectory_time_s) + slot * float(sample_interval_s)
+            occasion = ca.srs_occasion_index(
+                t_slot * 1e3, period_ms=period_ms,
+                processing_delay_ms=delay_ms, offset_ms=offset_ms)
+            cursor = self._hop_occasion.get(ue_id)
+            if cursor is None:
+                cursor = occasion - 1
+                cold_start = True
+            # 补测所有漏掉的机会；超过一个完整跳频周期就没必要再往回补了
+            # （那时全带都会被重新扫过一遍）。
+            first = max(cursor + 1, occasion - hop_cycle + 1)
+            for index in range(first, occasion + 1):
+                measured = channel_at((offset_ms + index * period_ms) / 1e3)
+                pilots = self._srs_pilot_rbs(n_rb, index, est_mode, assignment)
+                # **被探到的是哪个 RBG，只能从真正探到的那些 RB 反推。**
+                # 每个 UE 有自己的 SRS 频域相位，全局固化跳序只是没有资源分配
+                # 时的兜底；拿它记账会和实际探测对不上——实测 4 个 UE、8 个样本
+                # 全部错位（实际探 RBG8，却把 RBG0 标成新）。
+                rbg = self._sounded_rbg(pilots)
+                for direction in ("dl", "ul"):
+                    key = (ue_id, direction)
+                    history = (
+                        tuple(self._hop_pilots.get(key, {}).values())
+                        if est_mode == "ls_hop_concat" else ()
+                    )
+                    out = estimate_channel_with_interference(
+                        h_serving_true=measured,
+                        pilots_serving=None,
+                        interferer_cell_ids=None,
+                        direction=direction,
+                        snr_dB=est_snr,
+                        rng=rng_est,
+                        est_mode=est_mode,
+                        valid_symbol_mask=np.ones(1, dtype=bool),
+                        srs_rb_indices=pilots,
+                        tau_rms_ns=tau_rms_ns,
+                        subcarrier_spacing=subcarrier_spacing,
+                        prior_estimate=self._hop_estimate.get(key),
+                        pilot_history=history,
+                        # 污染是上行 SRS 上的现象，下行 CSI-RS 估计不吃它。
+                        h_interferers=(contamination if direction == "ul" else None),
+                    )
+                    self._hop_estimate[key] = out.h_est
+                    self._hop_pilots.setdefault(key, {})[rbg] = (
+                        out.pilot_rb, out.h_pilot)
+                    self._hop_last_seen.setdefault(key, {})[rbg] = index
+                self._hop_occasion[ue_id] = index
+                self._hop_last_rbg[ue_id] = rbg
+                hop_index = rbg
+            for direction in ("dl", "ul"):
+                slots[direction].append(
+                    np.asarray(self._hop_estimate[(ue_id, direction)])[0])
+            slot_seen = self._hop_last_seen.get((ue_id, "dl"), {})
+            age_by_slot.append([
+                (occasion - slot_seen[k]) if k in slot_seen else -1
+                for k in range(hop_cycle)])
+            occasion_by_slot.append(int(occasion))
+        # 本样本没有新机会时，跳序号仍应是**当前生效那份 CSI 是哪一跳测的**，
+        # 不是 -1（-1 只表示"非跳频档"）。补测循环不跑时不能把它留空。
+        # 本样本没有新机会时，跳序号仍应是**当前生效那份 CSI 是哪一跳测的**。
+        hop_index = int(self._hop_last_rbg.get(ue_id, hop_index))
+        # 范围也随最后一次真实观测保持。补测循环没有执行时，不能返回全带
+        # 默认值；concat 的历史并集也不等于最近一次探到的导频范围。
+        pilots = self._hop_pilots[(ue_id, "dl")][hop_index][0]
+        seen = self._hop_last_seen.get((ue_id, "dl"), {})
+        ages = [(occasion - seen[k]) if k in seen else -1
+                for k in range(hop_cycle)]
+        return (
+            np.stack(slots["dl"]).astype(np.complex64),
+            np.stack(slots["ul"]).astype(np.complex64),
+            pilots, hop_index, cold_start, ages, occasion,
+            np.asarray(age_by_slot, dtype=int),
+            np.asarray(occasion_by_slot, dtype=int),
+        )
+
+    def _sounded_rbg(self, pilot_rb: np.ndarray) -> int:
+        """这批导频 RB 属于哪个 RBG。
+
+        **和测量共用同一个真相。** 记账（谁被标成新、谁的 CSI 多老）如果去查
+        全局固化跳序，就会和按 SRS 资源分配算出来的实际探测位置分家：每个 UE
+        的频域相位不同，两者从第一个样本起就对不上。
+        """
+        rb = np.asarray(pilot_rb, dtype=np.int64).reshape(-1)
+        if rb.size != 16:
+            raise ValueError(
+                f"一次 SRS 机会应探 16 个 RB，收到 {rb.size} 个；"
+                "逐 RBG 的新鲜度记账依赖这个宽度")
+        start = int(rb.min())
+        if int(rb.max()) - start != 15 or start % 16 != 0:
+            raise ValueError(
+                f"导频 RB 必须是对齐的连续 16 个（收到 {start}..{int(rb.max())}）")
+        return start // 16
+
+    def _srs_pilot_rbs(self, n_rb: int, occasion: int, est_mode: str,
+                       assignment: Any = None) -> np.ndarray:
+        """本次 SRS 机会真正探到的 RB。
+
+        非跳频档是**显式的全带 SRS 工程上界**：一次覆盖全带宽，每个 RB 都有导频。
+        跳频档按 TS 38.211 表 6.4.1.4.3-1 的 ``C_SRS=63 / B_SRS=1 / b_hop=0``
+        取 16 RB 一跳，顺序用本仓固化的 17-hop profile（与 ``csi_aging.hop_order``
+        同一条序列）。其它带宽直接拒绝——跳频树不静默推广。
+        """
+        if est_mode not in HOP_EST_MODES:
+            return np.arange(int(n_rb), dtype=np.int64)
+        if assignment is not None and int(n_rb) == 272:
+            # **探测 RB 的唯一真相是 SRS 资源分配。** 分配器给的是这个 UE 自己的
+            # 频域相位，固化跳序只是没有分配时的兜底；两者并存会让"污染落在哪些
+            # RB"和"导频取自哪些 RB"指向不同的子带——文本上合得上，物理上是错的。
+            from .srs_waveform import assignment_rb_indices  # noqa: PLC0415
+
+            return np.asarray(
+                assignment_rb_indices(assignment, int(occasion) % len(_COMPANY_HOP_ORDER)),
+                dtype=np.int64)
+        if int(n_rb) != 272:
+            raise ValueError(
+                f"channel_est_mode={est_mode!r} 需要 272 RB 的 17x16 跳频 profile"
+                f"（C_SRS=63, B_SRS=1, b_hop=0），本次 num_rb={int(n_rb)}。"
+                "跳频树不提供通用推广：请改用非跳频估计档，或把载波设成 272 RB。"
+            )
+        resource = SRSResourceConfig(
+            C_SRS=63, B_SRS=1,
+            K_TC=int(self.cfg.get("srs_comb", 2) or 2),
+            n_RRC=0, b_hop=0,
+        )
+        return srs_rb_indices(resource, int(occasion), 0, int(n_rb))
 
     def _build_sites(self) -> list[Cell]:
         n_sites = max(int(self.cfg.get("num_sites", 1) or 1), 1)
@@ -1960,7 +2261,8 @@ class InternalSimSource:
     def _channel(self, profile: ChannelProfile, rng: np.random.Generator, *,
                  n_time: int, n_rb: int, n_bs: int, n_ue: int, doppler_hz: float,
                  realization_index: int, link_aod_rad: float, link_aoa_rad: float,
-                 link_zod_rad: float, link_zoa_rad: float) -> np.ndarray:
+                 link_zod_rad: float, link_zoa_rad: float,
+                 time_offset_s: float = 0.0) -> np.ndarray:
         powers = 10.0 ** (profile.powers_dB / 10.0)
         powers /= max(float(np.sum(powers)), _EPS)
         tau_rms = float(self.cfg.get("tau_rms_ns", 300.0) or 300.0) * 1e-9
@@ -1968,7 +2270,18 @@ class InternalSimSource:
         scs = float(self.cfg.get("subcarrier_spacing", 30_000.0) or 30_000.0)
         freq = (np.arange(n_rb, dtype=np.float64) - (n_rb - 1.0) / 2.0) * 12.0 * scs
         interval = float(self.cfg.get("sample_interval_s", 5e-3) or 5e-3)
-        times = np.arange(n_time, dtype=np.float64) * interval
+        # **绝对时间轴。** ``time_offset_s`` 是本样本第一个 slot 在这条轨迹上的
+        # 时刻；同一个 UE 的第 r 轮覆盖 ``[r*n_time*dt, (r+1)*n_time*dt)``，
+        # 相邻两轮首尾相接、不重叠。配合"每条轨迹一套散射体"（rng 按 UE 派生，
+        # 见 iter_samples），小尺度衰落就成了时间的连续函数，相邻样本的相关系数
+        # 自动等于 Jakes 的 ``J0(2*pi*f_d*dt)``——因为每条射线的多普勒投影角
+        # 是均匀分布的，而 ``E_theta[exp(j*2*pi*f_d*cos(theta)*dt)] = J0(...)``。
+        #
+        # 这一步对 CDL 正确、对射线追踪**错误**，两者不能照抄：CDL 每条径的相位
+        # 是随机数、位置移动只改簇的角度，时间演化全靠这里的多普勒项；RT 的径
+        # 相位来自真实径长，位置一动几何相位就已经算过一遍，再叠加时间偏移会把
+        # 相位算两遍（sionna_rt.synthesize_channel 里有实测数字）。
+        times = float(time_offset_s) + np.arange(n_time, dtype=np.float64) * interval
         h = np.zeros((n_time, n_rb, n_bs, n_ue), dtype=np.complex128)
         # Each diffuse table component receives 20 independent sub-rays.
         # Per-ray angle offsets, XPR/Jones phases and Doppler projections are
@@ -2090,14 +2403,12 @@ class InternalSimSource:
                 projected_fd = float(doppler_hz) * math.cos(rng.uniform(-np.pi, np.pi))
                 time_phase = np.exp(1j * (phase + 2.0 * np.pi * projected_fd * times))
                 h += math.sqrt(float(power) / ray_count) * time_phase[:, None, None, None] * delay_phase[None, :, None, None] * spatial[None, None]
-        # Large-scale realizations also vary UE-side spatial correlation.  The
-        # deterministic cycle is keyed by the global sample index so parallel
-        # slicing is exact while Monte-Carlo batches cover both well- and
-        # poorly-conditioned channels from their first few observations.
-        if n_ue > 1:
-            rho = 0.1 + 0.8 * (((int(realization_index) * 3) % 7) / 6.0)
-            mixing = (1.0 - rho) * np.eye(n_ue) + rho * np.ones((n_ue, n_ue)) / n_ue
-            h = np.einsum("...bu,uv->...bv", h, mixing, optimize=True)
+        # UE-side spatial correlation is produced by the geometry above -- the
+        # UE panel response and the per-ray polarization coupling -- and by
+        # nothing else.  An earlier build multiplied H by a rank-deficient
+        # mixing matrix whose weight cycled with period 7 in the sample index;
+        # that is not a 38.901 quantity and it stamped a deterministic period
+        # onto the conditioning of every multi-antenna channel.
         # Unit average coefficient power keeps link-level SNR semantics stable.
         h /= math.sqrt(max(float(np.mean(np.abs(h) ** 2)), _EPS))
         return h.astype(np.complex64)
@@ -2121,6 +2432,7 @@ class InternalSimSource:
         ue_position: np.ndarray,
         is_los: bool,
         role: str,
+        time_offset_s: float = 0.0,
     ) -> np.ndarray:
         """One BS-UE link's small-scale channel, shape ``[time, rb, bs, ue]``.
 
@@ -2150,6 +2462,7 @@ class InternalSimSource:
             link_aoa_rad=link_aoa_rad,
             link_zod_rad=link_zod_rad,
             link_zoa_rad=link_zoa_rad,
+            time_offset_s=time_offset_s,
         )
 
     def iter_samples(self) -> Iterator[ChannelSample]:
@@ -2163,6 +2476,7 @@ class InternalSimSource:
         if link == "BOTH" and n_ue_tx != n_ue:
             raise ValueError("paired TDD generation requires num_ue_tx_ant == num_ue_rx_ant")
         n_time = max(int(self.cfg.get("num_slots_per_sample", 1) or 1), 1)
+        sample_interval_s = float(self.cfg.get("sample_interval_s", 5e-3) or 5e-3)
         configured_model = str(self.cfg.get("channel_model", "CDL-C"))
         scenario = str(self.cfg.get("scenario", "UMa_NLOS"))
         scs = float(self.cfg.get("subcarrier_spacing", 30_000.0) or 30_000.0)
@@ -2192,6 +2506,41 @@ class InternalSimSource:
         subarray = dict(bs_ant.get("fixed_vertical_subarray") or {})
         elements_per_port = int(subarray.get("elements_per_rf_port", 1) or 1)
 
+        # **静止 + 零多普勒 + 多轮 = 逐位重复的矩阵，必须硬失败。**
+        # 小尺度实现现在按轨迹派生，时间演化全靠多普勒。速度为 0 时多普勒为 0、
+        # 位置也不动，于是同一个 UE 的每一轮都是同一个矩阵。它跑得通、meta 自洽、
+        # 下游还会把它们当成独立快照——正是最难查的那种假数据。
+        # TDD 图案与 SRS offset 只依赖配置，提到循环外算一次：估计器要在生成
+        # 每个样本之前就知道本条轨迹的 SRS 时序。
+        pattern_name = str(self.cfg.get("tdd_pattern", "DDDSU"))
+        try:
+            slots_pattern = get_tdd_pattern(pattern_name).slots
+        except ValueError:
+            slots_pattern = "".join(ch for ch in pattern_name if ch in "DSU") or "D"
+        paired_dl_rs_slot = next(
+            (idx for idx, direction in enumerate(slots_pattern) if direction in "DS"), 0)
+        paired_ul_srs_slot = next(
+            (idx for idx, direction in enumerate(slots_pattern) if direction in "US"), 0)
+        explicit_srs_offset = self.cfg.get("srs_offset")
+        srs_offset = (
+            int(explicit_srs_offset)
+            if explicit_srs_offset is not None
+            else paired_ul_srs_slot
+        )
+
+        rounds = -(-int(self.num_samples) // max(int(self.num_ues), 1))
+        if rounds > 1 and doppler <= 0.0:
+            raise ValueError(
+                f"ue_speed_kmh={float(self.cfg.get('ue_speed_kmh', 3.0) or 0.0):g}"
+                f" 时多普勒为 0，位置也不动，而每个 UE 有 {rounds} 轮样本："
+                "小尺度衰落按轨迹连续演化后，这些样本会**逐位相同**，"
+                "不是 {n} 个独立信道实现（旧实现靠每样本重掷随机数掩盖了这一点，"
+                "代价是相邻样本毫无时间相关性、CSI 老化失去物理意义）。"
+                "要么给 ue_speed_kmh 一个正值（哪怕 3 km/h 也会让相邻样本按 "
+                "Jakes 去相关），要么把 num_samples 降到 num_ues 以内。"
+                "**不会静默产出重复矩阵。**".format(n=int(self.num_samples))
+            )
+
         for local_index in range(self.num_samples):
             global_index = self._offset + local_index
             ue_id = global_index % self.num_ues
@@ -2199,16 +2548,25 @@ class InternalSimSource:
             round_index = global_index // self.num_ues
             mobility_mode = str(self.cfg.get("mobility_mode", "static")).strip().lower()
             speed_mps = max(float(self.cfg.get("ue_speed_kmh", 3.0) or 0.0), 0.0) / 3.6
+            # **一条轨迹只有一个时钟。** 一个样本横跨 n_time 个 sample_interval_s，
+            # 所以第 r 轮的起始时刻是 r*n_time*dt，位移也必须走同样多的时间。
+            # 旧实现每轮只推进一个 dt，位置钟比时间钟慢 n_time 倍，相邻两轮的
+            # 时间窗口互相重叠（n_time=8 时重叠 7/8），下游还会把它们当独立快照。
+            trajectory_time_s = round_index * n_time * sample_interval_s
             if mobility_mode != "static" and speed_mps > 0.0:
                 heading = math.radians(
                     float(self.cfg.get("ue_heading_deg", self.cfg.get("track_heading_deg", 0.0)) or 0.0)
                 )
-                travel = speed_mps * float(
-                    self.cfg.get("sample_interval_s", 5e-3) or 5e-3
-                ) * round_index
+                travel = speed_mps * trajectory_time_s
                 position[0] += travel * math.cos(heading)
                 position[1] += travel * math.sin(heading)
-            rng_small = np.random.default_rng(np.random.SeedSequence([self._seed, 211, global_index]))
+            # **小尺度的随机源按轨迹派生，不按样本派生。** 同一个 UE 的所有样本
+            # 共用一套散射体（簇/射线的角度、极化相位、多普勒投影角），随时间
+            # 演化的只有多普勒相位；这样相邻样本才是同一条物理信道上的两个时刻，
+            # 而不是两次互不相干的瑞利实现。仍然只依赖 (seed, ue_id, 绝对时刻)，
+            # 与 global_index 的分片方式无关，所以并行切片依旧逐位可复现。
+            rng_small = np.random.default_rng(np.random.SeedSequence([self._seed, 211, ue_id]))
+            # 估计噪声相反：每次测量的热噪声本来就是独立的，仍按样本派生。
             rng_est = np.random.default_rng(np.random.SeedSequence([self._seed, 307, global_index]))
 
             site_state: dict[int, tuple[bool, float, float, float]] = {}
@@ -2288,9 +2646,18 @@ class InternalSimSource:
                 link_aod_rad=link_aod, link_aoa_rad=link_aoa,
                 link_zod_rad=link_zod, link_zoa_rad=link_zoa,
                 cell=serving_cell, ue_position=position, is_los=is_los,
-                role="serving",
+                role="serving", time_offset_s=trajectory_time_s,
             )
 
+            est_pilot_rb = np.arange(n_rb, dtype=np.int64)
+            est_hop_index = -1
+            est_cold_start = False
+            est_rbg_age = None
+            est_rbg_age_by_slot = None
+            est_occasion_by_slot = None
+            est_srs_occasion = None
+            srs_period_ms = float(self.cfg.get("srs_periodicity", 10) or 10) * slot_duration * 1e3
+            srs_delay_ms = float(self.cfg.get("srs_processing_delay_ms", 2.0) or 0.0)
             # Real SRS resources for this snapshot: which 16 RB this UE
             # sounded, and which neighbour UEs share that exact leaf.
             srs_occurrence = int(round_index)
@@ -2379,10 +2746,14 @@ class InternalSimSource:
                     min(snr_db, measurement_sir if link == "BOTH" else snr_db),
                     0.1,
                 )
-                sigma = 10.0 ** (-est_snr / 20.0)
-                noise_dl = (rng_est.standard_normal(h_dl.shape) + 1j * rng_est.standard_normal(h_dl.shape)) / math.sqrt(2)
-                noise_ul = (rng_est.standard_normal(h_dl.shape) + 1j * rng_est.standard_normal(h_dl.shape)) / math.sqrt(2)
-                h_dl_est = (h_dl + sigma * noise_dl).astype(np.complex64)
+                # **一次 SRS 机会才推进一跳，不是一个样本推进一跳。**
+                # 时序取自 csi_aging.srs_occasion_index —— 与调度侧同一个公式、
+                # 同一个周期、同一个处理时延。
+                hopping = est_mode in HOP_EST_MODES
+                occasion, srs_period_ms, srs_delay_ms = self._srs_occasion(
+                    trajectory_time_s, slot_duration, srs_offset)
+                est_srs_occasion = occasion
+
                 # SRS pilot contamination.  A colliding neighbour UE's SRS
                 # survives our despreading with residual correlation rho, so
                 # its *whole channel to our gNB* lands inside our estimate.
@@ -2415,28 +2786,91 @@ class InternalSimSource:
                 elif h_ul_cross is not None:
                     cross_meta["srs_pilot_contamination_applied"] = False
 
-                if est_mode in ("ls_hop_concat", "ls_hop_sequential"):
-                    h_ul_est = self._srs_estimate_from_occasions(
-                        truth=h_dl,
-                        sigma=sigma,
-                        rng=rng_est,
-                        mode=est_mode,
-                        assignment=victim_assignment,
-                        occurrence=srs_occurrence,
-                        contamination=contamination,
-                    )
+                # 污染进估计器的形式是"已按残余相关性加权的上行交叉链路"，
+                # 由估计器在**它自己那次机会探到的 RB 上**取切片，所以不会
+                # 把一次机会的污染抹到 272 RB 上。
+                contamination_tensor = (
+                    np.stack([float(w) * np.asarray(c) for w, c in contamination])
+                    if contamination else None
+                )
+
+                if hopping:
+                    # 同一条轨迹的散射体，在任意时刻重算小尺度信道。连续轨迹让
+                    # 这件事逐位可复现（实测与原样本差 0）。每轮的几何量用默认参数
+                    # 显式绑定，闭包不去捕获循环变量。
+                    def _channel_at(
+                        moment_s: float, *, _ue=ue_id, _prof=profile,
+                        _idx=global_index, _aod=link_aod, _aoa=link_aoa,
+                        _zod=link_zod, _zoa=link_zoa, _cell=serving_cell,
+                        _pos=position, _los=is_los,
+                    ) -> np.ndarray:
+                        trace_rng = np.random.default_rng(
+                            np.random.SeedSequence([self._seed, 211, _ue]))
+                        return self._small_scale_channel(
+                            _prof, trace_rng, n_time=1, n_rb=n_rb,
+                            n_bs=n_bs, n_ue=n_ue, doppler_hz=doppler,
+                            realization_index=_idx,
+                            link_aod_rad=_aod, link_aoa_rad=_aoa,
+                            link_zod_rad=_zod, link_zoa_rad=_zoa,
+                            cell=_cell, ue_position=_pos,
+                            is_los=_los, role="serving",
+                            time_offset_s=moment_s)
+
+                    (h_dl_est, h_ul_est, est_pilot_rb, est_hop_index,
+                     est_cold_start, est_rbg_age, est_srs_occasion,
+                     est_rbg_age_by_slot, est_occasion_by_slot) = (
+                        self._hop_estimate_sequence(
+                            ue_id=ue_id, est_mode=est_mode, est_snr=est_snr,
+                            rng_est=rng_est, n_time=n_time, n_rb=n_rb,
+                            trajectory_time_s=trajectory_time_s,
+                            sample_interval_s=sample_interval_s,
+                            slot_duration_s=slot_duration,
+                            srs_offset_slots=srs_offset,
+                            channel_at=_channel_at,
+                            tau_rms_ns=ds_all[serving],
+                            subcarrier_spacing=scs,
+                            assignment=victim_assignment,
+                            contamination=contamination_tensor))
+                    # **数据集报的"本次探到哪些 RB"必须是估计器真正测的那一组。**
+                    # 主干那侧按 round_index 算 srs_occurrence，估计器按共用 SRS
+                    # 时钟（含处理时延）算机会序号，两者差一次机会：于是 meta 说
+                    # 探了 RBG0、估计其实来自 RBG9（实测 12/12 个样本全错位）。
+                    # 跳频档以估计器为准，非跳频档保持主干原样。
+                    srs_pilot_rb = np.asarray(est_pilot_rb, dtype=np.int64)
+                    srs_occurrence = int(est_srs_occasion)
                 else:
-                    h_ul_est = (h_dl + sigma * noise_ul).astype(np.complex64)
-                    if contamination:
-                        # Only the RBs this SRS occasion actually sounded can
-                        # be polluted; the legacy full-band proxy is not a
-                        # licence to smear one occasion over 272 RB.
-                        pollution = np.zeros_like(h_ul_est)
-                        for weight, cross in contamination:
-                            pollution[:, srs_pilot_rb] += (
-                                weight * np.asarray(cross)[:, srs_pilot_rb]
-                            ).astype(np.complex64)
-                        h_ul_est = (h_ul_est + pollution).astype(np.complex64)
+                    # 全带 SRS 的**工程上界**："现在就探"，每个样本自己测一次。
+                    # 跳频陈旧度由系统侧的老化模型建模（见 server 侧的守卫），
+                    # 所以这里不做机会锁定，否则周期内相位会被算两遍。
+                    est_pilot_rb = np.arange(n_rb, dtype=np.int64)
+                    mask = np.ones(n_time, dtype=bool)
+                    # 全带代理不是把一次机会的污染抹开的许可：只有这次真的探到
+                    # 的那 16 个 RB 会被污染，其余位置显式置零。
+                    masked_contamination = None
+                    if contamination_tensor is not None:
+                        masked_contamination = np.zeros_like(contamination_tensor)
+                        masked_contamination[:, :, srs_pilot_rb] = (
+                            contamination_tensor[:, :, srs_pilot_rb])
+                    results = []
+                    for direction_key in ("dl", "ul"):
+                        out = estimate_channel_with_interference(
+                            h_serving_true=h_dl,
+                            # 污染是上行 SRS 上的现象：下行估计不吃它。
+                            h_interferers=(masked_contamination
+                                           if direction_key == "ul" else None),
+                            pilots_serving=None,
+                            interferer_cell_ids=None,
+                            direction=direction_key,
+                            snr_dB=est_snr,
+                            rng=rng_est,
+                            est_mode=est_mode,
+                            valid_symbol_mask=mask,
+                            srs_rb_indices=est_pilot_rb,
+                            tau_rms_ns=ds_all[serving],
+                            subcarrier_spacing=scs,
+                        )
+                        results.append(out.h_est)
+                    h_dl_est, h_ul_est = results
             h_ul = h_dl.copy()  # canonical v2: physical transpose, same stored BS/UE tensor
             site_models = [
                 self._effective_model(configured_model, site_state[cell.site_id][0])
@@ -2485,7 +2919,7 @@ class InternalSimSource:
                         float(-cross_delta[2]), cross_horizontal
                     )
                     cross_rng = np.random.default_rng(
-                        np.random.SeedSequence([self._seed, 401, global_index, k])
+                        np.random.SeedSequence([self._seed, 401, ue_id, k])
                     )
                     cross = self._small_scale_channel(
                         get_channel_profile(site_models[k]),
@@ -2504,6 +2938,7 @@ class InternalSimSource:
                         ue_position=position,
                         is_los=bool(los_all[k]),
                         role="interferer",
+                        time_offset_s=trajectory_time_s,
                     )
                     rows.append((cross * scale).astype(np.complex64))
                     intf_cells.append(int(sites[k].cell_id))
@@ -2525,25 +2960,6 @@ class InternalSimSource:
                 max(int(self.cfg.get("num_interfering_ues", 0) or 0), 1)), -20.0)
             ul_sinr = -10.0 * math.log10(
                 10.0 ** (-snr_db / 10.0) + 10.0 ** (-ul_measure_sir / 10.0)
-            )
-            pattern_name = str(self.cfg.get("tdd_pattern", "DDDSU"))
-            try:
-                slots_pattern = get_tdd_pattern(pattern_name).slots
-            except ValueError:
-                slots_pattern = "".join(ch for ch in pattern_name if ch in "DSU") or "D"
-            paired_dl_rs_slot = next(
-                (idx for idx, direction in enumerate(slots_pattern) if direction in "DS"),
-                0,
-            )
-            paired_ul_srs_slot = next(
-                (idx for idx, direction in enumerate(slots_pattern) if direction in "US"),
-                0,
-            )
-            explicit_srs_offset = self.cfg.get("srs_offset")
-            srs_offset = (
-                int(explicit_srs_offset)
-                if explicit_srs_offset is not None
-                else paired_ul_srs_slot
             )
             antenna_profile = (
                 f"fixed_1to{elements_per_port}_vertical_subarray_{n_bs}T"
@@ -2657,6 +3073,36 @@ class InternalSimSource:
                 "rs_opportunity_abstraction_used": False,
                 "channel_generation_mode": "internal_sim",
                 "time_axis_semantics": "slot_snapshots",
+                "channel_est_implementation": "superran-ls-pilot-frequency-estimator-v1",
+                "channel_est_observation_model": "coherent_despread_rb_granular_ls",
+                "channel_est_pilot_rb_count": int(np.asarray(est_pilot_rb).size),
+                "channel_est_full_band_srs": bool(
+                    int(np.asarray(est_pilot_rb).size) == n_rb),
+                "srs_hop_index": est_hop_index,
+                "srs_occasion_index": est_srs_occasion,
+                "srs_estimation_period_ms": srs_period_ms,
+                "srs_estimation_processing_delay_ms": srs_delay_ms,
+                "srs_estimation_timing_source": "csi_aging.srs_occasion_index",
+                "srs_measurement_policy": (
+                    "occasion_locked_measured_at_srs_time"
+                    if est_mode in HOP_EST_MODES else
+                    ("perfect_csi" if est_mode == "ideal"
+                     else "sound_now_full_band_upper_bound")),
+                "srs_measurement_geometry_approximation": (
+                    "large_scale_geometry_taken_from_sample_time"
+                    if est_mode in HOP_EST_MODES else None),
+                "csi_aging_already_in_estimate": bool(est_mode in HOP_EST_MODES),
+                "srs_hop_profile": (
+                    "superran-c63-b1-bhop0-17x16" if est_hop_index >= 0 else None),
+                "channel_est_cold_start": est_cold_start,
+                "small_scale_time_model": "continuous_trajectory_jakes_v1",
+                "small_scale_seed_scope": "per_trajectory_ue",
+                "trajectory_time_s": trajectory_time_s,
+                "sample_time_window_s": [
+                    trajectory_time_s,
+                    trajectory_time_s + n_time * sample_interval_s,
+                ],
+                "sample_interval_s": sample_interval_s,
                 "symbol_grid_approximate": (
                     int(self.cfg.get("num_ofdm_symbols", 14) or 14) < 14
                 ),
@@ -2668,6 +3114,15 @@ class InternalSimSource:
                     "rs_opportunity_model": "indexed-slot TDD and periodicity schedule",
                 },
             }
+            if est_rbg_age_by_slot is not None:
+                meta["csi_rbg_age_by_slot"] = np.asarray(est_rbg_age_by_slot)
+                meta["srs_occasion_by_slot"] = np.asarray(est_occasion_by_slot)
+            if est_rbg_age is not None:
+                # **逐 RBG 的 CSI 年龄必须落盘。** 跳频档的陈旧度是烘进 h_est 的，
+                # 系统侧没有这一份就只能拿自己的 CsiConfig 重算，而它并不知道
+                # 数据是按哪次机会、哪一跳测的——实测会把"只更新了一个子带"
+                # 报成"17 个子带全新"。
+                meta["csi_rbg_age_occasions"] = list(est_rbg_age)
             paired = link == "BOTH"
             yield ChannelSample(
                 h_serving_true=h_dl,
