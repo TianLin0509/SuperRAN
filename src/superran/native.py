@@ -500,6 +500,14 @@ def estimate_channel_with_interference(
     本次探到的那些 RB，其余保留上一次的**估计值**（不是从旧真值快照复制）。
     ``pilot_history`` 是各跳最近一次的 ``(rb, 观测)``；``ls_hop_concat`` 把它们
     与本次观测并成一组非均匀导频，做一次联合维纳插值。
+
+    ``h_interferers`` must be the UL cross-link from each colliding UE to this
+    gNB, already weighted by that UE's residual pilot correlation.  It is not
+    the dataset's ``h_interferers`` tensor, which is the downlink
+    neighbour-gNB -> our-UE channel; substituting that models the wrong link,
+    the wrong array and the wrong angles.  The calibrated end-to-end path is
+    :func:`superran.srs_waveform.observe_srs_leg`, which synthesises real
+    resource elements and despreads them instead of assuming a weight.
     """
     del pilots_serving, interferer_cell_ids, direction, kwargs
     truth = np.asarray(h_serving_true, dtype=np.complex64)
@@ -527,7 +535,9 @@ def estimate_channel_with_interference(
     if h_interferers is not None:
         interference = np.asarray(h_interferers)
         if interference.size:
-            contaminated = contaminated + np.mean(interference, axis=0)
+            # **碰撞的导频是相加，不是取平均。** 取平均会让 K 个干扰者加起来
+            # 只剩一个的功率——污染越多反而越干净，方向完全反了。
+            contaminated = contaminated + np.sum(interference, axis=0)
     pilot_obs = ls_pilot_observation(
         contaminated[observed], pilots, math.sqrt(max(n0, 0.0)), rng)
 
@@ -575,6 +585,29 @@ def estimate_channel_with_interference(
 # ---------------------------------------------------------------------------
 # Array, topology and codebook primitives
 # ---------------------------------------------------------------------------
+
+# Storage defaults.  Each tensor costs one extra full small-scale channel
+# synthesis per interferer per sample, so both generation time and dataset
+# size scale with the interferer count.
+#
+# The downlink interferer channel is ON by default (2026-09-08 maintainer
+# ruling): a multi-cell dataset that silently ships without it looks like a
+# clean single-cell experiment to every downstream consumer.  Cap the cost
+# with ``max_per_ue_intf_cells`` (default 3), or switch it off explicitly.
+#
+# The UL cross-link stays opt-in: it only feeds SRS pilot contamination and
+# nothing consumes it unless that experiment is being run.
+_STORE_INTERFERER_CHANNELS_DEFAULT = True
+_STORE_SRS_CROSS_LINK_DEFAULT = False
+# Strongest-N neighbours kept per UE; matches the documented storage contract.
+_MAX_PER_UE_INTF_CELLS_DEFAULT = 3
+
+# How many SRS slots one cell can reserve before the allocator has to move to
+# a longer global period.  Measured on the product profile (272 RB / 30 kHz /
+# 17-hop / 4 cyclic shifts): 21 cells x 68 slots still fits the 10 ms period,
+# the 69th slot forces 20 ms.  Reserving up to this many costs nothing in
+# period and does not perturb the resources already handed to lower slots.
+_SRS_SLOTS_AT_BASE_PERIOD = 68
 
 PORT_LAYOUT_CONTRACT_VERSION = "pol_h_v-top_to_bottom-v1"
 
@@ -1168,6 +1201,9 @@ class ChannelSample:
     h_serving_true: np.ndarray | None = None
     h_serving_est: np.ndarray | None = None
     h_interferers: np.ndarray | None = None
+    # UL cross-link: interfering UE -> victim gNB, [intf_ue,time,rb,bs,ue].
+    # Never interchangeable with ``h_interferers`` (neighbour gNB -> our UE).
+    h_ul_cross: np.ndarray | None = None
     interference_signal: np.ndarray | None = None
     noise_power_dBm: float = -100.0
     snr_dB: float = 0.0
@@ -1283,7 +1319,9 @@ class InternalSimSource:
         trajectory_time_s: float, sample_interval_s: float,
         slot_duration_s: float, srs_offset_slots: int,
         channel_at: Any, tau_rms_ns: float, subcarrier_spacing: float,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, bool, list[int], int]:
+        assignment: Any = None, contamination: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, bool, list[int], int,
+               np.ndarray, np.ndarray]:
         """跳频档的估计：**在每次 SRS 机会自己的测量时刻上取信道**。
 
         这是"时钟统一"必须落到观测内容上的那一半。只把跳序标签对齐、观测仍取
@@ -1315,6 +1353,11 @@ class InternalSimSource:
         hop_index = -1
         pilots = np.arange(int(n_rb), dtype=np.int64)
         occasion = 0
+        # **逐 slot 记，不是逐样本记。** 一个样本内部可能跨过多次 SRS 机会
+        # （实测 4 个 slot 横跨 3 次机会）；只留最后一次会让下游把新鲜度落在
+        # 错误的 slot 上，而且前面几个 slot 的年龄整条都是错的。
+        age_by_slot: list[list[int]] = []
+        occasion_by_slot: list[int] = []
         for slot in range(int(n_time)):
             t_slot = float(trajectory_time_s) + slot * float(sample_interval_s)
             occasion = ca.srs_occasion_index(
@@ -1329,7 +1372,7 @@ class InternalSimSource:
             first = max(cursor + 1, occasion - hop_cycle + 1)
             for index in range(first, occasion + 1):
                 measured = channel_at((offset_ms + index * period_ms) / 1e3)
-                pilots = self._srs_pilot_rbs(n_rb, index, est_mode)
+                pilots = self._srs_pilot_rbs(n_rb, index, est_mode, assignment)
                 for direction in ("dl", "ul"):
                     key = (ue_id, direction)
                     history = (
@@ -1338,7 +1381,6 @@ class InternalSimSource:
                     )
                     out = estimate_channel_with_interference(
                         h_serving_true=measured,
-                        h_interferers=None,
                         pilots_serving=None,
                         interferer_cell_ids=None,
                         direction=direction,
@@ -1351,6 +1393,8 @@ class InternalSimSource:
                         subcarrier_spacing=subcarrier_spacing,
                         prior_estimate=self._hop_estimate.get(key),
                         pilot_history=history,
+                        # 污染是上行 SRS 上的现象，下行 CSI-RS 估计不吃它。
+                        h_interferers=(contamination if direction == "ul" else None),
                     )
                     self._hop_estimate[key] = out.h_est
                     rbg = int(_COMPANY_HOP_ORDER[index % hop_cycle])
@@ -1362,6 +1406,11 @@ class InternalSimSource:
             for direction in ("dl", "ul"):
                 slots[direction].append(
                     np.asarray(self._hop_estimate[(ue_id, direction)])[0])
+            slot_seen = self._hop_last_seen.get((ue_id, "dl"), {})
+            age_by_slot.append([
+                (occasion - slot_seen[k]) if k in slot_seen else -1
+                for k in range(hop_cycle)])
+            occasion_by_slot.append(int(occasion))
         # 本样本没有新机会时，跳序号仍应是**当前生效那份 CSI 是哪一跳测的**，
         # 不是 -1（-1 只表示"非跳频档"）。补测循环不跑时不能把它留空。
         held_occasion = self._hop_occasion.get(ue_id, occasion)
@@ -1373,9 +1422,12 @@ class InternalSimSource:
             np.stack(slots["dl"]).astype(np.complex64),
             np.stack(slots["ul"]).astype(np.complex64),
             pilots, hop_index, cold_start, ages, occasion,
+            np.asarray(age_by_slot, dtype=int),
+            np.asarray(occasion_by_slot, dtype=int),
         )
 
-    def _srs_pilot_rbs(self, n_rb: int, occasion: int, est_mode: str) -> np.ndarray:
+    def _srs_pilot_rbs(self, n_rb: int, occasion: int, est_mode: str,
+                       assignment: Any = None) -> np.ndarray:
         """本次 SRS 机会真正探到的 RB。
 
         非跳频档是**显式的全带 SRS 工程上界**：一次覆盖全带宽，每个 RB 都有导频。
@@ -1385,6 +1437,15 @@ class InternalSimSource:
         """
         if est_mode not in HOP_EST_MODES:
             return np.arange(int(n_rb), dtype=np.int64)
+        if assignment is not None and int(n_rb) == 272:
+            # **探测 RB 的唯一真相是 SRS 资源分配。** 分配器给的是这个 UE 自己的
+            # 频域相位，固化跳序只是没有分配时的兜底；两者并存会让"污染落在哪些
+            # RB"和"导频取自哪些 RB"指向不同的子带——文本上合得上，物理上是错的。
+            from .srs_waveform import assignment_rb_indices  # noqa: PLC0415
+
+            return np.asarray(
+                assignment_rb_indices(assignment, int(occasion) % len(_COMPANY_HOP_ORDER)),
+                dtype=np.int64)
         if int(n_rb) != 272:
             raise ValueError(
                 f"channel_est_mode={est_mode!r} 需要 272 RB 的 17x16 跳频 profile"
@@ -1512,6 +1573,657 @@ class InternalSimSource:
         fc_ghz = fc / 1e9
         exponent = 21.0 if is_los else 31.9
         return float(32.4 + 20.0 * math.log10(fc_ghz) + exponent * math.log10(max(distance_3d_m, 1.0)))
+
+    def _large_scale_state(
+        self, cell: Cell, ue_position: np.ndarray, scenario: str
+    ) -> tuple[bool, float, float, float]:
+        """One link's LOS draw, delay spread, shadow fading and LOS probability.
+
+        The law is quantised on the UE position, so the serving loop and the
+        UL cross-link generator draw the *same* random field for the same
+        (site, position) pair.  Duplicating it would let the two drift apart
+        and make an SRS contamination experiment silently non-comparable.
+        """
+        delta = np.asarray(ue_position, dtype=np.float64) - cell.position
+        d2 = max(float(np.linalg.norm(delta[:2])), 10.0)
+        p_los = min(18.0 / d2 + math.exp(-d2 / 63.0) * (1.0 - 18.0 / d2), 1.0)
+        forced = scenario.endswith("_LOS")
+        qx = int(math.floor(float(ue_position[0]) / 10.0))
+        qy = int(math.floor(float(ue_position[1]) / 10.0))
+        los_rng = np.random.default_rng(
+            _seed_from_parts(self._seed, cell.site_id, qx, qy, 0x10A5)
+        )
+        los = bool(forced or los_rng.random() < p_los)
+        tau_ns = float(self.cfg.get("tau_rms_ns", 100.0 if los else 300.0) or 300.0)
+        lsp_rng = np.random.default_rng(
+            _seed_from_parts(self._seed, cell.site_id, qx, qy, 0x15F0)
+        )
+        sf = float(lsp_rng.normal(0.0, 2.0 if los else 3.0))
+        return los, tau_ns, sf, float(p_los)
+
+    def _sector_gain_db(
+        self, cell: Cell, ue_position: np.ndarray, elements_per_port: int
+    ) -> float:
+        """Analog element/subarray gain minus the horizontal sector rolloff."""
+        delta = np.asarray(ue_position, dtype=np.float64) - cell.position
+        bearing = math.degrees(math.atan2(float(delta[1]), float(delta[0])))
+        offset = _circular_delta_deg(bearing, cell.azimuth_deg)
+        effective_array = (
+            str(self.cfg.get("antenna_model_mode", "legacy_64")) == "effective_subarray"
+        )
+        element_gain = (
+            8.0 + 10.0 * math.log10(max(int(elements_per_port), 1))
+            if effective_array else 0.0
+        )
+        return float(element_gain - min(12.0 * (offset / 65.0) ** 2, 30.0))
+
+    def _srs_cross_link_ues(
+        self,
+        *,
+        sites: list[Cell],
+        serving: int,
+        rx_all: list[float],
+        gain_all: list[float],
+        pathloss_all: list[float],
+        global_index: int,
+        scenario: str,
+        configured_model: str,
+        elements_per_port: int,
+        n_time: int,
+        n_rb: int,
+        n_bs: int,
+        n_ue: int,
+        doppler_hz: float,
+        victim_assignment: Any = None,
+        victim_slot: int | None = None,
+        srs_occupancy: list[dict[int, int]] | None = None,
+    ) -> tuple[np.ndarray | None, dict[str, Any]]:
+        """UL cross-link channels: interfering UEs -> *this* serving gNB.
+
+        This is the quantity SRS pilot contamination actually consumes, and it
+        is **not** ``h_interferers``.  ``h_interferers`` is the downlink
+        neighbour-gNB -> our-UE channel; substituting it here would model the
+        wrong link, the wrong array and the wrong angles.
+
+        Who is allowed to contaminate is decided by the repository's own SRS
+        resource contract: only cells sharing our PCI-mod-3 colour draw from
+        the same SRS resource pool, so only they can occupy the same
+        time/comb/cyclic-shift leaf.  Different-colour neighbours still
+        interfere on data (that lives in the geometry budget) but cannot
+        pollute our SRS pilots.
+
+        Returned tensor is ``[intf_ue, time, RB, gNB_rx_port, UE_port]``,
+        normalised so the *desired* UE's UL link has unit small-scale power;
+        the amplitude therefore already carries this interferer's UL received
+        power relative to the desired UE at the same gNB.
+        """
+        if not self._srs_cross_link_enabled() or len(sites) < 2:
+            return None, {}
+        same_colour_only = bool(
+            self.cfg.get("srs_cross_link_same_pci_colour_only", True)
+        )
+        serving_colour = int(sites[serving].cell_id % 1008) % 3
+        candidates = [
+            k for k in range(len(sites))
+            if k != serving
+            and (
+                not same_colour_only
+                or int(sites[k].cell_id % 1008) % 3 == serving_colour
+            )
+        ]
+        # Strongest neighbours first; ties broken by cell index so the choice
+        # never depends on Python's sort stability across topologies.
+        candidates.sort(key=lambda k: (-float(rx_all[k]), k))
+        requested = self.cfg.get("max_srs_cross_link_ues")
+        if requested is None:
+            requested = self.cfg.get("num_interfering_ues", 0) or 0
+        n_cross = max(min(int(requested), len(candidates)), 0)
+        if n_cross == 0:
+            return None, {
+                "srs_cross_link_cells": [],
+                "srs_cross_link_skipped": (
+                    "no_same_pci_colour_neighbour" if not candidates
+                    else "max_srs_cross_link_ues_is_zero"
+                ),
+            }
+
+        serving_cell = sites[serving]
+        # Desired UE's UL received level at this gNB, with the UE transmit
+        # power cancelled out: equal-power UEs, no uplink power control.
+        desired_rel_db = float(gain_all[serving]) - float(pathloss_all[serving])
+        isd = float(self.cfg.get("isd_m", 500.0) or 500.0)
+        min_d = max(float(self.cfg.get("min_ue_distance_m", 20.0) or 20.0), 10.0)
+        max_d = max(
+            float(self.cfg.get("max_ue_distance_m", isd * 0.7) or isd * 0.7),
+            min_d + 1.0,
+        )
+        height = float(self.cfg.get("ue_height_m", 1.5) or 1.5)
+
+        max_attempts = max(int(self.cfg.get("srs_cross_link_drop_attempts", 24) or 24), 1)
+
+        def _relative_level(cell: Cell, pos: np.ndarray) -> tuple[float, bool, float]:
+            los, _tau, sf, _p = self._large_scale_state(cell, pos, scenario)
+            d3 = max(float(np.linalg.norm(pos - cell.position)), 10.0)
+            gain = self._sector_gain_db(cell, pos, elements_per_port)
+            return gain - (self._pathloss(d3, los) + sf), los, d3
+
+        rows: list[np.ndarray] = []
+        cells_used: list[int] = []
+        ues_used: list[int] = []
+        collides: list[bool] = []
+        occupied_flags: list[bool] = []
+        freq_phase: list[int] = []
+        sir_db: list[float] = []
+        distances: list[float] = []
+        los_flags: list[bool] = []
+        rejected: list[int] = []
+        attempts_used: list[int] = []
+        plan = None
+        _resources_collide = None
+        if victim_assignment is not None and srs_occupancy is not None:
+            from .srs_resource import resources_collide as _rc  # noqa: PLC0415
+
+            _resources_collide = _rc
+            plan, slots_per_cell = self._srs_network_plan(
+                sites, scenario, elements_per_port
+            )
+        for k in candidates:
+            if len(rows) >= n_cross:
+                break
+            # A concrete neighbour UE, not an anonymous direction: its SRS
+            # resource is what decides whether it pollutes us at all.
+            # Which reserved interferer slot in that neighbour cell this UE
+            # occupies.  Different slots mean different SRS leaves, which is
+            # exactly what makes some same-colour neighbours harmless.
+            # Only one UE in that neighbour can possibly hit us: the one
+            # holding the *same slot index* we hold.  A different slot is a
+            # different cyclic shift or frequency phase, i.e. a different
+            # resource element set, so it cannot pollute our pilots at all.
+            # Whether such a UE exists is read from the neighbour's live
+            # occupancy -- an empty slot means nobody is sounding there.
+            intf_ue = 0 if victim_slot is None else int(victim_slot)
+            drop_rng = np.random.default_rng(
+                np.random.SeedSequence(
+                    [self._seed, 0x5C10, int(sites[k].cell_id), intf_ue]
+                )
+            )
+            # The interfering UE must really be served by cell k, otherwise the
+            # drop puts a "neighbour" UE on top of our own site and invents a
+            # contamination level no scheduler would ever produce.
+            intf_pos = None
+            for attempt in range(max_attempts):
+                radius = math.sqrt(drop_rng.uniform(min_d * min_d, max_d * max_d))
+                angle = drop_rng.uniform(-np.pi, np.pi)
+                trial = np.asarray([
+                    float(sites[k].position[0]) + radius * math.cos(angle),
+                    float(sites[k].position[1]) + radius * math.sin(angle),
+                    height,
+                ], dtype=np.float64)
+                levels = [_relative_level(cell, trial)[0] for cell in sites]
+                if int(np.argmax(levels)) == k:
+                    intf_pos = trial
+                    attempts_used.append(attempt + 1)
+                    break
+            if intf_pos is None:
+                rejected.append(int(sites[k].cell_id))
+                continue
+
+            rel_db, los, d3 = _relative_level(serving_cell, intf_pos)
+            delta = intf_pos - serving_cell.position
+            horizontal = max(float(np.linalg.norm(delta[:2])), _EPS)
+            scale = math.sqrt(max(10.0 ** ((rel_db - desired_rel_db) / 10.0), 0.0))
+
+            aod = math.atan2(float(delta[1]), float(delta[0]))
+            aoa = (aod + 2.0 * np.pi) % (2.0 * np.pi) - np.pi
+            zod = np.pi / 2.0 - math.atan2(float(delta[2]), horizontal)
+            zoa = np.pi / 2.0 - math.atan2(float(-delta[2]), horizontal)
+            cross_rng = np.random.default_rng(
+                np.random.SeedSequence([self._seed, 0x5C11, global_index, k])
+            )
+            cross = self._small_scale_channel(
+                get_channel_profile(self._effective_model(configured_model, los)),
+                cross_rng,
+                n_time=n_time,
+                n_rb=n_rb,
+                n_bs=n_bs,
+                n_ue=n_ue,
+                doppler_hz=doppler_hz,
+                realization_index=global_index * max(len(sites), 1) + k + 0x5C10,
+                link_aod_rad=aod,
+                link_aoa_rad=aoa,
+                link_zod_rad=zod,
+                link_zoa_rad=zoa,
+                cell=serving_cell,
+                ue_position=intf_pos,
+                is_los=los,
+                role="interferer",
+            )
+            other = None if plan is None else plan.get(
+                (int(sites[k].cell_id), intf_ue)
+            )
+            occupied = bool(
+                srs_occupancy is not None and intf_ue in srs_occupancy[k]
+            )
+            # Nobody holding that slot means nobody is transmitting on it, so
+            # the cross-link carries no signal.  Storing the geometry anyway
+            # lets any consumer that forgets to read the occupancy flag hand
+            # a silent UE to the receiver as if it were sounding, and invent
+            # contamination that never happened.  "No transmitter, no
+            # waveform" has to hold in the data itself, not only in a flag.
+            if plan is not None and not occupied:
+                rows.append(np.zeros_like(cross, dtype=np.complex64))
+            else:
+                rows.append((cross * scale).astype(np.complex64))
+            cells_used.append(int(sites[k].cell_id))
+            ues_used.append(intf_ue)
+            sir_db.append(
+                float(desired_rel_db - rel_db) if (plan is None or occupied)
+                else float("-inf")
+            )
+            distances.append(d3)
+            los_flags.append(bool(los))
+            if other is None:
+                # That cell does not even reserve this slot.
+                collides.append(False)
+                freq_phase.append(-1)
+            else:
+                collides.append(
+                    occupied
+                    and bool(_resources_collide(victim_assignment, other))
+                )
+                freq_phase.append(int(other.frequency_resource_id))
+            occupied_flags.append(occupied)
+
+        if len(rows) < n_cross:
+            # A ragged interferer axis would be silently dropped at write
+            # time, and the dataset would then look like a clean single-cell
+            # SRS experiment.  Fail loudly instead.
+            raise RuntimeError(
+                f"sample {global_index}: only {len(rows)} of {n_cross} requested "
+                f"SRS cross-link UEs could be dropped inside their own cell "
+                f"(same-PCI-colour candidates: {len(candidates)}, rejected: "
+                f"{rejected}).  Lower max_srs_cross_link_ues, raise "
+                f"srs_cross_link_drop_attempts, or widen max_ue_distance_m."
+            )
+        meta = {
+            "srs_cross_link_cells": cells_used,
+            "srs_cross_link_cell_ids": np.asarray(cells_used, dtype=np.int64),
+            "srs_cross_link_ue_ids": np.asarray(ues_used, dtype=np.int64),
+            "srs_cross_link_collides": np.asarray(collides, dtype=np.int64),
+            "srs_cross_link_slot_occupied": np.asarray(
+                occupied_flags, dtype=np.int64
+            ),
+            "srs_cross_link_frequency_resource_id": np.asarray(
+                freq_phase, dtype=np.int64
+            ),
+            "srs_cross_link_ul_sir_db_vec": np.asarray(sir_db, dtype=np.float64),
+            "srs_cross_link_rejected_cells": rejected,
+            "srs_cross_link_drop_attempts": attempts_used,
+            "srs_cross_link_pci": [cid % 1008 for cid in cells_used],
+            "srs_cross_link_serving_pci_mod3": serving_colour,
+            "srs_cross_link_same_pci_colour_only": same_colour_only,
+            "srs_cross_link_ul_sir_db": sir_db,
+            "srs_cross_link_distance_to_victim_m": distances,
+            "srs_cross_link_is_los": los_flags,
+            "srs_cross_link_model": (
+                "interfering_ue_to_victim_gnb_equal_ue_power_no_ul_power_control_v1"
+            ),
+            "srs_cross_link_axes": "[intf_ue,time,rb,gnb_rx_port,ue_port]",
+        }
+        return np.stack(rows), meta
+
+    def _srs_cross_link_enabled(self) -> bool:
+        """Whether to synthesise UL cross-link channels.  Explicit false wins."""
+        measurements = self.cfg.get("measurements") or {}
+        if "srs_cross_link_channels" in measurements:
+            return bool(measurements["srs_cross_link_channels"])
+        if "store_srs_cross_link_channels" in self.cfg:
+            return bool(self.cfg["store_srs_cross_link_channels"])
+        return _STORE_SRS_CROSS_LINK_DEFAULT
+
+    def _serving_cell_index(
+        self, sites: list[Cell], position: np.ndarray, scenario: str,
+        elements_per_port: int,
+    ) -> int:
+        """Strongest cell for one UE position, same rule as the sample loop."""
+        levels = []
+        for cell in sites:
+            los, _tau, sf, _p = self._large_scale_state(cell, position, scenario)
+            d3 = max(float(np.linalg.norm(np.asarray(position) - cell.position)), 10.0)
+            gain = self._sector_gain_db(cell, position, elements_per_port)
+            levels.append(gain - (self._pathloss(d3, los) + sf))
+        return int(np.argmax(levels))
+
+    def _ue_position_at(
+        self, base_positions: np.ndarray, ue: int, round_index: int
+    ) -> np.ndarray:
+        """Where UE ``ue`` is at snapshot ``round_index``.
+
+        Mirrors the sample loop's own motion law, so "who is in this cell now"
+        and "which channel did we generate" can never disagree.
+        """
+        position = np.asarray(base_positions[int(ue)], dtype=np.float64).copy()
+        mode = str(self.cfg.get("mobility_mode", "static")).strip().lower()
+        speed = max(float(self.cfg.get("ue_speed_kmh", 3.0) or 0.0), 0.0) / 3.6
+        if mode != "static" and speed > 0.0:
+            heading = math.radians(float(
+                self.cfg.get("ue_heading_deg", self.cfg.get("track_heading_deg", 0.0))
+                or 0.0
+            ))
+            travel = speed * float(
+                self.cfg.get("sample_interval_s", 5e-3) or 5e-3
+            ) * int(round_index)
+            position[0] += travel * math.cos(heading)
+            position[1] += travel * math.sin(heading)
+        return position
+
+    def _srs_slot_state(
+        self, sites: list[Cell], scenario: str, elements_per_port: int,
+        round_index: int,
+    ) -> tuple[dict[int, tuple[int, int]], list[dict[int, int]]]:
+        """Which SRS slot each UE holds at snapshot ``round_index``.
+
+        The rule is the one a real gNB follows on handover: **UEs already in
+        the cell keep their resource, and the arriving UE is given a free
+        one.**  It never displaces a UE that is already sounding, and two UEs
+        in the same cell can therefore never end up on the same resource.
+
+        The state is evolved from snapshot 0 forward, so it is a function of
+        the snapshot index alone.  That matters for parallel generation: if it
+        depended on the order samples happen to arrive, two workers would
+        build two different resource plans for the same instant.  Every worker
+        replays the same history and gets the same answer.
+
+        Returns ``(assignment, occupancy)`` where ``assignment`` maps UE to
+        ``(cell index, slot)`` and ``occupancy`` maps, per cell, slot to UE.
+        """
+        cache = getattr(self, "_srs_slot_cache", None)
+        if cache is None:
+            cache = []
+            self._srs_slot_cache = cache
+        target = int(round_index)
+        if target < 0:
+            raise ValueError("round_index must be non-negative")
+        if target < len(cache):
+            return cache[target]
+
+        base = self._place_ues(
+            np.random.default_rng(self._ue_seed + 7000), sites, self.num_ues
+        )
+        static = str(
+            self.cfg.get("mobility_mode", "static")
+        ).strip().lower() == "static" or max(
+            float(self.cfg.get("ue_speed_kmh", 3.0) or 0.0), 0.0
+        ) <= 0.0
+        pool = self._srs_slots_per_cell(sites, scenario, elements_per_port)
+
+        while len(cache) <= target:
+            step = len(cache)
+            if static and cache:
+                # Nothing moves, so the very first assignment stands forever.
+                cache.append(cache[0])
+                continue
+            serving = [
+                self._serving_cell_index(
+                    sites, self._ue_position_at(base, u, step), scenario,
+                    elements_per_port,
+                )
+                for u in range(self.num_ues)
+            ]
+            previous = cache[step - 1][0] if cache else {}
+            occupancy: list[dict[int, int]] = [{} for _ in sites]
+            assignment: dict[int, tuple[int, int]] = {}
+            # 1) Stayers keep what they already have.
+            for ue in range(self.num_ues):
+                held = previous.get(ue)
+                if held is not None and held[0] == serving[ue]:
+                    occupancy[serving[ue]][held[1]] = ue
+                    assignment[ue] = (serving[ue], held[1])
+            # 2) Arrivals take the lowest free slot, in UE order so the result
+            #    never depends on iteration order.
+            for ue in range(self.num_ues):
+                if ue in assignment:
+                    continue
+                cell_index = serving[ue]
+                used = occupancy[cell_index]
+                slot = next((k for k in range(pool[cell_index]) if k not in used), None)
+                if slot is None:
+                    raise RuntimeError(
+                        f"snapshot {step}: cell {sites[cell_index].cell_id} already "
+                        f"has all {pool[cell_index]} SRS slots occupied, so UE {ue} "
+                        "cannot be given a resource of its own.  Raise "
+                        "srs_slots_per_cell (each cell may reserve up to "
+                        f"{_SRS_SLOTS_AT_BASE_PERIOD} slots without changing the "
+                        "global SRS period), or reduce the UE count."
+                    )
+                used[slot] = ue
+                assignment[ue] = (cell_index, slot)
+            cache.append((assignment, occupancy))
+        return cache[target]
+
+    def _srs_slots_per_cell(
+        self, sites: list[Cell], scenario: str, elements_per_port: int,
+    ) -> list[int]:
+        """Slots each cell reserves.  Must not depend on the sample slice."""
+        cached = getattr(self, "_srs_pool_cache", None)
+        if cached is not None:
+            return cached
+        explicit = self.cfg.get("srs_slots_per_cell")
+        base_positions = self._place_ues(
+            np.random.default_rng(self._ue_seed + 7000), sites, self.num_ues
+        )
+        home = [
+            self._serving_cell_index(
+                sites, base_positions[u], scenario, elements_per_port
+            )
+            for u in range(self.num_ues)
+        ]
+        counts = [0] * len(sites)
+        for cell_index in home:
+            counts[cell_index] += 1
+        if explicit is not None:
+            pool = [max(int(explicit), 1)] * len(sites)
+        elif str(
+            self.cfg.get("mobility_mode", "static")
+        ).strip().lower() == "static" or max(
+            float(self.cfg.get("ue_speed_kmh", 3.0) or 0.0), 0.0
+        ) <= 0.0:
+            # Nothing moves: each cell needs exactly the UEs it serves.
+            pool = [max(c, 1) for c in counts]
+        else:
+            # UEs can pile into one cell, so reserve generously.  Anything up
+            # to the base-period ceiling is free: it neither lengthens the SRS
+            # period nor changes the resource already given to a lower slot.
+            pool = [
+                max(min(int(self.num_ues), _SRS_SLOTS_AT_BASE_PERIOD), 1)
+            ] * len(sites)
+        self._srs_pool_cache = pool
+        return pool
+
+    def _srs_network_plan(
+        self, sites: list[Cell], scenario: str, elements_per_port: int
+    ) -> tuple[dict[tuple[int, int], Any], dict[int, int]]:
+        """One network-wide SRS resource plan, allocated once per source.
+
+        Each **cell** owns a pool of UE slots; a UE occupies its slot in
+        whichever cell is currently serving it.  That matters the moment UEs
+        move: an SRS resource belongs to the serving cell's PCI-mod-3 pool, so
+        a handed-over UE must draw from the *target* cell.  Keying the plan by
+        UE alone froze it in the UE's first cell and quietly lost collisions.
+
+        Which slot a UE holds at a given instant is decided by
+        :meth:`_srs_slot_state`, not here: this method only hands each
+        ``(cell, slot)`` pair its resource.  Pool sizing lives in
+        :meth:`_srs_slots_per_cell`.
+
+        Contamination is decided by this *allocator*, not by PCI colour: two
+        same-colour cells share a pool, but the allocator then hands out
+        different frequency phases, cyclic shifts or symbols, and a neighbour
+        on a different leaf contributes exactly zero.  Colour only narrows the
+        candidate list.
+
+        Returns ``(slot_resources, slots_per_cell)``.
+        """
+        cached = getattr(self, "_srs_plan_cache", None)
+        if cached is not None:
+            return cached
+        from .srs_resource import allocate_basic_srs_resources  # noqa: PLC0415
+
+        positions = self._place_ues(
+            np.random.default_rng(self._ue_seed + 7000), sites, self.num_ues
+        )
+        slots_by_cell = self._srs_slots_per_cell(sites, scenario, elements_per_port)
+
+        ue_ids: list[int] = []
+        cell_ids: list[int] = []
+        # Deterministic order: cell by cell, slot by slot.  Sample order and
+        # worker count cannot change it.
+        #
+        # There is deliberately no separate pool for the cross-link
+        # interferers: an interfering UE is just a UE served by that
+        # neighbour cell, so it draws from the same slot list.  Giving them
+        # their own reserved slots put them after every victim slot, so a
+        # victim's leaf could never match an interferer's and cross-cell
+        # collisions became impossible.
+        for index, cell in enumerate(sites):
+            for slot in range(slots_by_cell[index]):
+                ue_ids.append(int(slot))
+                cell_ids.append(int(cell.cell_id))
+        plan = allocate_basic_srs_resources(
+            ue_ids,
+            cell_ids=cell_ids,
+            period_ms=float(self.cfg.get("srs_periodicity", 10) or 10),
+            hopping=True,
+            adaptive_period=True,
+        )
+        victims: dict[tuple[int, int], Any] = {
+            (int(a.cell_id), int(a.ue_id)): a for a in plan
+        }
+        slots_per_cell = {
+            int(cell.cell_id): slots_by_cell[i] for i, cell in enumerate(sites)
+        }
+        table = (victims, slots_per_cell)
+        self._srs_plan_cache = table
+        return table
+
+    def _srs_estimate_from_occasions(
+        self,
+        *,
+        truth: np.ndarray,
+        sigma: float,
+        rng: np.random.Generator,
+        mode: str,
+        assignment: Any,
+        occurrence: int,
+        contamination: list[tuple[float, np.ndarray]],
+    ) -> np.ndarray:
+        """LS channel estimate sampled at the real SRS resource positions.
+
+        One SRS occasion sounds **16 RB**, not the whole carrier.  Which RBG
+        that is comes from the assignment's 17-hop phase.
+
+        * ``ls_hop_sequential`` -- only the current occasion is available, so
+          only its 16 RB carry an observation and the rest of the band is
+          extrapolated from them.  This is what a single 2T occasion really
+          gives you.
+        * ``ls_hop_concat`` -- the band is stitched from the last full 17-hop
+          cycle, so every RBG has been sounded, each at its **own** occasion
+          with its own noise realisation and its own contamination state.
+        """
+        from . import hardware as hw  # noqa: PLC0415
+        from .srs_waveform import assignment_rb_indices  # noqa: PLC0415
+
+        n_rb = int(truth.shape[1])
+        if n_rb != hw.COMPANY_NUM_RB:
+            raise ValueError(
+                f"SRS-sampled estimation needs the {hw.COMPANY_NUM_RB}-RB product "
+                f"carrier (the 17-hop RBG map is frozen on it); got {n_rb} RB. "
+                "Use channel_est_mode='ls_linear'/'ls_mmse' on other carriers."
+            )
+        cycle = len(hw.COMPANY_SRS_17_HOP_ORDER_RBG)
+        if mode == "ls_hop_sequential":
+            offsets = [0]
+        elif mode == "ls_hop_concat":
+            offsets = list(range(cycle))
+        else:
+            raise ValueError(f"unknown SRS hopping estimation mode {mode!r}")
+
+        estimate = np.zeros_like(truth, dtype=np.complex64)
+        observed = np.zeros(n_rb, dtype=bool)
+        for offset in offsets:
+            occ = (int(occurrence) - offset) % cycle
+            rb = assignment_rb_indices(assignment, occ)
+            block = truth[:, rb].astype(np.complex128)
+            if sigma > 0.0:
+                noise = (
+                    rng.standard_normal(block.shape)
+                    + 1j * rng.standard_normal(block.shape)
+                ) / math.sqrt(2.0)
+                block = block + sigma * noise
+            for weight, cross in contamination:
+                # A real collision implies the same frequency-resource phase,
+                # so the collider occupies exactly these 16 RB at this
+                # occasion.  Nothing leaks onto the rest of the carrier.
+                block = block + float(weight) * np.asarray(cross)[:, rb]
+            estimate[:, rb] = block.astype(np.complex64)
+            observed[rb] = True
+
+        if not observed.all():
+            # Sequential mode knows one RBG.  Everything else is extrapolated
+            # from it -- explicitly, so nobody reads the untouched band as a
+            # measurement.
+            pilots = np.flatnonzero(observed)
+            grid = np.arange(n_rb)
+            filled = np.empty_like(estimate)
+            for t in range(estimate.shape[0]):
+                for bs in range(estimate.shape[2]):
+                    for ue in range(estimate.shape[3]):
+                        values = estimate[t, pilots, bs, ue]
+                        filled[t, :, bs, ue] = (
+                            np.interp(grid, pilots, values.real)
+                            + 1j * np.interp(grid, pilots, values.imag)
+                        )
+            estimate = filled.astype(np.complex64)
+        return estimate
+
+    def _srs_pilot_contamination_rho(
+        self, h_ul_cross: np.ndarray | None
+    ) -> np.ndarray | None:
+        """Residual SRS pilot correlation per colliding UE, or ``None``.
+
+        ``rho_k`` is what is left of interferer *k*'s SRS after our gNB
+        despreads with the local ZC sequence and applies the delay gate.
+        ``1.0`` means a full leaf collision (same symbol, comb and cyclic
+        shift): the interferer's channel enters our estimate unattenuated.
+
+        It is **not** calibrated here.  Nothing is applied unless the caller
+        asks for it, and the calibrated per-occasion value comes from the
+        RE-level receiver in :mod:`superran.srs_waveform`, which despreads a
+        real waveform instead of assuming a number.
+        """
+        if h_ul_cross is None:
+            return None
+        raw = self.cfg.get("srs_pilot_contamination_rho")
+        if raw is None or (isinstance(raw, bool) and not raw):
+            return None
+        n = int(np.asarray(h_ul_cross).shape[0])
+        rho = np.asarray(
+            [float(raw)] * n if np.isscalar(raw) or isinstance(raw, (int, float))
+            else list(raw),
+            dtype=np.float64,
+        )
+        if rho.shape != (n,):
+            raise ValueError(
+                "srs_pilot_contamination_rho must be a scalar or one value per "
+                f"cross-link UE ({n}); got shape {rho.shape}"
+            )
+        if not np.all(np.isfinite(rho)) or np.any(rho < 0.0) or np.any(rho > 1.0):
+            raise ValueError(
+                "srs_pilot_contamination_rho must be finite and within [0, 1]"
+            )
+        if not np.any(rho > 0.0):
+            return None
+        return rho
 
     def _effective_model(self, configured: str, is_los: bool) -> str:
         key = configured.upper().replace("_", "-")
@@ -1754,10 +2466,16 @@ class InternalSimSource:
         noise_dbm = -174.0 + 10.0 * math.log10(12.0 * scs) + nf_db
         noise_mw = _db_to_mw(noise_dbm)
         measure_ssb = bool((self.cfg.get("measurements") or {}).get("ssb_rsrp", True))
-        keep_interferer_h = bool(
-            (self.cfg.get("measurements") or {}).get("interferer_channels", False)
-            or self.cfg.get("store_interferer_channels", False)
-        )
+        # An explicit ``false`` must win.  Folding both keys through ``or``
+        # with a shared default makes the off switch unreachable as soon as
+        # the default flips to true, and that failure is silent.
+        _measurements = self.cfg.get("measurements") or {}
+        if "interferer_channels" in _measurements:
+            keep_interferer_h = bool(_measurements["interferer_channels"])
+        elif "store_interferer_channels" in self.cfg:
+            keep_interferer_h = bool(self.cfg["store_interferer_channels"])
+        else:
+            keep_interferer_h = _STORE_INTERFERER_CHANNELS_DEFAULT
         bs_ant = dict(self.cfg.get("bs_antenna") or {})
         subarray = dict(bs_ant.get("fixed_vertical_subarray") or {})
         elements_per_port = int(subarray.get("elements_per_rf_port", 1) or 1)
@@ -1825,7 +2543,7 @@ class InternalSimSource:
             # 估计噪声相反：每次测量的热噪声本来就是独立的，仍按样本派生。
             rng_est = np.random.default_rng(np.random.SeedSequence([self._seed, 307, global_index]))
 
-            site_state: dict[int, tuple[bool, float, float]] = {}
+            site_state: dict[int, tuple[bool, float, float, float]] = {}
             pathloss_all: list[float] = []
             rx_all: list[float] = []
             gain_all: list[float] = []
@@ -1840,32 +2558,11 @@ class InternalSimSource:
                 d3 = max(float(np.linalg.norm(delta)), 10.0)
                 d2 = max(float(np.linalg.norm(delta[:2])), 10.0)
                 if cell.site_id not in site_state:
-                    p_los = min(18.0 / d2 + math.exp(-d2 / 63.0) * (1.0 - 18.0 / d2), 1.0)
-                    forced = scenario.endswith("_LOS")
-                    qx = int(math.floor(float(position[0]) / 10.0))
-                    qy = int(math.floor(float(position[1]) / 10.0))
-                    los_rng = np.random.default_rng(
-                        _seed_from_parts(self._seed, cell.site_id, qx, qy, 0x10A5)
+                    site_state[cell.site_id] = self._large_scale_state(
+                        cell, position, scenario
                     )
-                    los = bool(forced or los_rng.random() < p_los)
-                    tau_ns = float(self.cfg.get("tau_rms_ns", 100.0 if los else 300.0) or 300.0)
-                    lsp_rng = np.random.default_rng(
-                        _seed_from_parts(self._seed, cell.site_id, qx, qy, 0x15F0)
-                    )
-                    sf = float(lsp_rng.normal(0.0, 2.0 if los else 3.0))
-                    site_state[cell.site_id] = (los, tau_ns, sf)
-                los, tau_ns, sf = site_state[cell.site_id]
-                bearing = math.degrees(math.atan2(delta[1], delta[0]))
-                offset = _circular_delta_deg(bearing, cell.azimuth_deg)
-                effective_array = (
-                    str(self.cfg.get("antenna_model_mode", "legacy_64"))
-                    == "effective_subarray"
-                )
-                element_gain = (
-                    8.0 + 10.0 * math.log10(max(elements_per_port, 1))
-                    if effective_array else 0.0
-                )
-                gain = element_gain - min(12.0 * (offset / 65.0) ** 2, 30.0)
+                los, tau_ns, sf, p_los = site_state[cell.site_id]
+                gain = self._sector_gain_db(cell, position, elements_per_port)
                 pl = self._pathloss(d3, los) + sf
                 # Keep the total-carrier received power independent of the
                 # frequency grid.  Per-RB PSD is formed once below; otherwise
@@ -1895,6 +2592,7 @@ class InternalSimSource:
             rx_elevation = math.atan2(float(-link_delta[2]), horizontal_distance)
             link_zod = np.pi / 2.0 - tx_elevation
             link_zoa = np.pi / 2.0 - rx_elevation
+            est_mode_requested = str(self.cfg.get("channel_est_mode", "ls_linear"))
             total_signal_mw = _db_to_mw(rx_all[serving])
             signal_mw = total_signal_mw / max(n_rb, 1)
             per_cell_i = np.asarray([
@@ -1925,14 +2623,89 @@ class InternalSimSource:
                 role="serving", time_offset_s=trajectory_time_s,
             )
 
-            est_mode = str(self.cfg.get("channel_est_mode", "ls_linear"))
             est_pilot_rb = np.arange(n_rb, dtype=np.int64)
             est_hop_index = -1
             est_cold_start = False
             est_rbg_age = None
+            est_rbg_age_by_slot = None
+            est_occasion_by_slot = None
             est_srs_occasion = None
             srs_period_ms = float(self.cfg.get("srs_periodicity", 10) or 10) * slot_duration * 1e3
             srs_delay_ms = float(self.cfg.get("srs_processing_delay_ms", 2.0) or 0.0)
+            # Real SRS resources for this snapshot: which 16 RB this UE
+            # sounded, and which neighbour UEs share that exact leaf.
+            srs_occurrence = int(round_index)
+            victim_assignment = None
+            srs_occupancy = None
+            srs_slot = -1
+            srs_pilot_rb = np.arange(n_rb, dtype=np.int64)
+            # The SRS plan is needed whenever anything downstream has to know
+            # which resource this UE sounded: the hopping estimators, the
+            # contamination weight, and -- always -- the per-sample identity
+            # of the cross-link interferers, so a consumer can bind each
+            # stored link back to a real neighbour UE and its SRS resource.
+            _cross_on = self._srs_cross_link_enabled()
+            needs_srs_plan = (
+                _cross_on
+                or est_mode_requested in ("ls_hop_concat", "ls_hop_sequential")
+                or self.cfg.get("srs_pilot_contamination_rho") is not None
+            )
+            if needs_srs_plan and len(sites) >= 1:
+                victims, _ = self._srs_network_plan(
+                    sites, scenario, elements_per_port
+                )
+                srs_assign, srs_occupancy = self._srs_slot_state(
+                    sites, scenario, elements_per_port, round_index
+                )
+                held = srs_assign.get(int(ue_id))
+                if held is None:
+                    raise RuntimeError(
+                        f"UE {ue_id} 在快照 {round_index} 上没有 SRS 槽位"
+                    )
+                # The occupancy table and the sample loop must agree on which
+                # cell serves this UE; if they ever diverge the resource would
+                # belong to a different cell than the channel we generated.
+                if int(held[0]) != int(serving):
+                    raise RuntimeError(
+                        f"SRS 占用表认为 UE {ue_id} 在小区 "
+                        f"{sites[held[0]].cell_id}，而本样本的服务小区是 "
+                        f"{serving_cell.cell_id}；两者必须一致"
+                    )
+                srs_slot = int(held[1])
+                key = (int(serving_cell.cell_id), srs_slot)
+                if key not in victims:
+                    raise RuntimeError(
+                        f"小区 {serving_cell.cell_id} 没有槽位 {srs_slot} 的 SRS "
+                        "资源；请检查 srs_slots_per_cell 与占用表是否一致。"
+                    )
+                victim_assignment = victims[key]
+                if n_rb == 272:
+                    from .srs_waveform import (  # noqa: PLC0415
+                        assignment_rb_indices as _arb,
+                    )
+                    srs_pilot_rb = _arb(victim_assignment, srs_occurrence)
+
+            h_ul_cross, cross_meta = self._srs_cross_link_ues(
+                sites=sites,
+                serving=serving,
+                rx_all=rx_all,
+                gain_all=gain_all,
+                pathloss_all=pathloss_all,
+                global_index=global_index,
+                scenario=scenario,
+                configured_model=configured_model,
+                elements_per_port=elements_per_port,
+                n_time=n_time,
+                n_rb=n_rb,
+                n_bs=n_bs,
+                n_ue=n_ue,
+                doppler_hz=doppler,
+                victim_assignment=victim_assignment,
+                victim_slot=None if srs_slot < 0 else srs_slot,
+                srs_occupancy=srs_occupancy,
+            )
+
+            est_mode = est_mode_requested
             if est_mode == "ideal":
                 h_dl_est = h_dl.copy()
                 h_ul_est = h_dl.copy()
@@ -1954,6 +2727,47 @@ class InternalSimSource:
                 occasion, srs_period_ms, srs_delay_ms = self._srs_occasion(
                     trajectory_time_s, slot_duration, srs_offset)
                 est_srs_occasion = occasion
+
+                # SRS pilot contamination.  A colliding neighbour UE's SRS
+                # survives our despreading with residual correlation rho, so
+                # its *whole channel to our gNB* lands inside our estimate.
+                # That is why contamination is not the same thing as extra
+                # noise: the error points at the interferer's spatial
+                # direction, which is exactly where reciprocity-based
+                # precoding then steers energy.
+                #
+                # Who actually contaminates is decided by the SRS allocator,
+                # not by PCI colour: a same-colour neighbour on a different
+                # frequency-resource phase, comb or cyclic shift lands on
+                # other resource elements and contributes nothing.
+                rho = self._srs_pilot_contamination_rho(h_ul_cross)
+                contamination: list[tuple[float, np.ndarray]] = []
+                if rho is not None:
+                    collides = np.asarray(
+                        cross_meta.get(
+                            "srs_cross_link_collides", np.zeros(0, dtype=np.int64)
+                        )
+                    ).reshape(-1)
+                    for k, weight in enumerate(rho):
+                        if k < collides.size and bool(collides[k]):
+                            contamination.append(
+                                (float(weight), np.asarray(h_ul_cross)[k])
+                            )
+                    cross_meta["srs_pilot_contamination_rho"] = [
+                        float(v) for v in rho
+                    ]
+                    cross_meta["srs_pilot_contamination_applied"] = bool(contamination)
+                elif h_ul_cross is not None:
+                    cross_meta["srs_pilot_contamination_applied"] = False
+
+                # 污染进估计器的形式是"已按残余相关性加权的上行交叉链路"，
+                # 由估计器在**它自己那次机会探到的 RB 上**取切片，所以不会
+                # 把一次机会的污染抹到 272 RB 上。
+                contamination_tensor = (
+                    np.stack([float(w) * np.asarray(c) for w, c in contamination])
+                    if contamination else None
+                )
+
                 if hopping:
                     # 同一条轨迹的散射体，在任意时刻重算小尺度信道。连续轨迹让
                     # 这件事逐位可复现（实测与原样本差 0）。每轮的几何量用默认参数
@@ -1977,7 +2791,8 @@ class InternalSimSource:
                             time_offset_s=moment_s)
 
                     (h_dl_est, h_ul_est, est_pilot_rb, est_hop_index,
-                     est_cold_start, est_rbg_age, est_srs_occasion) = (
+                     est_cold_start, est_rbg_age, est_srs_occasion,
+                     est_rbg_age_by_slot, est_occasion_by_slot) = (
                         self._hop_estimate_sequence(
                             ue_id=ue_id, est_mode=est_mode, est_snr=est_snr,
                             rng_est=rng_est, n_time=n_time, n_rb=n_rb,
@@ -1987,18 +2802,29 @@ class InternalSimSource:
                             srs_offset_slots=srs_offset,
                             channel_at=_channel_at,
                             tau_rms_ns=ds_all[serving],
-                            subcarrier_spacing=scs))
+                            subcarrier_spacing=scs,
+                            assignment=victim_assignment,
+                            contamination=contamination_tensor))
                 else:
                     # 全带 SRS 的**工程上界**："现在就探"，每个样本自己测一次。
                     # 跳频陈旧度由系统侧的老化模型建模（见 server 侧的守卫），
                     # 所以这里不做机会锁定，否则周期内相位会被算两遍。
                     est_pilot_rb = np.arange(n_rb, dtype=np.int64)
                     mask = np.ones(n_time, dtype=bool)
+                    # 全带代理不是把一次机会的污染抹开的许可：只有这次真的探到
+                    # 的那 16 个 RB 会被污染，其余位置显式置零。
+                    masked_contamination = None
+                    if contamination_tensor is not None:
+                        masked_contamination = np.zeros_like(contamination_tensor)
+                        masked_contamination[:, :, srs_pilot_rb] = (
+                            contamination_tensor[:, :, srs_pilot_rb])
                     results = []
                     for direction_key in ("dl", "ul"):
                         out = estimate_channel_with_interference(
                             h_serving_true=h_dl,
-                            h_interferers=None,
+                            # 污染是上行 SRS 上的现象：下行估计不吃它。
+                            h_interferers=(masked_contamination
+                                           if direction_key == "ul" else None),
                             pilots_serving=None,
                             interferer_cell_ids=None,
                             direction=direction_key,
@@ -2019,20 +2845,35 @@ class InternalSimSource:
             ]
 
             h_intf = None
+            intf_cells: list[int] = []
+            intf_rx: list[float] = []
             if keep_interferer_h and len(sites) > 1:
                 rows = []
-                max_cells = max(
-                    int(
-                        self.cfg.get("max_per_ue_intf_cells", len(sites) - 1)
-                        or (len(sites) - 1)
-                    ),
-                    0,
+                # The documented contract is "keep the 3 strongest by
+                # default".  The old code default was "keep every neighbour",
+                # which nobody hit while storage was off; with storage on it
+                # would silently cost one full channel synthesis per cell
+                # (21x on a 7-site hex layout).
+                raw_cap = self.cfg.get(
+                    "max_per_ue_intf_cells", _MAX_PER_UE_INTF_CELLS_DEFAULT
                 )
-                for k in range(len(sites)):
+                if raw_cap is None:
+                    raw_cap = _MAX_PER_UE_INTF_CELLS_DEFAULT
+                max_cells = max(min(int(raw_cap), len(sites) - 1), 0)
+                # "Keep the strongest N" has to mean strongest, not
+                # lowest-numbered.  Iterating cells in index order and
+                # stopping at N silently kept cells 0,1,2 -- on a 7-site
+                # layout that picked a neighbour up to 22 dB weaker than the
+                # real dominant interferer, so the equalizer saw the wrong
+                # interference directions.  Ties break on cell index so the
+                # order never depends on sort stability.
+                ranked = sorted(
+                    (k for k in range(len(sites)) if k != serving),
+                    key=lambda k: (-float(rx_all[k]), k),
+                )
+                for k in ranked:
                     if max_cells <= 0:
                         break
-                    if k == serving:
-                        continue
                     scale = math.sqrt(max(per_cell_i[k] / max(signal_mw, _EPS), _EPS))
                     cross_delta = position - sites[k].position
                     cross_horizontal = max(float(np.linalg.norm(cross_delta[:2])), _EPS)
@@ -2067,6 +2908,8 @@ class InternalSimSource:
                         time_offset_s=trajectory_time_s,
                     )
                     rows.append((cross * scale).astype(np.complex64))
+                    intf_cells.append(int(sites[k].cell_id))
+                    intf_rx.append(float(rx_all[k]))
                     if len(rows) >= max_cells:
                         break
                 if rows:
@@ -2142,6 +2985,39 @@ class InternalSimSource:
                 "dl_thermal_noise_power_mw": noise_mw,
                 "dl_interference_power_per_slot_per_cell_mw": per_cell_i.reshape(1, -1),
                 "dl_power_decomposition_version": "superran-prebeam-per-rb-sni-v1",
+                **cross_meta,
+                # Which neighbours h_interferers actually holds, strongest
+                # first.  Without it "the strongest 3" is unverifiable and a
+                # selection bug stays invisible.
+                "interferer_cell_ids": np.asarray(intf_cells, dtype=np.int64),
+                # 必须与 interferer_cell_ids 同序（都按保留顺序，最强优先）；
+                # 按小区编号另取一遍会让两列错位。
+                "interferer_rx_power_dbm": np.asarray(intf_rx, dtype=np.float64),
+                "srs_occurrence_index": srs_occurrence,
+                "srs_victim_rb_start": int(srs_pilot_rb[0]),
+                "srs_victim_rb_count": int(srs_pilot_rb.size),
+                "srs_victim_frequency_resource_id": (
+                    -1 if victim_assignment is None
+                    else int(victim_assignment.frequency_resource_id)
+                ),
+                "srs_victim_ue_id": int(ue_id),
+                "srs_victim_slot": srs_slot,
+                "srs_slots_reserved_per_cell": (
+                    -1 if victim_assignment is None
+                    else int(self._srs_slots_per_cell(
+                        sites, scenario, elements_per_port)[serving])
+                ),
+                "srs_cell_occupancy": (
+                    -1 if srs_occupancy is None else int(len(srs_occupancy[serving]))
+                ),
+                # The cell the assignment really came from.  Reporting the
+                # serving cell here regardless would hide exactly the
+                # handover mis-binding this key exists to expose.
+                "srs_victim_cell_id": (
+                    -1 if victim_assignment is None
+                    else int(victim_assignment.cell_id)
+                ),
+                "srs_serving_cell_id": int(serving_cell.cell_id),
                 "ul_geometry_sir_dB": sir_db,
                 "ul_geometry_sir_model": "shared_dl_geometry_sir_symmetric_neighbour_power_v1",
                 "effective_channel_model": effective_model,
@@ -2205,6 +3081,9 @@ class InternalSimSource:
                     "rs_opportunity_model": "indexed-slot TDD and periodicity schedule",
                 },
             }
+            if est_rbg_age_by_slot is not None:
+                meta["csi_rbg_age_by_slot"] = np.asarray(est_rbg_age_by_slot)
+                meta["srs_occasion_by_slot"] = np.asarray(est_occasion_by_slot)
             if est_rbg_age is not None:
                 # **逐 RBG 的 CSI 年龄必须落盘。** 跳频档的陈旧度是烘进 h_est 的，
                 # 系统侧没有这一份就只能拿自己的 CsiConfig 重算，而它并不知道
@@ -2216,6 +3095,7 @@ class InternalSimSource:
                 h_serving_true=h_dl,
                 h_serving_est=h_dl_est,
                 h_interferers=h_intf,
+                h_ul_cross=h_ul_cross,
                 noise_power_dBm=noise_dbm,
                 snr_dB=snr_db,
                 sir_dB=sir_db,

@@ -1722,16 +1722,38 @@ def build_link_tables(
                 merged_s.append([float(sir_in[i])
                                  for i, x in zip(g, per_sample, strict=True)
                                  for _ in range(x.shape[0] if x.ndim == 4 else 1)])
+            # 每个样本给的可能是**逐 slot**（[T,RBG] / [T]）也可能是逐样本一份
+            # （[RBG] / 标量）。逐 slot 的按 slot 展开，逐样本的才重复 T 次——
+            # 后者会把新鲜度落在错误的 slot 上，只作为旧数据的兼容路径。
             if csi_rbg_age_samples is not None:
-                merged_age.append(np.stack([
-                    np.asarray(csi_rbg_age_samples[i], dtype=int)
-                    for i, x in zip(g, per_sample, strict=True)
-                    for _ in range(x.shape[0] if x.ndim == 4 else 1)]))
+                rows: list[np.ndarray] = []
+                for i, x in zip(g, per_sample, strict=True):
+                    slots = x.shape[0] if x.ndim == 4 else 1
+                    entry = np.asarray(csi_rbg_age_samples[i], dtype=int)
+                    if entry.ndim == 2:
+                        if entry.shape[0] != slots:
+                            raise ValueError(
+                                f"样本 {i} 的逐 slot CSI 年龄有 {entry.shape[0]} 行，"
+                                f"而这个样本有 {slots} 个 slot")
+                        rows.extend(entry)
+                    else:
+                        rows.extend([entry] * slots)
+                merged_age.append(np.stack(rows))
             if csi_occasion_samples is not None:
-                merged_occ.append(np.asarray([
-                    int(csi_occasion_samples[i])
-                    for i, x in zip(g, per_sample, strict=True)
-                    for _ in range(x.shape[0] if x.ndim == 4 else 1)], dtype=int))
+                occ: list[int] = []
+                for i, x in zip(g, per_sample, strict=True):
+                    slots = x.shape[0] if x.ndim == 4 else 1
+                    entry = np.atleast_1d(
+                        np.asarray(csi_occasion_samples[i], dtype=int))
+                    if entry.size == slots:
+                        occ.extend(int(v) for v in entry)
+                    elif entry.size == 1:
+                        occ.extend([int(entry[0])] * slots)
+                    else:
+                        raise ValueError(
+                            f"样本 {i} 的 SRS 机会序号有 {entry.size} 项，"
+                            f"而这个样本有 {slots} 个 slot")
+                merged_occ.append(np.asarray(occ, dtype=int))
         h_users = merged_h
         h_precoding_users = merged_p
         per_snap_sinr, per_snap_sir = merged_g, merged_s

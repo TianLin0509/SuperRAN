@@ -743,6 +743,20 @@ def residual_correlation_loss_db(
         w_su_users, rb_per_rbg=rb_per_rbg, rbg_boundaries=rbg_boundaries,
         rank_scaling=rank_scaling)
     n_rbg = int(corr.shape[0])
+    # **rho 必须是 [0,1] 里的相关度。** 超过 1 时 (1-rho) 变负，而每条流要对
+    # 别的用户的每条流各乘一个因子——偶数个负因子相乘会翻成正数，于是这个
+    # 按定义只能是**损失**的量冒出了增益（实测 +7.12 dB，评审那侧 +9.54 dB）。
+    # 旧写法只对连乘结果做下限钳位，挡得住 -inf，挡不住"负负得正"。
+    # rho>1 只可能来自输入本身不是相关度（例如把携带功率的 sqrt(rank) 权直接
+    # 送进来），那是口径错误，必须硬失败而不是钳一下继续跑。
+    peak = float(np.max(corr)) if corr.size else 0.0
+    if peak > 1.0 + 1e-9:
+        raise ValueError(
+            f"SU 权互相关出现 rho={peak:.4f} > 1，它不是相关度："
+            "(1-rho) 会变负，偶数个负因子相乘还会翻成正的增益。"
+            "最常见的原因是 rank_scaling='sqrt_rank'——现场那个 sqrt(rank) "
+            "携带的是发射功率，本仓已在「单位方向 x 显式功率」里单独记账，"
+            "不能再送进相关度。请用 rank_scaling='none'。")
     start = [0]
     for r in ranks:
         start.append(start[-1] + r)
@@ -762,7 +776,8 @@ def residual_correlation_loss_db(
                         # 再压一道——逐 RBG 残差只看本地正交性，宽带那一项把
                         # 全带的耦合也算进配对代价。
                         rem *= (1.0 - wideband[start[i] + k, start[j] + q])
-            rem = np.maximum(rem, _EPS)
+            # 残留相关性是损失：结果必须落在 (0,1]，dB 必须 <= 0。
+            rem = np.clip(rem, _EPS, 1.0)
             stream_db[k] = 10.0 * np.log10(rem)
         out[i] = np.mean(stream_db, axis=0)
     return out

@@ -2330,12 +2330,23 @@ def sr_system_sim(
     # 跳频估计档随数据落盘的逐 RBG CSI 年龄。有它就以它为准，系统侧不再拿
     # 自己的 CsiConfig 重算一份并不成立的新鲜度。
     _hop_state = ds.csi_hop_state
-    csi_rbg_age_samples = (
-        [np.asarray(row, dtype=int) for row in _hop_state["rbg_age_occasions"]]
-        if _hop_state is not None else None)
-    csi_occasion_samples = (
-        [int(v) for v in _hop_state["srs_occasion_index"]]
-        if _hop_state is not None and "srs_occasion_index" in _hop_state else None)
+    # **逐 slot 优先。** 一个样本内部可能跨过多次 SRS 机会；只有逐样本一份时
+    # 下游会把同一个年龄/机会平铺给所有 slot，新鲜度就落在错误的 slot 上。
+    _per_slot = (_hop_state is not None
+                 and "csi_rbg_age_by_slot" in _hop_state
+                 and "srs_occasion_by_slot" in _hop_state)
+    if _per_slot:
+        csi_rbg_age_samples = [
+            np.asarray(row, dtype=int) for row in _hop_state["csi_rbg_age_by_slot"]]
+        csi_occasion_samples = [
+            np.asarray(row, dtype=int) for row in _hop_state["srs_occasion_by_slot"]]
+    else:
+        csi_rbg_age_samples = (
+            [np.asarray(row, dtype=int) for row in _hop_state["rbg_age_occasions"]]
+            if _hop_state is not None else None)
+        csi_occasion_samples = (
+            [int(v) for v in _hop_state["srs_occasion_index"]]
+            if _hop_state is not None and "srs_occasion_index" in _hop_state else None)
     # **样本数不是用户数。** 数据集里 num_samples 个样本分布在 num_ues 个
     # UE 位置上；不按 UE 合并的话小区里会多出好几倍的人，
     # 每用户谱效被摊薄（实测 40 样本/10 UE 时从 0.32 掉到 0.08）。
@@ -2886,7 +2897,9 @@ def sr_system_sim(
     # 写成"17 个子带年龄一律等于一个周期"。门控读的是数据、报告读的是配置，
     # 两者不一致比单纯报错更难查。
     if csi_rbg_age_samples is not None:
-        _age = np.asarray(csi_rbg_age_samples, dtype=float)     # [N, RBG]
+        # 逐 slot 时形状是 [N, T, RBG]，逐样本时是 [N, RBG]；统一压平成 [*, RBG]。
+        _age = np.asarray(csi_rbg_age_samples, dtype=float)
+        _age = _age.reshape(-1, _age.shape[-1])
         _period = float(_hop_state["srs_estimation_period_ms"][0])             if "srs_estimation_period_ms" in _hop_state else float(snap_ms)
         _delay = float(_hop_state["srs_estimation_processing_delay_ms"][0])             if "srs_estimation_processing_delay_ms" in _hop_state else 0.0
         _never = _age < 0
