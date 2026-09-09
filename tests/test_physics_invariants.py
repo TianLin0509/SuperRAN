@@ -2548,11 +2548,29 @@ def test_per_slot_ages_land_freshness_on_the_right_slot() -> None:
         check(False, f"build_link_tables 接受逐 slot 的年龄与机会（{exc}）")
         return
     fresh = np.any(table.csi_new_rbg, axis=1).astype(int).tolist()
-    print(f"  逐快照是否有新 CSI：{fresh}")
+
+    # **自带对照：同一批数据按样本平铺一次。** 这就是修复前下游拿到的东西——
+    # 每样本只有一份年龄/机会，被重复给 T 个 slot。反证不靠回退源码，因为
+    # 回退会一并丢掉主干的其它工作、测试提前崩掉。
+    legacy_age = [rows[-1] for rows in per_slot_age]       # 只留最后一个 slot
+    legacy_occ = [int(rows[-1]) for rows in per_slot_occ]
+    legacy = sy.build_link_tables(
+        flat, [12.0] * shape[0], num_ues=n_ue, h_for_precoding_users=flat,
+        num_snapshots=(shape[0] // n_ue) * n_slot, max_rank=2, csi=None,
+        snapshot_ms=5.0, csi_rbg_age_samples=legacy_age,
+        csi_occasion_samples=legacy_occ)[0]
+    legacy_fresh = np.any(legacy.csi_new_rbg, axis=1).astype(int).tolist()
+    print(f"  逐 slot 喂：  {fresh}（{sum(fresh)} 次更新）")
+    print(f"  按样本平铺：{legacy_fresh}（{sum(legacy_fresh)} 次更新）"
+          "   <- 一个样本内的两次机会被压成一次，且落在错误的 slot 上")
+
     # 机会每 2 个 slot 才推进一次 -> 新鲜度必须是"开一个、关一个"。
     check(fresh[1::2] == [0] * len(fresh[1::2]),
-          "机会没推进的那些 slot 不许被标成新（按样本平铺时它们会全被标新）")
+          "机会没推进的那些 slot 不许被标成新")
     check(sum(fresh) > 0, "机会推进的那些 slot 确实被标新")
+    check(legacy_fresh != fresh and sum(legacy_fresh) < sum(fresh),
+          f"按样本平铺会丢掉样本内部的 SRS 更新（{sum(legacy_fresh)} 次 vs "
+          f"逐 slot 的 {sum(fresh)} 次），这条对照证明上面两条有区分力")
 
 
 def test_residual_correlation_can_never_become_a_gain() -> None:
