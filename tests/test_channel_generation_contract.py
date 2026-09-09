@@ -563,7 +563,11 @@ def test_static_internal_sim_parallel_is_worker_count_invariant() -> None:
         "channel_est_mode": "ideal",
         "link": "DL",
         "mobility_mode": "static",
-        "ue_speed_kmh": 0.0,
+        # 几何静止但**时钟要走**：小尺度衰落按轨迹连续演化后，零多普勒 + 多轮
+        # 会产出逐位重复的矩阵，生成器为此硬失败。这里要测的是"分块数不影响
+        # 逐位结果"，与速度取多少无关，所以给一个正常步行速度即可；下面的
+        # 逐位相等断言一个字没改。
+        "ue_speed_kmh": 3.0,
         "seed": 20260812,
         "measurements": {"ssb_rsrp": False},
     }

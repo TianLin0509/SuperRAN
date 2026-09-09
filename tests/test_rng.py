@@ -652,6 +652,26 @@ for _factory, _label in (
         check(True, _label)
 
 # ---------------------------------------------------------------------------
+section("重复次数 <=5 时比较结论必须写明「判不了」")
+# 双侧 Wilcoxon 最小可达 p 是 2/2^n，n=5 给 0.0625 > 0.05。这时报出的
+# "p 差一点点" 会被读成 "再调调就显著了"，所以要把 "样本量本身判不了"
+# 单独说出来；三态 verdict 不变，另开一个字段。
+_a5 = np.arange(10.0, 15.0)
+_cmp5 = rg.compare_replications(_a5, _a5 - 5.0, metric="cell_served_mbps",
+                                arm_a="A", arm_b="B")
+_a8 = np.arange(10.0, 18.0)
+_cmp8 = rg.compare_replications(_a8, _a8 - 5.0, metric="cell_served_mbps",
+                                arm_a="A", arm_b="B")
+check(_cmp5["verdict"] == "inconclusive"
+      and _cmp5["inconclusive_reason"] is not None,
+      "n=5 两臂完全分离仍报 inconclusive，并说明是样本量本身判不了")
+check("2/2^5" in _cmp5["verdict_text"],
+      "结论正文先说样本量下界，再说 p 值")
+check(_cmp8["verdict"] == "significant" and _cmp8["inconclusive_reason"] is None,
+      "n=8 同样形态的数据照常判显著，闸门没有误伤够样本的实验")
+
+
+# ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 print(f"随机数体系：{_n_pass} 通过，{_n_fail} 失败")
 print("=" * 70)

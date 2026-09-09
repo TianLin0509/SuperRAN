@@ -564,6 +564,10 @@ def compare_replications(
                  f"{hw:.3f}，结论成立。**")
     else:
         why = []
+        # **样本量本身不成立时先说这一条。** 否则用户看到的是
+        # "p=0.0625 ≥ 0.05"，会以为再调调就显著了。
+        if paired.n_below_minimum and paired.inconclusive_reason:
+            why.append(paired.inconclusive_reason.rstrip("。"))
         if not paired.ci_excludes_zero:
             why.append(f"效应 {abs(effect):.3f} 小于 95% 置信区间半宽 {hw:.3f}"
                        f"（等价说法：区间 [{paired.ci_low:+.3f}, {paired.ci_high:+.3f}] 跨零）")
@@ -599,6 +603,9 @@ def compare_replications(
         "paired": paired.as_dict(),
         "gate_conclusion": g3.as_dict(),
         "verdict": verdict,
+        # 三态 verdict 保持 significant / inconclusive / not_pairable 不变；
+        # "样本量本身判不了" 另开一个字段，不去污染那三个值。
+        "inconclusive_reason": paired.inconclusive_reason,
         "verdict_text": vtext,
     }
 
