@@ -1289,6 +1289,7 @@ class InternalSimSource:
         self._hop_pilots: dict[tuple[int, str], dict[int, tuple[np.ndarray, np.ndarray]]] = {}
         self._hop_last_seen: dict[tuple[int, str], dict[int, int]] = {}
         self._hop_occasion: dict[tuple[int, str], int] = {}
+        self._hop_last_rbg: dict[int, int] = {}
 
     def _srs_occasion(self, trajectory_time_s: float, slot_duration_s: float,
                       srs_offset_slots: int) -> tuple[int, float, float]:
@@ -1373,6 +1374,11 @@ class InternalSimSource:
             for index in range(first, occasion + 1):
                 measured = channel_at((offset_ms + index * period_ms) / 1e3)
                 pilots = self._srs_pilot_rbs(n_rb, index, est_mode, assignment)
+                # **被探到的是哪个 RBG，只能从真正探到的那些 RB 反推。**
+                # 每个 UE 有自己的 SRS 频域相位，全局固化跳序只是没有资源分配
+                # 时的兜底；拿它记账会和实际探测对不上——实测 4 个 UE、8 个样本
+                # 全部错位（实际探 RBG8，却把 RBG0 标成新）。
+                rbg = self._sounded_rbg(pilots)
                 for direction in ("dl", "ul"):
                     key = (ue_id, direction)
                     history = (
@@ -1397,12 +1403,12 @@ class InternalSimSource:
                         h_interferers=(contamination if direction == "ul" else None),
                     )
                     self._hop_estimate[key] = out.h_est
-                    rbg = int(_COMPANY_HOP_ORDER[index % hop_cycle])
                     self._hop_pilots.setdefault(key, {})[rbg] = (
                         out.pilot_rb, out.h_pilot)
                     self._hop_last_seen.setdefault(key, {})[rbg] = index
                 self._hop_occasion[ue_id] = index
-                hop_index = int(_COMPANY_HOP_ORDER[index % hop_cycle])
+                self._hop_last_rbg[ue_id] = rbg
+                hop_index = rbg
             for direction in ("dl", "ul"):
                 slots[direction].append(
                     np.asarray(self._hop_estimate[(ue_id, direction)])[0])
@@ -1413,8 +1419,8 @@ class InternalSimSource:
             occasion_by_slot.append(int(occasion))
         # 本样本没有新机会时，跳序号仍应是**当前生效那份 CSI 是哪一跳测的**，
         # 不是 -1（-1 只表示"非跳频档"）。补测循环不跑时不能把它留空。
-        held_occasion = self._hop_occasion.get(ue_id, occasion)
-        hop_index = int(_COMPANY_HOP_ORDER[held_occasion % hop_cycle])
+        # 本样本没有新机会时，跳序号仍应是**当前生效那份 CSI 是哪一跳测的**。
+        hop_index = int(self._hop_last_rbg.get(ue_id, hop_index))
         seen = self._hop_last_seen.get((ue_id, "dl"), {})
         ages = [(occasion - seen[k]) if k in seen else -1
                 for k in range(hop_cycle)]
@@ -1425,6 +1431,24 @@ class InternalSimSource:
             np.asarray(age_by_slot, dtype=int),
             np.asarray(occasion_by_slot, dtype=int),
         )
+
+    def _sounded_rbg(self, pilot_rb: np.ndarray) -> int:
+        """这批导频 RB 属于哪个 RBG。
+
+        **和测量共用同一个真相。** 记账（谁被标成新、谁的 CSI 多老）如果去查
+        全局固化跳序，就会和按 SRS 资源分配算出来的实际探测位置分家：每个 UE
+        的频域相位不同，两者从第一个样本起就对不上。
+        """
+        rb = np.asarray(pilot_rb, dtype=np.int64).reshape(-1)
+        if rb.size != 16:
+            raise ValueError(
+                f"一次 SRS 机会应探 16 个 RB，收到 {rb.size} 个；"
+                "逐 RBG 的新鲜度记账依赖这个宽度")
+        start = int(rb.min())
+        if int(rb.max()) - start != 15 or start % 16 != 0:
+            raise ValueError(
+                f"导频 RB 必须是对齐的连续 16 个（收到 {start}..{int(rb.max())}）")
+        return start // 16
 
     def _srs_pilot_rbs(self, n_rb: int, occasion: int, est_mode: str,
                        assignment: Any = None) -> np.ndarray:
@@ -2805,6 +2829,13 @@ class InternalSimSource:
                             subcarrier_spacing=scs,
                             assignment=victim_assignment,
                             contamination=contamination_tensor))
+                    # **数据集报的"本次探到哪些 RB"必须是估计器真正测的那一组。**
+                    # 主干那侧按 round_index 算 srs_occurrence，估计器按共用 SRS
+                    # 时钟（含处理时延）算机会序号，两者差一次机会：于是 meta 说
+                    # 探了 RBG0、估计其实来自 RBG9（实测 12/12 个样本全错位）。
+                    # 跳频档以估计器为准，非跳频档保持主干原样。
+                    srs_pilot_rb = np.asarray(est_pilot_rb, dtype=np.int64)
+                    srs_occurrence = int(est_srs_occasion)
                 else:
                     # 全带 SRS 的**工程上界**："现在就探"，每个样本自己测一次。
                     # 跳频陈旧度由系统侧的老化模型建模（见 server 侧的守卫），

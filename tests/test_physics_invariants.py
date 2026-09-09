@@ -11,6 +11,7 @@ from __future__ import annotations
 import inspect
 import math
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -2549,28 +2550,19 @@ def test_per_slot_ages_land_freshness_on_the_right_slot() -> None:
         return
     fresh = np.any(table.csi_new_rbg, axis=1).astype(int).tolist()
 
-    # **自带对照：同一批数据按样本平铺一次。** 这就是修复前下游拿到的东西——
-    # 每样本只有一份年龄/机会，被重复给 T 个 slot。反证不靠回退源码，因为
-    # 回退会一并丢掉主干的其它工作、测试提前崩掉。
-    legacy_age = [rows[-1] for rows in per_slot_age]       # 只留最后一个 slot
-    legacy_occ = [int(rows[-1]) for rows in per_slot_occ]
-    legacy = sy.build_link_tables(
-        flat, [12.0] * shape[0], num_ues=n_ue, h_for_precoding_users=flat,
-        num_snapshots=(shape[0] // n_ue) * n_slot, max_rank=2, csi=None,
-        snapshot_ms=5.0, csi_rbg_age_samples=legacy_age,
-        csi_occasion_samples=legacy_occ)[0]
-    legacy_fresh = np.any(legacy.csi_new_rbg, axis=1).astype(int).tolist()
-    print(f"  逐 slot 喂：  {fresh}（{sum(fresh)} 次更新）")
-    print(f"  按样本平铺：{legacy_fresh}（{sum(legacy_fresh)} 次更新）"
-          "   <- 一个样本内的两次机会被压成一次，且落在错误的 slot 上")
-
-    # 机会每 2 个 slot 才推进一次 -> 新鲜度必须是"开一个、关一个"。
-    check(fresh[1::2] == [0] * len(fresh[1::2]),
-          "机会没推进的那些 slot 不许被标成新")
-    check(sum(fresh) > 0, "机会推进的那些 slot 确实被标新")
-    check(legacy_fresh != fresh and sum(legacy_fresh) < sum(fresh),
-          f"按样本平铺会丢掉样本内部的 SRS 更新（{sum(legacy_fresh)} 次 vs "
-          f"逐 slot 的 {sum(fresh)} 次），这条对照证明上面两条有区分力")
+    # 期望模式直接由机会序列算出来：机会相对上一快照推进了才算新。
+    # 按样本平铺（修复前下游拿到的形状）现在会被 build_link_tables 硬拒，
+    # 拒绝那条另有测试（第 19 节），这里只核对逐 slot 路径本身对不对。
+    flat_occ = [int(v) for rows in per_slot_occ[0::n_ue] for v in rows]
+    expected = [1] + [
+        int(flat_occ[k] != flat_occ[k - 1]) for k in range(1, len(flat_occ))
+    ]
+    print(f"  实得 {fresh}")
+    print(f"  期望 {expected}（机会推进的那些 slot 才算新）")
+    check(fresh == expected,
+          "新鲜度逐 slot 落在机会真正推进的那些时刻上")
+    check(0 < sum(fresh) < len(fresh),
+          "既不是全开也不是全关（否则这条判据没有区分力）")
 
 
 def test_residual_correlation_can_never_become_a_gain() -> None:
@@ -2615,6 +2607,125 @@ def test_residual_correlation_can_never_become_a_gain() -> None:
 test_srs_events_are_recorded_per_slot()
 test_per_slot_ages_land_freshness_on_the_right_slot()
 test_residual_correlation_can_never_become_a_gain()
+
+
+# ---------------------------------------------------------------------------
+section("19  逐 RBG 记账必须与真正探到的那一跳同源")
+
+# 踩过的坑：探测子带已经改由每个 UE 自己的 SRS 资源分配决定，但"哪个 RBG 被
+# 标成新、谁的 CSI 多老"这套记账还在查全局固化跳序。同一小区里不同 UE 拿到
+# 不同的频域相位，两者从第一个样本起就对不上——实测同一次机会里 UE0 探 RBG0、
+# UE2 探 RBG8，记账却把它们统统标成 RBG9，24 个样本全错。
+#
+# 第二条：多 slot 的数据集如果只带每样本一份年龄（逐 slot 记录之前生成的），
+# 平铺会丢掉样本内部的 SRS 更新并把新鲜度放到错误的时刻上。必须拒绝，
+# 不能凑合跑——这种错位在 KPI 上看不出来。
+
+
+def test_freshness_marks_the_rbg_that_was_actually_sounded() -> None:
+    # 同小区多 UE，才逼得出不同的频域相位；不同小区各一个 UE 时相位都是 0，
+    # 这条测试就没有区分力。
+    samples = list(chub.iter_samples("internal_sim", {
+        "num_samples": 12, "num_ues": 6, "num_rb": 272,
+        "num_slots_per_sample": 1,
+        "num_bs_tx_ant": 8, "num_bs_rx_ant": 8,
+        "num_ue_tx_ant": 4, "num_ue_rx_ant": 4,
+        "scenario": "UMa_NLOS", "channel_model": "CDL-C",
+        "channel_est_mode": "ls_hop_sequential", "link": "BOTH",
+        "seed": 11, "measurements": {"ssb_rsrp": False},
+        "ue_speed_kmh": 30.0, "carrier_freq_hz": 2.6e9,
+        "sample_interval_s": 5e-3, "mobility_mode": "static",
+        "topology": "hex", "num_sites": 1, "sectors_per_site": 1,
+        "isd_m": 300.0, "srs_periodicity": 10, "srs_offset": 0,
+    }))
+    if "srs_victim_rb_start" not in samples[0].meta:
+        check(False, "跳频样本记录本次探测的 RB 区间")
+        return
+
+    phases, by_occasion, mismatched = {}, {}, 0
+    for sample in samples:
+        ue = int(sample.meta["ue_id"])
+        phases[ue] = int(sample.meta["srs_victim_frequency_resource_id"])
+        sounded = int(sample.meta["srs_victim_rb_start"]) // 16
+        marked = np.flatnonzero(
+            np.asarray(sample.meta["csi_rbg_age_occasions"]) == 0).tolist()
+        if marked != [sounded] or int(sample.meta["srs_hop_index"]) != sounded:
+            mismatched += 1
+        by_occasion.setdefault(
+            int(sample.meta["srs_occasion_index"]), {})[ue] = sounded
+    distinct_phases = len(set(phases.values()))
+    spread = max(len(set(v.values())) for v in by_occasion.values())
+    print(f"  同小区 {len(phases)} 个 UE 拿到 {distinct_phases} 个不同频域相位；"
+          f"同一次机会里最多有 {spread} 个不同的 RBG 被探到")
+    check(distinct_phases > 1 and spread > 1,
+          "这批样本里不同 UE 确实探不同的 RBG（否则这条测试没有区分力）")
+    check(mismatched == 0,
+          f"标新的 RBG 与真正探到的那一跳一致（不一致 {mismatched}/{len(samples)}）")
+
+
+def test_stale_per_sample_ages_are_refused_under_multi_slot() -> None:
+    n_slot, n_rbg, n_ue = 4, 17, 2
+    gen = np.random.default_rng(19)
+    shape = (6, n_slot, 272, 8, 4)
+    block = ((gen.standard_normal(shape) + 1j * gen.standard_normal(shape))
+             / np.sqrt(2)).astype(np.complex64)
+    flat = [block[i] for i in range(shape[0])]
+    per_slot_age, per_slot_occ = [], []
+    for i in range(shape[0]):
+        base = (i // n_ue) * 2
+        occ_row, age_row = [], []
+        for j in range(n_slot):
+            occ = base + (j // 2)
+            occ_row.append(occ)
+            row = [-1] * n_rbg
+            for back in range(min(occ + 1, n_rbg)):
+                row[(occ - back) % n_rbg] = back
+            age_row.append(row)
+        per_slot_occ.append(np.asarray(occ_row, dtype=int))
+        per_slot_age.append(np.asarray(age_row, dtype=int))
+
+    def attempt(ages, occasions, slots_per_sample):
+        users = flat if slots_per_sample > 1 else [x[0:1] for x in flat]
+        snaps = (shape[0] // n_ue) * slots_per_sample
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return sy.build_link_tables(
+                users, [12.0] * shape[0], num_ues=n_ue,
+                h_for_precoding_users=users, num_snapshots=snaps, max_rank=2,
+                csi=None, snapshot_ms=5.0, csi_rbg_age_samples=ages,
+                csi_occasion_samples=occasions)
+
+    legacy_age = [rows[-1] for rows in per_slot_age]
+    legacy_occ = [int(rows[-1]) for rows in per_slot_occ]
+
+    try:
+        attempt(per_slot_age, per_slot_occ, n_slot)
+        per_slot_ok = True
+    except ValueError as exc:
+        per_slot_ok = False
+        print(f"  逐 slot 数据被误拒：{exc}")
+    check(per_slot_ok, "当前版本生成的逐 slot 数据照常放行")
+
+    refused = False
+    try:
+        attempt(legacy_age, legacy_occ, n_slot)
+    except ValueError as exc:
+        refused = "重新生成" in str(exc)
+    print(f"  旧的每样本一份 + 多 slot -> {'硬失败' if refused else '被放行'}")
+    check(refused,
+          "多 slot 数据集只带每样本一份年龄时硬失败，不静默平铺")
+
+    single_ok = True
+    try:
+        attempt(legacy_age, legacy_occ, 1)
+    except ValueError as exc:
+        single_ok = False
+        print(f"  单 slot 兼容路径被误拒：{exc}")
+    check(single_ok, "单 slot 的旧数据仍走兼容路径（这条限制只针对多 slot）")
+
+
+test_freshness_marks_the_rbg_that_was_actually_sounded()
+test_stale_per_sample_ages_are_refused_under_multi_slot()
 
 
 print("\n" + "=" * 70)

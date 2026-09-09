@@ -1736,6 +1736,17 @@ def build_link_tables(
                                 f"样本 {i} 的逐 slot CSI 年龄有 {entry.shape[0]} 行，"
                                 f"而这个样本有 {slots} 个 slot")
                         rows.extend(entry)
+                    elif slots > 1:
+                        # **多 slot 的数据集只有每样本一份年龄，不许凑合用。**
+                        # 一个样本内部会跨过多次 SRS 机会，平铺会把更新压掉一半
+                        # 并放到错误的时刻上（实测 6 次更新变 3 次）。这种错位在
+                        # KPI 上看不出来，所以宁可拒绝也不静默降级。
+                        raise ValueError(
+                            f"样本 {i} 有 {slots} 个 slot，但数据集只带每样本一份"
+                            "逐 RBG CSI 年龄。这批数据是在逐 slot 记录之前生成的，"
+                            "平铺会丢掉样本内部的 SRS 更新并把新鲜度放到错误的 slot 上。"
+                            "请用当前版本重新生成数据集，或把 num_slots_per_sample "
+                            "设回 1。")
                     else:
                         rows.extend([entry] * slots)
                 merged_age.append(np.stack(rows))
@@ -1747,6 +1758,10 @@ def build_link_tables(
                         np.asarray(csi_occasion_samples[i], dtype=int))
                     if entry.size == slots:
                         occ.extend(int(v) for v in entry)
+                    elif entry.size == 1 and slots > 1:
+                        raise ValueError(
+                            f"样本 {i} 有 {slots} 个 slot，但数据集只带每样本一个 "
+                            "SRS 机会序号；同上，请重新生成数据集。")
                     elif entry.size == 1:
                         occ.extend([int(entry[0])] * slots)
                     else:
