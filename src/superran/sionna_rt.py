@@ -614,10 +614,18 @@ class SionnaRTSource(InternalSimSource):
         ue_position: np.ndarray,
         is_los: bool,
         role: str,
+        time_offset_s: float = 0.0,
     ) -> np.ndarray:
         # 统计信道的这些入参在 RT 下没有意义：多径角度、时延、多普勒全部
         # 来自几何。显式 del 掉，避免以后有人以为它们参与了计算。
-        del profile, rng, doppler_hz, realization_index
+        #
+        # ``time_offset_s`` 是父类的轨迹时钟（CDL 的时间演化全靠它）。**RT 必须
+        # 丢掉它**：RT 的径相位来自真实径长，父类把 UE 位置推到 r*n_time*dt 之后
+        # 重追一遍几何，这段相位已经算进去了；再叠加同样一段多普勒相位就等于把
+        # 相位算两遍，等效多普勒接近翻倍、相干时间偏短、CSI 老化被系统性夸大
+        # （实测数字见 synthesize_channel 的注释）。父类的轨迹时钟修好之后，RT
+        # 相邻两轮的时间窗口不再重叠，但窗口内部的时间轴仍然从 0 起算。
+        del profile, rng, doppler_hz, realization_index, time_offset_s
         del link_aod_rad, link_aoa_rad, link_zod_rad, link_zoa_rad, is_los
 
         if role == "serving":
@@ -736,13 +744,12 @@ class SionnaRTSource(InternalSimSource):
         2. 样本内部多时隙 + 零多普勒。``num_slots_per_sample>1`` 而
            ``ue_speed_kmh=0`` 时所有径的 Doppler 都是 0，时间相位恒为 1，
            一个样本里的 N 个 slot 逐位相同。
-        3. 非 static + 多轮 + 样本内部多时隙。父类每轮只把位置前移**一个**
-           ``sample_interval_s``，而一个样本内部横跨 ``n_time`` 个间隔，于是
-           相邻两轮的窗口在物理时间上重叠（n_time=8 时重叠 7/8，16 个输出只有
-           9 个独特时刻），下游 ``system.py`` 还会把它们直接展平拼接当独立快照。
-           只有一轮时不存在跨轮重叠，必须放行。
-           这个窗口合同要改的是父类的轨迹时钟，跨引擎、要维护者定案，
-           **不在本 PR 范围内**；在它定案之前 RT 不产出这种数据。
+        3. 非 static + 多轮 + 样本内部多时隙。**父类的轨迹时钟已于 2026-09-08
+           修好**：第 r 轮的位置和时间都推进 ``r*n_time*dt``，相邻两轮的窗口
+           首尾相接、不再重叠。RT 侧的这条守卫因此**只剩下一个未验证项**——
+           RT 是在该轮的固定位置上用几何多普勒外推整段窗口，窗口越长外推越
+           不准，这个误差还没有实测过。在拿到实测之前 RT 仍不产出这种数据；
+           要放开它需要维护者拍板并补一次外推误差测量。
         """
         # **向上取整。** ``num_samples=3, num_ues=2`` 时轮转分配是 UE [0, 1, 0]
         # ——UE0 已经出现第二次了，而 floor 除法算出来是「1 轮」，守卫整个失效。

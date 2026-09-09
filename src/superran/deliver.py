@@ -143,9 +143,15 @@ for k in ("pathloss_dB", "distance_3d_m", "is_los", "doppler_hz"):
 if ds.ssb:
     print("SSB RSRP:", ds.ssb["ssb_rsrp_dBm"].shape)   # [N, K] 每小区
 if ds.h_interferers is not None:
-    print("干扰信道:", ds.h_interferers.shape)          # [N, K-1, T, RB, BS, UE]
+    print("下行干扰信道:", ds.h_interferers.shape)      # [N, K-1, T, RB, BS, UE]
 else:
-    print("单小区场景，无干扰信道")
+    print("单小区场景，或未开 measurements.interferer_channels")
+# 上行交叉链路（干扰 UE → 本站）：SRS 导频污染唯一正确的输入，
+# 与上面那条下行干扰信道不是同一根链路，不能互相替代。
+if ds.h_ul_cross is not None:
+    print("上行交叉链路:", ds.h_ul_cross.shape)         # [N, 干扰UE, T, RB, BS, UE]
+else:
+    print("无上行交叉链路（生成时未开 measurements.srs_cross_link_channels）")
 ''',
     "linkperf": '''
 # ── 链路性能：预编码 → 逐层 SINR → 谱效 ────────────────────

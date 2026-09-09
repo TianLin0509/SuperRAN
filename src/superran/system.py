@@ -1269,6 +1269,13 @@ class UeLinkTable:
     cqi_filter_domain: str = "cqi_index"
     srs_resource_assignment: srsr.SrsResourceAssignment | None = None
     precoding_csi_source: str = "evaluation_channel"
+    #: ``[snapshot, RBG]``：这一刻哪些 RBG 的 CSI 是"新"的（本次 SRS 机会刚探到）。
+    #: 对齐现场的 ``getIsUlCsiNew``；跳频打开时每个机会只有 1/hop_factor 是新的。
+    csi_new_rbg: np.ndarray | None = field(default=None, repr=False)
+    #: 逐快照被消费掉的新鲜 RBG 数（现场的 ``setIsUlCsiNew(false)`` 之前那一刻）。
+    csi_new_rbg_count: np.ndarray | None = field(default=None, repr=False)
+    #: SU 发射权在该快照是重算的还是沿用上一次的。没有新 CSI 就不该重算。
+    su_weight_recomputed: np.ndarray | None = field(default=None, repr=False)
     # MU 建表只保存 RBG 粒度；避免 TTI 主循环反复做 SVD/矩阵求逆。
     h_true_rbg: np.ndarray | None = field(default=None, repr=False)  # [S,F,BS,UE]
     h_prec_rbg: np.ndarray | None = field(default=None, repr=False)  # [S,F,BS,UE]
@@ -1486,8 +1493,10 @@ def group_samples_by_ue(n_samples: int, num_ues: int) -> list[list[int]]:
     每用户谱效从应有的 0.32 掉到 0.08，**看起来像边缘用户被饿死**，
     其实是分母大了 4 倍。
 
-    同一个 UE 的多个样本是**时间相关的**（多普勒就是从相邻样本的位移算的），
-    所以它们正好当这个 UE 的信道快照序列用。
+    同一个 UE 的多个样本是**时间相关的**：first-party 信道源给每条轨迹一套固定的
+    散射体，样本之间只推进绝对时刻，所以相邻样本的复相关系数就是 Jakes 的
+    ``J0(2*pi*f_d*dt)``（实测 3 km/h @2.6 GHz、dt=5 ms 时 0.987，与理论差 <0.002）。
+    它们正好当这个 UE 的信道快照序列用，CSI 老化的代价也才有物理意义。
     """
     n_ue = max(1, min(int(num_ues), int(n_samples)))
     return [list(range(u, int(n_samples), n_ue)) for u in range(n_ue)]
@@ -1498,6 +1507,8 @@ def build_link_tables(
     geo_sinr_db: list[float],
     *,
     h_for_precoding_users: list[np.ndarray] | None = None,
+    csi_rbg_age_samples: list[np.ndarray] | None = None,
+    csi_occasion_samples: list[int] | None = None,
     geo_sir_db: list[float] | None = None,
     neighbor_load: float = 1.0,
     max_rank: int = mu.SU_MAX_RANK,
@@ -1686,6 +1697,8 @@ def build_link_tables(
         groups = group_samples_by_ue(len(h_users), num_ues)
         merged_h, merged_p, merged_g, merged_s = [], [], [], []
         merged_power: list[list[tuple[float, float, np.ndarray, int]]] = []
+        merged_age: list[np.ndarray] = []
+        merged_occ: list[np.ndarray] = []
         for g in groups:
             per_sample = [np.asarray(h_users[i]) for i in g]
             per_prec = [np.asarray(h_precoding_users[i]) for i in g]
@@ -1709,6 +1722,53 @@ def build_link_tables(
                 merged_s.append([float(sir_in[i])
                                  for i, x in zip(g, per_sample, strict=True)
                                  for _ in range(x.shape[0] if x.ndim == 4 else 1)])
+            # 每个样本给的可能是**逐 slot**（[T,RBG] / [T]）也可能是逐样本一份
+            # （[RBG] / 标量）。逐 slot 的按 slot 展开，逐样本的才重复 T 次——
+            # 后者会把新鲜度落在错误的 slot 上，只作为旧数据的兼容路径。
+            if csi_rbg_age_samples is not None:
+                rows: list[np.ndarray] = []
+                for i, x in zip(g, per_sample, strict=True):
+                    slots = x.shape[0] if x.ndim == 4 else 1
+                    entry = np.asarray(csi_rbg_age_samples[i], dtype=int)
+                    if entry.ndim == 2:
+                        if entry.shape[0] != slots:
+                            raise ValueError(
+                                f"样本 {i} 的逐 slot CSI 年龄有 {entry.shape[0]} 行，"
+                                f"而这个样本有 {slots} 个 slot")
+                        rows.extend(entry)
+                    elif slots > 1:
+                        # **多 slot 的数据集只有每样本一份年龄，不许凑合用。**
+                        # 一个样本内部会跨过多次 SRS 机会，平铺会把更新压掉一半
+                        # 并放到错误的时刻上（实测 6 次更新变 3 次）。这种错位在
+                        # KPI 上看不出来，所以宁可拒绝也不静默降级。
+                        raise ValueError(
+                            f"样本 {i} 有 {slots} 个 slot，但数据集只带每样本一份"
+                            "逐 RBG CSI 年龄。这批数据是在逐 slot 记录之前生成的，"
+                            "平铺会丢掉样本内部的 SRS 更新并把新鲜度放到错误的 slot 上。"
+                            "请用当前版本重新生成数据集，或把 num_slots_per_sample "
+                            "设回 1。")
+                    else:
+                        rows.extend([entry] * slots)
+                merged_age.append(np.stack(rows))
+            if csi_occasion_samples is not None:
+                occ: list[int] = []
+                for i, x in zip(g, per_sample, strict=True):
+                    slots = x.shape[0] if x.ndim == 4 else 1
+                    entry = np.atleast_1d(
+                        np.asarray(csi_occasion_samples[i], dtype=int))
+                    if entry.size == slots:
+                        occ.extend(int(v) for v in entry)
+                    elif entry.size == 1 and slots > 1:
+                        raise ValueError(
+                            f"样本 {i} 有 {slots} 个 slot，但数据集只带每样本一个 "
+                            "SRS 机会序号；同上，请重新生成数据集。")
+                    elif entry.size == 1:
+                        occ.extend([int(entry[0])] * slots)
+                    else:
+                        raise ValueError(
+                            f"样本 {i} 的 SRS 机会序号有 {entry.size} 项，"
+                            f"而这个样本有 {slots} 个 slot")
+                merged_occ.append(np.asarray(occ, dtype=int))
         h_users = merged_h
         h_precoding_users = merged_p
         per_snap_sinr, per_snap_sir = merged_g, merged_s
@@ -1716,6 +1776,10 @@ def build_link_tables(
             per_snap_power = merged_power
         geo_sinr_db = [_nan_safe(np.mean, v) for v in merged_g]
         sir_in = [_nan_safe(np.mean, v) for v in merged_s]
+        if csi_rbg_age_samples is not None:
+            csi_rbg_age_samples = merged_age
+        if csi_occasion_samples is not None:
+            csi_occasion_samples = merged_occ
 
     # **邻区不是 full buffer。** 按 PRB 利用率折算干扰后再建表——
     # 折算必须发生在算 SINR/MCS/rank 之前，事后乘系数是补不回来的。
@@ -1990,8 +2054,82 @@ def build_link_tables(
         _ss = per_snap_sir[i] if i < len(per_snap_sir) else [sir_in[i]]
 
         # 先把每个时刻基站可用的信道建完，PMI 报告才能在后续快照里持有上一份。
+        #
+        # 同时按现场口径记一份**逐 RBG 的二值新鲜度**（getIsUlCsiNew）：跳频打开
+        # 时每次 SRS 机会只探 1/hop_factor 的带宽，只有那部分 RBG 才算"新"。
+        # 权重更新绑在它上面，用完立刻标回陈旧（setIsUlCsiNew(false)）。
         h_prec_seq: list[np.ndarray] = []
+        csi_gate = ca.CsiFreshness(n_rbg_eff)
+        csi_new_seq = np.zeros((n_s, n_rbg_eff), dtype=bool)
+        # **数据集自带逐 RBG 年龄时，一切以它为准。** 跳频估计档的陈旧度是烘进
+        # h_est 的：哪次机会、哪一跳测的，只有生成器知道。系统侧拿自己的
+        # CsiConfig 重算，会把"只更新了一个子带"报成"17 个子带全新、年龄一律
+        # 等于一个周期"——实测就是这样。有这份数据时也不能再套 stale_channel，
+        # 那会在已经陈旧的 CSI 上再退一次。
+        dataset_age = None
+        if csi_rbg_age_samples is not None:
+            dataset_age = np.asarray(csi_rbg_age_samples[i], dtype=int)
+            if dataset_age.ndim != 2 or dataset_age.shape[0] < n_s:
+                raise ValueError(
+                    f"UE {i} 的逐 RBG CSI 年龄应为 [snapshot,RBG] 且快照数不少于 "
+                    f"{n_s}，收到 {dataset_age.shape}")
+            if int(dataset_age.shape[1]) != n_rbg_eff:
+                raise ValueError(
+                    f"数据集的 RBG 数 {dataset_age.shape[1]} 与本次载波栅格 "
+                    f"{n_rbg_eff} 不符；跳频陈旧度无法对齐，拒绝静默套用")
+        dataset_occ = (
+            np.asarray(csi_occasion_samples[i], dtype=int)
+            if csi_occasion_samples is not None else None)
         for s in range(n_s):
+            if dataset_age is not None:
+                # 年龄 0 = **最近一次机会**探到的；-1 = 还没探到过，永远不新鲜。
+                # 但"最近一次探到的"在两次机会之间一直成立——两个快照落在同一次
+                # 机会里时，同一份 CSI 会被重复标新。所以还要求机会序号相对上一
+                # 快照真的前进了，与系统侧自己那条门用的是同一条判据。
+                advanced = (
+                    True if dataset_occ is None
+                    else (s == 0 or int(dataset_occ[s]) != int(dataset_occ[s - 1])))
+                csi_new_seq[s] = (dataset_age[s] == 0) & advanced
+                h_prec_seq.append(prec_snaps_u[s])
+                lag_used[s] = float(np.mean(np.maximum(dataset_age[s], 0)))
+                continue
+            if aging:
+                assert effective_csi is not None
+                offsets = (
+                    tuple(float(leg.offset_ms) for leg in srs_assignments[i].legs)
+                    if srs_assignments is not None else (0.0,)
+                )
+                resource_id = (int(srs_assignments[i].frequency_resource_id)
+                               if srs_assignments is not None else 0)
+                fresh = np.zeros(n_rbg_eff, dtype=bool)
+                for offset in offsets:
+                    # **"新"的定义是"这一跳刚测到"，不是"它是最近一次测到的"。**
+                    # 后者在两次机会之间也永远成立，门就永远开着、等于没有门。
+                    occasion = ca.usable_srs_occasion_index(
+                        effective_csi, s * snapshot_ms,
+                        opportunity_offset_ms=offset)
+                    previous = (
+                        ca.usable_srs_occasion_index(
+                            effective_csi, (s - 1) * snapshot_ms,
+                            opportunity_offset_ms=offset)
+                        if s > 0 else occasion - 1
+                    )
+                    if occasion == previous:
+                        continue
+                    # **两个快照之间可能跨过不止一次 SRS 机会**（快照间隔比 SRS
+                    # 周期长时就会这样）。只标最后一次那一跳，中间那几跳刚测到的
+                    # CSI 就被静默丢掉——实测快照 20 ms / SRS 10 ms 时每个快照丢
+                    # 一跳。这里把区间 (previous, occasion] 里的每一次机会都标上。
+                    span = min(occasion - previous, int(effective_csi.hop_factor))
+                    for n in range(occasion - span + 1, occasion + 1):
+                        t_n = (offset + n * effective_csi.srs_period_ms
+                               + effective_csi.processing_delay_ms)
+                        age = ca.rbg_sounding_age_occasions(
+                            effective_csi, n_rbg_eff, t_n,
+                            rb_per_rbg=rb_per_rbg, opportunity_offset_ms=offset,
+                            frequency_resource_id=resource_id)
+                        fresh |= age == 0
+                csi_new_seq[s] = fresh
             if aging:
                 assert effective_csi is not None
                 if srs_assignments is not None:
@@ -2046,6 +2184,15 @@ def build_link_tables(
         # 4 次里有 3 次是重复搜索（码本列选择是建表里最贵的几步之一）。
         # 按 report_s 记忆化，不改任何数值，只是不再算第二遍。
         pmi_by_report: dict[int, np.ndarray] = {}
+
+        # 现场的权重更新门：没有新 CSI 就不重算 SU 发射权。缓存只有在
+        # "门说陈旧" **且** "手上这份 CSI 与上一快照逐位相同" 两条同时成立时
+        # 才敢复用；两者不一致就照常重算并计一次分歧——这种分歧意味着新鲜度
+        # 推导和陈旧信道装配走的不是同一条时序，必须能被看见而不是被吃掉。
+        su_weight_recomputed = np.zeros(n_s, dtype=bool)
+        csi_consumed = np.zeros((n_s, n_rbg_eff), dtype=bool)
+        csi_gate_disagreements = 0
+        w_tx_cache: np.ndarray | None = None
 
         for s, hs in enumerate(snaps):
             _g = _gs[s % len(_gs)]
@@ -2103,7 +2250,33 @@ def build_link_tables(
             # BF Gain 是**实际发射权**相对 PMI 参照权的增益。
             # precoder="type1" 时两者是同一个权，所以它恒为 0——这不是特例处理，
             # 是定义的直接后果：码本发送没有额外的 BF 增益可加。
-            w_tx_prec = w_pmi_s if precoder == "type1" else ca.svd_precoder(h_prec)
+            # SRS 到达 -> 标新；调度器消费 -> 立刻标回陈旧。
+            # 新鲜度的来源有两个：数据集自带的逐 RBG 年龄（跳频估计档），
+            # 或者系统侧的 SRS 老化模型。两个都没有才是"完美 CSI，恒新"。
+            csi_gate.mark_sounded(
+                csi_new_seq[s] if (aging or dataset_age is not None)
+                else np.ones(n_rbg_eff, dtype=bool))
+            fresh_now = csi_gate.consume()
+            csi_consumed[s] = fresh_now
+            if precoder == "type1":
+                # 码本权走 CSI 报告周期这条自己的时钟，不受逐 RBG 的 SRS 门管。
+                w_tx_prec = w_pmi_s
+                su_weight_recomputed[s] = bool(report_source[s] == s)
+            else:
+                held = (
+                    w_tx_cache is not None
+                    and not bool(np.any(fresh_now))
+                    and np.array_equal(h_prec, h_prec_seq[s - 1])
+                )
+                if (w_tx_cache is not None and not bool(np.any(fresh_now))
+                        and not held):
+                    csi_gate_disagreements += 1
+                if held:
+                    w_tx_prec = w_tx_cache
+                else:
+                    w_tx_prec = ca.svd_precoder(h_prec)
+                    w_tx_cache = w_tx_prec
+                    su_weight_recomputed[s] = True
             rank_cap = min(max_rank, w_tx_prec.shape[2], w_pmi_s.shape[2])
             for r in range(1, rank_cap + 1):
                 p_per = 1.0 / r
@@ -2277,7 +2450,16 @@ def build_link_tables(
                                   else "evaluation_channel"),
             h_true_rbg=np.asarray(snaps_u), h_prec_rbg=np.asarray(h_prec_seq),
             noise_power_by_snapshot=noise_by_snapshot,
+            csi_new_rbg=csi_consumed,
+            csi_new_rbg_count=csi_consumed.sum(axis=1),
+            su_weight_recomputed=su_weight_recomputed,
         ))
+        if csi_gate_disagreements:
+            warnings.warn(
+                f"UE {i}: CSI 新鲜度门与陈旧信道装配在 {csi_gate_disagreements} "
+                "个快照上不一致（门说没有新 CSI，但预编码信道变了）。"
+                "两者应该出自同一套 SRS 时序，请检查 srs_period_ms 与快照间隔。",
+                RuntimeWarning, stacklevel=2)
     if mu_enabled:
         build_mu_pair_tables(
             out, rank_per_user=int(mu_rank_per_user),
@@ -2286,17 +2468,55 @@ def build_link_tables(
     return out
 
 
+SU_WEIGHT_METHODS = ("svd", "svd_rx_gram", "ezf")
+
+
+def su_weight_directions(h_prec_rbg: np.ndarray, rank: int, *,
+                         method: str = "svd") -> np.ndarray:
+    """单用户发射权的三种取法，列单位范数，``[F, BS, rank]``。
+
+    对齐第三方参考实现的三个 SuType：
+
+    * ``"svd"``（SuType=0）——发射侧协方差 ``H H^H`` 的主特征方向，
+      也就是 :func:`csi_aging.svd_precoder`。本仓一直用的就是它。
+    * ``"svd_rx_gram"``（SuType=2）——先对接收侧 Gram ``H^H H`` 做 SVD 得到
+      ``v``，再把信道投影过去 ``H v``，最后列归一。**它与 SuType=0 张成同一个
+      子空间**（``H v_k = sigma_k u_k``），归一后只差每列一个相位，所以
+      ``|w^H w|^2`` 这类相关度量逐位相同——这不是巧合，是 SVD 的定义。
+      保留它是为了能逐项对上参考实现的分支，不是另一种物理。
+    * ``"ezf"``——正则化迫零 ``H (H^H H + 0.01 I)^-1``，再列归一。
+      参考实现在这一支上把自己 rank 个流之间也做了解耦；对角加载 0.01 是
+      它写死的常数，本仓照抄并显式记下来，不冒充自适应正则化。
+    """
+    if str(method) not in SU_WEIGHT_METHODS:
+        raise ValueError(f"su_weight_method 只支持 {SU_WEIGHT_METHODS}，收到 {method!r}")
+    h = np.asarray(h_prec_rbg)
+    k = int(rank)
+    if str(method) == "svd":
+        return ca.svd_precoder(h)[:, :, :k]
+    gram = np.conj(np.transpose(h, (0, 2, 1))) @ h              # [F, UE, UE]
+    if str(method) == "svd_rx_gram":
+        _u, _sv, vh = np.linalg.svd(gram)
+        v = np.conj(np.transpose(vh, (0, 2, 1)))[:, :, :k]      # [F, UE, k]
+        w = h @ v
+    else:
+        loading = 0.01 * np.eye(gram.shape[-1], dtype=gram.dtype)
+        w = (h @ np.linalg.inv(gram + loading))[:, :, :k]
+    norm = np.linalg.norm(w, axis=1, keepdims=True)
+    return w / np.maximum(norm, _EPS)
+
+
 def _su_tx_directions(h_prec_rbg: np.ndarray, rank: int,
-                     power_constraint: str) -> np.ndarray:
+                     power_constraint: str, method: str = "svd") -> np.ndarray:
     """该用户单独发射时会用的物理波束方向 ``[F, BS, rank]``。
 
-    就是 SU 链路那条路真正会打出去的权：先由陈旧 CSI 做 SVD，再施加
-    每天线功率约束（默认 NEBF）。与现场实现取 SU 波束权的口径一致。
+    就是 SU 链路那条路真正会打出去的权：先由陈旧 CSI 算方向（默认 SVD，
+    见 :func:`su_weight_directions`），再施加每天线功率约束（默认 NEBF）。
     列范数由 :func:`mumimo.su_weight_correlation_matrix` 归一，这里不动。
     """
-    w_full = ca.svd_precoder(np.asarray(h_prec_rbg))
+    w_full = su_weight_directions(np.asarray(h_prec_rbg), int(rank), method=method)
     q, _w, _diag = bf.equal_power_weights(
-        w_full[:, :, :int(rank)], mode=power_constraint, total_power=1.0)
+        w_full, mode=power_constraint, total_power=1.0)
     return np.asarray(q)
 
 
@@ -2306,6 +2526,7 @@ def build_mu_pair_tables(
     rank_cap_per_user: int | Sequence[int] | None = None,
     precoder: str = "ezf", power_constraint: str = "nebf",
     csi_error_variance: float = 0.0,
+    su_weight_method: str = "svd",
 ) -> dict[str, Any]:
     """预计算所有两用户 MU 链路及 ``CorrLoss + powerLoss`` 分解。
 
@@ -2396,7 +2617,8 @@ def build_mu_pair_tables(
         if cached is None:
             hp_u = tables[u].h_prec_rbg
             assert hp_u is not None
-            cached = _su_tx_directions(hp_u[s], r, power_constraint)
+            cached = _su_tx_directions(hp_u[s], r, power_constraint,
+                                       str(su_weight_method))
             tx_dir_cache[key] = cached
         return cached
 
@@ -2480,14 +2702,15 @@ def build_mu_pair_tables(
                                             + power_loss[:, None])
                         pred_sinr[s] = np.mean(pred_sinr_rbg[s], axis=1)
                         pred_leakage[s] = 0.0  # 解析式不产生残余干扰功率比
-                        hp = mu.effective_user_channels(
-                            [ti.h_prec_rbg[s][None], tj.h_prec_rbg[s][None]],
-                            streams_per_user=max(pair_ranks))
-                        g = mu._wideband_user_vectors(hp)
-                        denom = max(
-                            float(np.linalg.norm(g[0]) * np.linalg.norm(g[1])),
-                            _EPS)
-                        corr[s] = abs(complex(g[0].conj() @ g[1])) / denom
+                        # **配对判决用的相关系数取自宽带 SU 权相关矩阵**
+                        # （现场 mxWbUhU 的跨用户块），与上面的残留相关性连乘
+                        # 同源、同一条两级平均链：逐 RB → RBG 平均 → 宽带平均。
+                        # 旧写法另算一个基于**等效信道**宽带向量的相关系数，
+                        # 与真正打出去的 SU 波束不是同一个量，宽带矩阵则算完丢弃。
+                        corr[s] = mu.wideband_pair_correlation(
+                            [_tx_dir(i, s, rank_i), _tx_dir(j, s, rank_j)],
+                            rb_per_rbg=rows_per_rbg,
+                            rbg_boundaries=rbg_boundaries)
 
                     su_true = np.column_stack((ti.sinr_db[:, rank_i - 1],
                                                tj.sinr_db[:, rank_j - 1]))

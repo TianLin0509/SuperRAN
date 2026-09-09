@@ -436,5 +436,46 @@ def test_srs_capacity_error_returns_structured_tool_error() -> None:
     assert "17 frequency-resource" in out["error"]
 
 
+def _set_est_mode(mode: str) -> None:
+    path = datasets_dir() / _DS / "summary.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["config"]["channel_est_mode"] = mode
+    path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize("mode", ["ls_hop_sequential", "ls_hop_concat"])
+def test_hop_estimated_dataset_refuses_a_second_hopping_aging(mode: str) -> None:
+    """跳频老化只能算一遍。
+
+    数据集用 ls_hop_* 生成时，逐 RBG 的陈旧度已经烘进 h_est；系统侧再开
+    srs_hopping 会在这份已经陈旧的 CSI 上按 stale_channel 再退一次，等于把
+    同一个跳频扫描算两遍。更麻烦的是两侧的 SRS 周期/offset 可以配成不同值，
+    两个时钟一漂开，估计值的逐 RBG 年龄和调度器的新鲜度门说的就不是一件事，
+    而 KPI 上完全看不出来。所以必须硬失败，不能静默跑完。
+    """
+    _write_dataset()
+    _set_est_mode(mode)
+    out = _run(csi_aging=True, srs_hopping=True)
+    assert "error" in out, out
+    assert "算两遍" in out["error"]
+    assert "srs_hopping=False" in out["error"]
+
+
+def test_hop_estimated_dataset_runs_without_a_second_hopping_aging() -> None:
+    """只要系统侧不再跳频，跳频估计的数据集照常放行。"""
+    _write_dataset()
+    _set_est_mode("ls_hop_sequential")
+    out = _run(csi_aging=True, srs_hopping=False, srs_period_adaptive=True)
+    assert "算两遍" not in str(out.get("error", ""))
+
+
+def test_full_band_estimated_dataset_still_allows_hopping_aging() -> None:
+    """全带估计的数据集里没有跳频陈旧度，系统侧建模跳频不算重复。"""
+    _write_dataset()
+    _set_est_mode("ls_mmse")
+    out = _run(csi_aging=True, srs_hopping=True)
+    assert "error" not in out, out.get("error")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

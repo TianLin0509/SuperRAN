@@ -647,8 +647,10 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
     ("ue_speed_kmh", "终端速度 km/h", "number", (0, 500, 1), ""),
     ("link", "链路方向", "select", ["DL", "UL", "BOTH"], "测量域 SIR 只在 BOTH 下产生"),
     ("channel_est_mode", "信道估计", "select",
-     ["ideal", "ls_linear", "ls_mmse"],
-     "ideal=拿真值；ls_mmse 比 ls_linear 实测好 0.7~4.6 dB，导频越挤差距越大"),
+     ["ideal", "ls_linear", "ls_mmse", "ls_hop_sequential", "ls_hop_concat"],
+     "ideal=拿真值；ls_linear=全带 SRS 的裸 LS；ls_mmse=同样导频再做频域维纳压噪；"
+     "ls_hop_* 是 272 RB 的 17x16 跳频，一次只探 1/17 带宽，"
+     "sequential 保留各 RBG 上一次的估计、concat 把各跳并成一组导频联合插值"),
     ("num_samples", "样本数", "number", (1, 5000, 1), "由 sr_sample_size 算，别拍脑袋"),
     # --- 系统级仿真旋钮（sr_system_sim 用，不进 ChannelHub 的信道生成）---
     ("s_slot_dl_fraction", "S 时隙下行折算", "number", (0.01, 1.0, 0.01),
