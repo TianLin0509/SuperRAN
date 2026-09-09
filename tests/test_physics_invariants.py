@@ -2728,6 +2728,68 @@ test_freshness_marks_the_rbg_that_was_actually_sounded()
 test_stale_per_sample_ages_are_refused_under_multi_slot()
 
 
+section("20  无新 SRS 时，落盘的导频范围必须保持上次观测")
+
+
+def test_held_srs_pilot_range_survives_npz_roundtrip() -> None:
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+
+    # 同小区 3 UE 有不同频域相位；1/4 slot 均包含整样本无新机会的情形。
+    # 两档都应持有最后一次测量的 16 RB，concat 的历史并集不是本次导频范围。
+    for mode in ("ls_hop_sequential", "ls_hop_concat"):
+        for n_slot in (1, 4):
+            cfg = {
+                "source": "internal_sim", "num_ues": 3, "num_rb": 272,
+                "num_slots_per_sample": n_slot,
+                "num_bs_tx_ant": 8, "num_bs_rx_ant": 8,
+                "num_ue_tx_ant": 4, "num_ue_rx_ant": 4,
+                "scenario": "UMa_NLOS", "channel_model": "CDL-C",
+                "channel_est_mode": mode, "link": "BOTH", "seed": 11,
+                "measurements": {"ssb_rsrp": False}, "ue_speed_kmh": 30.0,
+                "carrier_freq_hz": 2.6e9, "bandwidth_hz": 100000000.0,
+                "sample_interval_s": 1e-3, "mobility_mode": "static",
+                "topology": "hex", "num_sites": 1, "sectors_per_site": 1,
+                "isd_m": 300.0, "srs_periodicity": 10 * n_slot, "srs_offset": 0,
+            }
+            with TemporaryDirectory(prefix="superran-held-srs-") as tmp:
+                with patch.object(gen, "dataset_dir", lambda dsid: Path(tmp) / dsid):
+                    summary = gen.generate(cfg, num_samples=18, workers=1)
+                with np.load(Path(summary["path"]) / "channels.npz",
+                             allow_pickle=False) as data:
+                    starts = data["meta__srs_victim_rb_start"].astype(int)
+                    counts = data["meta__srs_victim_rb_count"].astype(int)
+                    pilot_counts = data["meta__channel_est_pilot_rb_count"].astype(int)
+                    occasions = data["meta__srs_occasion_index"].astype(int)
+                    hops = data["meta__srs_hop_index"].astype(int)
+                    ues = data["meta__ue_id"].astype(int)
+                    phases = data["meta__srs_victim_frequency_resource_id"].astype(int)
+                    held, advanced, mismatches = 0, 0, 0
+                    previous = {}
+                    for i, ue in enumerate(ues):
+                        mismatches += int(counts[i] != 16 or pilot_counts[i] != 16
+                                          or starts[i] != 16 * hops[i])
+                        old = previous.get(ue)
+                        if old is not None and occasions[i] == occasions[old]:
+                            held += 1
+                            assert starts[i] == starts[old], "无新 SRS 时导频起点漂移"
+                            # 没有新观测时，整样本每个 slot 都必须保持上一份 CSI。
+                            for slot in data["h_est"][i]:
+                                np.testing.assert_array_equal(slot, data["h_est"][old, -1])
+                        elif old is not None:
+                            advanced += 1
+                            assert starts[i] != starts[old], "新机会必须切换到下一跳"
+                        previous[ue] = i
+                    print(f"  {mode} / {n_slot} slot：持有 {held}，推进 {advanced}，"
+                          f"NPZ 范围不一致 {mismatches}/18")
+                    assert held > 0 and advanced > 0, "夹具必须覆盖持有和推进两条路径"
+                    assert len(set(phases)) > 1, "夹具必须覆盖不同 UE 的频域相位"
+                    assert mismatches == 0, "NPZ 必须记录持有的 16 RB，不能误报全带"
+
+
+test_held_srs_pilot_range_survives_npz_roundtrip()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

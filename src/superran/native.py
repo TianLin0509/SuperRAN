@@ -1352,7 +1352,6 @@ class InternalSimSource:
         slots: dict[str, list[np.ndarray]] = {"dl": [], "ul": []}
         cold_start = False
         hop_index = -1
-        pilots = np.arange(int(n_rb), dtype=np.int64)
         occasion = 0
         # **逐 slot 记，不是逐样本记。** 一个样本内部可能跨过多次 SRS 机会
         # （实测 4 个 slot 横跨 3 次机会）；只留最后一次会让下游把新鲜度落在
@@ -1421,6 +1420,9 @@ class InternalSimSource:
         # 不是 -1（-1 只表示"非跳频档"）。补测循环不跑时不能把它留空。
         # 本样本没有新机会时，跳序号仍应是**当前生效那份 CSI 是哪一跳测的**。
         hop_index = int(self._hop_last_rbg.get(ue_id, hop_index))
+        # 范围也随最后一次真实观测保持。补测循环没有执行时，不能返回全带
+        # 默认值；concat 的历史并集也不等于最近一次探到的导频范围。
+        pilots = self._hop_pilots[(ue_id, "dl")][hop_index][0]
         seen = self._hop_last_seen.get((ue_id, "dl"), {})
         ages = [(occasion - seen[k]) if k in seen else -1
                 for k in range(hop_cycle)]
