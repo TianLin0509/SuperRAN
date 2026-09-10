@@ -260,8 +260,8 @@ def test_rbg_reduce_keeps_partial_tail_representative() -> None:
 
 
 def test_su_rank_adaptation_uses_true_partial_rbg_boundaries() -> None:
-    # 8 个强 RB + 2 个深衰 RB。把它们错当一个 10-RB 组会被强 RB 淹没；
-    # 正确的两个 RBG 口径会让尾组在 dB 域平均中显式产生影响。
+    # 8 RB 为 +20 dB、2 RB 为 -20 dB；正确两组等权得到 0 dB。
+    # 错并为一组则是 (8*20+2*(-20))/10=12 dB，尾组权重被压低。
     h = np.empty((1, 10, 1, 1), dtype=np.complex128)
     h[:, :8, 0, 0] = 10.0
     h[:, 8:, 0, 0] = 0.1
@@ -278,7 +278,7 @@ def test_su_rank_adaptation_uses_true_partial_rbg_boundaries() -> None:
         rbg_boundaries=((0, 10),),
     )
     assert exact.sinr_db == pytest.approx(0.0, abs=1e-10)
-    assert collapsed.sinr_db > 15.0
+    assert collapsed.sinr_db == pytest.approx(12.0, abs=1e-10)
     assert exact.mcs < collapsed.mcs
 
 
