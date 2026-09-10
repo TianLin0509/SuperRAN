@@ -2659,11 +2659,7 @@ Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位�
 <code>f_ray = f_max × cos(AoA − velocity_direction)</code>。空间响应与时间相位共享同一 AoA，
 保留空间与时间的耦合；只有均匀方位角散射的时间相关才服从 Jakes 的 J0，定向 CDL/LOS 不保证这一形状。</p>
 <p><code>ue_velocity_direction_deg</code> 是水平面运动方位角，范围 <code>[0, 360)</code>，
-0 表示 +x/东，90 表示 +y/北。未指定时沿用旧 <code>ue_heading_deg</code>，其次
-<code>track_heading_deg</code>，三者均缺省时为 0。旧 heading 允许按 360° 周期换算；
-新参数与生效的旧 heading 同时指定时必须等价，否则明确报错。轨迹位移、SRS 的位置查询与
-多普勒共用这一个方向；<code>static</code> 只冻结位置，速度仍决定小尺度时间演化。
-RT 仍由几何路径计算逐径多普勒，继承的速度配置使用同一解析结果；本次未改变 RT 的投影模型。</p>
+0 表示 +x/东，90 表示 +y/北；轨迹与多普勒共用它。默认值、旧别名和冲突规则见详细版。</p>
 """
     body += table(
         ["profile", "表分量", "实际 ray 项", "关键口径"],
