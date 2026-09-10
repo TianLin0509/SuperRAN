@@ -475,7 +475,7 @@ sect("11  2026-08-07 自审修掉的三个口径 bug")
 # ---------------------------------------------------------------------------
 import inspect as _insp  # noqa: E402
 
-_src = _insp.getsource(expm.simulate_experience)
+_src = _insp.getsource(expm._experience_steps)
 
 # --- bug A：重传必须保留实发 MCS，等效低档只能作为 BLER lookup_mcs ---
 check("harq_retransmission_bler" in _src

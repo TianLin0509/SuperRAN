@@ -2352,6 +2352,22 @@ def simulate_experience(
     kpi: Any, book: rg.RngBook, s_slot_fraction: float = 0.7,
     progress: Any = None,
 ) -> ExperienceRun:
+    """Run the original state machine synchronously for one carrier."""
+    steps = _experience_steps(
+        tables, sys_cfg=sys_cfg, traffic_cfg=traffic_cfg, sched=sched, kpi=kpi,
+        book=book, s_slot_fraction=s_slot_fraction, progress=progress)
+    try:
+        next(steps)
+    except StopIteration as done:
+        return done.value
+    raise RuntimeError("single-carrier loop unexpectedly paused")
+
+
+def _experience_steps(
+    tables: Sequence[Any], *, sys_cfg: Any, traffic_cfg: Any, sched: Any,
+    kpi: Any, book: rg.RngBook, s_slot_fraction: float = 0.7,
+    progress: Any = None, lane: Any = None,
+) -> ExperienceRun:
     """运行 ``experience_v2``。返回值由 :mod:`system` 包成 ``SystemResult``。"""
     t0 = time.perf_counter()
     if not tables:
@@ -2544,8 +2560,8 @@ def simulate_experience(
             None if getattr(sched, "max_logical_prb_per_tti", None) is None
             else int(sched.max_logical_prb_per_tti)),
     )
-    tr = ExperienceTraffic(traffic_cfg, n_ue, sys_cfg.tti_ms,
-                           book.generator("traffic"))
+    tr = (ExperienceTraffic(traffic_cfg, n_ue, sys_cfg.tti_ms,
+                            book.generator("traffic")) if lane is None else lane.traffic)
     # **CRN 必须绑定到同一个事件，而不是“第几个被调度者”。** 若顺序消费一条
     # generator，A/B 的调度一旦分叉，后续同一个随机数会落到不同 UE/TTI，
     # 名义上种子相同、实际上事件错位。固定生成 [TTI,UE] 网格后，方案只会决定
@@ -2644,7 +2660,7 @@ def simulate_experience(
     # 按现场实现口径不进 Body，只进 first_pkt_delay）。
     hbt_burst_cur = np.zeros(n_ue, dtype=int)
 
-    def _hbt_tick(payload_by_ue: dict[int, int],
+    def _hbt_tick_local(payload_by_ue: dict[int, int],
                   burst_by_ue: dict[int, BusyPeriod]) -> None:
         """每个 TTI 收尾时给每个 UE 的当前 burst 归一次段。
 
@@ -2675,6 +2691,12 @@ def simulate_experience(
                     hbt_burst_cur[_u_hb] = 0
                 else:
                     _b_idle.body_sch_tti += 1
+
+    def _hbt_tick(payload_by_ue, burst_by_ue):
+        if lane is None:
+            _hbt_tick_local(payload_by_ue, burst_by_ue)
+        else:
+            lane.record_tick(payload_by_ue, burst_by_ue)
 
     def _count_rx_acked(ue: int, tb: _HarqTb, feedback_tti: int) -> None:
         """这个 TB 最终被对端收对了：记进接收侧 MAC 吞吐。
@@ -2824,6 +2846,9 @@ def simulate_experience(
         ))
 
     for tti in range(int(sys_cfg.num_tti)):
+        if lane is not None:
+            yield ("start", locals())
+            r_avg = lane.global_average.copy()
         in_measurement = tti >= warmup
         if tti == warmup:
             offered_before_measurement = int(tr.offered_bytes)
@@ -2893,6 +2918,8 @@ def simulate_experience(
             olla_db[_u_rk] = float(min(max(
                 _olla_rk, sched.olla_min_db), sched.olla_max_db))
         slot = pattern[tti % pattern_len]
+        if lane is not None:
+            yield ("ready", locals())
         if slot not in ("D", "S"):
             # 上行/保护时隙没有下行调度，但数据还在 buffer 里等着——
             # 它们要进 burst 的分母，否则分段速率就不是墙钟速率了。
@@ -3110,6 +3137,9 @@ def simulate_experience(
         ordered_users = pending_ready + [
             u for u in metric_order
             if u not in harq_pending and harq_free_ids[u]]
+        if lane is not None and lane.ue_order is not None:
+            order_position = {u: i for i, u in enumerate(lane.ue_order)}
+            ordered_users = sorted(ordered_users, key=lambda u: order_position[u])
         queue_bytes = {int(u): tr.bytes_left(int(u)) for u in cand}
         true_sinr_of = {
             int(u): float(tables[int(u)].sinr_db[
@@ -3192,6 +3222,8 @@ def simulate_experience(
                                    else "SU_no_eligible_MU_pair")
             su_decisions += int(in_measurement)
 
+        if lane is not None:
+            selected_plan = yield ("plan", locals())
         final_grants = _finalize_selected_plan(
             selected_plan,
             queue_bytes=queue_bytes,
@@ -3532,6 +3564,8 @@ def simulate_experience(
         if in_measurement:
             tti_occupied_rbg_counts[len(used_indices)] += 1
         r_avg = (1.0 - a) * r_avg + a * inst
+        if lane is not None:
+            lane.credit = inst.copy()
         if in_measurement and trace_mode != "off":
             event_reasons: list[str] = []
             if any(allocation.transmission_mode == "MU" for allocation in tti_allocations):
@@ -3577,6 +3611,133 @@ def simulate_experience(
         _hbt_tick(hbt_payload_tti, hbt_burst_tti)
         if progress and tti % 5000 == 0:
             progress(tti, int(sys_cfg.num_tti))
+
+    if lane is not None:
+        yield ("finished", locals())
+    return _summarize_experience(locals())
+
+
+def _summarize_experience(state: dict[str, Any]) -> ExperienceRun:
+    """One shared KPI implementation for the legacy loop and CA coordinator."""
+    _max_proc = state["_max_proc"]
+    accounting = state["accounting"]
+    acked_payload_from_pre_window = state["acked_payload_from_pre_window"]
+    acked_payload_measured = state["acked_payload_measured"]
+    acked_tbs_measured = state["acked_tbs_measured"]
+    adaptation_stats = state["adaptation_stats"]
+    allocated_logical_prb_equiv = state["allocated_logical_prb_equiv"]
+    allocated_prb_equiv = state["allocated_prb_equiv"]
+    allocated_rbg = state["allocated_rbg"]
+    allocated_rbg_equiv = state["allocated_rbg_equiv"]
+    allocated_rbg_full = state["allocated_rbg_full"]
+    allocation_limit = state["allocation_limit"]
+    allocation_recent = state["allocation_recent"]
+    allocation_sample = state["allocation_sample"]
+    attempted_payload_measured = state["attempted_payload_measured"]
+    available_prb_equiv = state["available_prb_equiv"]
+    available_rbg_equiv = state["available_rbg_equiv"]
+    backlog_at_measurement_start = state["backlog_at_measurement_start"]
+    book = state["book"]
+    busy_tti = state["busy_tti"]
+    class_acked = state["class_acked"]
+    class_alloc_rbg = state["class_alloc_rbg"]
+    class_physical_rbg_share = state["class_physical_rbg_share"]
+    cqi_reporter = state["cqi_reporter"]
+    dl_tti = state["dl_tti"]
+    dl_tti_full = state["dl_tti_full"]
+    feedback_delay_on = state["feedback_delay_on"]
+    feedback_modelled = state["feedback_modelled"]
+    feedback_offsets = state["feedback_offsets"]
+    feedback_wait_skips = state["feedback_wait_skips"]
+    finalizer_grant_count = state["finalizer_grant_count"]
+    frequency_aware = state["frequency_aware"]
+    frequency_evaluated_subsets = state["frequency_evaluated_subsets"]
+    frequency_grant_count = state["frequency_grant_count"]
+    frequency_incremental_useful = state["frequency_incremental_useful"]
+    frequency_mode = state["frequency_mode"]
+    frequency_quality_selected_count = state["frequency_quality_selected_count"]
+    frequency_ready = state["frequency_ready"]
+    frequency_score_gains = state["frequency_score_gains"]
+    harq_combining = state["harq_combining"]
+    harq_inflight = state["harq_inflight"]
+    harq_retx_forced_su = state["harq_retx_forced_su"]
+    lookup = state["lookup"]
+    max_layers_used = state["max_layers_used"]
+    max_rbg_in_tti = state["max_rbg_in_tti"]
+    mcs_first_sum_measured = state["mcs_first_sum_measured"]
+    mcs_sum_measured = state["mcs_sum_measured"]
+    measurement_duration_s = state["measurement_duration_s"]
+    mixed_edf_medians = state["mixed_edf_medians"]
+    mixed_epf_medians = state["mixed_epf_medians"]
+    mixed_epf_scale = state["mixed_epf_scale"]
+    mixed_weight = state["mixed_weight"]
+    mode_expected_bler_by_ue = state["mode_expected_bler_by_ue"]
+    mode_nack_by_ue = state["mode_nack_by_ue"]
+    mode_tx_by_ue = state["mode_tx_by_ue"]
+    modes = state["modes"]
+    mu_candidate_count = state["mu_candidate_count"]
+    mu_candidate_feasible_count = state["mu_candidate_feasible_count"]
+    mu_candidate_rejection_reasons = state["mu_candidate_rejection_reasons"]
+    mu_candidate_selected_count = state["mu_candidate_selected_count"]
+    mu_candidate_selected_scores = state["mu_candidate_selected_scores"]
+    mu_decisions = state["mu_decisions"]
+    mu_olla_db = state["mu_olla_db"]
+    mu_pair_graph = state["mu_pair_graph"]
+    mu_plan_useful = state["mu_plan_useful"]
+    mu_prb_equiv = state["mu_prb_equiv"]
+    mu_rbg = state["mu_rbg"]
+    mu_tti = state["mu_tti"]
+    mu_user_tx = state["mu_user_tx"]
+    multi_ue_tti = state["multi_ue_tti"]
+    n_snap = state["n_snap"]
+    n_ue = state["n_ue"]
+    nack_count_measured = state["nack_count_measured"]
+    offered_before_measurement = state["offered_before_measurement"]
+    olla_at_measurement_start = state["olla_at_measurement_start"]
+    olla_db = state["olla_db"]
+    outage_skips = state["outage_skips"]
+    overlap_violations = state["overlap_violations"]
+    padding_measured = state["padding_measured"]
+    pattern = state["pattern"]
+    pf_gain_ratios = state["pf_gain_ratios"]
+    pf_gain_rejects = state["pf_gain_rejects"]
+    rank_cfg = state["rank_cfg"]
+    rank_ctl = state["rank_ctl"]
+    rank_sum_measured = state["rank_sum_measured"]
+    rbg_hist = state["rbg_hist"]
+    resource_budget = state["resource_budget"]
+    resource_evaluated_rejection_reasons = state["resource_evaluated_rejection_reasons"]
+    resource_rejection_reasons = state["resource_rejection_reasons"]
+    retx_count_measured = state["retx_count_measured"]
+    retx_nack_count_measured = state["retx_nack_count_measured"]
+    sched = state["sched"]
+    sched_cnt_measured = state["sched_cnt_measured"]
+    scheduled_tbs_measured = state["scheduled_tbs_measured"]
+    scheduled_ues_sum = state["scheduled_ues_sum"]
+    served = state["served"]
+    served_measured = state["served_measured"]
+    small_policy = state["small_policy"]
+    srb_observed = state["srb_observed"]
+    starvation_hol_ms = state["starvation_hol_ms"]
+    starvation_lifts = state["starvation_lifts"]
+    su_decisions = state["su_decisions"]
+    su_forced_clear = state["su_forced_clear"]
+    su_plan_useful = state["su_plan_useful"]
+    sys_cfg = state["sys_cfg"]
+    t0 = state["t0"]
+    tables = state["tables"]
+    tr = state["tr"]
+    trace_max_points = state["trace_max_points"]
+    trace_mode = state["trace_mode"]
+    trace_uniform_ttis = state["trace_uniform_ttis"]
+    tti_occupied_rbg_counts = state["tti_occupied_rbg_counts"]
+    tti_trace_rows = state["tti_trace_rows"]
+    tx_count_measured = state["tx_count_measured"]
+    user_attributed_prb_equiv = state["user_attributed_prb_equiv"]
+    user_grant_prb_equiv = state["user_grant_prb_equiv"]
+    user_mu_grant_prb_equiv = state["user_mu_grant_prb_equiv"]
+    user_mu_tx_measured = state["user_mu_tx_measured"]
+    warmup = state["warmup"]
 
     pending_measured = np.asarray([
         sum(tb.first_tti >= warmup for tb in harq_inflight[u].values())
