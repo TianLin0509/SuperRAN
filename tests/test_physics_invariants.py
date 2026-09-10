@@ -674,11 +674,13 @@ check(_fb_served[0] > _fb_served[-1],
 # 出厂默认是 frequency_selective="auto" + mu_enabled=False，在真实锚点数据集上
 # 实测每忙 TTI 1.14；开 MU 是 1.86、小区吞吐 +64%。
 # 这里用互补频选的合成信道把四个格子都钉住，谁把任何一格改回 1.0 都会红。
+# R4 总配对代价补足后，以 16T 提供足够的空间自由度保留 MU 正例；
+# 保持随机频率起伏、几何 SINR 和全部准入/资源断言，不能把无配对放宽成通过。
 _fsrng = np.random.default_rng(7)
 _fsH = []
 for _u in range(4):
-    _h = ((_fsrng.standard_normal((2, 272, 8, 2))
-           + 1j * _fsrng.standard_normal((2, 272, 8, 2))) / np.sqrt(2))
+    _h = ((_fsrng.standard_normal((2, 272, 16, 2))
+           + 1j * _fsrng.standard_normal((2, 272, 16, 2))) / np.sqrt(2))
     _g = np.full(272, 0.15)
     _g[_u * 68:(_u + 1) * 68] = 1.0          # UE u 只在自己那 1/4 频段上强
     _fsH.append((_h * _g[None, :, None, None]).astype(complex))
@@ -2245,7 +2247,7 @@ def test_su_weight_correlation_averaging_order() -> None:
             for q in range(2):
                 rem = rem * (1.0 - rbg_corr[:, user * 2 + k, other * 2 + q])
             streams[k] = 10.0 * np.log10(np.maximum(rem, np.finfo(float).eps))
-        rebuilt[user] = streams.mean(axis=0)
+        rebuilt[user] = streams.sum(axis=0)
     check(float(np.max(np.abs(loss - rebuilt))) < 1e-12,
           "残留相关性连乘吃的就是第一级的 RBG 相关矩阵，没有第二套算法")
 
