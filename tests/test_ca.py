@@ -346,6 +346,10 @@ def assert_ca_statistics_use_carrier_scope():
     assert run(masked,model='full_buffer').cell['outage_ue']==2
     for table in b.tables['scc']:table.outage=np.ones(table.sinr_db.shape[0],dtype=bool)
     assert run(b,model='full_buffer').cell['outage_ue']==2
+    assert_ca_fullband_grants_use_own_carrier()
+
+
+def assert_ca_fullband_grants_use_own_carrier():
     for mode in ('independent','cort'):
         result=run(mode=mode,model='full_buffer')
         cc=result.diagnostics['ca']['per_carrier']
