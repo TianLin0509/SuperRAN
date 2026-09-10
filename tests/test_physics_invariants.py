@@ -2955,6 +2955,173 @@ def test_ca_coverage_and_fullband_statistics_use_carrier_scope():
 test_ca_coverage_and_fullband_statistics_use_carrier_scope()
 
 
+def _r1_profile(*, los=True, clusters=1):
+    return nv.ChannelProfile(
+        name="R1-controlled-rays", delays_norm=np.zeros(clusters),
+        powers_dB=np.zeros(clusters), is_los=los,
+        aoa_deg=np.zeros(clusters) if los else None,
+        aod_deg=np.zeros(clusters), zoa_deg=np.full(clusters, 90.0),
+        zod_deg=np.full(clusters, 90.0), c_asa_deg=0.0, c_asd_deg=0.0,
+        c_zsa_deg=0.0, c_zsd_deg=0.0,
+    )
+
+
+def _r1_motion_config(**extra):
+    cfg = dict(
+        num_samples=2, num_ues=1, num_rb=4, num_slots_per_sample=4,
+        num_bs_tx_ant=2, num_bs_rx_ant=2, num_ue_rx_ant=2, num_ue_tx_ant=2,
+        bs_panel=[2, 1, 1], ue_panel=[2, 1, 1], num_sites=1,
+        sectors_per_site=1, link="BOTH", channel_est_mode="ideal",
+        custom_ue_positions=[[100.0, 0.0, 1.5]], ue_speed_kmh=36.0,
+        carrier_freq_hz=3e9, sample_interval_s=0.0005, seed=81,
+        mobility_mode="linear", measurements={"ssb_rsrp": False,
+        "srs_cross_link_channels": False, "interferer_channels": False},
+    )
+    cfg.update(extra)
+    return cfg
+
+
+def test_r1_doppler_uses_spatial_ray_aoa():
+    source = nv.InternalSimSource({"bs_panel": [1, 1, 1], "ue_panel": [2, 1, 1],
+                                  "sample_interval_s": 0.0005})
+    def ray(**extra):
+        return source._channel(
+            _r1_profile(), np.random.default_rng(73), n_time=32, n_rb=1,
+            n_bs=1, n_ue=2, doppler_hz=100.0, realization_index=0,
+            link_aod_rad=0.0, link_aoa_rad=0.63,
+            link_zod_rad=np.pi / 2, link_zoa_rad=np.pi / 2, **extra,
+        )
+    default = ray()  # Old signature must fail numerically before R1 is fixed.
+    np.testing.assert_allclose(default[1:] / default[:-1],
+                               np.exp(2j * np.pi * 100 * math.cos(0.63) * 0.0005),
+                               atol=2e-6, rtol=0)
+    np.testing.assert_array_equal(default, ray(velocity_direction_rad=0.0))
+    for direction in (0.0, np.pi / 2, np.pi, 3 * np.pi / 2, 0.5):
+        h = ray(velocity_direction_rad=direction, time_offset_s=0.013)
+        np.testing.assert_allclose(h[1:] / h[:-1],
+                                   np.exp(2j * np.pi * 100 * math.cos(0.63 - direction) * 0.0005),
+                                   atol=2e-6, rtol=0)
+        np.testing.assert_allclose(h[..., 1] / h[..., 0],
+                                   np.exp(-1j * np.pi * math.sin(0.63)), atol=2e-6, rtol=0)
+        assert h.shape == (32, 1, 1, 2) and h.dtype == np.complex64
+
+
+def test_r1_space_time_transport_uses_same_rays():
+    # UE horizontal elements lie on +y. Motion through lambda/2 cancels the
+    # conjugated UE element phase exactly, for every ray in this 2D fixture.
+    source = nv.InternalSimSource({"bs_panel": [1, 1, 1], "ue_panel": [2, 1, 1],
+                                  "sample_interval_s": 0.0005})
+    h = source._channel(
+        _r1_profile(los=False, clusters=8), np.random.default_rng(73),
+        n_time=1000, n_rb=1, n_bs=1, n_ue=2, doppler_hz=100.0,
+        realization_index=0, link_aod_rad=0.0, link_aoa_rad=0.0,
+        link_zod_rad=np.pi / 2, link_zoa_rad=np.pi / 2,
+        velocity_direction_rad=np.pi / 2,
+    )[:, 0, 0]
+    assert np.linalg.norm(h[:-10, 0] - h[10:, 1]) / np.linalg.norm(h[:-10, 0]) < 2e-6
+
+
+def test_r1_motion_and_doppler_share_velocity():
+    from unittest.mock import patch
+
+    # Infer velocity from generated positions, not from the forwarded keyword.
+    # At 3 GHz and 36 km/h f_max=100 Hz; AoA of the first link is pi.
+    variants = [({}, 0.0), ({"ue_velocity_direction_deg": 90.0}, 90.0),
+                ({"ue_heading_deg": 90.0}, 90.0), ({"track_heading_deg": 90.0}, 90.0),
+                ({"ue_heading_deg": 90.0, "ue_velocity_direction_deg": 90.0}, 90.0),
+                ({"track_heading_deg": -90.0, "ue_velocity_direction_deg": 270.0}, 270.0),
+                ({"ue_heading_deg": 450.0}, 90.0),
+                ({"ue_heading_deg": 90.0, "track_heading_deg": 0.0}, 90.0)]
+    for fields, direction in variants:
+        source = nv.InternalSimSource(_r1_motion_config(**fields))
+        with patch.object(nv, "get_channel_profile", return_value=_r1_profile()):
+            samples = list(source.iter_samples())
+        displacement = samples[1].ue_position - samples[0].ue_position
+        v_xy = displacement[:2] / (4 * 0.0005)
+        expected_v = 10 * np.array([math.cos(math.radians(direction)),
+                                   math.sin(math.radians(direction))])
+        np.testing.assert_allclose(v_xy, expected_v, atol=1e-9, rtol=0)
+        # Arrival vector [-1, 0] points from this UE back toward the BS.
+        expected_fd = float(np.dot(v_xy, [-1.0, 0.0]) / 0.1)
+        h = samples[0].h_dl_true[:, 0, 0, 0]
+        measured_fd = float(np.angle(h[1] / h[0]) / (2 * np.pi * 0.0005))
+        assert abs(measured_fd - expected_fd) < 1e-4, (fields, measured_fd, expected_fd)
+        # Cell/SRS assignment's position helper must use the same direction.
+        helper_delta = source._ue_position_at(np.array([[100., 0., 1.5]]), 0, 1) - samples[0].ue_position
+        np.testing.assert_allclose(helper_delta[:2] / 0.0005, v_xy, atol=1e-9, rtol=0)
+        for sample in samples:
+            np.testing.assert_array_equal(sample.h_dl_true, sample.h_ul_true)
+
+
+def test_r1_direction_validation_and_rt_velocity_alias():
+    for bad in (-1, 360, float("nan"), float("inf"), -float("inf"), "bad", None, {}, []):
+        try:
+            nv.InternalSimSource(_r1_motion_config(ue_velocity_direction_deg=bad))
+        except ValueError as exc:
+            assert "ue_velocity_direction_deg" in str(exc)
+        else:
+            raise AssertionError(f"Invalid direction accepted: {bad!r}")
+    for legacy in ("ue_heading_deg", "track_heading_deg"):
+        for value in (float("nan"), float("inf"), "bad"):
+            try:
+                nv.InternalSimSource(_r1_motion_config(**{legacy: value}))
+            except ValueError as exc:
+                assert legacy in str(exc)
+            else:
+                raise AssertionError(f"Invalid legacy direction accepted: {legacy}={value!r}")
+        for source_type in (nv.InternalSimSource, srt.SionnaRTSource):
+            try:
+                source_type(_r1_motion_config(**{legacy: 90.0, "ue_velocity_direction_deg": 0.0}))
+            except ValueError as exc:
+                assert legacy in str(exc) and "ue_velocity_direction_deg" in str(exc)
+            else:
+                raise AssertionError("Conflicting motion directions must be rejected")
+    for alias in ("ue_velocity_direction_deg", "ue_heading_deg", "track_heading_deg"):
+        cfg = _r1_motion_config(**{alias: 90.0})
+        before = dict(cfg)
+        rt = srt.SionnaRTSource(cfg)
+        np.testing.assert_allclose(rt._velocity(), [0.0, 10.0, 0.0], atol=1e-12, rtol=0)
+        assert cfg == before, "Normalization must not mutate the caller's config"
+
+
+def test_r1_historical_srs_uses_resolved_direction():
+    from unittest.mock import patch
+
+    cfg = _r1_motion_config(
+        num_samples=4, num_rb=272, num_slots_per_sample=2, mobility_mode="static",
+        channel_est_mode="ls_hop_concat", srs_processing_delay_ms=0.0,
+        sample_interval_s=0.001, ue_heading_deg=90.0,
+    )
+    original = nv.InternalSimSource._channel
+    calls = []
+    def record(self, *args, **kwargs):
+        calls.append((kwargs["n_time"], kwargs["velocity_direction_rad"]))
+        return original(self, *args, **kwargs)
+    with patch.object(nv.InternalSimSource, "_channel", record):
+        samples = list(nv.InternalSimSource(cfg).iter_samples())
+    assert any(n == 1 for n, _ in calls), "Must sample the historical SRS channel"
+    assert any(n == 2 for n, _ in calls), "Must sample the current channel"
+    assert all(abs(d - np.pi / 2) < 1e-12 for _, d in calls)
+    for sample in samples:
+        np.testing.assert_array_equal(sample.h_dl_true, sample.h_ul_true)
+        np.testing.assert_array_equal(sample.ue_position, samples[0].ue_position)
+    simple = _r1_motion_config(num_samples=1)
+    default = next(nv.InternalSimSource(simple).iter_samples()).h_dl_true
+    zero = next(nv.InternalSimSource(dict(simple, ue_velocity_direction_deg=0)).iter_samples()).h_dl_true
+    np.testing.assert_array_equal(default, zero)
+    stopped = dict(simple, ue_speed_kmh=0)
+    a = next(nv.InternalSimSource(dict(stopped, ue_velocity_direction_deg=0)).iter_samples()).h_dl_true
+    b = next(nv.InternalSimSource(dict(stopped, ue_velocity_direction_deg=90)).iter_samples()).h_dl_true
+    np.testing.assert_array_equal(a, b)
+
+
+test_r1_doppler_uses_spatial_ray_aoa()
+test_r1_space_time_transport_uses_same_rays()
+test_r1_motion_and_doppler_share_velocity()
+test_r1_direction_validation_and_rt_velocity_alias()
+test_r1_historical_srs_uses_resolved_direction()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

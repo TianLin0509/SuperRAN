@@ -1277,6 +1277,12 @@ class InternalSimSource:
 
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = dict(cfg)
+        direction_deg = self._resolve_velocity_direction_deg(self.cfg)
+        self._velocity_direction_rad = math.radians(direction_deg)
+        # One velocity direction for geometry and fading. Keep the resolved
+        # legacy key for adapters (including RT) that consume UE velocity.
+        self.cfg["ue_velocity_direction_deg"] = direction_deg
+        self.cfg["ue_heading_deg"] = direction_deg
         self.num_ues = max(int(self.cfg.get("num_ues", 1) or 1), 1)
         self.num_samples = max(int(self.cfg.get("num_samples", self.num_ues) or self.num_ues), 1)
         self._seed = int(self.cfg.get("seed", 0) or 0)
@@ -1290,6 +1296,40 @@ class InternalSimSource:
         self._hop_last_seen: dict[tuple[int, str], dict[int, int]] = {}
         self._hop_occasion: dict[tuple[int, str], int] = {}
         self._hop_last_rbg: dict[int, int] = {}
+
+    @staticmethod
+    def _resolve_velocity_direction_deg(cfg: dict[str, Any]) -> float:
+        """Resolve one horizontal velocity azimuth before any channel draws.
+
+        The new key is in [0, 360). Without it, preserve the old heading-key
+        precedence and accept periodic legacy angles. Explicit new and legacy
+        directions must agree modulo 360; contradictory velocities are errors.
+        """
+        key = "ue_velocity_direction_deg"
+        direction = None
+        if key in cfg:
+            try:
+                direction = float(cfg[key])
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{key} must be a finite number in [0, 360)") from exc
+            if not math.isfinite(direction) or not 0.0 <= direction < 360.0:
+                raise ValueError(f"{key} must be a finite number in [0, 360)")
+        legacy_key = next((k for k in ("ue_heading_deg", "track_heading_deg") if k in cfg), None)
+        legacy_direction = 0.0
+        if legacy_key is not None:
+            try:
+                legacy_direction = float(cfg[legacy_key] or 0.0)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{legacy_key} must be a finite number") from exc
+            if not math.isfinite(legacy_direction):
+                raise ValueError(f"{legacy_key} must be a finite number")
+            legacy_direction %= 360.0
+            if direction is not None:
+                difference = (direction - legacy_direction + 180.0) % 360.0 - 180.0
+                if not math.isclose(difference, 0.0, abs_tol=1e-9):
+                    raise ValueError(f"{key} conflicts with {legacy_key}; geometry and Doppler "
+                                     "must use the same UE velocity direction")
+        return legacy_direction if direction is None else direction
 
     def _srs_occasion(self, trajectory_time_s: float, slot_duration_s: float,
                       srs_offset_slots: int) -> tuple[int, float, float]:
@@ -1932,10 +1972,7 @@ class InternalSimSource:
         mode = str(self.cfg.get("mobility_mode", "static")).strip().lower()
         speed = max(float(self.cfg.get("ue_speed_kmh", 3.0) or 0.0), 0.0) / 3.6
         if mode != "static" and speed > 0.0:
-            heading = math.radians(float(
-                self.cfg.get("ue_heading_deg", self.cfg.get("track_heading_deg", 0.0))
-                or 0.0
-            ))
+            heading = self._velocity_direction_rad
             travel = speed * float(
                 self.cfg.get("sample_interval_s", 5e-3) or 5e-3
             ) * int(round_index)
@@ -2262,7 +2299,8 @@ class InternalSimSource:
                  n_time: int, n_rb: int, n_bs: int, n_ue: int, doppler_hz: float,
                  realization_index: int, link_aod_rad: float, link_aoa_rad: float,
                  link_zod_rad: float, link_zoa_rad: float,
-                 time_offset_s: float = 0.0) -> np.ndarray:
+                 time_offset_s: float = 0.0,
+                 velocity_direction_rad: float = 0.0) -> np.ndarray:
         powers = 10.0 ** (profile.powers_dB / 10.0)
         powers /= max(float(np.sum(powers)), _EPS)
         tau_rms = float(self.cfg.get("tau_rms_ns", 300.0) or 300.0) * 1e-9
@@ -2274,8 +2312,8 @@ class InternalSimSource:
         # 时刻；同一个 UE 的第 r 轮覆盖 ``[r*n_time*dt, (r+1)*n_time*dt)``，
         # 相邻两轮首尾相接、不重叠。配合"每条轨迹一套散射体"（rng 按 UE 派生，
         # 见 iter_samples），小尺度衰落就成了时间的连续函数，相邻样本的相关系数
-        # 自动等于 Jakes 的 ``J0(2*pi*f_d*dt)``——因为每条射线的多普勒投影角
-        # 是均匀分布的，而 ``E_theta[exp(j*2*pi*f_d*cos(theta)*dt)] = J0(...)``。
+        # 由同一条射线的到达角与运动方向共同决定。只有到达方位角均匀分布时，
+        # 才退化为 Jakes 的 ``J0(2*pi*f_d*dt)``；定向 CDL/LOS 不保证该曲线。
         #
         # 这一步对 CDL 正确、对射线追踪**错误**，两者不能照抄：CDL 每条径的相位
         # 是随机数、位置移动只改簇的角度，时间演化全靠这里的多普勒项；RT 的径
@@ -2284,8 +2322,8 @@ class InternalSimSource:
         times = float(time_offset_s) + np.arange(n_time, dtype=np.float64) * interval
         h = np.zeros((n_time, n_rb, n_bs, n_ue), dtype=np.complex128)
         # Each diffuse table component receives 20 independent sub-rays.
-        # Per-ray angle offsets, XPR/Jones phases and Doppler projections are
-        # separate.  D/E row zero is the deterministic specular component;
+        # Per-ray angle offsets and XPR/Jones phases are sampled separately;
+        # Doppler uses that same ray's arrival azimuth. D/E row zero is the specular component;
         # its K ratio is already in the table powers and is never mixed twice.
         bs_shape = _panel_shape(n_bs, self.cfg.get("bs_panel"))
         ue_shape = _panel_shape(n_ue, self.cfg.get("ue_panel"))
@@ -2400,7 +2438,9 @@ class InternalSimSource:
                                         spatial[b, u] = coupling * b_space * np.conj(u_space)
                 phase = rng.uniform(-np.pi, np.pi)
                 delay_phase = np.exp(-2j * np.pi * freq * delays[cluster])
-                projected_fd = float(doppler_hz) * math.cos(rng.uniform(-np.pi, np.pi))
+                # Horizontal (2D) projection of the UE velocity onto this ray.
+                # TR 38.901 (7.5-25): arrival direction and Doppler share AoA.
+                projected_fd = float(doppler_hz) * math.cos(aoa - velocity_direction_rad)
                 time_phase = np.exp(1j * (phase + 2.0 * np.pi * projected_fd * times))
                 h += math.sqrt(float(power) / ray_count) * time_phase[:, None, None, None] * delay_phase[None, :, None, None] * spatial[None, None]
         # UE-side spatial correlation is produced by the geometry above -- the
@@ -2447,6 +2487,11 @@ class InternalSimSource:
         ``role`` is ``"serving"`` or ``"interferer"``; ``profile`` is the
         statistical CDL/TDL profile and is ignored by engines that derive
         multipath from geometry instead.
+
+        ``ue_velocity_direction_deg`` is the horizontal velocity azimuth in
+        degrees, in [0, 360) (+x/east is 0; +y/north is 90). Initialization
+        resolves it together with the legacy heading keys, defaulting to 0
+        when none is supplied. Geometry and Doppler share that direction.
         """
         del cell, ue_position, is_los, role
         return self._channel(
@@ -2463,6 +2508,7 @@ class InternalSimSource:
             link_zod_rad=link_zod_rad,
             link_zoa_rad=link_zoa_rad,
             time_offset_s=time_offset_s,
+            velocity_direction_rad=self._velocity_direction_rad,
         )
 
     def iter_samples(self) -> Iterator[ChannelSample]:
@@ -2554,9 +2600,7 @@ class InternalSimSource:
             # 时间窗口互相重叠（n_time=8 时重叠 7/8），下游还会把它们当独立快照。
             trajectory_time_s = round_index * n_time * sample_interval_s
             if mobility_mode != "static" and speed_mps > 0.0:
-                heading = math.radians(
-                    float(self.cfg.get("ue_heading_deg", self.cfg.get("track_heading_deg", 0.0)) or 0.0)
-                )
+                heading = self._velocity_direction_rad
                 travel = speed_mps * trajectory_time_s
                 position[0] += travel * math.cos(heading)
                 position[1] += travel * math.sin(heading)
