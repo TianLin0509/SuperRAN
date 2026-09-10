@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, replace
 from collections import deque
+from copy import deepcopy
 from typing import Any, Mapping
 import hashlib
 import json
@@ -274,6 +275,24 @@ class CaLinkTables:
                         raise ValueError("CA link-table RBG geometry mismatch")
 
 
+def _build_input_identity(value):
+    """Keep build parameters and exact array fingerprints in the source contract."""
+    if isinstance(value, np.ndarray):
+        a = np.ascontiguousarray(value)
+        if a.dtype.hasobject:
+            raise ValueError("CA build arrays must not contain Python objects")
+        return {"shape":list(a.shape),"dtype":a.dtype.str,"sha256":hashlib.sha256(a.tobytes()).hexdigest()}
+    if hasattr(value, "as_dict"):
+        return _build_input_identity(value.as_dict())
+    if isinstance(value, Mapping):
+        return {str(k):_build_input_identity(v) for k,v in value.items()}
+    if isinstance(value, (list,tuple)):
+        return [_build_input_identity(v) for v in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
 def build_ca_link_tables(carriers: CarrierSet, inputs: Mapping[str, dict], *,
                          config: CaSchedulerConfig | None = None, active_mask=None,
                          source_manifest=None):
@@ -282,7 +301,7 @@ def build_ca_link_tables(carriers: CarrierSet, inputs: Mapping[str, dict], *,
     if set(inputs) != {c.carrier_id for c in carriers.members}:
         raise ValueError("CA input keys must match carrier_id exactly")
     tables = {}
-    manifest = dict(source_manifest or {})
+    manifest = deepcopy(dict(source_manifest or {}))
     for c in carriers.members:
         args = dict(inputs[c.carrier_id])
         if carriers.num_cc>1 and "csi" not in args:
@@ -304,7 +323,14 @@ def build_ca_link_tables(carriers: CarrierSet, inputs: Mapping[str, dict], *,
                 raise ValueError("snapshot_times_ms must be finite and strictly increasing")
             if any(np.ndim(h)!=4 or np.shape(h)[0]!=len(times) for h in hs):
                 raise ValueError("CA channel timeline must match snapshot_times_ms")
-            manifest[c.carrier_id] = {"identity":{"ue_positions":positions.tolist(),"snapshot_times_ms":times.tolist()},
+            identity = {"ue_positions":positions.tolist(),"snapshot_times_ms":times.tolist()}
+            supplied = manifest.get(c.carrier_id,{})
+            if not isinstance(supplied,dict):
+                raise ValueError("CA source manifest entries must be objects")
+            if "identity" in supplied and supplied["identity"] != identity:
+                raise ValueError("declared CA source geometry/time differs from actual inputs")
+            manifest[c.carrier_id] = {**supplied,"identity":identity,
+                "link_build_parameters":_build_input_identity({**args,"geo_sinr_db":geo}),
                 "csi":args["csi"].as_dict() if args.get("csi") is not None else None,
                 "raw_channel_sha256":hashlib.sha256(b"".join(np.ascontiguousarray(h).tobytes() for h in hs)).hexdigest(),
                 "estimated_channel_sha256":hashlib.sha256(b"".join(np.ascontiguousarray(h).tobytes() for h in args.get("h_for_precoding_users",hs))).hexdigest()}

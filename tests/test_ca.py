@@ -82,6 +82,22 @@ def test_input_identity_rejections():
         raises(lambda:run(b))
 
 
+def test_build_preserves_source_and_power_identity():
+    carriers=fixture().carriers
+    rng=np.random.default_rng(72)
+    inputs={m.carrier_id:dict(h_users=[rng.normal(size=(2,m.total_prb,4,2))+1j*rng.normal(size=(2,m.total_prb,4,2))],
+        geo_sinr_db=[18.],num_snapshots=2,power_constraint='nebf',csi=s.ca.CsiConfig(enabled=False),
+        geometry={'ue_positions':[[0,0,1.5]],'snapshot_times_ms':[0,5]}) for m in carriers.members}
+    source={m.carrier_id:{'dataset_id':'source_'+m.carrier_id,'config':{'center_frequency_hz':3.5e9,'tx_power_dbm':46.}} for m in carriers.members}
+    baseline=ca.build_ca_link_tables(carriers,inputs,source_manifest=source)
+    assert baseline.source_manifest['scc']['dataset_id']=='source_scc'
+    assert baseline.source_manifest['pcc']['link_build_parameters']['power_constraint']=='nebf'
+    source['scc']['config']['tx_power_dbm']=43.
+    changed=ca.build_ca_link_tables(carriers,inputs,source_manifest=source)
+    assert changed.identity()!=baseline.identity(), 'source power provenance was discarded'
+    assert baseline.source_manifest['scc']['config']['tx_power_dbm']==46., 'caller mutated an existing source contract'
+
+
 def test_single_cc_bit_compatibility_and_pcc_identity():
     b=deepcopy(fixture(1))
     cfg=s.SystemConfig(duration_s=.03,seed=0)
