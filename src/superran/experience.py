@@ -3139,7 +3139,9 @@ def _experience_steps(
             if u not in harq_pending and harq_free_ids[u]]
         if lane is not None and lane.ue_order is not None:
             order_position = {u: i for i, u in enumerate(lane.ue_order)}
-            ordered_users = sorted(ordered_users, key=lambda u: order_position[u])
+            ordered_users = pending_ready + sorted(
+                (u for u in ordered_users if u not in harq_pending),
+                key=lambda u: order_position[u])
         queue_bytes = {int(u): tr.bytes_left(int(u)) for u in cand}
         true_sinr_of = {
             int(u): float(tables[int(u)].sinr_db[

@@ -2799,6 +2799,14 @@ def test_ca_cort_reserved_payload_expands_existing_grant():
 test_ca_cort_reserved_payload_expands_existing_grant()
 
 
+def test_ca_ready_harq_precedes_new_transmissions():
+    from test_ca import assert_ca_ready_retx_keeps_priority
+    assert_ca_ready_retx_keeps_priority()
+
+
+test_ca_ready_harq_precedes_new_transmissions()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

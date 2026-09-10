@@ -249,6 +249,42 @@ def test_rng_feedback_isolation_and_causal_prediction():
     assert_cort_first_tti_drains_original_water()
 
 
+def assert_ca_ready_retx_keeps_priority():
+    """Competing UEs: verify actual TX, not just the candidate ordering."""
+    b=deepcopy(fixture())
+    for table in b.tables['pcc']:
+        table.sinr_rbg_db[:]=-40
+        table.sinr_db[:]=-40
+    original=ce.correct_cort_plan
+    ready=[]
+    def capture(context,targets):
+        pending=context['harq_pending']
+        if pending:
+            ready.append((context['lane'].member.carrier_id,context['tti'],
+                context['sys_cfg'].num_rbg,
+                [(u,tb.first_tti,tb.n_rbg) for u,tb in sorted(pending.items(),
+                    key=lambda item:(item[1].first_tti,context['ordered_users'].index(item[0])))],
+                list(context['ordered_users'])))
+        return original(context,targets)
+    with patch.object(ce,'correct_cort_plan',capture):
+        result=run(b,mode='cort',model='full_buffer',sys_cfg=s.SystemConfig(duration_s=.06,seed=0))
+    checked=0
+    for cid,tti,available,pending,order in ready:
+        grants=result.diagnostics['ca']['per_carrier'][cid]['tti_trace'][str(tti)]['grants']
+        sent={(g['ue'],g['original_tb_tti']) for g in grants if g['harq_tx_mode']=='retx'}
+        for u,first,size in pending:
+            if size<=available:
+                assert (u,first) in sent, f'{cid} TTI {tti}: ready TB from {first} was displaced by new TX'
+                available-=size
+                checked+=1
+        assert order[:len(pending)]==[u for u,_,_ in pending], 'ready HARQ order must follow first_tti (ties retain local order)'
+    assert checked>10, 'fixture must exercise repeated cross-UE HARQ competition'
+
+
+def test_ready_retx_priority():
+    assert_ca_ready_retx_keeps_priority()
+
+
 def test_mu_and_replications():
     result=run(fixture(mu=True),mode='cort',model='full_buffer',mu=True)
     check_water(result)
