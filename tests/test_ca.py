@@ -376,7 +376,7 @@ def test_mu_and_replications():
 
 
 def test_mcp_real_dataset_route():
-    from superran import server
+    from superran import server, provenance
     from superran.paths import datasets_dir
     with tempfile.TemporaryDirectory(prefix='superran-ca-') as root, patch.dict(os.environ,{'SUPERRAN_ARTIFACTS':root,'SUPERRAN_NO_BROWSER':'1'}):
         common=np.tile([[0.,0.,1.5],[10.,0.,1.5]],(4,1))
@@ -397,8 +397,37 @@ def test_mcp_real_dataset_route():
             (d/'summary.json').write_text(json.dumps(summary),encoding='utf-8')
             rows.append({'carrier_id':cid,'dataset_id':dsid,'bandwidth_hz':bw,'is_pcc':i==0,'csi':{'srs_hopping':False}})
         kwargs=dict(dataset_id=rows[0]['dataset_id'],duration_s=.02,warmup_s=0,num_replications=2,ca_config={'carriers':rows,'scheduler':{'mode':'cort'}})
-        result=server.sr_system_sim(**kwargs)
+        with patch.object(provenance,'snapshot',wraps=provenance.snapshot) as snapshots:
+            result=server.sr_system_sim(**kwargs)
+        assert snapshots.call_count==1,'CA must compare all carriers against one runtime provenance snapshot'
         assert 'error' not in result,result
+        assert 'provenance' in result,'CA lost dataset provenance on its preparation path'
+        for row in rows:
+            cid=row['carrier_id']
+            assert result['provenance']['carriers'][cid]['compatibility']['status']=='unknown'
+            assert result['ca']['sources'][cid]['provenance'] is None
+            assert any(f'载波 {cid}：' in note and 'unknown' in note for note in result['notes'])
+        saved=json.loads(Path(result['kpi_view']['result_json_path']).read_text(encoding='utf-8'))
+        assert saved['provenance']==result['provenance']
+        assert saved['notes']==result['notes']
+        runtime=deepcopy(result['provenance']['runtime'])
+        for row in rows:
+            path=datasets_dir()/row['dataset_id']/'summary.json'
+            summary=json.loads(path.read_text(encoding='utf-8'))
+            summary['provenance']=deepcopy(runtime)
+            if row['carrier_id']=='scc':summary['provenance']['git_commit']='0'*40
+            path.write_text(json.dumps(summary),encoding='utf-8')
+        with patch.object(provenance,'snapshot',wraps=provenance.snapshot) as snapshots:
+            mismatched=server.sr_system_sim(**kwargs)
+        assert snapshots.call_count==1
+        assert 'error' not in mismatched,mismatched
+        assert mismatched['provenance']['carriers']['pcc']['compatibility']['status']=='match'
+        assert mismatched['provenance']['carriers']['scc']['compatibility']['status']=='mismatch'
+        assert mismatched['ca']['sources']['scc']['provenance']['git_commit']=='0'*40
+        assert any('载波 scc：' in note and 'mismatch' in note for note in mismatched['notes'])
+        saved=json.loads(Path(mismatched['kpi_view']['result_json_path']).read_text(encoding='utf-8'))
+        assert saved['provenance']==mismatched['provenance']
+        assert saved['notes']==mismatched['notes']
         json.dumps(result,allow_nan=False)
         assert result['ca']['replication_diagnostics'][0]['combination_identity']==result['ca']['combination_identity']
         assert 'error' not in result['kpi_view'],result['kpi_view']

@@ -6,6 +6,7 @@ It is reset even on failure and is never accepted from an external tool caller.
 from __future__ import annotations
 
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import asdict
 import hashlib
 import inspect
@@ -36,7 +37,7 @@ def _digest(array):
 
 
 def run_ca_tool(arguments):
-    from . import server, system, load, kpi_view
+    from . import server, system, load, kpi_view, provenance
     signature = inspect.signature(server.sr_system_sim)
     params = {k:v for k,v in arguments.items() if k in signature.parameters}
     request = params.pop("ca_config")
@@ -60,9 +61,23 @@ def run_ca_tool(arguments):
         if params.get("target_prb_utilization") is not None:
             raise ValueError("CA automatic load calibration is not implemented")
         prepared, manifest, shared_identity = {}, {}, None
+        runtime_provenance = provenance.snapshot(source="system_sim")
+        provenance_by_carrier = {}
+        provenance_notes = []
         for m in carriers.members:
             row = source_rows[m.carrier_id]
             dataset = load(row["dataset_id"])
+            dataset_provenance = deepcopy(dataset.summary.get("provenance"))
+            provenance_check = provenance.compare(dataset_provenance,runtime_provenance)
+            provenance_by_carrier[m.carrier_id] = {
+                "dataset":dataset_provenance,"compatibility":provenance_check}
+            if provenance_check["status"] == "mismatch":
+                provenance_notes.append(f"载波 {m.carrier_id}：**数据集与当前运行代码的血缘不一致（provenance mismatch）**："
+                    + "；".join(provenance_check["mismatches"])
+                    + "。结果可用于历史复现；当前版本正式结论前应重新生成信道。")
+            elif provenance_check["status"] == "unknown":
+                provenance_notes.append(f"载波 {m.carrier_id}：**数据集缺少完整 provenance（血缘 unknown）**："
+                    "无法证明生成版本与当前运行环境一致；正式结论建议重新生成。")
             ue = np.asarray(dataset.scalar("ue_id"))
             serving = np.asarray(dataset.scalar("serving_cell_index"))
             positions = np.asarray(dataset.ue_position)
@@ -95,7 +110,7 @@ def run_ca_tool(arguments):
             h = dataset.h_true
             manifest[m.carrier_id] = {"dataset_id":row["dataset_id"],"identity":identity,
                                       "raw_channel_sha256":_digest(h),"estimated_channel_sha256":_digest(dataset.h_est),"csi":overrides,
-                                      "config":dataset.config}
+                                      "config":dataset.config,"provenance":dataset_provenance}
         p = prepared[carriers.pcc.carrier_id]
         for cid,value in prepared.items():
             for key in ("snapshot_update_ms","tdd_pattern","s_slot_dl_fraction","duration_s","scs_khz"):
@@ -106,6 +121,8 @@ def run_ca_tool(arguments):
         result = system.simulate_replications(bundle,sys_cfg=p["sys_cfg"],traffic=p["traffic"],sched=p["sched"],kpi=p["kpi"],
             num_replications=params["num_replications"],master_seed=params["seed"],replication_workers=params["replication_workers"])
         out = strict_json_value(result.as_dict())
+        out["provenance"] = {"runtime":runtime_provenance,"carriers":provenance_by_carrier}
+        out["notes"].extend(provenance_notes)
         out.update(dataset_id=params["dataset_id"],analysis_identity={"ca_combination":bundle.identity()},
             algorithm={"label":params.get("algorithm_label") or f"CA {config.mode}/{config.method}"},
             ca={"combination_identity":bundle.identity(),"carriers":[asdict(m) for m in carriers.members],
