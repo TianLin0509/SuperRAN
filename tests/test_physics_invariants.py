@@ -2815,6 +2815,14 @@ def test_ca_comparison_binds_actual_mu_inputs():
 test_ca_comparison_binds_actual_mu_inputs()
 
 
+def test_ca_coverage_and_fullband_statistics_use_carrier_scope():
+    from test_ca import assert_ca_statistics_use_carrier_scope
+    assert_ca_statistics_use_carrier_scope()
+
+
+test_ca_coverage_and_fullband_statistics_use_carrier_scope()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

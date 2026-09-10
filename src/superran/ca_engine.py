@@ -394,13 +394,21 @@ def simulate_ca(bundle: CaLinkTables, *, sys_cfg, traffic, sched, kpi, book, pro
     merged = dict(raw[0])
     for key in _ADDITIVE: merged[key] = _sum_nested([s[key] for s in raw])
     for key in _CONCAT: merged[key] = [v for s in raw for v in s[key]]
+    merged["grant_full_rbg_limits"] = [s["sys_cfg"].num_rbg for s in raw for _ in s["rbg_hist"]]
+    coverage = np.zeros((raw[0]["n_snap"],n),dtype=bool)
+    for cid,lane in lanes.items():
+        for u,table in enumerate(bundle.tables[cid]):
+            coverage[:,u] |= lane.active[u] & (np.ones(coverage.shape[0],dtype=bool)
+                if table.outage is None else ~np.asarray(table.outage,dtype=bool))
+    merged["ca_coverage_by_ue"] = coverage
     merged.update(counts, tr=shared, book=book, tti_occupied_rbg_counts=hist,tti_trace_rows=aggregate_trace)
     merged["olla_db"] = np.concatenate([s["olla_db"] for s in raw])
     merged["mu_olla_db"] = np.concatenate([s["mu_olla_db"] for s in raw])
     merged["harq_inflight"] = {u: {(i,h):tb for i,s in enumerate(raw) for h,tb in s["harq_inflight"][u].items()} for u in range(n)}
     sizes = tuple(v for c in members for v in c.rbg_prb_sizes)
     merged["sys_cfg"] = replace(sys_cfg,num_rbg=len(sizes),rbg_prb_sizes=sizes,rb_per_rbg=max(sizes))
-    merged["resource_budget"] = replace(raw[0]["resource_budget"],num_rbg=len(sizes),rbg_prb_sizes=sizes)
+    merged["resource_budget"] = replace(raw[0]["resource_budget"],num_rbg=len(sizes),rbg_prb_sizes=sizes,
+        max_logical_prb=sum(s["resource_budget"].resolved_max_logical_prb for s in raw))
     merged["max_layers_used"] = max(s["max_layers_used"] for s in raw)
     run = ex._summarize_experience(merged)
     per_cc = {}
@@ -413,6 +421,13 @@ def simulate_ca(bundle: CaLinkTables, *, sys_cfg, traffic, sched, kpi, book, pro
             "ue_carrier_state":[{k:v for k,v in asdict(s).items() if k not in ("harq_inflight","delay_queue")} for s in lanes[cid].states],
             "served_measured_bytes":state["served_measured"].tolist(),
             "olla_state_final":local.diagnostics["olla_state_final"],
+            "olla_state_at_measurement_start":local.diagnostics["olla_state_at_measurement_start"],
+            "mu_pair_graph":local.diagnostics["mu_pair_graph"],
+            "coverage":{"outage_ue":local.cell["outage_ue"],"active_mask":lanes[cid].active.tolist()},
+            "geo_sinr_db":[t.geo_sinr_db for t in bundle.tables[cid]],
+            "grant_size_hist":local.cell["actual_rbg_size_hist"],
+            "resource_ledger":local.cell["resource_ledger"],
+            "radio_notes":[note for note in local.notes if "IoT" in note or "全程处于覆盖外" in note or note.startswith("Rank 策略=")],
             "rank_policy":local.diagnostics["rank_policy"],"cqi_report":local.diagnostics["cqi_report"],
             "srs_resource_assignments":local.diagnostics["srs_resource_assignments"],
             "cell_physical_diagnostics":{k:v for k,v in local.cell.items() if any(t in k for t in ("iot","cqi","olla"))},
@@ -420,8 +435,14 @@ def simulate_ca(bundle: CaLinkTables, *, sys_cfg, traffic, sched, kpi, book, pro
             "tti_trace":state["tti_trace_rows"],
             "harq_inflight":{str(u):{str(i):{"state":tb.state,"first_tti":tb.first_tti,"tbs_bytes":tb.tb_bytes} for i,tb in row.items()} for u,row in state["harq_inflight"].items()}}
         generators[cid].close()
-    for key in ("olla_state_final","rank_policy","cqi_report","srs_resource_assignments"):
+    for key in ("olla_state_final","olla_state_at_measurement_start","rank_policy","cqi_report","srs_resource_assignments","mu_pair_graph"):
         run.diagnostics[key] = {"scope":"per_carrier","carriers":{cid:row[key] for cid,row in per_cc.items()}}
+    run.cell["mu_pair_graph"] = run.diagnostics["mu_pair_graph"]
+    for key in ("actual_rbg_size_hist","rbg_size_hist"):
+        if run.cell[key] is not None:
+            run.cell[key]["fullband_scope"] = "grant_count_weighted; each grant compared with its own carrier RBG count"
+    run.cell["harq_process_scope"] = "per_UE_per_carrier"
+    run.diagnostics["harq_feedback"]["process_scope"] = "per_UE_per_carrier"
     # IoT has no additive cross-frequency meaning. Keep the measured per-CC values.
     for key in list(run.cell):
         if "iot" in key or "cqi" in key:
@@ -432,18 +453,23 @@ def simulate_ca(bundle: CaLinkTables, *, sys_cfg, traffic, sched, kpi, book, pro
         user["sched_tti"] = int(user_tti_counts[u])
         user["retx_tti"] = int(user_retx_tti_counts[u])
         user["iot_db"] = None
+        user["geo_sinr_db"] = None
         user["srs_resource_assignment"] = None
     run.diagnostics["ca"] = {"combination_identity":bundle.identity(),"per_carrier":per_cc,
         "tti_trace":diagnostics,"expanded_rbg_total":expanded_total,"global_pf_average_bytes":global_avg.tolist(),
         "causal_capacity":"reported SINR and current rank; true SINR is decoder input only",
         "cort_initial_quota":"equal serviceable-CC seed share, corrected using other-CC reserved newtx payload",
         "olla_units":"continuous MCS index"}
+    run.diagnostics["ca"]["coverage"] = {"scope":"union of active-carrier coverage over link snapshots",
+        "covered_by_snapshot_ue":coverage.tolist(),"outage_skips_scope":"sum of per-carrier UE/TTI skips"}
     run.diagnostics["crn_event_mapping"] = "RngBook stream + SHA256(carrier identity) namespace; fixed [TTI,UE] grid; common traffic stream"
     run.diagnostics["tti_trace"]["ca_rbg_indexing"] = {c.carrier_id:sum(m.num_rbg for m in members[:i]) for i,c in enumerate(members)}
     run.diagnostics["tti_trace"]["sampling_policy"] = "full DL trace" if kpi.tti_trace_mode=="full" else "bounded prefix of DL TTIs; diagnostic, not an unbiased sample"
     run.diagnostics["allocation_sample"] = [dict(a,carrier_id=cid) for cid,row in per_cc.items() for a in row["allocations"]]
     run.diagnostics["allocation_recent_sample"] = [dict(a.as_dict(),carrier_id=cid) for cid,(_,state) in states.items() for a in state["allocation_recent"]]
-    run.notes=[note for note in run.notes if "IoT" not in note]
+    run.notes=[note.replace("当前每 UE 上限","当前每 UE、每载波上限") for note in run.notes
+               if "IoT" not in note and not note.startswith("Rank 策略=")]
+    run.notes.extend(f"载波 {cid}（逐载波诊断）：{note}" for cid,row in per_cc.items() for note in row["radio_notes"])
     run.notes.append("CA: common queue, one arrival and one PF update per TTI; independent per-CC feedback. IoT remains per carrier. Aggregate RBG numbering is for resource accounting, never a cross-carrier TB.")
     run.cell = strict_json_value(run.cell)
     run.users = strict_json_value(run.users)

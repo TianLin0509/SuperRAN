@@ -4521,14 +4521,14 @@ def _summarize_experience(state: dict[str, Any]) -> ExperienceRun:
         "padding_ratio": float(padding_total / max(sched_total, 1.0)),
         "actual_rbg_size_hist": ({
             "p_1rbg": float(np.mean(np.asarray(rbg_hist) == 1)),
-            "p_full": float(np.mean(np.asarray(rbg_hist) == sys_cfg.num_rbg)),
+            "p_full": float(np.mean(np.asarray(rbg_hist) == state.get("grant_full_rbg_limits",sys_cfg.num_rbg))),
             "mean_rbg": float(np.mean(rbg_hist)), "n": len(rbg_hist),
             "scope": "nonzero_grant_size_not_tti_total",
         } if rbg_hist else None),
         # 兼容旧消费者；experience_v2 里它明确就是 actual allocation。
         "rbg_size_hist": ({
             "p_1rbg": float(np.mean(np.asarray(rbg_hist) == 1)),
-            "p_full": float(np.mean(np.asarray(rbg_hist) == sys_cfg.num_rbg)),
+            "p_full": float(np.mean(np.asarray(rbg_hist) == state.get("grant_full_rbg_limits",sys_cfg.num_rbg))),
             "mean_rbg": float(np.mean(rbg_hist)), "n": len(rbg_hist),
             "scope": "nonzero_grant_size_not_tti_total",
         } if rbg_hist else None),
@@ -4562,8 +4562,9 @@ def _summarize_experience(state: dict[str, Any]) -> ExperienceRun:
         "backlog_bursts": int(sum(q.active is not None for q in tr.queues)),
         "accounting_error_pct": (
             None if acct_error is None else round(float(acct_error), 6)),
-        "outage_ue": int(sum(1 for t in tables
-                              if t.outage is not None and bool(t.outage.all()))),
+        "outage_ue": (int(np.count_nonzero(~np.any(state["ca_coverage_by_ue"],axis=0)))
+                      if "ca_coverage_by_ue" in state else
+                      int(sum(1 for t in tables if t.outage is not None and bool(t.outage.all())))),
         "outage_skips": int(outage_skips),
         "harq_feedback_wait_skips": int(feedback_wait_skips),
         # CQI 新鲜度诊断；运行时上报关掉时为 None（离线预计算没有"上报时刻"）。
@@ -4933,7 +4934,12 @@ def _summarize_experience(state: dict[str, Any]) -> ExperienceRun:
             f"**5% 边缘用户的 MCS 是 {cell['edge_mcs_p5']:.1f}，偏高**"
             "（现场经验通常 <5）。多半是撒点没覆盖到真正的边缘，"
             "或者邻区负载设得太低、干扰被低估了。")
-    if cell["outage_ue"]:
+    if cell["outage_ue"] and "ca_coverage_by_ue" in state:
+        notes.append(
+            f"**{cell['outage_ue']} 个用户在全部链路快照中均无已启用且覆盖内的载波**。"
+            "覆盖取各已启用载波的并集；这些用户没有可用下行服务，"
+            "以0进入ue_served_*分布，不能用PCC单独失覆盖代替此计数。")
+    elif cell["outage_ue"]:
         notes.append(
             f"**{cell['outage_ue']} 个用户全程处于覆盖外**"
             "（用户级 SINR 够不到 MCS 0 的门限），已从调度中剔除。"

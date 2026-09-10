@@ -333,6 +333,36 @@ def test_complete_runtime_table_identity():
     assert_ca_runtime_table_identity_is_complete()
 
 
+def assert_ca_statistics_use_carrier_scope():
+    b=deepcopy(fixture())
+    for table in b.tables['pcc']:table.outage=np.ones(table.sinr_db.shape[0],dtype=bool)
+    served=run(b,model='full_buffer')
+    assert all(x>0 for x in served.diagnostics['ca']['per_carrier']['scc']['served_bytes'])
+    assert served.cell['outage_ue']==0, 'SCC-served users were classified as permanently out of coverage'
+    assert not any(note.startswith('**2 个用户全程处于覆盖外') for note in served.notes)
+    assert all(u['geo_sinr_db'] is None for u in served.users)
+    assert served.diagnostics['ca']['per_carrier']['pcc']['coverage']['outage_ue']==2
+    masked=deepcopy(b);masked.active_mask={'pcc':(True,True),'scc':(False,False)}
+    assert run(masked,model='full_buffer').cell['outage_ue']==2
+    for table in b.tables['scc']:table.outage=np.ones(table.sinr_db.shape[0],dtype=bool)
+    assert run(b,model='full_buffer').cell['outage_ue']==2
+    for mode in ('independent','cort'):
+        result=run(mode=mode,model='full_buffer')
+        cc=result.diagnostics['ca']['per_carrier']
+        grants=[(cid,g) for cid,c in cc.items() for row in c['tti_trace'].values() for g in row['grants']]
+        full=sum(g['n_rbg']==len(cc[cid]['carrier']['rbg_prb_sizes']) for cid,g in grants)
+        assert full>0 and len({cc[cid]['carrier']['num_rbg'] for cid,_ in grants})==2
+        for key in ('actual_rbg_size_hist','rbg_size_hist'):
+            assert result.cell[key]['n']==len(grants)
+            assert result.cell[key]['p_full']==full/len(grants), 'full-band grant compared with combined-carrier width'
+        assert result.diagnostics['mu_pair_graph']['scope']=='per_carrier'
+        assert set(result.diagnostics['olla_state_at_measurement_start']['carriers'])==set(cc)
+
+
+def test_carrier_scoped_statistics():
+    assert_ca_statistics_use_carrier_scope()
+
+
 def test_mu_and_replications():
     result=run(fixture(mu=True),mode='cort',model='full_buffer',mu=True)
     check_water(result)
