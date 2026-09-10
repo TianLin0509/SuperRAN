@@ -48,6 +48,136 @@ def section(title: str) -> None:
     print("\n" + "=" * 70 + f"\n{title}\n" + "=" * 70)
 
 
+
+# ---------------------------------------------------------------------------
+# R4：同一个调度组内也必须在 dB 域聚合，不能让强 RB 抹平深衰 RB。
+# ---------------------------------------------------------------------------
+def test_r4_rbg_sinr_averages_rb_in_db() -> None:
+    import numpy as np
+    from superran import mumimo as mu
+
+    cases = (
+        ([10.0, 0.1], 2, None, [0.0]),
+        ([[10.0, 100.0], [0.1, 1.0]], 2, None, [5.0]),
+        ([10.0, 0.1, 10.0], 2, None, [0.0, 10.0]),
+        ([10.0, 0.1, 10.0], 2, ((0, 2), (2, 3)), [0.0, 10.0]),
+        ([10.0, 0.1, 100.0, 0.01], 2, ((0, 2), (2, 4)), [0.0, 0.0]),
+        ([[10.0, 100.0], [0.1, 0.01]], 1, None, [15.0, -15.0]),
+        (np.full((32, 2), 10.0), 16, None, [10.0, 10.0]),
+        ([0.0, 1.0], 2, None, [-150.0]),
+        ([1e-40, 1.0], 2, ((0, 2),), [-150.0]),
+    )
+    for values, step, bounds, expected in cases:
+        actual = mu.rbg_sinr_db(values, rb_per_rbg=step, rbg_boundaries=bounds)
+        np.testing.assert_allclose(
+            actual, expected, rtol=0.0, atol=1e-12,
+            err_msg=f"R4: RB dB mean, step={step}, bounds={bounds}")
+        assert actual.shape == (len(expected),)
+        assert np.all(np.isfinite(actual))
+    # 不等长组仍按 RBG 等权：mean([0,10])=5，不是逐 RB 的 10/3。
+    assert mu.user_sinr_db(
+        [10.0, 0.1, 10.0], rbg_boundaries=((0, 2), (2, 3))) == 5.0
+    # 同一组划分的两条实现必须逐位相同；不同组长不要求宽带数相同。
+    values = np.array([[10.0, 100.0], [0.1, 1.0], [3.0, 7.0], [0.03, 0.7]])
+    np.testing.assert_array_equal(
+        mu.rbg_sinr_db(values, rb_per_rbg=2),
+        mu.rbg_sinr_db(values, rbg_boundaries=((0, 2), (2, 4))))
+
+
+def test_r4_full_rb_link_table_keeps_intra_rbg_db_loss() -> None:
+    import numpy as np
+    from superran import csi_aging as ca
+    from superran import power_control as pc
+    from superran import system as sy
+
+    # 平坦 rank1 信道，组内等量增强/减弱保持平均发射功率不变。
+    # 因此解析期望为 0.5*(10log10(1.5)+10log10(0.5))，不借用聚合函数自证。
+    h = [np.ones((1, 32, 2, 1), dtype=complex)]
+    geometry = pc.DownlinkPowerGeometry(
+        serving_cell_index=np.array([0]), signal_power_mw=np.array([10.0]),
+        thermal_noise_power_mw=np.array([1.0]),
+        interference_power_mw=np.array([[[0.0, 2.0]]]))
+    common = dict(
+        geo_sir_db=[10.0 * np.log10(5.0)], max_rank=1, rb_per_rbg=16,
+        neighbor_load=1.0, neighbor_load_jitter=0.0,
+        csi=ca.CsiConfig(enabled=False), power_geometry=geometry)
+    uniform = pc.RbPowerControlConfig(enabled=True, num_rb=32)
+    shaped = pc.RbPowerControlConfig.from_raw(
+        enabled=True, num_rb=32, overrides=[
+            {"cell_index": 0, "rb_start": 0, "rb_end": 7, "multiplier": 1.5},
+            {"cell_index": 0, "rb_start": 8, "rb_end": 15, "multiplier": 0.5}])
+    original = sy.build_link_tables(
+        h, [10.0 * np.log10(10.0 / 3.0)], rb_power_control=uniform, **common)[0]
+    changed = sy.build_link_tables(
+        h, [10.0 * np.log10(10.0 / 3.0)], rb_power_control=shaped, **common)[0]
+    assert changed.frequency_rows_per_rbg == 16
+    assert changed.h_true_rbg.shape[1] == 32
+    np.testing.assert_allclose(
+        changed.sinr_rbg_db - original.sinr_rbg_db,
+        [[[5.0 * np.log10(0.75), 0.0]]], rtol=0.0, atol=1e-12,
+        err_msg="R4: full-RB link table must retain the intra-RBG dB loss")
+    # 不启用逐 RB 功控时仍取 RBG 代表点，不能因本次修订切换抽样算法。
+    represented = sy.build_link_tables(
+        h, [10.0 * np.log10(10.0 / 3.0)], **common)[0]
+    assert represented.frequency_rows_per_rbg == 1
+    assert represented.h_true_rbg.shape[1] == 2
+    np.testing.assert_allclose(
+        represented.sinr_rbg_db, original.sinr_rbg_db, rtol=0.0, atol=1e-12)
+
+
+test_r4_rbg_sinr_averages_rb_in_db()
+test_r4_full_rb_link_table_keeps_intra_rbg_db_loss()
+
+
+def test_r4_residual_loss_sums_stream_db() -> None:
+    import math
+    import numpy as np
+    from superran import mumimo as mu
+
+    # A 的 SU 两列正交；B 单列单位范数。模平方互相关为 0.2、0.4。
+    # A 的逐流残余为 0.8、0.6；B 单流残余为 0.8*0.6。
+    a = np.eye(3, dtype=complex)[:, :2][None, :, :]
+    b = np.sqrt([0.2, 0.4, 0.4]).astype(complex)[None, :, None]
+    target = 10.0 * math.log10(0.8) + 10.0 * math.log10(0.6)
+    actual = mu.residual_correlation_loss_db([a, b], rb_per_rbg=1)
+    np.testing.assert_allclose(
+        actual, [[target], [10.0 * math.log10(0.48)]], rtol=0.0, atol=1e-12,
+        err_msg="R4: rank2 codeword loss must SUM the stream dB losses")
+    np.testing.assert_array_equal(
+        mu.residual_correlation_loss_db([b, a], rb_per_rbg=1), actual[::-1])
+
+    # 四种 rank 组合：每个对应流的 rho=0.25，其余交叉流正交。
+    # 因而每个 UE 恰有 min(rank_a,rank_b) 条流各损失 10log10(0.75)。
+    ua = np.eye(4, dtype=complex)[:, :2]
+    ub = np.zeros((4, 2), dtype=complex)
+    ub[0, 0] = ub[1, 1] = 0.5
+    ub[2, 0] = ub[3, 1] = math.sqrt(0.75)
+    for ra, rb in ((1, 1), (1, 2), (2, 1), (2, 2)):
+        weights = [np.repeat(ua[None, :, :ra], 3, axis=0),
+                   np.repeat(ub[None, :, :rb], 3, axis=0)]
+        loss = mu.residual_correlation_loss_db(
+            weights, rbg_boundaries=((0, 2), (2, 3)))
+        expected = min(ra, rb) * 10.0 * math.log10(0.75)
+        np.testing.assert_allclose(loss, np.full((2, 2), expected),
+                                   rtol=0.0, atol=1e-12)
+        assert np.all(loss <= 0.0)
+        # 非默认对照开关仍只增加一次相同相关代价，不改默认值。
+        doubled = mu.residual_correlation_loss_db(
+            weights, rbg_boundaries=((0, 2), (2, 3)), wideband_coupling=True)
+        np.testing.assert_allclose(doubled, 2.0 * loss, rtol=0.0, atol=1e-12)
+    np.testing.assert_array_equal(
+        mu.residual_correlation_loss_db(
+            [ua[None], np.eye(4, dtype=complex)[None, :, 2:]], rb_per_rbg=1),
+        np.zeros((2, 1)))
+    # 每流钳位到 1e-30 => -300 dB；两流合计 -600，不应再钳用户值。
+    np.testing.assert_array_equal(
+        mu.residual_correlation_loss_db([ua[None], ua[None]], rb_per_rbg=1),
+        np.full((2, 1), -600.0))
+
+
+test_r4_residual_loss_sums_stream_db()
+
+
 rng = np.random.default_rng(20260809)
 
 
@@ -544,11 +674,13 @@ check(_fb_served[0] > _fb_served[-1],
 # 出厂默认是 frequency_selective="auto" + mu_enabled=False，在真实锚点数据集上
 # 实测每忙 TTI 1.14；开 MU 是 1.86、小区吞吐 +64%。
 # 这里用互补频选的合成信道把四个格子都钉住，谁把任何一格改回 1.0 都会红。
+# R4 总配对代价补足后，以 16T 提供足够的空间自由度保留 MU 正例；
+# 保持随机频率起伏、几何 SINR 和全部准入/资源断言，不能把无配对放宽成通过。
 _fsrng = np.random.default_rng(7)
 _fsH = []
 for _u in range(4):
-    _h = ((_fsrng.standard_normal((2, 272, 8, 2))
-           + 1j * _fsrng.standard_normal((2, 272, 8, 2))) / np.sqrt(2))
+    _h = ((_fsrng.standard_normal((2, 272, 16, 2))
+           + 1j * _fsrng.standard_normal((2, 272, 16, 2))) / np.sqrt(2))
     _g = np.full(272, 0.15)
     _g[_u * 68:(_u + 1) * 68] = 1.0          # UE u 只在自己那 1/4 频段上强
     _fsH.append((_h * _g[None, :, None, None]).astype(complex))
@@ -2115,7 +2247,7 @@ def test_su_weight_correlation_averaging_order() -> None:
             for q in range(2):
                 rem = rem * (1.0 - rbg_corr[:, user * 2 + k, other * 2 + q])
             streams[k] = 10.0 * np.log10(np.maximum(rem, np.finfo(float).eps))
-        rebuilt[user] = streams.mean(axis=0)
+        rebuilt[user] = streams.sum(axis=0)
     check(float(np.max(np.abs(loss - rebuilt))) < 1e-12,
           "残留相关性连乘吃的就是第一级的 RBG 相关矩阵，没有第二套算法")
 

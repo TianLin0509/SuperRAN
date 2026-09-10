@@ -414,7 +414,7 @@ MCS 查表都不含随机），所以 n 次重复只重跑 TTI 主循环。代�
 预置 profile 将源标签 `Es/No` 解释为经典 MMSE 的**单码字有效 SINR**；误块事件是
 **一个用户在一个已调度 TTI 中的独立单码字 TB**，系统不单独查询或统计 CBLER。预置表
 查询只使用 `MCS + codeword_effective_sinr_db`；跨 RBG、跨 rank stream 都做 dB
-算术平均（RBG 内多个 RB 先在线性功率域平均）。TBS、RE、RBG 数、rank、场景、码字数和
+算术平均（RBG 内多个 RB 也先转 dB 再平均，与参考实现对齐）。TBS、RE、RBG 数、rank、场景、码字数和
 译码器细节本阶段都不是曲线查询轴，这是已确认的通用曲线合同，不是待补数据缺口。
 物理编码内部即使分成多个 CB，也不能在表 3 路径上再次套 CB→TB 合成。曲线范围外只能
 保守钳位，不能外推。
@@ -470,7 +470,7 @@ TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sr_tdd_mcs` 实现：
 CQI 是 PMI 权测得的 pre-BF 值。BF Gain 逐 RB、逐流计算为同一信道、CSI、rank、
 功率、噪声、干扰与经典 MMSE 接收机下 `SINR_SVD - SINR_PMI`；默认物理发送权为
 SVD 方向叠加 NEBF 每天线约束，因此也记为 `SINR_NEBF`。RB 先在每个 RBG 内做
-线性功率平均，再对RBG×流做dB算术平均。历史row0映射MCS0并对应上报CQI1；
+dB 算术平均，再对RBG×流做dB算术平均。历史row0映射MCS0并对应上报CQI1；
 上报CQI0不调度。OLLA的
 单位是连续 MCS 档位，不是 dB；正值更激进，
 最终结果严格向下取整并钳位到0..27。默认10%首传BLER下ACK +0.01、NACK -0.09，
@@ -930,6 +930,12 @@ MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、**误�
 `MuPairLink.true_sinr_db`**——ZF 权按基站（可能已老化的）CSI 打，但打在双方
 `h_true` 上，对方的流进干扰协方差。逐 TTI 只查表，矩阵运算全在建表阶段
 （实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s）。
+
+**R4 残余相关性口径（2026-09-10 核对参考实现）**：逐 RBG 先平均相关度，再逐流
+连乘 `(1-rho)`；`CorrLoss = sum_stream 10log10(RemCorr_stream)`。所有流的损失
+归到本用户的单一码字，rank2 用两流 dB 求和，rank1 保持原值。逐流沿用 `_EPS`
+下限，用户级和不再额外钳位。宽带相关矩阵仅用于预筛，额外连乘开关默认关闭；
+接收 SINR 的跨流 dB 平均约定不变。
 
 开 `pair_table` 前会校验完整、双向、维度一致的 pair graph；三 UE 缺任意一条边（例如
 1↔2）都硬失败。MU 准入的 predicted BLER 使用叠加 **SU+MU OLLA 后的实际发送 MCS**；

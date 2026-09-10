@@ -281,7 +281,7 @@ check(np.allclose(_random_lmmse.se_per_user, _closed_form_se,
 # ---------------------------------------------------------------------------
 sect("6  单码字谱效与 rank 自适应")
 
-# 用户级 SINR：RBG 内线性平均、RBG 间与流间 dB 域平均
+# 用户级 SINR：RBG 内、RBG 间与流间均用 dB 域平均
 _s = np.full((32, 1), 10.0)
 check(abs(mu.user_sinr_db(_s, rb_per_rbg=16) - 10.0) < 1e-9, "全平信道的用户级 SINR 就是它本身")
 # **dB 域平均必须比线性平均保守** —— 单码字会被深衰的 RBG 拖下去
@@ -465,8 +465,9 @@ def _ref_rbg_sinr_db(s, step):
     n_rb = s.shape[0]
     st = max(1, min(int(step), n_rb))
     n = int(np.ceil(n_rb / st))
-    lin = np.stack([s[i * st:(i + 1) * st].mean(axis=0) for i in range(n)])
-    return np.mean(10.0 * np.log10(np.maximum(lin, 1e-12)), axis=1)
+    db = 10.0 * np.log10(np.maximum(s, 1e-30))
+    grouped = np.stack([db[i * st:(i + 1) * st].mean(axis=0) for i in range(n)])
+    return np.mean(grouped, axis=1)
 
 
 _rng_agg = np.random.default_rng(4242)
