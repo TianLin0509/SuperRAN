@@ -2262,7 +2262,8 @@ class InternalSimSource:
                  n_time: int, n_rb: int, n_bs: int, n_ue: int, doppler_hz: float,
                  realization_index: int, link_aod_rad: float, link_aoa_rad: float,
                  link_zod_rad: float, link_zoa_rad: float,
-                 time_offset_s: float = 0.0) -> np.ndarray:
+                 time_offset_s: float = 0.0,
+                 velocity_direction_rad: float = 0.0) -> np.ndarray:
         powers = 10.0 ** (profile.powers_dB / 10.0)
         powers /= max(float(np.sum(powers)), _EPS)
         tau_rms = float(self.cfg.get("tau_rms_ns", 300.0) or 300.0) * 1e-9
@@ -2274,8 +2275,8 @@ class InternalSimSource:
         # 时刻；同一个 UE 的第 r 轮覆盖 ``[r*n_time*dt, (r+1)*n_time*dt)``，
         # 相邻两轮首尾相接、不重叠。配合"每条轨迹一套散射体"（rng 按 UE 派生，
         # 见 iter_samples），小尺度衰落就成了时间的连续函数，相邻样本的相关系数
-        # 自动等于 Jakes 的 ``J0(2*pi*f_d*dt)``——因为每条射线的多普勒投影角
-        # 是均匀分布的，而 ``E_theta[exp(j*2*pi*f_d*cos(theta)*dt)] = J0(...)``。
+        # 由同一条射线的到达角与运动方向共同决定。只有到达方位角均匀分布时，
+        # 才退化为 Jakes 的 ``J0(2*pi*f_d*dt)``；定向 CDL/LOS 不保证该曲线。
         #
         # 这一步对 CDL 正确、对射线追踪**错误**，两者不能照抄：CDL 每条径的相位
         # 是随机数、位置移动只改簇的角度，时间演化全靠这里的多普勒项；RT 的径
@@ -2284,8 +2285,8 @@ class InternalSimSource:
         times = float(time_offset_s) + np.arange(n_time, dtype=np.float64) * interval
         h = np.zeros((n_time, n_rb, n_bs, n_ue), dtype=np.complex128)
         # Each diffuse table component receives 20 independent sub-rays.
-        # Per-ray angle offsets, XPR/Jones phases and Doppler projections are
-        # separate.  D/E row zero is the deterministic specular component;
+        # Per-ray angle offsets and XPR/Jones phases are sampled separately;
+        # Doppler uses that same ray's arrival azimuth. D/E row zero is the specular component;
         # its K ratio is already in the table powers and is never mixed twice.
         bs_shape = _panel_shape(n_bs, self.cfg.get("bs_panel"))
         ue_shape = _panel_shape(n_ue, self.cfg.get("ue_panel"))
@@ -2400,7 +2401,9 @@ class InternalSimSource:
                                         spatial[b, u] = coupling * b_space * np.conj(u_space)
                 phase = rng.uniform(-np.pi, np.pi)
                 delay_phase = np.exp(-2j * np.pi * freq * delays[cluster])
-                projected_fd = float(doppler_hz) * math.cos(rng.uniform(-np.pi, np.pi))
+                # Horizontal (2D) projection of the UE velocity onto this ray.
+                # TR 38.901 (7.5-25): arrival direction and Doppler share AoA.
+                projected_fd = float(doppler_hz) * math.cos(aoa - velocity_direction_rad)
                 time_phase = np.exp(1j * (phase + 2.0 * np.pi * projected_fd * times))
                 h += math.sqrt(float(power) / ray_count) * time_phase[:, None, None, None] * delay_phase[None, :, None, None] * spatial[None, None]
         # UE-side spatial correlation is produced by the geometry above -- the
@@ -2447,8 +2450,19 @@ class InternalSimSource:
         ``role`` is ``"serving"`` or ``"interferer"``; ``profile`` is the
         statistical CDL/TDL profile and is ignored by engines that derive
         multipath from geometry instead.
+
+        ``ue_velocity_direction_deg`` is the horizontal velocity azimuth in
+        degrees, in [0, 360), default 0 (+x/east; 90 is +y/north). This controls
+        statistical Doppler; moving geometry still uses ``ue_heading_deg`` /
+        ``track_heading_deg``, which should describe the same direction.
         """
         del cell, ue_position, is_los, role
+        try:
+            velocity_direction_deg = float(self.cfg.get("ue_velocity_direction_deg", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ue_velocity_direction_deg must be a finite number in [0, 360)") from exc
+        if not math.isfinite(velocity_direction_deg) or not 0.0 <= velocity_direction_deg < 360.0:
+            raise ValueError("ue_velocity_direction_deg must be a finite number in [0, 360)")
         return self._channel(
             profile,
             rng,
@@ -2463,6 +2477,7 @@ class InternalSimSource:
             link_zod_rad=link_zod_rad,
             link_zoa_rad=link_zoa_rad,
             time_offset_s=time_offset_s,
+            velocity_direction_rad=math.radians(velocity_direction_deg),
         )
 
     def iter_samples(self) -> Iterator[ChannelSample]:
