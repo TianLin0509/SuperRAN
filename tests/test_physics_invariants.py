@@ -2807,6 +2807,14 @@ def test_ca_ready_harq_precedes_new_transmissions():
 test_ca_ready_harq_precedes_new_transmissions()
 
 
+def test_ca_comparison_binds_actual_mu_inputs():
+    from test_ca import assert_ca_runtime_table_identity_is_complete
+    assert_ca_runtime_table_identity_is_complete()
+
+
+test_ca_comparison_binds_actual_mu_inputs()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

@@ -285,6 +285,54 @@ def test_ready_retx_priority():
     assert_ca_ready_retx_keeps_priority()
 
 
+def assert_ca_runtime_table_identity_is_complete():
+    b=deepcopy(fixture(mu=True))
+    identity=b.identity()
+    reordered=deepcopy(b)
+    reordered.tables=dict(reversed(list(reordered.tables.items())))
+    for table in reordered.tables['scc']:
+        table.mu_links=dict(reversed(list(table.mu_links.items())))
+        table.mu_links_by_rank=dict(reversed(list(table.mu_links_by_rank.items())))
+    assert reordered.identity()==identity
+    mutations=[
+        lambda t:setattr(t,'outage',np.ones(t.sinr_db.shape[0],dtype=bool)),
+        lambda t:setattr(t,'geo_sinr_db',t.geo_sinr_db+1),
+        lambda t:setattr(t,'cqi_filter_lambda',t.cqi_filter_lambda/2),
+        lambda t:next(iter(t.mu_links.values())).true_sinr_rbg_db.fill(-40),
+        lambda t:next(iter(t.mu_links.values())).predicted_sinr_rbg_db.fill(-40),
+        lambda t:next(iter(t.mu_links.values())).correlation.fill(.999),
+        lambda t:next(iter(next(iter(t.mu_links_by_rank.values())).values())).corr_loss_tx_rbg_db.fill(17),
+        lambda t:t.mu_links.clear(),
+    ]
+    for index,mutate in enumerate(mutations):
+        changed=deepcopy(b);mutate(changed.tables['scc'][0])
+        assert changed.identity()!=identity,f'changed runtime input {index} retained the same CA identity'
+    changed=deepcopy(b)
+    for table in changed.tables['scc']:
+        for pair in table.mu_links.values():
+            pair.true_sinr_db[:]=-40;pair.true_sinr_rbg_db[:]=-40
+    from superran import kpi_compare
+    with tempfile.TemporaryDirectory(prefix='superran-ca-identity-') as root,patch.dict(os.environ,{'SUPERRAN_ARTIFACTS':root}):
+        ids=[]
+        for label,bundle,mode in (('independent',b,'independent'),('cort',b,'cort'),('changed',changed,'cort')):
+            bundle=deepcopy(bundle);bundle.config=replace(bundle.config,mode=mode)
+            result=s.simulate_replications(bundle,num_replications=2,master_seed=0,
+                sys_cfg=s.SystemConfig(duration_s=.015),traffic=s.TrafficConfig(model='full_buffer'),
+                sched=s.SchedulerConfig(mu_enabled=True),kpi=s.KpiConfig(warmup_s=0)).as_dict()
+            result['algorithm']={'label':label}
+            path=kpi_compare._result_path(label);path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_text(json.dumps(ca.strict_json_value(result),allow_nan=False),encoding='utf-8')
+            ids.append(label)
+        kpi_compare.build_comparison(ids[:2],primary_kpi='cell_served_mbps')
+        try:kpi_compare.build_comparison([ids[0],ids[2]],primary_kpi='cell_served_mbps')
+        except ValueError as exc:assert 'ca_combination_identity' in str(exc),str(exc)
+        else:raise AssertionError('comparison accepted different MU decoder inputs')
+
+
+def test_complete_runtime_table_identity():
+    assert_ca_runtime_table_identity_is_complete()
+
+
 def test_mu_and_replications():
     result=run(fixture(mu=True),mode='cort',model='full_buffer',mu=True)
     check_water(result)

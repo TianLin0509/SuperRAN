@@ -5,7 +5,7 @@ The existing company_tdd profile remains unchanged.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from collections import deque
 from copy import deepcopy
 from typing import Any, Mapping
@@ -190,6 +190,33 @@ def split_buffer(queue_bytes: int, carriers: CarrierSet, config: CaSchedulerConf
     return out, "split"
 
 
+def _table_identity(value):
+    """Lossless structural identity, including dataclass fields hidden by as_dict."""
+    if is_dataclass(value) and not isinstance(value,type):
+        return {"dataclass":type(value).__qualname__,
+                "fields":{f.name:_table_identity(getattr(value,f.name)) for f in fields(value)}}
+    if isinstance(value,np.ndarray):
+        a=np.ascontiguousarray(value)
+        if a.dtype.hasobject:
+            raise ValueError("CA runtime table arrays cannot contain Python objects")
+        return {"array_shape":list(a.shape),"dtype":a.dtype.str,
+                "sha256":hashlib.sha256(a.tobytes()).hexdigest()}
+    if isinstance(value,np.generic):
+        return _table_identity(value.item())
+    if isinstance(value,Mapping):
+        pairs=[(_table_identity(k),_table_identity(v)) for k,v in value.items()]
+        return {"mapping":sorted(pairs,key=lambda pair:json.dumps(pair[0],sort_keys=True,allow_nan=False))}
+    if isinstance(value,(tuple,list)):
+        return {type(value).__name__:[_table_identity(v) for v in value]}
+    if isinstance(value,float) and not math.isfinite(value):
+        return {"float":str(value)}
+    if isinstance(value,complex):
+        return {"complex":[_table_identity(value.real),_table_identity(value.imag)]}
+    if value is None or isinstance(value,(str,int,float,bool)):
+        return value
+    raise TypeError(f"unsupported CA runtime table identity value: {type(value).__name__}")
+
+
 @dataclass
 class CaLinkTables:
     """Explicit identity-keyed input; compatible with the replication transport."""
@@ -204,19 +231,11 @@ class CaLinkTables:
         return len(self.tables[self.carriers.pcc.carrier_id])
 
     def identity(self):
-        tables_digest = hashlib.sha256()
-        for c in self.carriers.members:
-            for table in self.tables[c.carrier_id]:
-                tables_digest.update(str((c.carrier_id,table.ue,table.mcs_table,table.target_bler)).encode())
-                for key in ("sinr_db","sinr_tx_db","sinr_rbg_db","sinr_tx_rbg_db","mcs_tx","best_rank"):
-                    a = np.ascontiguousarray(getattr(table,key,None))
-                    if a.dtype.hasobject:
-                        tables_digest.update(b"none")
-                    else:
-                        tables_digest.update(str((key,a.shape,a.dtype.str)).encode()+a.tobytes())
+        runtime_tables = _table_identity(self.tables)
+        tables_digest = hashlib.sha256(json.dumps(runtime_tables,sort_keys=True,allow_nan=False).encode())
         payload = {"carriers": [asdict(c) for c in self.carriers.members],
                    "sources": self.source_manifest, "active_mask": self.active_mask,
-                   "link_tables_sha256":tables_digest.hexdigest(),
+                   "link_tables_identity_version":2,"link_tables_sha256":tables_digest.hexdigest(),
                    "system_configs":{cid:cfg.as_dict() for cid,cfg in sorted(self.system_configs.items())} if self.system_configs else None}
         return hashlib.sha256(json.dumps(payload, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
