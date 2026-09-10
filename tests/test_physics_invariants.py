@@ -2790,6 +2790,15 @@ def test_held_srs_pilot_range_survives_npz_roundtrip() -> None:
 test_held_srs_pilot_range_survives_npz_roundtrip()
 
 
+def test_ca_cort_reserved_payload_expands_existing_grant():
+    """CA uses original water minus other-CC newtx reservations, with real TBS."""
+    from test_ca import assert_cort_first_tti_drains_original_water
+    assert_cort_first_tti_drains_original_water()
+
+
+test_ca_cort_reserved_payload_expands_existing_grant()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

@@ -107,6 +107,7 @@ from __future__ import annotations
 
 import math
 import zlib
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -245,6 +246,21 @@ class RngBook:
                      "RngRun 而不是 RngSeed）；A/B 两臂共用同一批 replication "
                      "即公共随机数（CRN）。"),
         }
+
+    def namespaced_generator(self, stream: str, identity: str) -> np.random.Generator:
+        """Derive an event namespace without mutating the global stream registry.
+
+        CA uses carrier identity here and [TTI, UE] indexing within the result.
+        SHA-256 words extend SeedSequence's existing stream/replication key;
+        adding or reordering carriers cannot advance any other carrier's stream.
+        """
+        if not isinstance(identity, str) or not identity:
+            raise ValueError("random namespace identity must be a nonempty string")
+        base = self.seed_sequence(stream)
+        digest = hashlib.sha256(identity.encode("utf-8")).digest()
+        namespace = tuple(int.from_bytes(digest[i:i+4], "little") for i in range(0,32,4))
+        return np.random.default_rng(np.random.SeedSequence(
+            base.entropy, spawn_key=(*base.spawn_key, *namespace)))
 
 
 def replications(master_seed: int = 0, n: int = 8, *, start: int = 0) -> list[RngBook]:

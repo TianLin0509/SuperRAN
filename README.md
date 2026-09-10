@@ -567,12 +567,13 @@ python tests/test_channel_generation_contract.py
 python tests/test_native_independence.py
 python tests/test_developer_guide.py
 python tests/test_carrier.py
+python tests/test_ca.py
 python tests/test_company_256t.py
 python tests/test_system_sim_tool.py
 python tests/test_benchmarks.py
 ```
 
-当前共 **29 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
+当前共 **30 个可执行测试文件**。运行时检查会在循环中按场景展开，因此不维护一个
 容易失真的手写“总项数”；以实际运行输出和开发者文档的自动盘点为准。
 
 经典通信正确性套件先冻结判据再运行：
