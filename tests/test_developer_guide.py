@@ -85,7 +85,7 @@ def test_guide_is_offline_utf8_hash_routed_and_accessible() -> None:
     assert "校准、验证和算法统计不是一回事" in text
     assert "当前分类器是确定性关键词路由，不是 LLM 语义理解" in text
     assert "channel_generation_mode" in text and "tdl_fallback" in text
-    assert "当前预置表系统路径采用前文明确的“RBG 内线性、跨 RBG" in text
+    assert "当前预置表系统路径采用前文明确的“RBG 内、跨 RBG" in text
     assert "预置表口径：一次 TTI 的 TB 就是一次 BLER 事件" in text
     assert "当前是单码字通用 TB-BLER 抽象，不展开 RE/TBS/CB" in text
     assert "只允许一次重传：默认 IR，可选 CC" in text
