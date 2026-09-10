@@ -1,0 +1,21 @@
+{
+  "dataset_id": "ds_ca_example_pcc",
+  "duration_s": 0.05,
+  "warmup_s": 0.005,
+  "num_replications": 2,
+  "replication_workers": 1,
+  "traffic_model": "ftp3",
+  "file_bytes": 9001,
+  "arrival_rate_hz": 100,
+  "seed": 17,
+  "tti_trace_mode": "full",
+  "ca_config": {
+    "scheduler": {"mode": "cort", "method": "average", "split_threshold_bits": 72000},
+    "carriers": [
+      {"carrier_id": "pcc", "dataset_id": "ds_ca_example_pcc", "bandwidth_hz": 100000000,
+       "cell_id": 0, "is_pcc": true, "csi": {"srs_hopping": false}},
+      {"carrier_id": "scc", "dataset_id": "ds_ca_example_scc", "bandwidth_hz": 20000000,
+       "cell_id": 0, "is_pcc": false, "csi": {"srs_hopping": false}}
+    ]
+  }
+}

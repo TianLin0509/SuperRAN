@@ -2922,6 +2922,39 @@ def test_held_srs_pilot_range_survives_npz_roundtrip() -> None:
 test_held_srs_pilot_range_survives_npz_roundtrip()
 
 
+def test_ca_cort_reserved_payload_expands_existing_grant():
+    """CA uses original water minus other-CC newtx reservations, with real TBS."""
+    from test_ca import assert_cort_first_tti_drains_original_water
+    assert_cort_first_tti_drains_original_water()
+
+
+test_ca_cort_reserved_payload_expands_existing_grant()
+
+
+def test_ca_ready_harq_precedes_new_transmissions():
+    from test_ca import assert_ca_ready_retx_keeps_priority
+    assert_ca_ready_retx_keeps_priority()
+
+
+test_ca_ready_harq_precedes_new_transmissions()
+
+
+def test_ca_comparison_binds_actual_mu_inputs():
+    from test_ca import assert_ca_runtime_table_identity_is_complete
+    assert_ca_runtime_table_identity_is_complete()
+
+
+test_ca_comparison_binds_actual_mu_inputs()
+
+
+def test_ca_coverage_and_fullband_statistics_use_carrier_scope():
+    from test_ca import assert_ca_statistics_use_carrier_scope
+    assert_ca_statistics_use_carrier_scope()
+
+
+test_ca_coverage_and_fullband_statistics_use_carrier_scope()
+
+
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

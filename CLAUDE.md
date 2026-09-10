@@ -84,12 +84,13 @@ python tests/test_channel_generation_contract.py # first-party 信道生成合�
 python tests/test_native_independence.py       # 外部根/导入阻断、v1/v2互易、35工具
 python tests/test_developer_guide.py         # 开发者文档覆盖、离线结构与漂移检查
 python tests/test_carrier.py                 # 载波栅格、Type-0 边界、本地 TDD 合同
+python tests/test_ca.py                      # 共享队列 CA、整数分流、CORT 扩容与跨载波隔离
 python tests/test_company_256t.py            # 256T 阵列与码本
 python tests/test_system_sim_tool.py          # sr_system_sim 行为级（硬失败路径）
 python tests/test_benchmarks.py               # 预注册经典通信基准与 provenance
 ```
 
-当前共 **29 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
+当前共 **30 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
 pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` 不再是
 0 检查假绿）；脚本式文件必须在 pytest 收集/薄壳路径中同样以异常或非零退出
 传播失败，不能只在 `if __name__ == '__main__'` 里检查全局 FAILED。
@@ -1755,6 +1756,18 @@ full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst �
 `presets/traffic_cdf/`，由 `scripts/make_field_bimodal_cdf.py` 生成。
 
 ## 加东西的地方
+
+### 多载波 CA
+
+显式 CA 入口与旧单载波固定格栅分开，使用说明见 `docs/ca.md`。
+`ca.py` 定义载波、输入身份与整数配额；`ca_engine.py` 协调原 experience 状态机；
+`ca_server.py` 复用原 MCP 数据准备与独立建表。不得另复制一套 PHY 或 busy-period 公式。
+载波事件用 `RngBook.namespaced_generator` 在原用途流下派生，不修改全局登记表。
+改动以上模块运行 `test_ca`、`test_system`、`test_scheduler_p0`、`test_scheduler_edf`、
+`test_csi_aging`、`test_rng`、`test_carrier`、`test_system_sim_tool` 和 `test_physics_invariants`。
+关闭 CORT 扩 RBG 时，棘轮必须在实际首传净荷上变红；缺 API 的 ImportError 不算反证。
+
+### 其他扩展
 
 - 新的 3GPP 校准量 → `calibration.py`，按条款号标注来源
 - 新的 MCS/CQI 表或 TBS 分支 → `linkadapt.py`，**标准表必须过 `verify_tables` 的内蕴自检**

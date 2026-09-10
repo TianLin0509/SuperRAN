@@ -173,6 +173,7 @@ def _fairness_value(result: dict[str, Any], path: Sequence[str]) -> Any:
 
 
 _FAIRNESS_PATHS: tuple[tuple[str, ...], ...] = (
+    ("config", "ca_combination_identity"),
     ("dataset_id",),
     ("analysis_identity",),
     ("config", "system", "model_version"),

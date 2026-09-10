@@ -5021,6 +5021,33 @@ MCS12/rank2 的 TBS=1,729 B：新 R̄=0.99×1,000+0.01×1,729=<strong>1,007.29 B
     )
 
 
+def carrier_aggregation_page() -> Page:
+    body = """
+<p>载波聚合（Carrier Aggregation，CA）把同一 UE 的共享队列送到多个独立载波。
+CQI、Rank、OLLA 和 HARQ 按载波独立；业务到达、全局 PF 和用户体验统计每 TTI 只推进一次。</p>
+<p>显式 CA 入口支持 100 MHz（272 PRB，17×16）和 20 MHz（51 PRB，6×8＋3），
+同站 30 kHz、同步 TDD。旧单数据集入口继续保持固定 100 MHz 合同。</p>
+<p><code>independent</code> 冻结 average/bandwidth/rbnum 整字节配额。
+<code>cort</code> 先形成等份首轮计划，再以原队列减去其他 CC 的首传预占，
+通过实际 TBS 反查扩用空闲 RBG。原 grant 不缩减；重传、填充不当作新队列水量。
+已就绪重传始终按首传时刻排在新传前，CORT 全局排序只用于新传。</p>
+<p>9001 B 等分为 4501/4500 B。20 MHz 的尾组确实只有 3 PRB；
+20 MHz 需要显式兼容 CSI 配置，不能套用 272-PRB 的 17-hop SRS。
+同 TTI 多载波首传先合并，再计算 busy period，不把并行时长串接。</p>
+<p>Python 用 <code>build_ca_link_tables</code> 接原 <code>simulate</code> / <code>simulate_replications</code>；
+MCP 用 <code>sr_system_sim(ca_config=...)</code>。
+可运行请求在 <code>examples/ca_100_20.json</code>，使用说明在 <code>docs/ca.md</code>。
+<code>scripts/run_ca_example.py</code> 的显式合成夹具只验证接口，不能用于性能结论。</p>
+<p>自动 SCell 激活、延迟 FIFO、异步 TDD、混合 SCS、跨站协调不支持；启用会报错。
+算法比较必须绑定完整运行表（包括 MU 配对表）、载波组合来源和相同随机事件，继续通过 Gate 2/3。</p>
+<p>覆盖按已启用载波取并集；满带授权按所属载波判断后按授权次数汇总。
+逐载波保存数据血缘并核对同一次运行快照，unknown/mismatch 的载波身份与告警进入 JSON 和 KPI 页。</p>
+"""
+    return Page("carrier-aggregation", "多载波共享队列与 CORT", "系统仿真", "CA",
+                "一份业务，多套载波状态；先守住水量与时钟，再谈吞吐。", body,
+                ("CA", "CORT", "PCC", "SCC", "载波聚合"))
+
+
 def scheduler_p0_page() -> Page:
     body = """
 <div class="callout note"><span class="callout-icon">✓</span><div><strong>结果先说</strong>
@@ -6504,7 +6531,7 @@ def build() -> str:
         measurements_page(modules), beamforming_page(), powercontrol_page(), robust_page(),
         sinr_page(), bfgain_page(), linkadapt_page(), dlamc_page(),
         bler_page(), mu_page(),
-        modes_page(), experience_page(), scheduler_p0_page(), traffic_page(), kpi_page(),
+        modes_page(), experience_page(), carrier_aggregation_page(), scheduler_p0_page(), traffic_page(), kpi_page(),
         calibration_page(), interference_page(), rng_page(), gates_page(),
         external_results_page(), tests_page(tests, modules),
         tools_page(tools), skill_page(skills), presets_page(presets), extension_page(),
