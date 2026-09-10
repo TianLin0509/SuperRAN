@@ -48,6 +48,86 @@ def section(title: str) -> None:
     print("\n" + "=" * 70 + f"\n{title}\n" + "=" * 70)
 
 
+
+# ---------------------------------------------------------------------------
+# R4：同一个调度组内也必须在 dB 域聚合，不能让强 RB 抹平深衰 RB。
+# ---------------------------------------------------------------------------
+def test_r4_rbg_sinr_averages_rb_in_db() -> None:
+    import numpy as np
+    from superran import mumimo as mu
+
+    cases = (
+        ([10.0, 0.1], 2, None, [0.0]),
+        ([[10.0, 100.0], [0.1, 1.0]], 2, None, [5.0]),
+        ([10.0, 0.1, 10.0], 2, None, [0.0, 10.0]),
+        ([10.0, 0.1, 10.0], 2, ((0, 2), (2, 3)), [0.0, 10.0]),
+        ([10.0, 0.1, 100.0, 0.01], 2, ((0, 2), (2, 4)), [0.0, 0.0]),
+        ([[10.0, 100.0], [0.1, 0.01]], 1, None, [15.0, -15.0]),
+        (np.full((32, 2), 10.0), 16, None, [10.0, 10.0]),
+        ([0.0, 1.0], 2, None, [-150.0]),
+        ([1e-40, 1.0], 2, ((0, 2),), [-150.0]),
+    )
+    for values, step, bounds, expected in cases:
+        actual = mu.rbg_sinr_db(values, rb_per_rbg=step, rbg_boundaries=bounds)
+        np.testing.assert_allclose(
+            actual, expected, rtol=0.0, atol=1e-12,
+            err_msg=f"R4: RB dB mean, step={step}, bounds={bounds}")
+        assert actual.shape == (len(expected),)
+        assert np.all(np.isfinite(actual))
+    # 不等长组仍按 RBG 等权：mean([0,10])=5，不是逐 RB 的 10/3。
+    assert mu.user_sinr_db(
+        [10.0, 0.1, 10.0], rbg_boundaries=((0, 2), (2, 3))) == 5.0
+    # 同一组划分的两条实现必须逐位相同；不同组长不要求宽带数相同。
+    values = np.array([[10.0, 100.0], [0.1, 1.0], [3.0, 7.0], [0.03, 0.7]])
+    np.testing.assert_array_equal(
+        mu.rbg_sinr_db(values, rb_per_rbg=2),
+        mu.rbg_sinr_db(values, rbg_boundaries=((0, 2), (2, 4))))
+
+
+def test_r4_full_rb_link_table_keeps_intra_rbg_db_loss() -> None:
+    import numpy as np
+    from superran import csi_aging as ca
+    from superran import power_control as pc
+    from superran import system as sy
+
+    # 平坦 rank1 信道，组内等量增强/减弱保持平均发射功率不变。
+    # 因此解析期望为 0.5*(10log10(1.5)+10log10(0.5))，不借用聚合函数自证。
+    h = [np.ones((1, 32, 2, 1), dtype=complex)]
+    geometry = pc.DownlinkPowerGeometry(
+        serving_cell_index=np.array([0]), signal_power_mw=np.array([10.0]),
+        thermal_noise_power_mw=np.array([1.0]),
+        interference_power_mw=np.array([[[0.0, 2.0]]]))
+    common = dict(
+        geo_sir_db=[10.0 * np.log10(5.0)], max_rank=1, rb_per_rbg=16,
+        neighbor_load=1.0, neighbor_load_jitter=0.0,
+        csi=ca.CsiConfig(enabled=False), power_geometry=geometry)
+    uniform = pc.RbPowerControlConfig(enabled=True, num_rb=32)
+    shaped = pc.RbPowerControlConfig.from_raw(
+        enabled=True, num_rb=32, overrides=[
+            {"cell_index": 0, "rb_start": 0, "rb_end": 7, "multiplier": 1.5},
+            {"cell_index": 0, "rb_start": 8, "rb_end": 15, "multiplier": 0.5}])
+    original = sy.build_link_tables(
+        h, [10.0 * np.log10(10.0 / 3.0)], rb_power_control=uniform, **common)[0]
+    changed = sy.build_link_tables(
+        h, [10.0 * np.log10(10.0 / 3.0)], rb_power_control=shaped, **common)[0]
+    assert changed.frequency_rows_per_rbg == 16
+    assert changed.h_true_rbg.shape[1] == 32
+    np.testing.assert_allclose(
+        changed.sinr_rbg_db - original.sinr_rbg_db,
+        [[[5.0 * np.log10(0.75), 0.0]]], rtol=0.0, atol=1e-12,
+        err_msg="R4: full-RB link table must retain the intra-RBG dB loss")
+    # 不启用逐 RB 功控时仍取 RBG 代表点，不能因本次修订切换抽样算法。
+    represented = sy.build_link_tables(
+        h, [10.0 * np.log10(10.0 / 3.0)], **common)[0]
+    assert represented.frequency_rows_per_rbg == 1
+    assert represented.h_true_rbg.shape[1] == 2
+    np.testing.assert_allclose(
+        represented.sinr_rbg_db, original.sinr_rbg_db, rtol=0.0, atol=1e-12)
+
+
+test_r4_rbg_sinr_averages_rb_in_db()
+test_r4_full_rb_link_table_keeps_intra_rbg_db_loss()
+
 rng = np.random.default_rng(20260809)
 
 

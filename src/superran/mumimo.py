@@ -122,7 +122,8 @@ def rbg_sinr_db(sinr_lin_per_rb: np.ndarray, *,
                 ) -> np.ndarray:
     """把逐 RB/流 SINR 压成逐 RBG SINR（dB）。
 
-    RBG 内先在线性域平均 RB，再在 dB 域平均各流；返回 ``[RBG]``。
+    逐 RB/流先转 dB，RBG 内与跨流均取 dB 算术平均，与参考实现对齐；
+    返回 ``[RBG]``。
     保留这一级是 RB 功控能正确评估 1-RBG grant 的前提。
     """
     s = np.asarray(sinr_lin_per_rb, dtype=float)
@@ -138,24 +139,25 @@ def rbg_sinr_db(sinr_lin_per_rb: np.ndarray, *,
         else carrier_grid.uniform_boundaries(n_rb, step)
     )
     n_rbg = len(bounds)
+    s_db = 10.0 * np.log10(np.maximum(s, _EPS))
     # 逐 RBG 切片 + mean 在 step=1（输入已是 RBG 粒度）时是纯开销：实测一次
     # 12 UE 建表里光 ndarray.mean 就被调了 10 万次。整除时 reshape 一次算完，
     # 元素与顺序完全一样；除不尽才退回按组切片。
     if rbg_boundaries is None and step == 1:
-        rbg_lin = s
+        rbg_db = s_db
     elif rbg_boundaries is None and n_rb % step == 0:
-        rbg_lin = s.reshape(n_rbg, step, s.shape[1]).mean(axis=1)
+        rbg_db = s_db.reshape(n_rbg, step, s.shape[1]).mean(axis=1)
     else:
-        rbg_lin = np.stack([
-            s[start:stop].mean(axis=0) for start, stop in bounds])
-    return np.mean(10.0 * np.log10(np.maximum(rbg_lin, _EPS)), axis=1)
+        rbg_db = np.stack([
+            s_db[start:stop].mean(axis=0) for start, stop in bounds])
+    return np.mean(rbg_db, axis=1)
 
 
 def user_sinr_db(sinr_lin_per_rb: np.ndarray, *, rb_per_rbg: int = RB_PER_RBG,
                  rbg_boundaries: tuple[tuple[int, int], ...] | None = None) -> float:
     """把 ``[RB, stream]`` 的线性 SINR 压成一个**用户级 SINR**（dB）。
 
-    口径（用户 2026-08-02 定）::
+    口径（用户 2026-09-10 核对参考实现）::
 
         逐 RB SINR → RBG 内聚合 → 各 RBG 的 dB 值算术平均 → 各流的 dB 值算术平均
 
@@ -164,11 +166,11 @@ def user_sinr_db(sinr_lin_per_rb: np.ndarray, *, rb_per_rbg: int = RB_PER_RBG,
     再查 MCS，而不是逐 RB 查完再平均——后者等于假设每个 RB 能用不同 MCS，
     会系统性高估。两者的差正是单码字相对多码字的损失。
 
-    dB 域平均（即几何平均）比线性平均保守，这是链路自适应的常规做法：
+    本接口按参考实现采用 dB 域平均（即几何平均），比线性平均保守：
     深衰的那几个 RBG 会把整个码字拖下去，线性平均会把它们的影响冲淡。
 
-    RBG **内部**用线性域平均（同一个调度单位，功率域相加合理），
-    RBG **之间**用 dB 域平均。
+    RBG **内部**用 dB 域平均，与参考实现对齐；
+    RBG **之间**仍对每组的 dB 值等权平均，不按组内 RB 数加权。
     """
     # RBG 与流两个维度都在 dB 域取算术平均（顺序无关）。
     return float(np.mean(rbg_sinr_db(
