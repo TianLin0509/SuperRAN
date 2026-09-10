@@ -128,6 +128,56 @@ def test_r4_full_rb_link_table_keeps_intra_rbg_db_loss() -> None:
 test_r4_rbg_sinr_averages_rb_in_db()
 test_r4_full_rb_link_table_keeps_intra_rbg_db_loss()
 
+
+def test_r4_residual_loss_sums_stream_db() -> None:
+    import math
+    import numpy as np
+    from superran import mumimo as mu
+
+    # A 的 SU 两列正交；B 单列单位范数。模平方互相关为 0.2、0.4。
+    # A 的逐流残余为 0.8、0.6；B 单流残余为 0.8*0.6。
+    a = np.eye(3, dtype=complex)[:, :2][None, :, :]
+    b = np.sqrt([0.2, 0.4, 0.4]).astype(complex)[None, :, None]
+    target = 10.0 * math.log10(0.8) + 10.0 * math.log10(0.6)
+    actual = mu.residual_correlation_loss_db([a, b], rb_per_rbg=1)
+    np.testing.assert_allclose(
+        actual, [[target], [10.0 * math.log10(0.48)]], rtol=0.0, atol=1e-12,
+        err_msg="R4: rank2 codeword loss must SUM the stream dB losses")
+    np.testing.assert_array_equal(
+        mu.residual_correlation_loss_db([b, a], rb_per_rbg=1), actual[::-1])
+
+    # 四种 rank 组合：每个对应流的 rho=0.25，其余交叉流正交。
+    # 因而每个 UE 恰有 min(rank_a,rank_b) 条流各损失 10log10(0.75)。
+    ua = np.eye(4, dtype=complex)[:, :2]
+    ub = np.zeros((4, 2), dtype=complex)
+    ub[0, 0] = ub[1, 1] = 0.5
+    ub[2, 0] = ub[3, 1] = math.sqrt(0.75)
+    for ra, rb in ((1, 1), (1, 2), (2, 1), (2, 2)):
+        weights = [np.repeat(ua[None, :, :ra], 3, axis=0),
+                   np.repeat(ub[None, :, :rb], 3, axis=0)]
+        loss = mu.residual_correlation_loss_db(
+            weights, rbg_boundaries=((0, 2), (2, 3)))
+        expected = min(ra, rb) * 10.0 * math.log10(0.75)
+        np.testing.assert_allclose(loss, np.full((2, 2), expected),
+                                   rtol=0.0, atol=1e-12)
+        assert np.all(loss <= 0.0)
+        # 非默认对照开关仍只增加一次相同相关代价，不改默认值。
+        doubled = mu.residual_correlation_loss_db(
+            weights, rbg_boundaries=((0, 2), (2, 3)), wideband_coupling=True)
+        np.testing.assert_allclose(doubled, 2.0 * loss, rtol=0.0, atol=1e-12)
+    np.testing.assert_array_equal(
+        mu.residual_correlation_loss_db(
+            [ua[None], np.eye(4, dtype=complex)[None, :, 2:]], rb_per_rbg=1),
+        np.zeros((2, 1)))
+    # 每流钳位到 1e-30 => -300 dB；两流合计 -600，不应再钳用户值。
+    np.testing.assert_array_equal(
+        mu.residual_correlation_loss_db([ua[None], ua[None]], rb_per_rbg=1),
+        np.full((2, 1), -600.0))
+
+
+test_r4_residual_loss_sums_stream_db()
+
+
 rng = np.random.default_rng(20260809)
 
 
