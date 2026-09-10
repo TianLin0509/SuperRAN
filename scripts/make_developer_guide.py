@@ -2655,6 +2655,15 @@ TDL 只有功率时延轮廓，空间相关是统计近似。</p>
 38.901 Table 7.7.1-1~5 逐字段交叉核对。每个 diffuse table component 按 Table 7.5-3
 展开成 20 条 ray：四组角度 offset 会独立随机耦合，每条 ray 有自己的交叉极化矩阵、初相和
 Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位是反向 bearing，不是把 AOD 原样复制。</p>
+<p>统计信道的每条射线使用其实际到达方位角 AoA 做二维多普勒投影：
+<code>f_ray = f_max × cos(AoA − velocity_direction)</code>。空间响应与时间相位共享同一 AoA，
+保留空间与时间的耦合；只有均匀方位角散射的时间相关才服从 Jakes 的 J0，定向 CDL/LOS 不保证这一形状。</p>
+<p><code>ue_velocity_direction_deg</code> 是水平面运动方位角，范围 <code>[0, 360)</code>，
+0 表示 +x/东，90 表示 +y/北。未指定时沿用旧 <code>ue_heading_deg</code>，其次
+<code>track_heading_deg</code>，三者均缺省时为 0。旧 heading 允许按 360° 周期换算；
+新参数与生效的旧 heading 同时指定时必须等价，否则明确报错。轨迹位移、SRS 的位置查询与
+多普勒共用这一个方向；<code>static</code> 只冻结位置，速度仍决定小尺度时间演化。
+RT 仍由几何路径计算逐径多普勒，继承的速度配置使用同一解析结果；本次未改变 RT 的投影模型。</p>
 """
     body += table(
         ["profile", "表分量", "实际 ray 项", "关键口径"],

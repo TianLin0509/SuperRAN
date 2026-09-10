@@ -1277,6 +1277,12 @@ class InternalSimSource:
 
     def __init__(self, cfg: dict[str, Any]):
         self.cfg = dict(cfg)
+        direction_deg = self._resolve_velocity_direction_deg(self.cfg)
+        self._velocity_direction_rad = math.radians(direction_deg)
+        # One velocity direction for geometry and fading. Keep the resolved
+        # legacy key for adapters (including RT) that consume UE velocity.
+        self.cfg["ue_velocity_direction_deg"] = direction_deg
+        self.cfg["ue_heading_deg"] = direction_deg
         self.num_ues = max(int(self.cfg.get("num_ues", 1) or 1), 1)
         self.num_samples = max(int(self.cfg.get("num_samples", self.num_ues) or self.num_ues), 1)
         self._seed = int(self.cfg.get("seed", 0) or 0)
@@ -1290,6 +1296,40 @@ class InternalSimSource:
         self._hop_last_seen: dict[tuple[int, str], dict[int, int]] = {}
         self._hop_occasion: dict[tuple[int, str], int] = {}
         self._hop_last_rbg: dict[int, int] = {}
+
+    @staticmethod
+    def _resolve_velocity_direction_deg(cfg: dict[str, Any]) -> float:
+        """Resolve one horizontal velocity azimuth before any channel draws.
+
+        The new key is in [0, 360). Without it, preserve the old heading-key
+        precedence and accept periodic legacy angles. Explicit new and legacy
+        directions must agree modulo 360; contradictory velocities are errors.
+        """
+        key = "ue_velocity_direction_deg"
+        direction = None
+        if key in cfg:
+            try:
+                direction = float(cfg[key])
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{key} must be a finite number in [0, 360)") from exc
+            if not math.isfinite(direction) or not 0.0 <= direction < 360.0:
+                raise ValueError(f"{key} must be a finite number in [0, 360)")
+        legacy_key = next((k for k in ("ue_heading_deg", "track_heading_deg") if k in cfg), None)
+        legacy_direction = 0.0
+        if legacy_key is not None:
+            try:
+                legacy_direction = float(cfg[legacy_key] or 0.0)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{legacy_key} must be a finite number") from exc
+            if not math.isfinite(legacy_direction):
+                raise ValueError(f"{legacy_key} must be a finite number")
+            legacy_direction %= 360.0
+            if direction is not None:
+                difference = (direction - legacy_direction + 180.0) % 360.0 - 180.0
+                if not math.isclose(difference, 0.0, abs_tol=1e-9):
+                    raise ValueError(f"{key} conflicts with {legacy_key}; geometry and Doppler "
+                                     "must use the same UE velocity direction")
+        return legacy_direction if direction is None else direction
 
     def _srs_occasion(self, trajectory_time_s: float, slot_duration_s: float,
                       srs_offset_slots: int) -> tuple[int, float, float]:
@@ -1932,10 +1972,7 @@ class InternalSimSource:
         mode = str(self.cfg.get("mobility_mode", "static")).strip().lower()
         speed = max(float(self.cfg.get("ue_speed_kmh", 3.0) or 0.0), 0.0) / 3.6
         if mode != "static" and speed > 0.0:
-            heading = math.radians(float(
-                self.cfg.get("ue_heading_deg", self.cfg.get("track_heading_deg", 0.0))
-                or 0.0
-            ))
+            heading = self._velocity_direction_rad
             travel = speed * float(
                 self.cfg.get("sample_interval_s", 5e-3) or 5e-3
             ) * int(round_index)
@@ -2452,17 +2489,11 @@ class InternalSimSource:
         multipath from geometry instead.
 
         ``ue_velocity_direction_deg`` is the horizontal velocity azimuth in
-        degrees, in [0, 360), default 0 (+x/east; 90 is +y/north). This controls
-        statistical Doppler; moving geometry still uses ``ue_heading_deg`` /
-        ``track_heading_deg``, which should describe the same direction.
+        degrees, in [0, 360) (+x/east is 0; +y/north is 90). Initialization
+        resolves it together with the legacy heading keys, defaulting to 0
+        when none is supplied. Geometry and Doppler share that direction.
         """
         del cell, ue_position, is_los, role
-        try:
-            velocity_direction_deg = float(self.cfg.get("ue_velocity_direction_deg", 0.0))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("ue_velocity_direction_deg must be a finite number in [0, 360)") from exc
-        if not math.isfinite(velocity_direction_deg) or not 0.0 <= velocity_direction_deg < 360.0:
-            raise ValueError("ue_velocity_direction_deg must be a finite number in [0, 360)")
         return self._channel(
             profile,
             rng,
@@ -2477,7 +2508,7 @@ class InternalSimSource:
             link_zod_rad=link_zod_rad,
             link_zoa_rad=link_zoa_rad,
             time_offset_s=time_offset_s,
-            velocity_direction_rad=math.radians(velocity_direction_deg),
+            velocity_direction_rad=self._velocity_direction_rad,
         )
 
     def iter_samples(self) -> Iterator[ChannelSample]:
@@ -2569,9 +2600,7 @@ class InternalSimSource:
             # 时间窗口互相重叠（n_time=8 时重叠 7/8），下游还会把它们当独立快照。
             trajectory_time_s = round_index * n_time * sample_interval_s
             if mobility_mode != "static" and speed_mps > 0.0:
-                heading = math.radians(
-                    float(self.cfg.get("ue_heading_deg", self.cfg.get("track_heading_deg", 0.0)) or 0.0)
-                )
+                heading = self._velocity_direction_rad
                 travel = speed_mps * trajectory_time_s
                 position[0] += travel * math.cos(heading)
                 position[1] += travel * math.sin(heading)
