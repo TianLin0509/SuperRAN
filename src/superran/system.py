@@ -3153,6 +3153,13 @@ def simulate(
     sched = sched or SchedulerConfig()
     kpi = kpi or KpiConfig()
 
+    from .ca import CaLinkTables
+    if isinstance(tables, CaLinkTables):
+        from .ca_engine import simulate_ca
+        return simulate_ca(tables, sys_cfg=sys_cfg, traffic=traffic, sched=sched,
+                           kpi=kpi, book=rng or rg.RngBook(master_seed=sys_cfg.seed),
+                           progress=progress)
+
     from . import linkadapt as la  # noqa: PLC0415
 
     book = rng if rng is not None else rg.RngBook(master_seed=int(sys_cfg.seed))
@@ -3419,6 +3426,10 @@ class ReplicationResult:
                    ),
                }}
         if self.runs:
+            ca_diagnostics = self.runs[0].diagnostics.get("ca")
+            if ca_diagnostics is not None:
+                out["ca"] = {"combination_identity":ca_diagnostics["combination_identity"],
+                    "replication_diagnostics":[run.diagnostics["ca"] for run in self.runs]}
             definitions = self.runs[0].diagnostics.get("kpi_definitions")
             if definitions:
                 out["kpi_definitions"] = definitions

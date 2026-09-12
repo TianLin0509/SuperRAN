@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "output" / "test-matrix"
 
 QUICK = (
+    "test_ca.py",
     "test_carrier.py",
     "test_channel_generation_contract.py",
     "test_company_256t.py",
