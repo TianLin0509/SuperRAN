@@ -702,8 +702,12 @@ MU 准入要过 predicted BLER ≤ 0.5，查询的是叠加 SU+MU OLLA 后的**�
 MU MCS 口径是 `CQI + BF + SU-OLLA + CorrLoss + powerLoss + MU-OLLA`。
 两个 rank2 UE 相对 SU rank2 的等流功率损失为 `−10log10(2)=−3.0103 dB`；
 不等 rank 时按各自 rank 与总层数的实际功率比例计算，不能固定套用 −3.0103 dB。
-CorrLoss 先逐流计算 MMSE SINR 的 MU−SU 差并扣除等流功率变化，再在一个用户的
-单一码字内按 dB 求和（rank1 保持原值）；SU/MU OLLA 是独立的用户级状态。
+发送侧 CorrLoss 来自 SU 发射波束的残余相关度：每 RBG 内平均两流波束的
+`|w_k^H w_q|²`，逐流连乘各干扰流的 `(1-rho)`，转 dB 后在一个用户的
+单一码字内求和（rank1 保持原值）。LMMSE（线性最小均方误差）接收机用于真实接收
+SINR 与误块评估；`corr_loss_true` 是真实 MU−SU SINR 差扣除功率分摊后的审计量，
+不能冒充发送侧 CorrLoss。
+SU/MU OLLA 是独立的用户级状态。
 
 每个 DL TTI 只做一次 PF 排序。若 SU 能发完所有队列就强制 SU；否则比较队列封顶后的
 useful payload bytes，只有 MU 不小于 SU 才选 MU。接收端用 per-user LMMSE，预编码只看
