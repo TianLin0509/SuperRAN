@@ -2101,8 +2101,8 @@ def gates_svg() -> str:
 
 def skill_flow_svg() -> str:
     labels = [
-        (25, "1 头脑风暴", "问题/基线/主指标"), (300, "2 计划书", "四项可见计划"),
-        (575, "3 生成 + 门1", "数据先体检"), (850, "4 实验 + 门2/3", "证据后结论"),
+        (25, "1 对齐目标", "问题/约定/参数核对"), (300, "2 生成数据", "生成后立即体检"),
+        (575, "3 跑对比", "配对/公平/统计判决"), (850, "4 写结论", "解释结果与证据边界"),
     ]
     body = ""
     for i, (x, title, sub) in enumerate(labels):
@@ -2110,7 +2110,7 @@ def skill_flow_svg() -> str:
         if i:
             body += arrow(labels[i - 1][0] + 230, 94, x, 94)
     body += '<text class="ds" x="550" y="190">HARD-GATE：未通过时不能用“趋势上/总体来看”绕过，也不能手算救结论</text>'
-    return svg_wrap(body, 1110, 225, "channel-sim Skill 的强制收敛与证据工作流")
+    return svg_wrap(body, 1110, 225, "完整比较的四阶段；概念咨询与数据交付按其完成条件结束")
 
 
 def product_surfaces_showcase() -> str:
@@ -5776,7 +5776,8 @@ def skill_page(skills: list[dict[str, Any]]) -> Page:
     body += """
 <h2>Skill 不是提示词装饰</h2>
 <p><code>channel-sim</code> 规定何时追问、计划如何收敛、门 1/2/3 何时阻断、CRN 如何保持、
-系统级 A/B 如何写结论。它还规定可见计划恰为四项，避免用十几个待办制造“很专业”的错觉。</p>
+系统级 A/B 如何写结论。完整比较采用四阶段；概念咨询只解释，数据任务体检后交付，
+不强问虚构基线。“证据不足”也是终态，不反复补跑直到显著。</p>
 """
     rows = []
     for item in skills:
@@ -5794,6 +5795,9 @@ def skill_page(skills: list[dict[str, Any]]) -> Page:
         ["需要回答", "读取"],
         [
             ("怎样问清实验问题", "asking.md"),
+            ("原话如何进入实际仿真条件", "experiment-agreement.md"),
+            ("问答方法的调研来源", "clarification-sources.md"),
+            ("同站同步多载波", "carrier-aggregation.md"),
             ("默认 64T4R/载波", "default-hardware.md"),
             ("Gate、统计与结论句", "gates-and-stats.md"),
             ("MCS/TBS/BLER/OLLA", "link-adaptation.md"),

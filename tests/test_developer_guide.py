@@ -439,6 +439,82 @@ def test_team_skill_installer_copies_role_scoped_verified_skills() -> None:
     assert sorted(catalogued) == [path.name for path in test_files]
 
 
+def test_simulation_handbook_install_detects_drift_and_preserves_backup() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        home = Path(temp_dir)
+        command = [sys.executable, str(ROOT / "scripts/install_agent_skills.py"),
+                   "--role", "simulation", "--codex-home", str(home)]
+
+        def run(*args: str) -> subprocess.CompletedProcess:
+            return subprocess.run(command + list(args), cwd=ROOT, text=True,
+                                  capture_output=True, encoding="utf-8", timeout=30)
+
+        assert run("--check").returncode == 1
+        assert not (home / "skills").exists()
+        unrelated = home / "skills/unrelated/custom.txt"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("user-owned", encoding="utf-8")
+        result = run()
+        assert result.returncode == 0, result.stderr
+        canonical = home / "skills/channel-sim"
+        alias = home / "skills/superran"
+        base = (canonical / "SKILL.md").read_text(encoding="utf-8")
+        explicit = (alias / "SKILL.md").read_text(encoding="utf-8")
+        assert base.split("---", 2)[2] == explicit.split("---", 2)[2]
+        assert "name: superran" in explicit and "仅当用户在当前请求中显式" in explicit
+        refs = [p.relative_to(canonical) for p in canonical.rglob("*") if p.is_file()
+                and p.name != "SKILL.md"]
+        assert refs
+        for rel in refs:
+            assert (canonical / rel).read_bytes() == (alias / rel).read_bytes()
+        assert run("--check").returncode == 0
+        # Real stale content and custom edits survive in backup, never in the new bundle.
+        stale = alias / "obsolete.md"
+        stale.write_text("old manual", encoding="utf-8")
+        assert run("--check").returncode == 1
+        result = run()
+        assert result.returncode == 0, result.stderr
+        row = next(r for r in json.loads(result.stdout)["installed"] if r["name"] == "superran")
+        assert (Path(row["backup"]) / "obsolete.md").read_text() == "old manual"
+        assert not stale.exists()
+        assert unrelated.read_text() == "user-owned"
+        assert run("--check").returncode == 0
+        assert all("backup" not in row for row in json.loads(run().stdout)["installed"])
+
+
+def test_handbook_installer_rejects_or_archives_junction_without_touching_target() -> None:
+    if sys.platform != "win32":
+        return  # Junction behavior is a Windows contract.
+    with tempfile.TemporaryDirectory() as temp_dir:
+        home = Path(temp_dir)
+        skills = home / "agent/skills"
+        skills.mkdir(parents=True)
+        target = home / "external"
+        target.mkdir()
+        marker = target / "SKILL.md"
+        marker.write_text("external source must survive", encoding="utf-8")
+        link = skills / "superran"
+        created = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                                 capture_output=True, timeout=10)
+        assert created.returncode == 0, created.stderr
+        command = [sys.executable, str(ROOT / "scripts/install_agent_skills.py"),
+                   "--skills-root", str(skills)]
+        result = subprocess.run(command, capture_output=True, timeout=30)
+        assert result.returncode != 0
+        assert not (skills / "channel-sim").exists()  # All targets preflighted before mutation.
+        assert marker.read_text() == "external source must survive"
+        result = subprocess.run(command + ["--replace-links"], text=True, encoding="utf-8",
+                                capture_output=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        row = next(r for r in json.loads(result.stdout)["installed"] if r["name"] == "superran")
+        assert marker.read_text() == "external source must survive"
+        assert (Path(row["backup"]) / "SKILL.md").read_text() == "external source must survive"
+        assert "name: superran" in (link / "SKILL.md").read_text(encoding="utf-8")
+        # Remove only the archived junction entry before TemporaryDirectory cleans its own files.
+        import os
+        os.rmdir(row["backup"])
+
+
 def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> None:
     member_html = (ROOT / "docs" / "team" / "member-start.html").read_text(
         encoding="utf-8", errors="strict")

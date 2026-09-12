@@ -23,7 +23,7 @@
 | 边缘用户吞吐 | `cell_edge_mbps_5pct` | 最差那个样本 |
 | 干扰强度是 X dB IoT | `sr_interference_report` 的返回 | 未声明参考面的外部/旧数据直接做 `snr_dB-sinr_dB` |
 | 体验速率 X Mbps | `sr_system_sim` 的返回 + `notes` 一起给 | 吞吐均值折算 |
-| 体验速率 A 比 B 高 | 逐用户配对过 `sr_compare_results` 门 3 | 两次 `cell_experienced_mbps` 之差 |
+| 体验速率 A 比 B 高 | 同随机流的系统结果通过 `sr_compare_system_results` 判决，并满足预注册身份 | 两次 `cell_experienced_mbps` 之差 |
 | CSI 老化的代价是 X | 每 UE ≥8 个快照且 `csi_aging` 开着 | 单快照数据集上跑出来的数 |
 | 确证还需要 N 个样本 | `sr_sample_size` 的返回 | 拿置信区间反推标准误手算 |
 | 这个方向统计上成立 | 门 3 通过 | 手算的符号检验、正负样本计数 |
