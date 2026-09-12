@@ -1,6 +1,6 @@
 # 系统级仿真参数详解 —— `sr_system_sim`
 
-**什么时候读这一份**：主文件「第 5 段」里的旋钮不够用、要解释某个 KPI
+**什么时候读这一份**：要执行系统仿真、解释某个 KPI
 是怎么算的、要调话务或邻区负载、或者 `notes` 报了一条你不确定怎么处理的。
 
 主文件里已经写死的三条不在这里重复：**每 UE 要 ≥8 个快照**（可由多个单时隙样本组成）、
@@ -8,7 +8,11 @@
 
 ## 完整签名
 
-99 个参数，按用途分组（从 `server.sr_system_sim` 的真实签名生成，2026-09-05）。
+显式 `ca_config` 的载波聚合入口见 `carrier-aggregation.md`；以下单载波栅格限制
+不能套到 CA。CA 当前要求同站同步、30 kHz、PF 与逐 RBG 频选；20 MHz 载波需显式
+关闭仅适用 272 RB 的 SRS hopping，不能关闭 CSI 老化来掩盖不兼容。
+
+100 个参数，按用途分组（2026-09-12 核对 `server.sr_system_sim` 真实签名）。
 `trim` 已随 legacy 容量路径下线，传入会报错。
 
 ```python
@@ -44,7 +48,7 @@ sr_system_sim(
     rank_quick_fallback_ibler_thld=0.3, rank_quick_fallback_se_ratio_thld=1.0,
     rank_max_backoff_times=4, rank_probe_enabled=False,
     # —— MU ——
-    mu_enabled=False, mu_accounting="pair_table", mu_precoder="zf",
+    mu_enabled=False, mu_accounting="pair_table", mu_precoder="ezf",
     mu_csi_error_variance=0.0, mu_corr_threshold=0.7,
     min_pairing_mcs=4, pf_gain_threshold=0.0, orthogonalization_mode="select",
     mu_olla_step_up_db=0.01, mu_olla_step_down_db=None,
@@ -62,7 +66,7 @@ sr_system_sim(
     # —— 随机数 / 重复 / 产物 ——
     seed=0, num_replications=8, replication_workers="auto",
     algorithm_label="", tti_trace_mode="sampled", tti_trace_max_points=256,
-    kpi_focus=None, kpi_intent="",
+    kpi_focus=None, kpi_intent="", ca_config=None,
 )
 ```
 
@@ -115,7 +119,7 @@ full_buffer 下留 `None` 的只有明确需要 burst 传完的：
 `cell_experienced_completed_only_mbps`、`cell_head_inclusive_experienced_mbps`、
 完成时延分位数、`pdb_miss_ratio`。
 
-当前支持两用户、每用户 rank2 的数据受限 SU/MU 自适应；矩阵运算集中在
+当前支持两用户、每用户 rank 1–2（含不等 rank）的数据受限 SU/MU 自适应；矩阵运算集中在
 `build_link_tables` 建表相，TTI 主循环只查 pair 表。逐 TTI 的 FIFO 与 RBG 分配是
 主要开销，历史上 legacy 全带路径那句"40000 TTI 只要 0.2 秒"**不适用**。
 
@@ -250,7 +254,7 @@ ACK、OLLA 前后、PF metric/平均速率及 SU/MU 选择原因。**单 TTI 是
 
 ## 载波栅格与 numerology（固定产品合同，不是用户参数）
 
-`sr_system_sim` **不接受**带宽/RBG 数/子载波间隔参数，因为当前 TDD 系统口径已经
+未传 `ca_config` 的单载波 `sr_system_sim` **不接受**带宽/RBG 数/子载波间隔参数，因为该 TDD 系统口径已经
 冻结为 100 MHz @ 30 kHz、272 RB = 17 RBG × 16 RB。38.104 的标准表值是 273 RB；
 SuperRAN 在系统级信道生成前明确舍去 1 RB。张量宽度必须真是 272，配置中的带宽、
 SCS、BWP 起点与 RBG configuration 若存在也必须匹配；任何错配立即失败，不自动生成
@@ -265,7 +269,7 @@ SCS、BWP 起点与 RBG configuration 若存在也必须匹配；任何错配立
 | `profile_id` / `user_configurable` | 版本化产品合同；后者固定为 false |
 
 `CarrierGrid.from_config()` 等通用 Type-0 工具仍服务链路级、导入诊断和数学回归；
-保留这些内部能力不代表 `sr_system_sim` 已支持 51/106/273 RB。未来扩带宽时需要新增
+保留这些内部能力不代表普通单载波入口已支持 51/106/273 RB。该入口未来扩带宽时需要新增
 版本化 profile、SRS 资源、TBS/功率/KPI 分母的整套合同，不能只放开一个输入框。
 
 历史坑：这里曾经把 `num_rbg` 写死 17（= 272 RB）、`scs_khz` 从来不设（默认 30），
@@ -678,7 +682,7 @@ bitmap TBS、payload/padding/useful bytes，并与 planner 估值逐值硬比较
 ## MU `mu_enabled`
 
 默认 **False**，先看清 SU 基线。`mu_accounting="pair_table"` 是**唯一**口径：
-在建表阶段预计算所有两用户、每用户 rank2 的 pair 链路，MCS 输入按
+在建表阶段预计算两用户、每用户 rank 1–2 的 pair 链路（包括不等 rank），MCS 输入按
 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、误块抽签用 pair 的 `true_sinr_db`。
 历史的聚合 `mu_gain` 标量近似（`mu_accounting="se_ratio_legacy"` 与
 `simulate(..., mu_se_ratio=)` 入口）**已于 2026-09-04 删除**，它的另一个宿主
@@ -695,13 +699,15 @@ MU 准入要过 predicted BLER ≤ 0.5，查询的是叠加 SU+MU OLLA 后的**�
 两个方向必须引用同一个 pair，snapshot/两侧/RBG 维度必须一致且有限。三 UE 即使
 0↔1、0↔2 都存在，只要缺 1↔2 仍会硬失败，不能在运行中静默跳过该候选。
 
-MU MCS 口径是 `CQI + BF + SU-OLLA + CorrLoss + powerLoss + MU-OLLA`：两个 rank2 UE
-相对 SU rank2 的等流功率损失固定为 `−10log10(2)=−3.0103 dB`；CorrLoss 来自 pair
-的基站侧预测 SINR 差分；SU/MU OLLA 是两组独立的用户级状态，不按配对关系拆分。
+MU MCS 口径是 `CQI + BF + SU-OLLA + CorrLoss + powerLoss + MU-OLLA`。
+两个 rank2 UE 相对 SU rank2 的等流功率损失为 `−10log10(2)=−3.0103 dB`；
+不等 rank 时按各自 rank 与总层数的实际功率比例计算，不能固定套用 −3.0103 dB。
+CorrLoss 先逐流计算 MMSE SINR 的 MU−SU 差并扣除等流功率变化，再在一个用户的
+单一码字内按 dB 求和（rank1 保持原值）；SU/MU OLLA 是独立的用户级状态。
 
 每个 DL TTI 只做一次 PF 排序。若 SU 能发完所有队列就强制 SU；否则比较队列封顶后的
 useful payload bytes，只有 MU 不小于 SU 才选 MU。接收端用 per-user LMMSE，预编码只看
-`h_est`，BLER 用 `h_true`。当前工程边界仍是两用户 rank2、ZF/RZF；更一般的 MU 配对与
+`h_est`，BLER 用 `h_true`。当前工程边界是两用户、每用户 rank 1–2、EZF/ZF/RZF；更一般的 MU 配对与
 现场算法待后续接入。
 
 方向性证据（固定合成反例，不是一般现场收益承诺）：互补 8/9-RBG 两用户在相同 CRN 下，

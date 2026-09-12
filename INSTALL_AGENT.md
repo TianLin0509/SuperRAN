@@ -197,13 +197,34 @@ claude mcp list        # 应看到 superran ... ✔ Connected
 
 ## 第 6 步：装 Skill
 
-仓库是 Skill 的版本真源。不要从聊天记录复制旧版本；按角色运行统一安装器：
+仓库 `skills/channel-sim/` 是仿真手册的唯一内容源。统一安装器会从它生成
+显式点名入口 `superran`，两份正文和 references 相同，只有触发范围不同。
+普通仿真 Agent 使用：
 
 ```bash
-# 正式 Author（普通组员，或组长另开的实现会话）：仿真门 + 任务问答/开发/PR
+<PYTHON> scripts/install_agent_skills.py --role simulation
+<PYTHON> scripts/install_agent_skills.py --role simulation --check
+# Claude / 通用 Agent：显式给出其 skills 目录
+<PYTHON> scripts/install_agent_skills.py --role simulation --skills-root <Agent的skills绝对目录>
+```
+
+`--check` 逐文件核对内容哈希，不更新已安装文件，发现缺失或漂移返回非零。
+更新前把原目录完整移到 skills 目录外的 `superran-skill-backups`，清理旧版残留文件靠
+替换整个受管 skill 完成，其他 skill 不动；可用 `--backup-root` 指向项目 artifacts。
+目标是符号链接/junction 时默认拒绝；显式 `--replace-links` 只把链接本身移到备份，
+随后安装普通目录，**不写链接目标**。备份与目标需在同一文件系统，便于原子改名。
+嵌套链接或链接形式的安装根会被拒绝，先核对实际目录归属。
+安装收据 `superran-team-skills.json` 保存来源提交、路径、内容哈希和备份路径。
+恢复时先核对收据和备份；不得递归删除或修改旧链接指向的源目录。
+
+当前开发场景用仓库 `AGENTS.md` 与 `.agents/AUTHOR.md` / `.agents/MERGER.md`。
+下列 member/lead 仅保留历史兼容，**不作为当前开发入口**：
+
+```bash
+# 历史 Author 流程兼容
 <PYTHON> scripts/install_agent_skills.py --role member
 
-# 组长：再增加分任务、状态、PR 审核与合并
+# 历史组长流程兼容
 <PYTHON> scripts/install_agent_skills.py --role lead
 ```
 
@@ -214,7 +235,7 @@ claude mcp list        # 应看到 superran ... ✔ Connected
 - `superran-lead`：仅组长使用的分工、状态、审核与 SHA 绑定合并。
 
 当前会话仍要直接完整读取仓库里的对应 `SKILL.md`；新会话会从用户 Skill 目录自动发现。
-MCP 即使不装 Skill 也能调用，但团队开发流程不得省略角色 Skill。
+MCP 即使不装 Skill 也能调用；仿真行为应遵循当前手册，开发角色遵循当前仓库约定。
 
 ---
 
