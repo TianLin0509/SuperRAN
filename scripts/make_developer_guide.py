@@ -374,8 +374,8 @@ F_GRANT_SINR = M(
     r"\gamma^{\mathrm{grant}}_{\mathrm{RX}}"
     r"=\frac{1}{|\mathcal G|}\sum_{g\in\mathcal G}\gamma_{\mathrm{RX},g}"
     r"\quad[\mathrm{dB}],\qquad "
-    r"\gamma_{\mathrm{RX},g}=10\log_{10}\!\Big(\tfrac{1}{|g|}"
-    r"\sum_{b\in g}\gamma^{\mathrm{lin}}_{\mathrm{RX},b}\Big)",
+    r"\gamma_{\mathrm{RX},g}=\tfrac{1}{|g|}"
+    r"\sum_{b\in g}10\log_{10}\!\left(\gamma^{\mathrm{lin}}_{\mathrm{RX},b}\right)",
 )
 F_RANK_SE = M(
     r"\widehat{SE}_r=\rho_r\cdot r\cdot SE\!\left(m_r\right)\cdot"
@@ -568,8 +568,8 @@ F_MCS_PROFILE = M(
 )
 F_CODEWORD_SINR = M(
     r"\begin{aligned}"
-    r"\gamma_{g,s}^{\mathrm{dB}}&=10\log_{10}\!\left("
-    r"\frac{1}{|\mathcal B_g|}\sum_{b\in\mathcal B_g}\gamma_{b,s}\right),\\"
+    r"\gamma_{g,s}^{\mathrm{dB}}&="
+    r"\frac{1}{|\mathcal B_g|}\sum_{b\in\mathcal B_g}10\log_{10}\!\left(\gamma_{b,s}\right),\\"
     r"\gamma_{\mathrm{cw}}^{\mathrm{dB}}&="
     r"\frac{1}{N_GN_s}\sum_{g=1}^{N_G}\sum_{s=1}^{N_s}"
     r"\gamma_{g,s}^{\mathrm{dB}}"
@@ -1730,10 +1730,10 @@ def codeword_sinr_db(sinr_lin_rb_stream, rb_per_rbg: int = 16) -> float:
     if s.ndim != 2 or min(s.shape) < 1 or rb_per_rbg < 1:
         raise ValueError("need non-empty [RB,stream] and positive rb_per_rbg")
     rbg_stream_db = []
+    s_db = 10.0 * np.log10(np.maximum(s, 1e-30))
     for start in range(0, s.shape[0], rb_per_rbg):
-        # RBs inside an RBG: linear mean per stream; streams stay separate here.
-        rbg_lin = s[start:start + rb_per_rbg].mean(axis=0)
-        rbg_stream_db.extend(10.0 * np.log10(np.maximum(rbg_lin, 1e-12)))
+        # RBs inside an RBG: dB mean per stream; streams stay separate here.
+        rbg_stream_db.extend(s_db[start:start + rb_per_rbg].mean(axis=0))
     # Equal dB weight across granted RBGs and selected-rank streams.
     return float(np.mean(rbg_stream_db))
 
@@ -1869,7 +1869,7 @@ def bler_detail_atlas() -> str:
             ["步骤", "输入→输出", "必须锁住的不变量"],
             [
                 ("1 数据体检", "raw rows→可信 profile", "28 顺序 MCS、56 曲线、SHA、有限/单调/target crossing"),
-                ("2 RBG 内聚合", "逐 RB/stream 线性 SINR→逐 RBG/stream dB", "每 16 RB 先在线性域逐流平均"),
+                ("2 RBG 内聚合", "逐 RB/stream 线性 SINR→逐 RBG/stream dB", "逐 RB 先转 dB，再在每 16 RB 内逐流平均"),
                 ("3 单码字压缩", "逐 RBG/stream dB→γcw", "只平均本 grant RBG 与选定 rank streams"),
                 ("4 选择 MCS", "γcw+target→m*", "只查 NewTx；最高满足档；MCS0 fallback 仍保留真实高 BLER"),
                 ("5 TB 判错", "m*+γcw→p→ACK/NACK", "一个 UE grant/TTI 只抽一次；不做 CB 二次合成"),
@@ -2655,6 +2655,11 @@ TDL 只有功率时延轮廓，空间相关是统计近似。</p>
 38.901 Table 7.7.1-1~5 逐字段交叉核对。每个 diffuse table component 按 Table 7.5-3
 展开成 20 条 ray：四组角度 offset 会独立随机耦合，每条 ray 有自己的交叉极化矩阵、初相和
 Doppler。profile 中心角再整体旋到实际 BS→UE 几何；到达方位是反向 bearing，不是把 AOD 原样复制。</p>
+<p>统计信道的每条射线使用其实际到达方位角 AoA 做二维多普勒投影：
+<code>f_ray = f_max × cos(AoA − velocity_direction)</code>。空间响应与时间相位共享同一 AoA，
+保留空间与时间的耦合；只有均匀方位角散射的时间相关才服从 Jakes 的 J0，定向 CDL/LOS 不保证这一形状。</p>
+<p><code>ue_velocity_direction_deg</code> 是水平面运动方位角，范围 <code>[0, 360)</code>，
+0 表示 +x/东，90 表示 +y/北；轨迹与多普勒共用它。默认值、旧别名和冲突规则见详细版。</p>
 """
     body += table(
         ["profile", "表分量", "实际 ray 项", "关键口径"],
@@ -4053,7 +4058,7 @@ assert (abs(q.sum(axis=1) - 272) < 1e-12).all()
             ("profile 身份", "配置 fingerprint 写入链路表，simulate 拒绝错配复用", "防止结果标签与实际建表 profile 不同"),
             ("调度小区", "一个 SystemResult 只允许同一 serving cell 的 UE", "不同小区的 RBG 不是同一个互斥资源池"),
             ("capacity + MU + RB 功控", "当前拒绝，需切 experience", "legacy MU 只有标量增益，没有逐 RBG pair SINR"),
-            ("跨 RBG 有效 SINR", "当前 RBG 内线性、RBG 间 dB 平均", "尚未用链路级 EESM/MIESM β 标定"),
+            ("跨 RBG 有效 SINR", "当前 RBG 内、RBG 间均用 dB 平均", "尚未用链路级 EESM/MIESM β 标定"),
         ],
     )
     body += "<p class=source-row>配置与守恒：" + source_ref("src/superran/power_control.py", "class RbPowerControlConfig") + " · 精确耦合：" + source_ref("src/superran/power_control.py", "def couple_rb_power") + " · 系统入口：" + source_ref("src/superran/system.py", "rb_power_control") + "</p>"
@@ -4093,7 +4098,7 @@ SINR 高 14 dB；拿 σ₁² 反标噪声会把这 14 dB 人为抵消。</p>
 """
     body += steps((
         ("逐快照、逐候选 rank", "<p>对 r=1..4 用 gNB 可见 CSI 设计 SVD/Type-I 权，并在真实当前信道上算逐 RB×流 post-MMSE SINR。</p>"),
-        ("RB → RBG", "<p>每 16 RB 在线性功率域平均各流 SINR，得到 17 个 RBG；若输入已经是 RBG，组长为 1。</p>"),
+        ("RB → RBG", "<p>逐 RB/流 SINR 先转 dB，再在每 16 RB 内平均，得到 17 个 RBG；若输入已经是 RBG，组长为 1。</p>"),
         ("RBG/流 → 一个宽带 SINR", "<p>每个 RBG 先对流取 dB 均值，再对 17 RBG 的 dB 值取算术平均；顺序等价。</p>"),
         ("单码字 MCS", "<p>用该宽带 SINR 查目标 BLER 10% 的最高 MCS；不能逐 RB 各选一档再平均。</p>"),
         ("rank 谱效", "<p><code>SE(r)=r×MCS.se</code>，选择 SE 最大的 rank；不是直接把 Shannon log2(1+SINR) 当系统 MCS 谱效。</p>"),
@@ -4185,7 +4190,7 @@ SINR 事后反推的余量。它的定义是：<strong>基站当前可见 CSI �
         ("构造两套方向", "<p>PMI 由 Type-I-style 宽带码本搜索得到；发送方向默认为 SVD。<code>precoder=type1</code> 时两方向相同。</p>"),
         ("形成两套物理 Q", "<p>两边强制同 rank、每流 P/r，并经过同一 C。默认 NEBF 将每根天线功率强制到 P/M。</p>"),
         ("算 gNB post-MMSE SINR", "<p>在同一 h_prec 和总损伤上分别计算 SINR_NEBF/PEBF/EBF 与 SINR_PMI 的逐 RB×流线性值。</p>"),
-        ("RB → RBG → 宽带", "<p>RBG 内先线性平均 RB，转 dB 后对流平均；最后对全带 RBG 平均并作 TX−PMI。</p>"),
+        ("RB → RBG → 宽带", "<p>逐 RB/流先转 dB，再在 RBG 内平均 RB、对流平均；最后对全带 RBG 等权平均并作 TX−PMI。</p>"),
         ("进入 AMC", "<p><code>Γ(MCS(CQI))+G_BF</code> 得到 SINR_AMC_PRED，再反折无 OLLA MCS；它不用于 BLER。</p>"),
         ("真实判错", "<p>把同一个发送 Q 作用到 h_true，聚合得到 SINR_*_RX，再用最终 MCS 查 NewTx 曲线。</p>"),
     ))
@@ -4530,7 +4535,7 @@ t0 首传 NACK → t5 重传 → t10 终次反馈后才可发下一份新 TB，t
 <h2>第六步：解码 SINR 只在实际授予的 RBG 上取</h2>
 <p>误块抽签用的是<strong>最终发送 MCS + 真实接收 SINR</strong>。这个 SINR 由同一个
 基站设计出的物理发射权作用到 <code>h_true</code>、经经典 MMSE 接收机逐 RB 逐流算出，
-再按"RBG 内线性功率平均、跨 RBG 与流 dB 域算术平均"聚合——<strong>是算出来的，
+再按"RBG 内、跨 RBG 与流均用 dB 域算术平均"聚合——<strong>是算出来的，
 不是从全带值折算的</strong>。聚合只在<strong>本次 grant 实际占用的那些 RBG</strong>
 上做。</p>
 """
@@ -4612,7 +4617,7 @@ def bler_page() -> Page:
     body = bler_pipeline_svg()
     body += """
 <h2>先分清当前主链与两条可选旁路</h2>
-<p><strong>当前体验系统主链只有：</strong>逐 RB/stream SINR → RBG 内线性平均 →
+<p><strong>当前体验系统主链只有：</strong>逐 RB/stream SINR 先转 dB → RBG 内 dB 平均 →
 跨 RBG/选定 rank streams 做 dB 平均 → 预置 BLER 表选最终发送 MCS并判 TB ACK/NACK。
 它不调用 QAM 约束容量，也不调用 MIESM/EESM。</p>
 <p>旁路 A 是表 1/2 的分析 <code>BlerModel</code>，会用 QAM 互信息和有限码长形状；
@@ -4626,7 +4631,7 @@ MCS/CQI 表与 TBS 算法来自 38.214，但分析 BLER 和预置曲线都不能
     body += """
 <p>预置 Table 3 固定 28 档 MCS。每档由 <code>Qm</code>、码率 <code>R</code>、名义谱效
 <code>η=QmR</code> 和一条 NewTx BLER 曲线共同定义；MCS index 才是曲线身份，不能只看谱效。
-系统收到逐 RB、逐 stream 的线性 SINR 后，先在每个 16-RB RBG 内逐流做线性平均，再对实际
+系统收到逐 RB、逐 stream 的线性 SINR 后，先逐 RB 转 dB，再在每个 16-RB RBG 内逐流平均，再对实际
 grant 的全部 RBG 与选定 rank streams 做 dB 平均，得到唯一 <code>γcw</code>。最后逐档查询
 NewTx 曲线，选 BLER 不超过目标值的最高 MCS。详细版给出完整 28 行表、1,824 个原始点和独立
 NumPy 重实现。</p>
@@ -4636,7 +4641,7 @@ NumPy 重实现。</p>
 <p>当前表驱动仿真不单独查询 CBLER，也不在系统层用 CB 数再次合成 TBLER。每个用户在一个 TTI
 中的 grant 视为一个独立、单码字 TB；调度器先确定 RBG、rank、MCS 和 TBS，随后只用该用户的
 单码字有效 SINR与 MCS 查询一次通用 NewTx 曲线，再抽一次 ACK/NACK。跨 RBG 与跨 rank stream
-均采用 dB 算术平均；RBG 内多个 RB 先在线性功率域平均。</p>
+均采用 dB 算术平均；RBG 内多个 RB 也先转 dB 再平均，与参考实现对齐。</p>
 """
     body += table(
         ["层次", "已经确认的口径", "SuperRAN 当前实际承载"],
@@ -4665,7 +4670,7 @@ NumPy 重实现。</p>
 QAM 约束容量用于表 1/2 的分析 BLER 模型，回答“给定星座时理论上最多承载多少互信息”；
 MIESM/EESM 是把频选 SINR 压成一个等效值的通用链路级方法，只有调用
 <code>linkadapt.effective_sinr()</code> / <code>link_adaptation(..., esm=...)</code> 时才生效。
-当前预置表系统路径采用前文明确的“RBG 内线性、跨 RBG 与选定 rank streams 做 dB 平均”，
+当前预置表系统路径采用前文明确的“RBG 内、跨 RBG 与选定 rank streams 均做 dB 平均”，
 然后直接查预置 NewTx 曲线。因此它们在本章只用于解释可选后端与未来升级方向，不参与当前体验结果。</p>
 """
     body += table(
@@ -4751,6 +4756,14 @@ def mu_page() -> Page:
         "‘本次没有合适伙伴’。</p>",
     )
     body += """
+<h2>R4：单码字的残余相关性损失按流求和</h2>
+<p>已核对参考实现：逐 RBG 平均相关度后，每条流对其他用户各流连乘
+<code>(1-rho)</code>，再把 <code>CorrLoss = sum_stream 10log10(RemCorr_stream)</code>
+归到本用户的单一码字。rank2 两流残余为 0.8、0.6 时，总损失为
+<strong>−3.1876 dB</strong>；rank1 只有一流，结果保持原值。逐流沿用
+<code>_EPS=1e-30</code> 下限，用户级总和不额外钳位。</p>
+<p>这项配对代价进入预测侧。真实解码仍独立使用实际信道，接收 SINR 的跨流
+dB 平均约定不变；宽带相关矩阵继续用于配对预筛，额外连乘开关默认关闭。</p>
 <h2>Phase B 为什么比较 useful bytes</h2>
 <p>PF 先排一次优先级，然后分别构造“全 SU”和“允许 MU”的完整 TTI 计划。两者都按队列实际剩余
 字节截断收益：TBS 超出业务包的 padding 不算谱效收益。若 SU 能传完所有当前可服务队列，强制 SU；否则
@@ -5011,6 +5024,33 @@ MCS12/rank2 的 TBS=1,729 B：新 R̄=0.99×1,000+0.01×1,729=<strong>1,007.29 B
         "逐 TTI 的 PF、SU/MU plan、按需 RBG 和 R_avg 正确记账。", body,
         ("PF", "R_avg", "RU", "按需RBG", "scheduled_tbs", "QoS-PF"),
     )
+
+
+def carrier_aggregation_page() -> Page:
+    body = """
+<p>载波聚合（Carrier Aggregation，CA）把同一 UE 的共享队列送到多个独立载波。
+CQI、Rank、OLLA 和 HARQ 按载波独立；业务到达、全局 PF 和用户体验统计每 TTI 只推进一次。</p>
+<p>显式 CA 入口支持 100 MHz（272 PRB，17×16）和 20 MHz（51 PRB，6×8＋3），
+同站 30 kHz、同步 TDD。旧单数据集入口继续保持固定 100 MHz 合同。</p>
+<p><code>independent</code> 冻结 average/bandwidth/rbnum 整字节配额。
+<code>cort</code> 先形成等份首轮计划，再以原队列减去其他 CC 的首传预占，
+通过实际 TBS 反查扩用空闲 RBG。原 grant 不缩减；重传、填充不当作新队列水量。
+已就绪重传始终按首传时刻排在新传前，CORT 全局排序只用于新传。</p>
+<p>9001 B 等分为 4501/4500 B。20 MHz 的尾组确实只有 3 PRB；
+20 MHz 需要显式兼容 CSI 配置，不能套用 272-PRB 的 17-hop SRS。
+同 TTI 多载波首传先合并，再计算 busy period，不把并行时长串接。</p>
+<p>Python 用 <code>build_ca_link_tables</code> 接原 <code>simulate</code> / <code>simulate_replications</code>；
+MCP 用 <code>sr_system_sim(ca_config=...)</code>。
+可运行请求在 <code>examples/ca_100_20.json</code>，使用说明在 <code>docs/ca.md</code>。
+<code>scripts/run_ca_example.py</code> 的显式合成夹具只验证接口，不能用于性能结论。</p>
+<p>自动 SCell 激活、延迟 FIFO、异步 TDD、混合 SCS、跨站协调不支持；启用会报错。
+算法比较必须绑定完整运行表（包括 MU 配对表）、载波组合来源和相同随机事件，继续通过 Gate 2/3。</p>
+<p>覆盖按已启用载波取并集；满带授权按所属载波判断后按授权次数汇总。
+逐载波保存数据血缘并核对同一次运行快照，unknown/mismatch 的载波身份与告警进入 JSON 和 KPI 页。</p>
+"""
+    return Page("carrier-aggregation", "多载波共享队列与 CORT", "系统仿真", "CA",
+                "一份业务，多套载波状态；先守住水量与时钟，再谈吞吐。", body,
+                ("CA", "CORT", "PCC", "SCC", "载波聚合"))
 
 
 def scheduler_p0_page() -> Page:
@@ -6089,7 +6129,7 @@ def limitations_page() -> Page:
             ("阵子方向图", "110°×65° 参数化 3GPP-style cos/抛物近似，+45/−45° Jones", "实测复 Jones pattern、频率/温度/校准版本"),
             ("电下倾", "默认 6° 产品先验，可任意配置并进入 F", "实际 AAU 校准表与波束档位"),
             ("LMMSE", "真实 pilot→target 的频域 LMMSE；指数 PDP + 白噪声默认，时间仍线性", "实测/在线 PDP、Doppler/空间协方差、Kalman 或 2D LMMSE 路径"),
-            ("宽带有效 SINR", "库支持 MIESM/EESM；experience 仍为 RBG 内线性、跨流/RBG dB 算术均值", "链路级标定并显式接入体验链的 EESM/MIESM β"),
+            ("宽带有效 SINR", "库支持 MIESM/EESM；experience 的 RBG 内、跨流/RBG 均为 dB 算术均值", "链路级标定并显式接入体验链的 EESM/MIESM β"),
             ("PMI/RI", "Type-I-style 宽带列集合、端口置换与独立 rank 选择", "严格 38.214 多层/子带/subset restriction/反馈比特与 RI pipeline"),
             ("RB 功控算法", "给定 profile 的守恒、逐小区耦合与逐 RBG 调度已实现", "跨小区闭环优化目标、约束信令与现场策略；当前不是自动功控算法"),
             ("MU", "SUS + ZF/RZF、pair table、用户级 MU-OLLA", "现场配对细则、最大用户/层数、接收机与 CSI error 标定"),
@@ -6496,7 +6536,7 @@ def build() -> str:
         measurements_page(modules), beamforming_page(), powercontrol_page(), robust_page(),
         sinr_page(), bfgain_page(), linkadapt_page(), dlamc_page(),
         bler_page(), mu_page(),
-        modes_page(), experience_page(), scheduler_p0_page(), traffic_page(), kpi_page(),
+        modes_page(), experience_page(), carrier_aggregation_page(), scheduler_p0_page(), traffic_page(), kpi_page(),
         calibration_page(), interference_page(), rng_page(), gates_page(),
         external_results_page(), tests_page(tests, modules),
         tools_page(tools), skill_page(skills), presets_page(presets), extension_page(),

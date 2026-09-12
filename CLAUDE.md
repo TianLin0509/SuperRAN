@@ -84,12 +84,13 @@ python tests/test_channel_generation_contract.py # first-party 信道生成合�
 python tests/test_native_independence.py       # 外部根/导入阻断、v1/v2互易、35工具
 python tests/test_developer_guide.py         # 开发者文档覆盖、离线结构与漂移检查
 python tests/test_carrier.py                 # 载波栅格、Type-0 边界、本地 TDD 合同
+python tests/test_ca.py                      # 共享队列 CA、整数分流、CORT 扩容与跨载波隔离
 python tests/test_company_256t.py            # 256T 阵列与码本
 python tests/test_system_sim_tool.py          # sr_system_sim 行为级（硬失败路径）
 python tests/test_benchmarks.py               # 预注册经典通信基准与 provenance
 ```
 
-当前共 **29 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
+当前共 **30 个可执行测试文件**。**两种执行方式必须看到同一个真理**：
 pytest 原生文件都有 `__main__` 入口（直接 `python tests/test_x.py` 不再是
 0 检查假绿）；脚本式文件必须在 pytest 收集/薄壳路径中同样以异常或非零退出
 传播失败，不能只在 `if __name__ == '__main__'` 里检查全局 FAILED。
@@ -413,7 +414,7 @@ MCS 查表都不含随机），所以 n 次重复只重跑 TTI 主循环。代�
 预置 profile 将源标签 `Es/No` 解释为经典 MMSE 的**单码字有效 SINR**；误块事件是
 **一个用户在一个已调度 TTI 中的独立单码字 TB**，系统不单独查询或统计 CBLER。预置表
 查询只使用 `MCS + codeword_effective_sinr_db`；跨 RBG、跨 rank stream 都做 dB
-算术平均（RBG 内多个 RB 先在线性功率域平均）。TBS、RE、RBG 数、rank、场景、码字数和
+算术平均（RBG 内多个 RB 也先转 dB 再平均，与参考实现对齐）。TBS、RE、RBG 数、rank、场景、码字数和
 译码器细节本阶段都不是曲线查询轴，这是已确认的通用曲线合同，不是待补数据缺口。
 物理编码内部即使分成多个 CB，也不能在表 3 路径上再次套 CB→TB 合成。曲线范围外只能
 保守钳位，不能外推。
@@ -469,7 +470,7 @@ TDD AMC 已由 `tdd_mcs_adaptation` / `Dataset.tdd_mcs` / `sr_tdd_mcs` 实现：
 CQI 是 PMI 权测得的 pre-BF 值。BF Gain 逐 RB、逐流计算为同一信道、CSI、rank、
 功率、噪声、干扰与经典 MMSE 接收机下 `SINR_SVD - SINR_PMI`；默认物理发送权为
 SVD 方向叠加 NEBF 每天线约束，因此也记为 `SINR_NEBF`。RB 先在每个 RBG 内做
-线性功率平均，再对RBG×流做dB算术平均。历史row0映射MCS0并对应上报CQI1；
+dB 算术平均，再对RBG×流做dB算术平均。历史row0映射MCS0并对应上报CQI1；
 上报CQI0不调度。OLLA的
 单位是连续 MCS 档位，不是 dB；正值更激进，
 最终结果严格向下取整并钳位到0..27。默认10%首传BLER下ACK +0.01、NACK -0.09，
@@ -929,6 +930,12 @@ MCS 输入按 `CorrLoss + PowerLoss` 平移、TBS 按该 MCS 全带算、**误�
 `MuPairLink.true_sinr_db`**——ZF 权按基站（可能已老化的）CSI 打，但打在双方
 `h_true` 上，对方的流进干扰协方差。逐 TTI 只查表，矩阵运算全在建表阶段
 （实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s）。
+
+**R4 残余相关性口径（2026-09-10 核对参考实现）**：逐 RBG 先平均相关度，再逐流
+连乘 `(1-rho)`；`CorrLoss = sum_stream 10log10(RemCorr_stream)`。所有流的损失
+归到本用户的单一码字，rank2 用两流 dB 求和，rank1 保持原值。逐流沿用 `_EPS`
+下限，用户级和不再额外钳位。宽带相关矩阵仅用于预筛，额外连乘开关默认关闭；
+接收 SINR 的跨流 dB 平均约定不变。
 
 开 `pair_table` 前会校验完整、双向、维度一致的 pair graph；三 UE 缺任意一条边（例如
 1↔2）都硬失败。MU 准入的 predicted BLER 使用叠加 **SU+MU OLLA 后的实际发送 MCS**；
@@ -1749,6 +1756,18 @@ full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst �
 `presets/traffic_cdf/`，由 `scripts/make_field_bimodal_cdf.py` 生成。
 
 ## 加东西的地方
+
+### 多载波 CA
+
+显式 CA 入口与旧单载波固定格栅分开，使用说明见 `docs/ca.md`。
+`ca.py` 定义载波、输入身份与整数配额；`ca_engine.py` 协调原 experience 状态机；
+`ca_server.py` 复用原 MCP 数据准备与独立建表。不得另复制一套 PHY 或 busy-period 公式。
+载波事件用 `RngBook.namespaced_generator` 在原用途流下派生，不修改全局登记表。
+改动以上模块运行 `test_ca`、`test_system`、`test_scheduler_p0`、`test_scheduler_edf`、
+`test_csi_aging`、`test_rng`、`test_carrier`、`test_system_sim_tool` 和 `test_physics_invariants`。
+关闭 CORT 扩 RBG 时，棘轮必须在实际首传净荷上变红；缺 API 的 ImportError 不算反证。
+
+### 其他扩展
 
 - 新的 3GPP 校准量 → `calibration.py`，按条款号标注来源
 - 新的 MCS/CQI 表或 TBS 分支 → `linkadapt.py`，**标准表必须过 `verify_tables` 的内蕴自检**

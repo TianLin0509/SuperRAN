@@ -2014,6 +2014,7 @@ def sr_system_sim(
     kpi_focus: list[str] | None = None,
     kpi_intent: str = "",
     serving_cell: int | None = None,
+    ca_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI，全部带置信区间。**
 
@@ -2309,6 +2310,10 @@ def sr_system_sim(
     from . import rng  # noqa: PLC0415
     from . import system as sysm  # noqa: PLC0415
 
+    from .ca_server import active_preparation, ca_grid, run_ca_tool
+    if ca_config is not None:
+        return run_ca_tool(locals())
+    ca_prepare = active_preparation.get()
     ds = _load(dataset_id)
     if traffic_profiles is not None and not isinstance(traffic_profiles, list):
         return {"error": "traffic_profiles 必须是对象数组"}
@@ -2553,7 +2558,8 @@ def sr_system_sim(
     # 272 RB，配置标签也必须是 100 MHz / 30 kHz。不符时拒绝运行，既不把
     # 51 RB 假当 272 RB，也不在系统层临时发明 7-RBG 口径。
     try:
-        carrier = _carrier_grid(ds.config, num_rb=int(h.shape[2]))
+        carrier = (ca_grid(ca_prepare, ds.config, int(h.shape[2]))
+                   if ca_prepare is not None else _carrier_grid(ds.config, num_rb=int(h.shape[2])))
     except ValueError as exc:
         return {"error": f"TDD 系统载波不符合固定口径：{exc}"}
     # 说明书页面上的开关是 select，回传的是 "on"/"off" 字符串；
@@ -2779,6 +2785,13 @@ def sr_system_sim(
             vertical_index_order=_v_order)
     except (ValueError, RuntimeError) as exc:
         return {"error": str(exc)}
+    if ca_prepare is not None:
+        for table in tables:
+            if table.serving_cell_index != ca_prepare.cell_id:
+                return {"error": "CA prepared serving-cell identity mismatch"}
+            table.frequency_rbg_boundaries = ca_prepare.boundaries
+        return {"tables": tables, "sys_cfg": system_cfg, "traffic": traffic_cfg,
+                "sched": scheduler_cfg, "kpi": kpi_cfg}
     effective_csi_cfg = csi_cfg
     if csi_cfg.enabled and csi_cfg.srs_resource_allocation:
         assignments = [table.srs_resource_assignment for table in tables]
