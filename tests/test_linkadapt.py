@@ -248,6 +248,19 @@ def main() -> None:
     small = la.transport_block_size(50, 0.234, 2, 1)
     check(small in la._TBS_SMALL, "小包走查表分支，落在 Table 5.1.3.2-1 上")
 
+    check(la.calc_tbs_airview(1, 0, 1) == 24,
+          "AirView MCS0 uses SE=0.1523, not 2*0.333")
+    check(la.calc_tbs_airview(1, 28, 1, "D") == 984
+          and la.calc_tbs_airview(1, 28, 1, "S") == 704,
+          "AirView standalone 29-row TBS: MCS28 D=984/S=704 bits")
+    check(la.fg_adjust_tbs(3896) == 3904,
+          "FgAdjustTbs half-tie uses C++ half-up, not Python bankers rounding")
+    check(la.fg_adjust_tbs(3824) == 3824
+          and la.fg_adjust_tbs(3825) == 3776,
+          "Source excerpt boundary discontinuity is retained, not silently repaired")
+    check(la.calc_tbs_airview(0, 28, 4) == 0,
+          "Zero physical resource never creates a 24-bit transmission")
+
     big = la.transport_block_size(n_re, 0.926, 6, 4)
     check(big > 3824, "大包走量化分支")
     check(big % 8 == 0, "大包 TBS 是 8 的倍数")

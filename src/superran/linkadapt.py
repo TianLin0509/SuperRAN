@@ -393,6 +393,65 @@ def transport_block_size(n_re: int, rate: float, q_m: int, layers: int = 1) -> i
     return int(8 * math.ceil((n_info_q + 24) / 8) - 24)
 
 
+# User-supplied AirView SE rows (2026-09-18). These are NOT the bundled BLER
+# profile's MCS indices and must never be used to index its 28 curves.
+AIRVIEW_MCS_SE: tuple[float, ...] = (
+    0.1523, 0.2344, 0.3770, 0.6016, 0.8770, 1.1758, 1.4766,
+    1.6953, 1.9141, 2.1602, 2.4063, 2.5703, 2.7305, 3.0293,
+    3.3223, 3.6094, 3.9023, 4.2129, 4.5234, 4.8164, 5.1152,
+    5.3320, 5.5547, 5.8906, 6.2266, 6.5703, 6.9141, 7.1602, 7.4063,
+)
+
+
+def fg_adjust_tbs(tbs_bits: int) -> int:
+    """Reproduce the supplied non-calibration AirView FgAdjustTbs excerpt.
+
+    Positive half ties round upward, as in C++ std::round, not Python round.
+    This engineering path has no rate<=0.25 branch and is not the standard
+    transport_block_size implementation. Zero follows the supplied guard (24).
+    """
+    if (isinstance(tbs_bits, (bool, np.bool_))
+            or not isinstance(tbs_bits, (int, np.integer)) or tbs_bits < 0):
+        raise ValueError("tbs_bits must be a nonnegative integer")
+    bits = int(tbs_bits)
+    if bits <= 3824:
+        n = max(3, bits.bit_length() - 1 - 6) if bits else 3
+        quantized = max(24, (bits // (1 << n)) * (1 << n))
+        return next(tbs for tbs in _TBS_SMALL if tbs >= quantized)
+    n = (bits - 24).bit_length() - 1 - 5
+    step = 1 << n
+    # Integer half-up avoids floating-point and Python banker's-rounding drift.
+    quantized = step * ((2 * (bits - 24) + step) // (2 * step))
+    c = (quantized + 24 + 8423) // 8424 if quantized > 8424 else 1
+    return 8 * c * ((quantized + 24 + 8 * c - 1) // (8 * c)) - 24
+
+
+def calc_tbs_airview(n_prb: int, mcs: int, rank: int, slot: str = "D",
+                     *, s_slot_fraction: float = 0.715) -> int:
+    """Standalone AirView TBS in bits, using the supplied 29-row SE table.
+
+    Not wired into system AMC/BLER: its matching block-size curves are missing.
+    This exposes an exact comparison entry without silently mixing MCS profiles.
+    """
+    for name, value, lo, hi in (
+        ("n_prb", n_prb, 0, None), ("mcs", mcs, 0, 28), ("rank", rank, 1, 4),
+    ):
+        if (isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                or value < lo or (hi is not None and value > hi)):
+            raise ValueError(f"invalid {name}: {value!r}")
+    key = str(slot).upper()
+    if key not in ("D", "S"):
+        raise ValueError("slot must be D or S")
+    if (isinstance(s_slot_fraction, (bool, np.bool_))
+            or not math.isfinite(s_slot_fraction) or not 0 < s_slot_fraction <= 1):
+        raise ValueError("s_slot_fraction must be finite and in (0,1]")
+    re_per_prb = 132 if key == "D" else math.floor(132 * s_slot_fraction)
+    if not n_prb or not re_per_prb:
+        return 0  # No physical resource means no transmission.
+    return fg_adjust_tbs(int(re_per_prb * int(n_prb) * AIRVIEW_MCS_SE[int(mcs)] * int(rank)))
+
+
 def re_per_slot(n_prb: int, n_symbols: int = 12, n_dmrs_per_prb: int = 12,
                 overhead_per_prb: int = 0) -> int:
     """一个时隙内分配给 PDSCH 的 RE 数（38.214 §5.1.3.2 步骤 1）。
