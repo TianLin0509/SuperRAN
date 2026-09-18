@@ -69,10 +69,10 @@ def _finite_real(value: Any) -> bool:
         and np.isfinite(float(value))
     )
 
-#: S 时隙折合成多少个下行 TTI 的兼容默认值。0.7 是符号占比近似；
-#: 另一类按可用 RE 标定的系数不是同一口径，必须由用户显式覆盖。
+#: S 时隙折合成多少个下行 TTI 的兼容默认值。0.715 是 AirView 指定场景的净 RE 折算系数；
+#: 不等于精确的下行符号占比，实际 RE 还会向下取整。
 #: **主循环与 dl_ratio 必须用同一个配置值**，否则实际调度的下行比报告的多。
-S_SLOT_DL_FRACTION = 0.7
+S_SLOT_DL_FRACTION = 0.715
 
 # D/S/U 字符本身不包含 DwPTS/GP/UpPTS 的符号配比，不能从任意字符串凭空反推。
 # 这里只登记已经明确给出特殊时隙格式的产品图案；未知图案要求用户显式配置。

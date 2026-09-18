@@ -223,32 +223,20 @@ def main() -> None:
     # **棘轮。** 把系统入口 / TbsLookup 换回 `PRB × 12 × 12` 会让这里变红：
     # 那等于假设 DM-RS 与 PDCCH 都不占资源，TBS 系统性偏大约 12.5%。
     _oh = la.PdschOverhead()
-    check((_oh.pdsch_symbols, _oh.dmrs_re_per_prb, _oh.pdcch_symbols) == (12, 6, 1),
-          "默认口径：12 个 PDSCH 符号、单符号 type-1 DM-RS 6 RE/PRB、PDCCH 1 符号")
-    check(_oh.re_per_prb("D") == 144 - 6 - 12 == 126,
-          f"D 时隙每 PRB 126 RE（实得 {_oh.re_per_prb('D')}）")
-    check(_oh.re_per_grant(100, "D") == 12_600,
-          "100 PRB 的 D 时隙 N_RE = 12600（改前是 14400）")
-    _m10 = la.MCS_TABLES[3][10]
-    _tbs_new = la.transport_block_size(12_600, _m10.rate, _m10.q_m, layers=1)
-    _tbs_old = la.transport_block_size(14_400, _m10.rate, _m10.q_m, layers=1)
-    print(f"  100PRB MCS10 rank1：不扣开销 {_tbs_old} bit → 扣开销 {_tbs_new} bit "
-          f"（-{100 * (1 - _tbs_new / _tbs_old):.2f}%）")
-    check(0.12 < 1 - _tbs_new / _tbs_old < 0.13,
-          f"扣 DM-RS+PDCCH 让 TBS 降约 12.5%（实得 {100 * (1 - _tbs_new / _tbs_old):.2f}%）")
-    # S 时隙：只折符号数，固定开销随后扣一次，所以比值小于 s_slot_fraction
-    check(_oh.symbols("S", 0.7) == 8 and _oh.re_per_prb("S", 0.7) == 78,
-          f"S 时隙 8 个符号 / 78 RE per PRB（实得 {_oh.symbols('S', 0.7)}/"
-          f"{_oh.re_per_prb('S', 0.7)}）")
-    check(_oh.re_per_prb("S", 0.7) / _oh.re_per_prb("D") < 0.7 - 1e-9,
-          "DM-RS 与 PDCCH 是每时隙固定开销，S/D 的可用 RE 之比必须小于 0.7")
+    check((_oh.pdsch_symbols, _oh.dmrs_re_per_prb, _oh.pdcch_symbols) == (14, 24, 1),
+          "默认口径：14 总符号、DM-RS 等效预留24 RE、PDCCH等效预留12 RE")
+    check(_oh.re_per_prb("D") == 132, "AirView D: 132 RE/PRB")
+    check(_oh.re_per_grant(100, "D") == 13200, "AirView D: 100 PRB = 13200 RE")
+    check(_oh.re_per_prb("S", 0.715) == 94, "AirView S: floor(0.715*132)=94")
+    check(_oh.re_per_prb("S", 0.7) == 92, "显式0.7覆盖仍生效")
+    check(_oh.re_per_prb("S", 0.82) == 108, "显式0.82覆盖仍生效")
     # 156 上限仍然生效：14 符号 + 零开销就撞顶
     check(la.PdschOverhead(pdsch_symbols=14, dmrs_re_per_prb=0,
                            pdcch_symbols=0).re_per_prb("D") == 156,
           "接入 PdschOverhead 之后 156 上限没有被绕过")
     for _bad in (dict(pdsch_symbols=0), dict(pdsch_symbols=15),
-                 dict(dmrs_re_per_prb=-1), dict(dmrs_re_per_prb=13),
-                 dict(pdcch_symbols=-1), dict(pdcch_symbols=12),
+                 dict(dmrs_re_per_prb=-1), dict(dmrs_re_per_prb=25),
+                 dict(pdcch_symbols=-1), dict(pdcch_symbols=14),
                  dict(dmrs_re_per_prb=True)):
         try:
             la.PdschOverhead(**_bad)

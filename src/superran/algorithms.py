@@ -434,7 +434,7 @@ def derivations(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
 
     # --- 小区谱效的 TDD 归一 ---
     pat = str(cfg.get("tdd_pattern", "DDDSU")).upper() or "DDDSU"
-    s_slot_fraction = float(cfg.get("s_slot_dl_fraction", 0.7))
+    s_slot_fraction = float(cfg.get("s_slot_dl_fraction", 0.715))
     if not 0.0 < s_slot_fraction <= 1.0:
         raise ValueError("s_slot_dl_fraction 必须是 (0,1] 内的有限数")
     dl_ratio = (pat.count("D") + s_slot_fraction * pat.count("S")) / len(pat)

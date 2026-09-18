@@ -63,8 +63,8 @@ class TbsLookup:
     下 51 RB 的 ``[8,8,8,8,8,8,3]`` 尾组既不会丢，也不会被错算成 8 PRB。
 
     每 PRB 的 RE 数由 ``overhead``（:class:`linkadapt.PdschOverhead`）决定，
-    已扣 DM-RS 与 PDCCH。``s_slot_fraction`` 现在只折算**符号数**，固定开销
-    随后只扣一次，因此 S/D 的 TBS 之比小于 ``s_slot_fraction``。
+    已扣 DM-RS 与 PDCCH。S 时隙取 floor(D 净 RE × s_slot_fraction)，
+    不再重复扣除固定开销；TBS 另有量化。
     """
 
     values: np.ndarray                 # int64 [2, 28, 4, num_rbg]，单位 byte
@@ -79,7 +79,7 @@ class TbsLookup:
 
     @classmethod
     def build(cls, num_rbg: int, rb_per_rbg: int,
-              s_slot_fraction: float = 0.7, *,
+              s_slot_fraction: float = 0.715, *,
               rbg_prb_sizes: Sequence[int] | None = None,
               mcs_table: int = 3,
               target_bler: float = 0.1,
@@ -123,8 +123,7 @@ class TbsLookup:
             raise ValueError("overhead 必须是 linkadapt.PdschOverhead")
         table = np.zeros((2, 28, 4, n_rbg), dtype=np.int64)
         prefix_prb = np.cumsum(np.asarray(sizes, dtype=np.int64))
-        # S 时隙的缩减只走符号数（``oh.symbols``），DM-RS/PDCCH 随后只扣一次。
-        # 以前是 ``144 × frac`` 完全不扣开销，且 frac 与开销的语义混在一起。
+        # S 时隙按净 D-slot RE 折算并向下取整，开销只扣一次。
         for slot in ("D", "S"):
             si = _SLOT_INDEX[slot]
             re_per_prb = oh.re_per_prb(slot, float(s_slot_fraction))
@@ -2349,7 +2348,7 @@ def _finalize_selected_plan(
 
 def simulate_experience(
     tables: Sequence[Any], *, sys_cfg: Any, traffic_cfg: Any, sched: Any,
-    kpi: Any, book: rg.RngBook, s_slot_fraction: float = 0.7,
+    kpi: Any, book: rg.RngBook, s_slot_fraction: float = 0.715,
     progress: Any = None,
 ) -> ExperienceRun:
     """Run the original state machine synchronously for one carrier."""
@@ -2365,7 +2364,7 @@ def simulate_experience(
 
 def _experience_steps(
     tables: Sequence[Any], *, sys_cfg: Any, traffic_cfg: Any, sched: Any,
-    kpi: Any, book: rg.RngBook, s_slot_fraction: float = 0.7,
+    kpi: Any, book: rg.RngBook, s_slot_fraction: float = 0.715,
     progress: Any = None, lane: Any = None,
 ) -> ExperienceRun:
     """运行 ``experience_v2``。返回值由 :mod:`system` 包成 ``SystemResult``。"""
