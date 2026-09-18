@@ -48,6 +48,32 @@ def section(title: str) -> None:
     print("\n" + "=" * 70 + f"\n{title}\n" + "=" * 70)
 
 
+def test_airview_srs_numerology_power_and_cap() -> None:
+    """PWR-001/002: absolute anchor, SCS scaling, cap, and link-budget wiring."""
+    from superran import srs_metrics as sm
+
+    # This assertion fails numerically on the previous implementation.
+    expected = -96.0 + 0.8 * 110.0 + 10.0 * math.log10(32.0)
+    assert abs(sm.open_loop_ul_tx_power_dbm(110.0, 16) - expected) < 1e-12
+    for scs, factor in ((15000, 1), (30000, 2), (60000, 4)):
+        tx = sm.open_loop_ul_tx_power_dbm(110.0, 16, subcarrier_spacing_hz=scs)
+        assert abs(tx - (-8.0 + 10.0 * math.log10(16 * factor))) < 1e-12
+        budget = sm.srs_link_budget(
+            pathloss_db=110.0, rb_indices=list(range(16)), subcarrier_spacing_hz=scs)
+        assert abs(budget.ue_tx_power_dbm - tx) < 1e-12
+        assert sm.open_loop_ul_tx_power_dbm(
+            160.0, 16, subcarrier_spacing_hz=scs) == 23.0
+    for invalid in (True, 0, -15000, 20000, float("nan"), float("inf")):
+        try:
+            sm.open_loop_ul_tx_power_dbm(110.0, 16, subcarrier_spacing_hz=invalid)
+        except ValueError:
+            continue
+        raise AssertionError(f"invalid SCS accepted: {invalid}")
+
+
+test_airview_srs_numerology_power_and_cap()
+
+
 
 # ---------------------------------------------------------------------------
 # R4：同一个调度组内也必须在 dB 域聚合，不能让强 RB 抹平深衰 RB。

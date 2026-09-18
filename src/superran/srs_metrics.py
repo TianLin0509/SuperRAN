@@ -167,11 +167,14 @@ def open_loop_ul_tx_power_dbm(
     ue_max_power_dbm: float = 23.0,
     p0_dbm: float = -96.0,
     alpha: float = 0.8,
+    subcarrier_spacing_hz: float = float(hw.COMPANY_SCS_HZ),
 ) -> float:
     """TS 38.213-style engineering open-loop UL power-control equation.
 
     ``p0_dbm`` and ``alpha`` are configurable engineering parameters, not a
     claim that the standard mandates these defaults.
+    P0 excludes the numerology term: add 10*log10(SCS/15kHz) exactly once,
+    before applying the UE total-power cap.
     """
     if isinstance(allocated_rb, (bool, np.bool_)):
         raise ValueError("allocated_rb must be a positive integer")
@@ -187,10 +190,16 @@ def open_loop_ul_tx_power_dbm(
     alpha_value = _finite("alpha", alpha)
     if not 0.0 <= alpha_value <= 1.0:
         raise ValueError("alpha must be in [0, 1]")
+    if isinstance(subcarrier_spacing_hz, (bool, np.bool_)):
+        raise ValueError("subcarrier_spacing_hz must be 15000 * 2**mu")
+    scs = _finite("subcarrier_spacing_hz", subcarrier_spacing_hz)
+    ratio = scs / 15000.0
+    if ratio not in (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0):
+        raise ValueError("subcarrier_spacing_hz must be 15000 * 2**mu, mu=0..6")
     requested = (
         _finite("p0_dbm", p0_dbm)
         + alpha_value * pathloss
-        + 10.0 * math.log10(rb)
+        + 10.0 * math.log10(ratio * rb)
     )
     return float(min(_finite("ue_max_power_dbm", ue_max_power_dbm), requested))
 
@@ -266,6 +275,7 @@ def srs_link_budget(
         ue_max_power_dbm=ue_max_power_dbm,
         p0_dbm=p0_dbm,
         alpha=alpha,
+        subcarrier_spacing_hz=subcarrier_spacing_hz,
     )
     gain = _finite("antenna_gain_db", antenna_gain_db)
     pathloss = _finite("pathloss_db", pathloss_db)
