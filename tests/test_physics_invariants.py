@@ -48,7 +48,7 @@ def section(title: str) -> None:
     print("\n" + "=" * 70 + f"\n{title}\n" + "=" * 70)
 
 
-def test_airview_srs_numerology_power_and_cap() -> None:
+def test_reference_srs_numerology_power_and_cap() -> None:
     """PWR-001/002: absolute anchor, SCS scaling, cap, and link-budget wiring."""
     from superran import srs_metrics as sm
 
@@ -71,7 +71,7 @@ def test_airview_srs_numerology_power_and_cap() -> None:
         raise AssertionError(f"invalid SCS accepted: {invalid}")
 
 
-test_airview_srs_numerology_power_and_cap()
+test_reference_srs_numerology_power_and_cap()
 
 
 
@@ -912,11 +912,11 @@ section("9  唯一系统主循环必须消费同一个 PDSCH 开销口径（38.2
 # 下面几条会变红：那等于假设 DM-RS 与 PDCCH 都不占资源。判据不是"数值等于多少"，
 # 而是"改开销配置，TBS 表和真实系统吞吐都必须跟着动"；硬编码路径的比值会退化成 1.000。
 check(la.PdschOverhead().re_per_prb("D") == 132,
-      "AirView AMC-OH-001: D-slot 132 RE/PRB")
+      "参考实现 AMC-OH-001: D-slot 132 RE/PRB")
 check(la.PdschOverhead().re_per_prb("S", 0.715) == 94,
-      "AirView AMC-OH-001: S-slot floor(132*0.715)=94 RE/PRB")
+      "参考实现 AMC-OH-001: S-slot floor(132*0.715)=94 RE/PRB")
 check(sy.SystemConfig().s_slot_dl_fraction == 0.715,
-      "AirView CAR-002: default scene fraction 0.715")
+      "参考实现 CAR-002: default scene fraction 0.715")
 _oh_default = la.PdschOverhead()                                  # 132 RE/PRB
 _oh_free = la.PdschOverhead(dmrs_re_per_prb=0, pdcch_symbols=0)   # 156 RE/PRB (cap)
 _re_ratio = _oh_free.re_per_prb("D") / _oh_default.re_per_prb("D")

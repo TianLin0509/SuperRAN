@@ -1638,7 +1638,7 @@ DETAIL_SPECS.update({
         ),
         implementation=(
             ("解析标准链路表", "<code>linkadapt.py</code> 维护 CQI/MCS/TBS 规则，TBS 对 RBG 数用表驱动反查；不能用全带字节除以 17 估计所需 RBG。"),
-            ("扣掉 PDSCH 拿不到的 RE", "TBS 的第一步是 38.214 §5.1.3.2 的 <code>N_RE = min(156, 12·符号数 − N_DMRS − N_OTH) × N_PRB</code>。<code>PdschOverhead</code> 把这个口径集中到一处，默认 12 个 PDSCH 符号、单符号 type-1 DM-RS 6 RE/PRB、PDCCH 等效 1 个符号（12 RE/PRB），即每 PRB 126 RE。统一后的唯一系统主循环由 <code>experience.TbsLookup</code> 消费它，不能另写 <code>12×12=144</code>。S 时隙只按 <code>S_SLOT_DL_FRACTION</code> 折**符号数**，DM-RS 与 PDCCH 是每时隙固定开销、随后只扣一次，所以 S/D 的可用 RE 之比是 78/126≈0.619，小于 0.7。"),
+            ("扣掉 PDSCH 拿不到的 RE", "默认以14个总符号为入口，预留等效DM-RS 24 RE/PRB和PDCCH 12 RE/PRB，净132 RE/PRB。24代表两个完整符号的工程预留，不等于单端口type-1导频RE数。<code>PdschOverhead</code> 是系统资源预算真相源，<code>experience.TbsLookup</code> 消费它。S时隙使用<code>floor(132 × 0.715)=94</code> RE/PRB：先折算扣完开销后的净RE，再向下取整，不重复扣开销。该系数是指定场景值，不是通用标准；真实逐RB开销账本尚未实现。独立<code>calc_tbs_reference</code>按外部29档谱效和<code>fg_adjust_tbs</code>对拍，尚未接入系统，不能与旧28档BLER曲线混用。"),
             ("生成 QAM MI", "对单位能量 M-QAM 星座和复高斯噪声做 Gauss-Hermite 数值积分，生成单调缓存，并提供正/逆插值。"),
             ("映射频选 SINR", "<code>effective_sinr()</code> 根据modulation/method选择MIESM或EESM；EESM接受显式beta，缺正式标定时结果只能作为参考。输入中的每个RB都必须有限，空数组或任一NaN/Inf当场失败，禁止只丢掉坏RB后用剩余好RB计算。"),
             ("计算分析 BLER", "表 1/2 按 MI 余量、码长和实现损失得到 CB 瀑布，再按 38.212 分段估算 C 并合成 TB BLER；anchor_check 只输出对标点。"),

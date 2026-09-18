@@ -275,8 +275,11 @@ class TbsLookup:
                 "preset_20b_256qam_table_3" if self.mcs_table == 3
                 else f"mcs_table_{self.mcs_table}"
             ),
-            "n_re_model": ("12 data symbols/RB in D; S scales N_RE by "
-                           f"{self.s_slot_fraction:g}; no exact DMRS/PTRS/CORESET pattern"),
+            "n_re_model": (
+                f"D={self.overhead.re_per_prb('D')} net RE/PRB; "
+                f"S=floor(D*{self.s_slot_fraction:g})="
+                f"{self.overhead.re_per_prb('S', self.s_slot_fraction)} net RE/PRB; "
+                "no exact DMRS/PTRS/CORESET pattern"),
             "standard_boundary": ("TBS quantization follows 38.214 5.1.3.2; "
                                   "MCS profile and N_RE inputs are engineering profiles"),
         }
@@ -4766,9 +4769,11 @@ def _summarize_experience(state: dict[str, Any]) -> ExperienceRun:
             "frequency_selective='off' 或逐 RBG 字段不可用的结果，不再由 RB 功控"
             "开关暗中决定。"
         ),
-        "TBS 量化算法走 38.214 §5.1.3.2，但 MCS 使用预置 20B profile；默认 D 时隙"
-        "每 PRB 为 12×12−6(DM-RS)−12(PDCCH 等效)=126 RE，S 时隙只折符号数后"
-        "再扣同一份固定开销。未展开 PTRS 与 RB 级 CORESET 账本。",
+        "TBS 量化算法走 38.214 §5.1.3.2，但 MCS 使用预置 20B profile；"
+        f"当前 D 时隙每 PRB 净 {lookup.overhead.re_per_prb('D')} RE，"
+        f"S 时隙按 floor(D净RE×{lookup.s_slot_fraction:g})="
+        f"{lookup.overhead.re_per_prb('S', lookup.s_slot_fraction)} RE/PRB 折算，"
+        "不重复扣开销。未展开 PTRS 与 RB 级 CORESET 账本。",
         ("HARQ 每个单码字 TB 最多一次重传，重传保持初传 MCS、RBG 数、rank 与 TBS；"
          f"当前合并={harq_combining.upper()}。CC 用同一 NewTx 曲线并把码字 "
          "SINR 抬升 10log10(2)=3.0103 dB；IR 用原 MCS 一半谱效映射等效低档 MCS，"

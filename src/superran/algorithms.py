@@ -402,7 +402,8 @@ def derivations(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     ts = 1e-3 / 14 / 2
     r_max = 948 / 1024
     peak = 4 * 8 * r_max * (n_prb * 12 / ts) * (1 - oh)
-    re_tti = hw.COMPANY_NUM_RB * 12 * 12
+    pdsch = la.PdschOverhead()
+    re_tti = pdsch.re_per_grant(hw.COMPANY_NUM_RB, "D")
     tbs = la.transport_block_size(re_tti, m27.rate, m27.q_m, layers=4)
     out.append({
         "key": "peak_rate",
@@ -418,9 +419,9 @@ def derivations(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
             ("标准公式结果", "代入",
              f"4 × 8 × {r_max:.4f} × ({n_prb}×12 / {ts:.3e}) × {1 - oh:.2f} "
              f"= {peak / 1e9:.4f} Gbps"),
-            ("本仿真器的 RE 数", "N_RE = N_RB × 12 子载波 × 12 数据符号",
-             f"{hw.COMPANY_NUM_RB} × 12 × 12 = {re_tti} 个 RE/TTI"
-             f"（14 符号扣掉 2 个给 DM-RS 与控制）"),
+            ("本仿真器的 RE 数", "N_RE = N_RB × 净 PDSCH RE/PRB",
+             f"{hw.COMPANY_NUM_RB} × {pdsch.re_per_prb('D')} = {re_tti} 个 RE/TTI"
+             f"（14总符号，等效预留DM-RS 24 RE与PDCCH 12 RE/PRB）"),
             ("按 38.214 §5.1.3.2 算 TBS", "transport_block_size(N_RE, R, q_m, layers=4)",
              f"= {tbs} bit"),
             ("折成速率", "TBS / TTI 时长",
@@ -428,7 +429,7 @@ def derivations(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
             ("与公式对比", "两条独立路径",
              f"偏差 {(tbs / 0.5e-3 - peak) / peak * 100:+.1f}%。"
              f"差异来自 RB 数（{hw.COMPANY_NUM_RB} vs {n_prb}）与开销口径——"
-             f"我们按 12/14 符号扣，标准按固定 OH=0.14 扣"),
+             f"本场景按每PRB净{pdsch.re_per_prb('D')} RE算，标准按固定 OH=0.14 扣"),
         ],
     })
 

@@ -542,6 +542,13 @@ _rs82 = sysm.simulate(
 _bd = _rd.as_dict()["cell"]["cell_served_mbps"]
 _bs = _rs.as_dict()["cell"]["cell_served_mbps"]
 _bs82 = _rs82.as_dict()["cell"]["cell_served_mbps"]
+check("132" in " ".join(_rs.notes) and "94 RE/PRB" in " ".join(_rs.notes),
+      "系统结果说明回显真实132/94净RE预算")
+check("108 RE/PRB" in " ".join(_rs82.notes),
+      "显式0.82覆盖时结果说明动态回显108净RE")
+check("D=132 net RE/PRB" in _slot_lut.as_dict()["n_re_model"]
+      and "=94 net RE/PRB" in _slot_lut.as_dict()["n_re_model"],
+      "TBS表元数据使用同一份净RE预算")
 # S 时隙先折算净 D-slot RE，再向下取整；TBS 另有量化。
 _oh_ds = sysm.SystemConfig().pdsch_overhead
 

@@ -3043,6 +3043,7 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
         [
             ("thermal noise / active RE", "−126.23 dBm", "一个30-kHz子载波；SRS波形噪声入口"),
             ("thermal noise / RB", "−115.44 dBm", "12个子载波；不能与per-RE底噪互换，差10.79 dB"),
+            ("SRS TX / total", "min(Pmax, P0+αPL+10log10((SCS/15kHz)×M_RB))", "P0不含SCS项；30kHz未触顶时补3.0103dB。仅预算/诊断接口，未驱动信道生成。"),
             ("SRS RX / active RE", "P_UE−PL+G−10log10(N_active_RE)", "N_active_RE来自绝对comb tone，不用固定每RB整数"),
             ("raw UL IoT", "10log10((I+N)/N)", "解扩前active RE；sidecar保存slot×RB矩阵、轴与双SHA-256"),
             ("post-despread SIR", "S/I after local sequence + delay gate", "衡量接收机残余；不能反推raw IoT"),

@@ -1060,6 +1060,10 @@ check(str(_m27.q_m) in _peak["steps"][0][2], "调制阶数取自 MCS 表")
 
 _rate = next(d for d in _dv if d["key"] == "peak_rate")
 check("38.306" in _rate["ref_src"], "峰值速率引 38.306 §4.1.2")
+_rate_re = _la.PdschOverhead().re_per_grant(272, "D")
+_rate_bits = _la.transport_block_size(_rate_re, _m27.rate, _m27.q_m, layers=4)
+check(_rate["result"] == f"{_rate_bits / 0.5e-3 / 1e9:.3f} Gbps",
+      "算法页峰值使用实际PDSCH净RE预算")
 check("transport_block_size" in " ".join(x[1] for x in _rate["steps"]),
       "峰值速率走真实的 TBS 函数，不是另算一套")
 

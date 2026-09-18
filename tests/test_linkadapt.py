@@ -225,9 +225,9 @@ def main() -> None:
     _oh = la.PdschOverhead()
     check((_oh.pdsch_symbols, _oh.dmrs_re_per_prb, _oh.pdcch_symbols) == (14, 24, 1),
           "默认口径：14 总符号、DM-RS 等效预留24 RE、PDCCH等效预留12 RE")
-    check(_oh.re_per_prb("D") == 132, "AirView D: 132 RE/PRB")
-    check(_oh.re_per_grant(100, "D") == 13200, "AirView D: 100 PRB = 13200 RE")
-    check(_oh.re_per_prb("S", 0.715) == 94, "AirView S: floor(0.715*132)=94")
+    check(_oh.re_per_prb("D") == 132, "参考实现 D: 132 RE/PRB")
+    check(_oh.re_per_grant(100, "D") == 13200, "参考实现 D: 100 PRB = 13200 RE")
+    check(_oh.re_per_prb("S", 0.715) == 94, "参考实现 S: floor(0.715*132)=94")
     check(_oh.re_per_prb("S", 0.7) == 92, "显式0.7覆盖仍生效")
     check(_oh.re_per_prb("S", 0.82) == 108, "显式0.82覆盖仍生效")
     # 156 上限仍然生效：14 符号 + 零开销就撞顶
@@ -248,17 +248,17 @@ def main() -> None:
     small = la.transport_block_size(50, 0.234, 2, 1)
     check(small in la._TBS_SMALL, "小包走查表分支，落在 Table 5.1.3.2-1 上")
 
-    check(la.calc_tbs_airview(1, 0, 1) == 24,
-          "AirView MCS0 uses SE=0.1523, not 2*0.333")
-    check(la.calc_tbs_airview(1, 28, 1, "D") == 984
-          and la.calc_tbs_airview(1, 28, 1, "S") == 704,
-          "AirView standalone 29-row TBS: MCS28 D=984/S=704 bits")
+    check(la.calc_tbs_reference(1, 0, 1) == 24,
+          "参考实现 MCS0 uses SE=0.1523, not 2*0.333")
+    check(la.calc_tbs_reference(1, 28, 1, "D") == 984
+          and la.calc_tbs_reference(1, 28, 1, "S") == 704,
+          "参考实现 standalone 29-row TBS: MCS28 D=984/S=704 bits")
     check(la.fg_adjust_tbs(3896) == 3904,
           "FgAdjustTbs half-tie uses C++ half-up, not Python bankers rounding")
     check(la.fg_adjust_tbs(3824) == 3824
           and la.fg_adjust_tbs(3825) == 3776,
           "Source excerpt boundary discontinuity is retained, not silently repaired")
-    check(la.calc_tbs_airview(0, 28, 4) == 0,
+    check(la.calc_tbs_reference(0, 28, 4) == 0,
           "Zero physical resource never creates a 24-bit transmission")
 
     big = la.transport_block_size(n_re, 0.926, 6, 4)

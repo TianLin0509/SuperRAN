@@ -393,9 +393,9 @@ def transport_block_size(n_re: int, rate: float, q_m: int, layers: int = 1) -> i
     return int(8 * math.ceil((n_info_q + 24) / 8) - 24)
 
 
-# User-supplied AirView SE rows (2026-09-18). These are NOT the bundled BLER
+# User-supplied 参考实现 SE rows (2026-09-18). These are NOT the bundled BLER
 # profile's MCS indices and must never be used to index its 28 curves.
-AIRVIEW_MCS_SE: tuple[float, ...] = (
+REFERENCE_MCS_SE: tuple[float, ...] = (
     0.1523, 0.2344, 0.3770, 0.6016, 0.8770, 1.1758, 1.4766,
     1.6953, 1.9141, 2.1602, 2.4063, 2.5703, 2.7305, 3.0293,
     3.3223, 3.6094, 3.9023, 4.2129, 4.5234, 4.8164, 5.1152,
@@ -404,7 +404,7 @@ AIRVIEW_MCS_SE: tuple[float, ...] = (
 
 
 def fg_adjust_tbs(tbs_bits: int) -> int:
-    """Reproduce the supplied non-calibration AirView FgAdjustTbs excerpt.
+    """Reproduce the supplied non-calibration 参考实现 FgAdjustTbs excerpt.
 
     Positive half ties round upward, as in C++ std::round, not Python round.
     This engineering path has no rate<=0.25 branch and is not the standard
@@ -426,9 +426,9 @@ def fg_adjust_tbs(tbs_bits: int) -> int:
     return 8 * c * ((quantized + 24 + 8 * c - 1) // (8 * c)) - 24
 
 
-def calc_tbs_airview(n_prb: int, mcs: int, rank: int, slot: str = "D",
+def calc_tbs_reference(n_prb: int, mcs: int, rank: int, slot: str = "D",
                      *, s_slot_fraction: float = 0.715) -> int:
-    """Standalone AirView TBS in bits, using the supplied 29-row SE table.
+    """Standalone 参考实现 TBS in bits, using the supplied 29-row SE table.
 
     Not wired into system AMC/BLER: its matching block-size curves are missing.
     This exposes an exact comparison entry without silently mixing MCS profiles.
@@ -449,7 +449,7 @@ def calc_tbs_airview(n_prb: int, mcs: int, rank: int, slot: str = "D",
     re_per_prb = 132 if key == "D" else math.floor(132 * s_slot_fraction)
     if not n_prb or not re_per_prb:
         return 0  # No physical resource means no transmission.
-    return fg_adjust_tbs(int(re_per_prb * int(n_prb) * AIRVIEW_MCS_SE[int(mcs)] * int(rank)))
+    return fg_adjust_tbs(int(re_per_prb * int(n_prb) * REFERENCE_MCS_SE[int(mcs)] * int(rank)))
 
 
 def re_per_slot(n_prb: int, n_symbols: int = 12, n_dmrs_per_prb: int = 12,
@@ -465,7 +465,7 @@ def re_per_slot(n_prb: int, n_symbols: int = 12, n_dmrs_per_prb: int = 12,
 
 @dataclass(frozen=True)
 class PdschOverhead:
-    """AirView 场景的等效 PDSCH 资源预算（2026-09-18 对齐）。
+    """参考实现 场景的等效 PDSCH 资源预算（2026-09-18 对齐）。
 
     默认 D 时隙以 14 个总符号为入口，预留 DM-RS 等效 24 RE/PRB 与
     PDCCH 等效 12 RE/PRB，得到 132 RE/PRB。24 是参考实现预留的
@@ -509,7 +509,7 @@ class PdschOverhead:
 
     def re_per_prb(self, slot: str, s_slot_fraction: float = 1.0) -> int:
         """扣完 DM-RS 与 PDCCH 之后每 PRB 的 PDSCH RE 数（含 156 上限）。"""
-        # AirView no-per-RB-ledger contract: scale net D-slot REs, then floor.
+        # 参考实现 no-per-RB-ledger contract: scale net D-slot REs, then floor.
         # symbols() validates the slot/fraction but is not the S-slot RE budget.
         self.symbols(slot, s_slot_fraction)
         if str(slot).upper() == "S":

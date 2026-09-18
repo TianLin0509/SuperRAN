@@ -31,7 +31,7 @@ P0 参数明确不含这项；调用者若传的是已吸收 SCS 的 P0，需先
 
 ## TBS 独立对拍入口与未接通部分
 
-`calc_tbs_airview` 逐字采用需求中的29档谱效，计算 `int(RE × SE × rank)`，
+`calc_tbs_reference` 逐字采用需求中的29档谱效，计算 `int(RE × SE × rank)`，
 再调用非校准版 `fg_adjust_tbs`。标准的 `transport_block_size` 保持独立。
 这份29档表不允许按下标直接查询旧28档 BLER 曲线，因此本次没有把它接入系统 AMC。
 
