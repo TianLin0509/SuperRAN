@@ -507,14 +507,14 @@ check(abs(expm._bler_lookup(15, float("inf"))
       "+Inf SINR 与建表相一致钳到预置曲线高 SINR 尾部")
 
 # --- bug B：S 时隙的 RE 与 dl_ratio 必须用同一个系数 ---
-check(abs(sysm.S_SLOT_DL_FRACTION - 0.7) < 1e-9, "S 时隙折合系数 0.7")
+check(abs(sysm.S_SLOT_DL_FRACTION - 0.715) < 1e-9, "S 时隙折合系数 0.715")
 _slot_lut = expm.TbsLookup.build(17, 16, sysm.S_SLOT_DL_FRACTION)
 check(int(_slot_lut.values[1, 12, 1, -1])
       < int(_slot_lut.values[0, 12, 1, -1]),
       "TBS 按 D/S 时隙各自的可用 RE 计算，不是所有时隙一个数")
 _dd = sysm.SystemConfig(tdd_pattern="DDDD").dl_ratio
 _ds = sysm.SystemConfig(tdd_pattern="DDDS").dl_ratio
-check(abs(_dd - 1.0) < 1e-9 and abs(_ds - (3 + 0.7) / 4) < 1e-9,
+check(abs(_dd - 1.0) < 1e-9 and abs(_ds - (3 + 0.715) / 4) < 1e-9,
       f"dl_ratio 用同一个常量（DDDD={_dd:.3f}, DDDS={_ds:.3f}）")
 check(abs(sysm.infer_s_slot_fraction("DDDSU") - 10 / 14) < 1e-12,
       "DDDSU 的 S 时隙建议值来自 10/14 个下行符号")
@@ -542,11 +542,14 @@ _rs82 = sysm.simulate(
 _bd = _rd.as_dict()["cell"]["cell_served_mbps"]
 _bs = _rs.as_dict()["cell"]["cell_served_mbps"]
 _bs82 = _rs82.as_dict()["cell"]["cell_served_mbps"]
-# **承载之比不等于 s_slot_dl_fraction 本身。** DM-RS 与 PDCCH 是每时隙固定
-# 开销，不随下行符号数缩水：S 时隙的符号数按该系数折算，固定开销却照扣一份，
-# 于是可用 RE 之比比系数更小（0.7 → 78/126 = 0.619，0.82 → 102/126 = 0.810）。
-# 期望值直接从口径本身算出来，不写死成常数——换 DM-RS/PDCCH 参数时这两条断言
-# 应该跟着走，而不是需要人来改数字。
+check("132" in " ".join(_rs.notes) and "94 RE/PRB" in " ".join(_rs.notes),
+      "系统结果说明回显真实132/94净RE预算")
+check("108 RE/PRB" in " ".join(_rs82.notes),
+      "显式0.82覆盖时结果说明动态回显108净RE")
+check("D=132 net RE/PRB" in _slot_lut.as_dict()["n_re_model"]
+      and "=94 net RE/PRB" in _slot_lut.as_dict()["n_re_model"],
+      "TBS表元数据使用同一份净RE预算")
+# S 时隙先折算净 D-slot RE，再向下取整；TBS 另有量化。
 _oh_ds = sysm.SystemConfig().pdsch_overhead
 
 
@@ -559,9 +562,9 @@ _expect_ds82 = _expect_s_over_d(0.82)
 print(f"  全 D {_bd:.1f} Mbps vs 全 S {_bs:.1f} Mbps，比值 "
       f"{_bs / max(_bd, 1e-9):.3f}（RE 口径预期 {_expect_ds:.3f}）；"
       f"系数 0.82 时 {_bs82 / max(_bd, 1e-9):.3f}（预期 {_expect_ds82:.3f}）")
-check(abs(_expect_ds - 78.0 / 126.0) < 1e-9
-      and abs(_expect_ds82 - 102.0 / 126.0) < 1e-9,
-      f"默认口径下 S/D 每 PRB 的 RE 之比：0.7→78/126、0.82→102/126"
+check(abs(_expect_ds - 94.0 / 132.0) < 1e-9
+      and abs(_expect_ds82 - 108.0 / 132.0) < 1e-9,
+      f"默认口径下 S/D 每 PRB 的 RE 之比：0.715→94/132、0.82→108/132"
       f"（实得 {_expect_ds:.4f} / {_expect_ds82:.4f}）")
 check(abs(_bs / max(_bd, 1e-9) - _expect_ds) < 0.06,
       f"全 S 图案的吞吐约为全 D 的 {_expect_ds:.3f} 倍"
@@ -657,7 +660,10 @@ for _slot in ("D", "S"):
                 _got, _fits = _lut.required_rbg(_slot, _m, _rank, int(_bytes))
                 _minimal &= _fits and _got == _n
 check(_minimal, "searchsorted 对每个表项都返回最小够用 RBG")
-_m12 = _lut.row("D", 12, 2)
+# 固定旧量化锚点的资源配置；默认场景已迁到132 RE，不能沿用旧数值。
+_frozen_tbs = expm.TbsLookup.build(
+    17, 16, overhead=la.PdschOverhead(pdsch_symbols=12, dmrs_re_per_prb=6))
+_m12 = _frozen_tbs.row("D", 12, 2)
 _nonlinear = float(_m12[-1] / (17 * _m12[0]) - 1.0)
 # 守的是"TBS 对 PRB 数**不是线性的**，不能用 bytes/bytes_per_rbg 反推 RBG 数"。
 # 扣掉 DM-RS+PDCCH 之后每 PRB 从 144 RE 变成 126 RE，落点换了一格量化台阶，

@@ -48,6 +48,32 @@ def section(title: str) -> None:
     print("\n" + "=" * 70 + f"\n{title}\n" + "=" * 70)
 
 
+def test_reference_srs_numerology_power_and_cap() -> None:
+    """PWR-001/002: absolute anchor, SCS scaling, cap, and link-budget wiring."""
+    from superran import srs_metrics as sm
+
+    # This assertion fails numerically on the previous implementation.
+    expected = -96.0 + 0.8 * 110.0 + 10.0 * math.log10(32.0)
+    assert abs(sm.open_loop_ul_tx_power_dbm(110.0, 16) - expected) < 1e-12
+    for scs, factor in ((15000, 1), (30000, 2), (60000, 4)):
+        tx = sm.open_loop_ul_tx_power_dbm(110.0, 16, subcarrier_spacing_hz=scs)
+        assert abs(tx - (-8.0 + 10.0 * math.log10(16 * factor))) < 1e-12
+        budget = sm.srs_link_budget(
+            pathloss_db=110.0, rb_indices=list(range(16)), subcarrier_spacing_hz=scs)
+        assert abs(budget.ue_tx_power_dbm - tx) < 1e-12
+        assert sm.open_loop_ul_tx_power_dbm(
+            160.0, 16, subcarrier_spacing_hz=scs) == 23.0
+    for invalid in (True, 0, -15000, 20000, float("nan"), float("inf")):
+        try:
+            sm.open_loop_ul_tx_power_dbm(110.0, 16, subcarrier_spacing_hz=invalid)
+        except ValueError:
+            continue
+        raise AssertionError(f"invalid SCS accepted: {invalid}")
+
+
+test_reference_srs_numerology_power_and_cap()
+
+
 
 # ---------------------------------------------------------------------------
 # R4：同一个调度组内也必须在 dB 域聚合，不能让强 RB 抹平深衰 RB。
@@ -885,11 +911,17 @@ section("9  唯一系统主循环必须消费同一个 PDSCH 开销口径（38.2
 # **棘轮。** 把 experience.TbsLookup 或系统集成入口换回硬编码的 `PRB x 12 x 12`，
 # 下面几条会变红：那等于假设 DM-RS 与 PDCCH 都不占资源。判据不是"数值等于多少"，
 # 而是"改开销配置，TBS 表和真实系统吞吐都必须跟着动"；硬编码路径的比值会退化成 1.000。
-_oh_default = la.PdschOverhead()                                  # 126 RE/PRB
-_oh_free = la.PdschOverhead(dmrs_re_per_prb=0, pdcch_symbols=0)   # 144 RE/PRB
+check(la.PdschOverhead().re_per_prb("D") == 132,
+      "参考实现 AMC-OH-001: D-slot 132 RE/PRB")
+check(la.PdschOverhead().re_per_prb("S", 0.715) == 94,
+      "参考实现 AMC-OH-001: S-slot floor(132*0.715)=94 RE/PRB")
+check(sy.SystemConfig().s_slot_dl_fraction == 0.715,
+      "参考实现 CAR-002: default scene fraction 0.715")
+_oh_default = la.PdschOverhead()                                  # 132 RE/PRB
+_oh_free = la.PdschOverhead(dmrs_re_per_prb=0, pdcch_symbols=0)   # 156 RE/PRB (cap)
 _re_ratio = _oh_free.re_per_prb("D") / _oh_default.re_per_prb("D")
-check(abs(_re_ratio - 144.0 / 126.0) < 1e-12,
-      f"两组开销参数的每 PRB RE 之比 = 144/126（实得 {_re_ratio:.6f}）")
+check(abs(_re_ratio - 156.0 / 132.0) < 1e-12,
+      f"两组开销参数的每 PRB RE 之比 = 156/132（实得 {_re_ratio:.6f}）")
 
 # --- experience 侧：TbsLookup 必须消费传进去的开销 ---
 _lut_default = ex.TbsLookup.build(17, 16, sy.S_SLOT_DL_FRACTION)
@@ -916,8 +948,8 @@ def _system_served(overhead):
 _served_default = _system_served(None)
 _served_free = _system_served(_oh_free)
 _served_ratio = _served_free / max(_served_default, 1e-12)
-print(f"  唯一系统主循环：126 RE/PRB -> {_served_default:.2f} Mbps，"
-      f"144 RE/PRB -> {_served_free:.2f} Mbps，比值 {_served_ratio:.4f}")
+print(f"  唯一系统主循环：132 RE/PRB -> {_served_default:.2f} Mbps，"
+      f"156 RE/PRB -> {_served_free:.2f} Mbps，比值 {_served_ratio:.4f}")
 check(_served_ratio > 1.05,
       f"唯一系统主循环确实读了 sys_cfg.pdsch_overhead（比值 {_served_ratio:.4f}；"
       "硬编码 12x12 时会退化成 1.000）")

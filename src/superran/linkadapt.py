@@ -393,6 +393,65 @@ def transport_block_size(n_re: int, rate: float, q_m: int, layers: int = 1) -> i
     return int(8 * math.ceil((n_info_q + 24) / 8) - 24)
 
 
+# User-supplied 参考实现 SE rows (2026-09-18). These are NOT the bundled BLER
+# profile's MCS indices and must never be used to index its 28 curves.
+REFERENCE_MCS_SE: tuple[float, ...] = (
+    0.1523, 0.2344, 0.3770, 0.6016, 0.8770, 1.1758, 1.4766,
+    1.6953, 1.9141, 2.1602, 2.4063, 2.5703, 2.7305, 3.0293,
+    3.3223, 3.6094, 3.9023, 4.2129, 4.5234, 4.8164, 5.1152,
+    5.3320, 5.5547, 5.8906, 6.2266, 6.5703, 6.9141, 7.1602, 7.4063,
+)
+
+
+def fg_adjust_tbs(tbs_bits: int) -> int:
+    """Reproduce the supplied non-calibration 参考实现 FgAdjustTbs excerpt.
+
+    Positive half ties round upward, as in C++ std::round, not Python round.
+    This engineering path has no rate<=0.25 branch and is not the standard
+    transport_block_size implementation. Zero follows the supplied guard (24).
+    """
+    if (isinstance(tbs_bits, (bool, np.bool_))
+            or not isinstance(tbs_bits, (int, np.integer)) or tbs_bits < 0):
+        raise ValueError("tbs_bits must be a nonnegative integer")
+    bits = int(tbs_bits)
+    if bits <= 3824:
+        n = max(3, bits.bit_length() - 1 - 6) if bits else 3
+        quantized = max(24, (bits // (1 << n)) * (1 << n))
+        return next(tbs for tbs in _TBS_SMALL if tbs >= quantized)
+    n = (bits - 24).bit_length() - 1 - 5
+    step = 1 << n
+    # Integer half-up avoids floating-point and Python banker's-rounding drift.
+    quantized = step * ((2 * (bits - 24) + step) // (2 * step))
+    c = (quantized + 24 + 8423) // 8424 if quantized > 8424 else 1
+    return 8 * c * ((quantized + 24 + 8 * c - 1) // (8 * c)) - 24
+
+
+def calc_tbs_reference(n_prb: int, mcs: int, rank: int, slot: str = "D",
+                     *, s_slot_fraction: float = 0.715) -> int:
+    """Standalone 参考实现 TBS in bits, using the supplied 29-row SE table.
+
+    Not wired into system AMC/BLER: its matching block-size curves are missing.
+    This exposes an exact comparison entry without silently mixing MCS profiles.
+    """
+    for name, value, lo, hi in (
+        ("n_prb", n_prb, 0, None), ("mcs", mcs, 0, 28), ("rank", rank, 1, 4),
+    ):
+        if (isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                or value < lo or (hi is not None and value > hi)):
+            raise ValueError(f"invalid {name}: {value!r}")
+    key = str(slot).upper()
+    if key not in ("D", "S"):
+        raise ValueError("slot must be D or S")
+    if (isinstance(s_slot_fraction, (bool, np.bool_))
+            or not math.isfinite(s_slot_fraction) or not 0 < s_slot_fraction <= 1):
+        raise ValueError("s_slot_fraction must be finite and in (0,1]")
+    re_per_prb = 132 if key == "D" else math.floor(132 * s_slot_fraction)
+    if not n_prb or not re_per_prb:
+        return 0  # No physical resource means no transmission.
+    return fg_adjust_tbs(int(re_per_prb * int(n_prb) * REFERENCE_MCS_SE[int(mcs)] * int(rank)))
+
+
 def re_per_slot(n_prb: int, n_symbols: int = 12, n_dmrs_per_prb: int = 12,
                 overhead_per_prb: int = 0) -> int:
     """一个时隙内分配给 PDSCH 的 RE 数（38.214 §5.1.3.2 步骤 1）。
@@ -406,36 +465,18 @@ def re_per_slot(n_prb: int, n_symbols: int = 12, n_dmrs_per_prb: int = 12,
 
 @dataclass(frozen=True)
 class PdschOverhead:
-    """一个下行时隙里 PDSCH **拿不到**的那部分 RE，即 38.214 §5.1.3.2 步骤 1
-    的 ``N_DMRS`` 与 ``N_OTH``。
+    """参考实现 场景的等效 PDSCH 资源预算（2026-09-18 对齐）。
 
-    以前主调度路径直接按 ``12 子载波 × 12 符号 = 144 RE/PRB`` 算 TBS，
-    等于假设 DM-RS 与 PDCCH 都不占资源，TBS 偏大约 12%。这个类把口径集中到
-    一处，由系统级唯一主循环的 ``experience.TbsLookup`` 与链路级工具共同消费，
-    不会各自算各自的。
-
-    三个参数的物理含义：
-
-    ``pdsch_symbols``
-        一个 D 时隙里留给 PDSCH 的 OFDM 符号数。项目历史口径是 14 符号里取
-        12，**这 12 是资源换算的入口，不是标准值**；改成 13/14 会同比抬高
-        所有 TBS，属于口径决策，所以做成参数。
-    ``dmrs_re_per_prb``
-        DM-RS 每 PRB 占的 RE。38.211 §7.4.1.1 的 Configuration type 1：
-        单符号 DM-RS 6 RE/PRB（默认），双符号 12 RE/PRB。
-    ``pdcch_symbols``
-        PDCCH 等效占用的前置 OFDM 符号数，每符号折 12 RE/PRB。**这是等效法**：
-        真实系统里 PDCCH 只占 CORESET 覆盖的那些 RB，这里摊到全带宽。
-        RB 级 CORESET 账本是后续可选项，不在本模型内。
-
-    S 时隙不是 D 时隙的等比缩小：DM-RS 与 PDCCH 是**每时隙固定开销**，
-    不随下行符号数缩水，所以 S 的可用 RE 比 ``D × s_slot_fraction`` 更少。
-    ``symbols()`` 只把符号数按比例折算，开销随后只扣一次——这正是"不要和
-    ``frac`` 双重扣减"的含义。
+    默认 D 时隙以 14 个总符号为入口，预留 DM-RS 等效 24 RE/PRB 与
+    PDCCH 等效 12 RE/PRB，得到 132 RE/PRB。24 是参考实现预留的
+    两个完整符号，不是声称 type-1 单端口导频每符号占 12 RE。
+    S 时隙按 floor(D 净 RE × s_slot_fraction) 折算，不再二次扣开销。
+    默认场景系数 0.715 对应 94 RE/PRB；这不是通用 3GPP 规定。
+    未实现逐 RB CORESET/DM-RS 实际开销账本。
     """
 
-    pdsch_symbols: int = 12
-    dmrs_re_per_prb: int = 6
+    pdsch_symbols: int = 14
+    dmrs_re_per_prb: int = 24
     pdcch_symbols: int = 1
 
     def __post_init__(self) -> None:
@@ -446,8 +487,8 @@ class PdschOverhead:
                 raise ValueError(f"{name} 必须是整数")
         if not 1 <= int(self.pdsch_symbols) <= 14:
             raise ValueError("pdsch_symbols 必须在 1..14 之间")
-        if not 0 <= int(self.dmrs_re_per_prb) <= 12:
-            raise ValueError("dmrs_re_per_prb 必须在 0..12 之间（type-1 单/双符号）")
+        if not 0 <= int(self.dmrs_re_per_prb) <= 24:
+            raise ValueError("dmrs_re_per_prb 必须在 0..24 之间（等效预留 RE）")
         if not 0 <= int(self.pdcch_symbols) < int(self.pdsch_symbols):
             raise ValueError("pdcch_symbols 必须非负且小于 pdsch_symbols")
 
@@ -468,6 +509,11 @@ class PdschOverhead:
 
     def re_per_prb(self, slot: str, s_slot_fraction: float = 1.0) -> int:
         """扣完 DM-RS 与 PDCCH 之后每 PRB 的 PDSCH RE 数（含 156 上限）。"""
+        # 参考实现 no-per-RB-ledger contract: scale net D-slot REs, then floor.
+        # symbols() validates the slot/fraction but is not the S-slot RE budget.
+        self.symbols(slot, s_slot_fraction)
+        if str(slot).upper() == "S":
+            return math.floor(float(s_slot_fraction) * self.re_per_prb("D"))
         return re_per_slot(
             1, n_symbols=self.symbols(slot, s_slot_fraction),
             n_dmrs_per_prb=int(self.dmrs_re_per_prb),

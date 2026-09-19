@@ -69,10 +69,10 @@ def _finite_real(value: Any) -> bool:
         and np.isfinite(float(value))
     )
 
-#: S 时隙折合成多少个下行 TTI 的兼容默认值。0.7 是符号占比近似；
-#: 另一类按可用 RE 标定的系数不是同一口径，必须由用户显式覆盖。
+#: S 时隙折合成多少个下行 TTI 的兼容默认值。0.715 是 参考实现 指定场景的净 RE 折算系数；
+#: 不等于精确的下行符号占比，实际 RE 还会向下取整。
 #: **主循环与 dl_ratio 必须用同一个配置值**，否则实际调度的下行比报告的多。
-S_SLOT_DL_FRACTION = 0.7
+S_SLOT_DL_FRACTION = 0.715
 
 # D/S/U 字符本身不包含 DwPTS/GP/UpPTS 的符号配比，不能从任意字符串凭空反推。
 # 这里只登记已经明确给出特殊时隙格式的产品图案；未知图案要求用户显式配置。
@@ -929,7 +929,7 @@ class SystemConfig:
     # 则是每组真实 PRB 数，TBS、功控和利用率全部以它为准。
     rbg_prb_sizes: tuple[int, ...] | None = None
     tdd_pattern: str = "DDDSU"
-    # S 时隙相对完整 D 时隙的下行承载比例。默认保留 0.7 兼容旧结果；
+    # S 时隙相对完整 D 时隙的下行承载比例。默认 0.715 为指定场景的净 RE 折算；
     # 报告 dl_ratio 与唯一系统路径的 TBS 查表共用这一份值。
     s_slot_dl_fraction: float = S_SLOT_DL_FRACTION
     # 每个 TB 最多一次重传。IR：半谱效等效 MCS（默认）；CC：SINR +10log10(2)。
@@ -965,7 +965,7 @@ class SystemConfig:
     # 它与 csi_aging 正交：前者管 MCS 输入多久更新，后者管预编码 CSI 多陈旧。
     cqi_report: ap.CqiReportConfig | None = None
     # PDSCH 拿不到的那部分 RE（DM-RS + PDCCH），定义见 linkadapt.PdschOverhead。
-    # None = 用默认口径：12 个 PDSCH 符号、单符号 DM-RS 6 RE/PRB、PDCCH 1 符号。
+    # None = 默认14总符号，DM-RS等效预留24 RE/PRB，PDCCH等效预留12 RE/PRB。
     # 这里保持 None 默认而不是 default_factory，是为了不把 linkadapt 拉成
     # system 的顶层依赖（本模块对它一直是懒加载）。
     pdsch_overhead: Any | None = None
@@ -3286,9 +3286,10 @@ def simulate(
                     "crn_event_mapping": "harq and scheduler tie-break indexed by [TTI,UE]",
                     "tbs_resources": (
                         "38.214 TBS quantization with preset MCS table 3; "
-                        "12 data symbols/RB and S-slot DL fraction "
-                        f"{float(sys_cfg.s_slot_dl_fraction):.3g} "
-                        "(configurable; inferred from tdd_pattern when unset)"),
+                        f"D={sys_cfg.pdsch_overhead.re_per_prb('D')} net RE/PRB; "
+                        f"S=floor(D*{float(sys_cfg.s_slot_dl_fraction):g})="
+                        f"{sys_cfg.pdsch_overhead.re_per_prb('S', sys_cfg.s_slot_dl_fraction)} "
+                        "net RE/PRB (explicit scene fraction; no automatic inference)"),
                     "type1": ("single-panel Type-I-style beam-column subset; "
                               "greedy multi-layer approximation"),
                 }},

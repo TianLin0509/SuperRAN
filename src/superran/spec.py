@@ -653,8 +653,8 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
      "sequential 保留各 RBG 上一次的估计、concat 把各跳并成一组导频联合插值"),
     ("num_samples", "样本数", "number", (1, 5000, 1), "由 sr_sample_size 算，别拍脑袋"),
     # --- 系统级仿真旋钮（sr_system_sim 用，不进 ChannelHub 的信道生成）---
-    ("s_slot_dl_fraction", "S 时隙下行折算", "number", (0.01, 1.0, 0.01),
-     "默认 0.7 保持兼容；报告占比与 TBS 折算共用该值"),
+    ("s_slot_dl_fraction", "S 时隙下行折算", "number", (0.001, 1.0, 0.001),
+     "默认 0.715 对齐 参考实现 指定场景；报告占比与 TBS 折算共用该值"),
     ("replication_workers", "重复实验进程", "select", ["auto", "1", "2", "4", "8"],
      "auto 按 TTI×UE×重复数决定；短任务串行，长任务最多 4 进程；显式值会严格执行或报错"),
     ("traffic_model", "系统话务", "select",
@@ -813,7 +813,7 @@ _EDITABLE: tuple[tuple[str, str, str, Any, str], ...] = (
 #: 给它们一份默认值，**必须和 sr_system_sim 的函数签名一致**——
 #: 两处漂了的话页面显示的就不是实际会跑的值，而这种不一致没有任何提示。
 _SIM_DEFAULTS: dict[str, Any] = {
-    "s_slot_dl_fraction": 0.7,
+    "s_slot_dl_fraction": 0.715,
     "replication_workers": "auto",
     "traffic_model": "ftp3",
     "small_ue_share": 0.5,

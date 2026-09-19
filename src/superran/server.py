@@ -1984,7 +1984,7 @@ def sr_system_sim(
     mu_olla_step_down_db: float | None = None,
     small_burst_policy: str = "fractional_slot",
     tdd_pattern: str = "DDDSU",
-    s_slot_dl_fraction: float = 0.7,
+    s_slot_dl_fraction: float = 0.715,
     neighbor_prb_util: float = 0.3,
     neighbor_load_jitter: float = 0.05,
     csi_aging: bool | str = True,
@@ -2198,7 +2198,7 @@ def sr_system_sim(
         alpha=beta=1、gamma=0、w=1，严格退化成经典 PF；它不是未确认定义的 EPF。
     small_burst_policy : experience_v2 默认 ``fractional_slot``，按 28.552 Rel-19
         的 TB volume / padding volume 折算单时隙小 burst；``exclude`` 保留旧式盲区。
-    s_slot_dl_fraction : S 时隙相对完整 D 时隙的下行承载比例。默认 0.7 保持兼容；
+    s_slot_dl_fraction : S 时隙相对完整 D 时隙的下行承载比例。默认 0.715 对齐 参考实现 指定场景；
         报告 ``dl_ratio``、capacity RE 预算和 experience TBS 查表共用该值。
     mu_enabled : 是否允许 MU 配对。默认关，先看清 SU 基线。
     mu_corr_threshold : MU SUS 配对的归一化相关性上限，默认 0.7。

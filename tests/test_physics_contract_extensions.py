@@ -81,7 +81,7 @@ def test_srs_open_loop_power_and_active_re_link_budget_close_exactly() -> None:
         alpha=0.8,
         ue_max_power_dbm=23.0,
     )
-    expected_tx = -96.0 + 0.8 * 110.0 + 10.0 * math.log10(16.0)
+    expected_tx = -96.0 + 0.8 * 110.0 + 10.0 * math.log10(2.0 * 16.0)
     assert result.ue_tx_power_dbm == pytest.approx(expected_tx)
     assert result.received_total_dbm == pytest.approx(expected_tx - 110.0)
     assert result.received_per_active_re_dbm == pytest.approx(
