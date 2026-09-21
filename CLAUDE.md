@@ -907,17 +907,14 @@ Python 侧：反斜杠 + 数字 是合法的八进制转义，
 不小——最终 MCS15 在 15.1 dB 上的 NewTx BLER 是 0.0006，在 13.2 dB 上是 0.997，
 不到 2 dB 跨越整条瀑布。手工构造、逐 RBG 宽度对不上载波栅格的链路表退回全带值。
 
-### 仿真粒度降到 RBG 是安全的
+### 信道采样粒度与 SINR 聚合不能混为一谈
 
-一个 RBG 内的 16 个 RB 共用同一个 MCS、同一次调度决策、同一个预编码，
-**RB 级的分辨率没有任何已实现的算法在用**。降到 RBG（272 → 17）实测
-rank 与 MCS **逐位相同**、谱效差 0.1%，建表快一倍。
+当前系统已实现逐 RBG 频选调度及 SRS 跳频资源，不能再写“频选和导频图案还没做”。
+同一 RBG 共用调度资源，并不意味着其 RB 的接收 SINR 可以任取一个代表。
 
-聚合方式是 RBG 内**取中间那个 RB 作代表**，不是平均。平均会把频选衰落抹平、
-让奇异值分布变平（信道条件数被人为改善），进而**高估 rank**。
-
-会受影响的只有频选调度与导频图案，两者都还没做。真要做时把
-`rb_per_rbg=1` 设回去就退回 RB 粒度。
+当前单码字口径是：逐 RB、逐流计算接收 SINR，先转 dB 再在 RBG 内平均，最后在
+实际授予的 RBG 与流之间做 dB 平均。复信道采样、预编码方向选择和 SINR 聚合是不同步骤；
+历史“取中间 RB”或 RBG 内线性平均的说明不能替代当前聚合合同。
 
 ### MU 是空间复用，不是频率复用
 
@@ -958,11 +955,11 @@ MU 准入还有三层显式门：`min_pairing_mcs` 默认 4，低于该档的用
 `NotImplementedError`，绝不静默退回 `select`。这些是准入门，不替代最终的小区谱效或
 队列封顶 useful-bytes 方案比较；设 `min_pairing_mcs=0,pf_gain_threshold=0` 可复现旧准入。
 
-**−3.01 dB 只是记账标签，不是近似。** 按定义 `CorrLoss = pred_MU − pred_SU −
-PowerLoss`，所以决策里真正用的平移量 `CorrLoss + PowerLoss` 恒等于
-`pred_MU − pred_SU`，那个常数精确抵消。单列 PowerLoss 只为诊断能分开看
-「功率分摊占多少、相关性损失占多少」。**这条只在当前支持的 2 用户 × rank2 下
-成立**，扩到 3/4 用户或不等流数时标签本身要重新定义。
+**当前 MU 支持两用户、每用户 rank 1–2，含不等 rank。** 默认预编码为 EZF，
+ZF/RZF 可显式选择。功率按层等分，`PowerLoss_u = 10log10(rank_u / sum(rank))`：
+rank2+rank2 时两侧均为 −3.0103 dB，rank1+rank2 时为 −4.7712/−1.7609 dB。
+预测端把它与残余相关性损失加到 SU 基线上；真实接收 SINR 独立按实际信道与发射权计算，
+不能把预测侧相关性损失解释成真实接收干扰损失。
 
 实测在 10 用户 / 64 端口下 **MU/SU 比值 < 1**（密集城区 0.755、城区宏站 0.917），
 自适应因此全程选 SU。这不是 bug：SU 无干扰且能到 rank4，
@@ -1544,9 +1541,10 @@ first-party source 的 `doppler_hz` 明确定义为最大 Doppler
 速度投影到最近站的径向、随后又在 CDL 内投影一次，会把高铁场景严重压低；
 `hst_350kmh` 在 2.6 GHz 下现在稳定为 **842.59 Hz**，与解析值一致。
 
-`mobility_mode=static` 只表示跨 snapshot 的 UE 几何位置固定、样本间不构成连续
-轨迹；它不覆盖 `ue_speed_kmh`。因此可用 `static + 3 km/h` 生成独立位置快照下的
-步行小尺度时变。要真正零 Doppler，必须显式设 `ue_speed_kmh=0`。
+`mobility_mode=static` 表示 UE 几何位置固定，不覆盖 `ue_speed_kmh`。同 UE 的各轮样本
+仍使用同一组散射体、沿连续时钟推进；`static + 3 km/h` 会有小尺度时变，相邻快照
+不能当成独立信道实现。逐径 Doppler 使用同一 UE 的运动方向，不为不同 BS 重抽方向。
+要零 Doppler 须显式设 `ue_speed_kmh=0`；零速时每 UE 多轮会因重复矩阵被拒绝。
 
 ### 比耗时必须交错重测
 
@@ -1751,7 +1749,7 @@ full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst �
 `evaluation_mode`、`traffic_model="bimodal"`（连同 `p_small_rbg`/`p_full_rbg`/
 `p_idle_tti`/`expected_prb_util`）、`KpiConfig.trim`/`min_burst_tti`、
 `mu_accounting="se_ratio_legacy"`、`pf_accounting="legacy_best_se"`、
-`max_mu_users`/`mu_rank_per_user` 的非 2 取值、`simulate(mu_se_ratio=...)`。
+`max_mu_users` 的非 2 取值、`mu_rank_per_user` 超出 1–2 的取值、`simulate(mu_se_ratio=...)`。
 现网两头高中间低的话务画像迁到 `traffic_model="cdf"`，CDF 文件在
 `presets/traffic_cdf/`，由 `scripts/make_field_bimodal_cdf.py` 生成。
 
