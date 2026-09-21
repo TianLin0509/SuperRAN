@@ -59,6 +59,7 @@ from superran import katex as kx  # noqa: E402
 from superran import kpi_view as _kv  # noqa: E402
 from superran import linkadapt as la  # noqa: E402
 from superran import mathml as mm  # noqa: E402
+from superran import reference_ldpc as rldpc  # noqa: E402
 from superran import srs_resource as srsres  # noqa: E402
 
 
@@ -3069,6 +3070,19 @@ TDD 互易假设下，它经 RF 校准后转置/共轭到下行预编码约定�
         "它不是宣称所有商用网都固定 20 ms；若现场 RRC/日志给出周期，应覆盖并记录。"
         "SRS 周期和 CSI report 周期不可合并成一个旋钮。</p>",
     )
+    body += (
+        "<h2>SRS功率诊断：先明确P0参考面，再比较数值</h2>"
+        "<p><code>power_model=nr_scs</code>保持默认，P0不含子载波间隔项，增加10log10(SCS/15kHz)。"
+        "<code>reference_per_rb</code>按提供的逐RB公式，不加该项；P0取nominal与UE偏置之和，RB数必须是实际RB数。"
+        "两者都先加带宽、闭环与SRS偏移，再对总功率执行可选Pmin和Pmax限制，最后均分到实际comb活动RE。"
+        "不要先对PUSCH基量封顶再生成SRS。</p>"
+        "<p>手算例：P0=-96dBm、alpha=0.8、路损110dB、16RB、30kHz、偏移0且未触顶："
+        "参考逐RB口径4.0412dBm，NR口径7.0515dBm，差3.0103dB。两者噪声带宽相同；"
+        "改变SCS时噪声也会变，不能把发射功率变化直接等同SNR收益。"
+        "输出显式记录请求功率、实际功率、上下限、offset、闭环项和口径。"
+        "<code>Dataset.srs_link_budget</code>传递同一配置；它是诊断预算，仍未驱动信道生成与调度主循环。"
+        "目标场景P0/Pmin等参数尚未提取，所以此例不代表现场实测。</p>"
+    )
     body += "<p class=source-row>实现入口：" + source_ref("src/superran/physical.py", "def srs_config") + " · " + source_ref("src/superran/srs_waveform.py", "def observe_srs_leg") + " · " + source_ref("src/superran/srs_metrics.py", "def srs_link_budget") + " · " + source_ref("src/superran/csi_aging.py", "class CsiConfig") + "</p>"
     return Page(
         "srs", "SRS、64×4 与信道估计", "物理内核", "SRS & CHANNEL ESTIMATION",
@@ -4722,7 +4736,48 @@ Qm 内检查。这个分析后端用于表 1/2，不描述预置表 3 的运行�
         '<a href="https://www.etsi.org/deliver/etsi_ts/138200_138299/138214/18.03.00_60/ts_138214v180300p.pdf" '
         'target="_blank" rel="noreferrer">3GPP TS 38.214 V18.3.0</a>（MCS 与 TBS）。两份标准都不会替特定接收机提供一套通用预置 BLER 瀑布。</p>'
     )
-    body += "<p class=source-row>映射与分析模型：" + source_ref("src/superran/linkadapt.py", "def effective_sinr") + " · 预置曲线：" + source_ref("src/superran/bler_curves.py", "def verify_curves") + " · TTI 判错：" + source_ref("src/superran/experience.py", "def _bler_lookup") + "</p>"
+    body += "<h2>独立参考诊断：29 档、码块选档与证据缺口</h2>"
+    body += (
+        "<p>这一入口用于核对外部源码摘录，不是当前系统的28档单码字误块模型。"
+        "有效码率 SE/Qm 决定 BG1/BG2（LDPC 编码图类型）；曲线码率是另一字段，"
+        "不能笼统叫母码率，更不能替代有效码率来计算TBS。下表从代码唯一数据源生成，"
+        "四元组依次是RV0..3的曲线码率；展示四项不代表系统放开四次发送。</p>"
+    )
+    body += table(
+        ["MCS", "SE", "Qm", "有效码率", "BG1 曲线码率 RV0..3", "BG2 曲线码率 RV0..3"],
+        [(str(i), f"{se:.4f}", str(rldpc.REFERENCE_QM[i]),
+          f"{se / rldpc.REFERENCE_QM[i]:.6f}",
+          ", ".join(f"{v:.3f}" for v in rldpc.REFERENCE_BG1_RATES[i]),
+          ", ".join(f"{v:.3f}" for v in rldpc.REFERENCE_BG2_RATES[i]))
+         for i, se in enumerate(la.REFERENCE_MCS_SE)],
+    )
+    body += table(
+        ["档位", "标称大小 bit", "从高到低首个满足的阈值 bit"],
+        [(str(i), str(label), str(threshold))
+         for i, (label, threshold) in enumerate(zip(
+             rldpc.REFERENCE_BLOCK_LABELS, rldpc.REFERENCE_BLOCK_THRESHOLDS))],
+    )
+    body += table(
+        ["Qm", "BLER曲线码率索引轴（依次从0开始，剩余零填充到40）"],
+        [(str(qm), ", ".join(str(v) for v in axis))
+         for qm, axis in zip((2, 4, 6, 8), rldpc.REFERENCE_CURVE_RATES)],
+    )
+    body += (
+        "<p>查表前先用TBS与有效码率选BG，再用RV选曲线码率，在所属调制的码率轴上选绝对距离最近的首项。"
+        "码块数量按BG1的8448或BG2的3840上限向上取整；用于选档的大小按回信中的min(TBS,上限)推导，"
+        "完整查表函数尚待核实，不能冒充标准CRC与LDPC lifting实现。"
+        "<code>reference_ldpc_plan</code>只返回索引与证据状态；所有曲线都标为未载入，已知缺档另标known_missing。</p>"
+        "<p>例如MCS21、TBS200bit：SE/Qm=0.6665，选BG2，大小仍是200bit，命中档4；"
+        "该档256QAM曲线缺失。换BG不会把小包变大，不能把缺失曲线当成零误码。"
+        "<code>reference_tb_bler</code>仅在调用者明确提供有效码块错误率时按独立码块假设合成，"
+        "如CBLER=0.1、两块得到TBLER=0.19；该函数不查询也不复用系统TBLER表。</p>"
+        "<p><code>fg_adjust_tbs</code>可显式传code_rate启用校准重载：大包且码率≤0.25时按3816分段。"
+        "保留正数半值向上舍入：3896→3904；输入0按无传输返回0。"
+        "MCS2、D时隙76→77PRB，TBS仍是3824→3776，不能二分反查。"
+        "<code>reference_prbs_for_bits</code>按资源数量递增逐项找第一个够用值：需求3800bit、上限77PRB返回76；"
+        "成本是最多扫描max_prb项。该独立入口未接系统调度，七档原始曲线及现场参数尚缺。</p>"
+    )
+    body += "<p class=source-row>参考诊断：" + source_ref("src/superran/reference_ldpc.py", "def reference_ldpc_plan") + " · 映射与分析模型：" + source_ref("src/superran/linkadapt.py", "def effective_sinr") + " · 预置曲线：" + source_ref("src/superran/bler_curves.py", "def verify_curves") + " · TTI 判错：" + source_ref("src/superran/experience.py", "def _bler_lookup") + "</p>"
     return Page(
         "bler", "BLER：MCS 表、曲线与 HARQ 复现", "链路算法", "BLER & LINK MAPPING",
         "从 28 档 MCS、单码字有效 SINR 和 1,824 个原始点，逐步复现 TB 判错与一次 CC/IR 重传。", body,
