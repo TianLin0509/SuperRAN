@@ -297,5 +297,54 @@ def test_reference_ldpc_plan_uses_true_thresholds_and_separate_rates() -> None:
             ref.reference_ldpc_plan(*args)
 
 
+def test_srs_explicit_reference_power_and_post_bandwidth_clipping() -> None:
+    # Independent linear-domain translation of the supplied source path.
+    for scs in (15000, 30000, 60000):
+        for loss in (50.0, 110.0, 160.0):
+            for offset in (-5.0, 3.0):
+                raw_mw = 16 * 10**(-96/10) * 10**(0.8*loss/10) * 10**((offset+2)/10)
+                expected = 10 * math.log10(min(10**(23/10), max(10**(-40/10), raw_mw)))
+                result = sm.srs_link_budget(
+                    pathloss_db=loss, rb_indices=np.arange(16), subcarrier_spacing_hz=scs,
+                    power_model="reference_per_rb", ue_min_power_dbm=-40,
+                    srs_offset_db=offset, closed_loop_db=2,
+                )
+                assert result.ue_tx_power_dbm == pytest.approx(expected)
+                assert result.requested_ue_tx_power_dbm == pytest.approx(10*math.log10(raw_mw))
+                assert result.numerology_term_db == 0
+                assert result.received_per_active_re_dbm == pytest.approx(expected-loss-10*math.log10(96))
+                assert result.as_dict()["power_model"] == "reference_per_rb"
+    reference = sm.srs_link_budget(pathloss_db=110, rb_indices=range(16), power_model="reference_per_rb")
+    standard = sm.srs_link_budget(pathloss_db=110, rb_indices=range(16))
+    assert reference.ue_tx_power_dbm == pytest.approx(4.041199826559248)
+    assert standard.ue_tx_power_dbm - reference.ue_tx_power_dbm == pytest.approx(10*math.log10(2))
+    assert reference.noise == standard.noise
+    # Offset must act on the unclipped basis, then apply total SRS limits.
+    assert sm.open_loop_ul_tx_power_dbm(0, 16, p0_dbm=30, alpha=0,
+        power_model="reference_per_rb", srs_offset_db=-30) == pytest.approx(10*math.log10(16))
+    for kwargs in ({"power_model": "typo"}, {"ue_min_power_dbm": 24},
+                   {"srs_offset_db": float("nan")}, {"closed_loop_db": float("inf")}):
+        with pytest.raises(ValueError):
+            sm.open_loop_ul_tx_power_dbm(110, 16, **kwargs)
+
+
+def test_dataset_propagates_explicit_srs_power_basis() -> None:
+    from superran.loader import Dataset
+    from superran.srs_resource import allocate_basic_srs_resources
+
+    dataset = object.__new__(Dataset)
+    dataset.summary = {"shape": {"N": 1}, "config": {"subcarrier_spacing": 30000.0}}
+    assignment = allocate_basic_srs_resources([0], adaptive_period=False)[0]
+    result = dataset.srs_link_budget(
+        0, assignment, pathloss_db=110.0, antenna_gain_db=0.0,
+        power_model="reference_per_rb", srs_offset_db=3.0, closed_loop_db=2.0,
+        ue_min_power_dbm=-40.0,
+    )
+    assert result.ue_tx_power_dbm == pytest.approx(9.041199826559248)
+    assert result.as_dict()["closed_loop_db"] == 2.0
+    assert result.power_model == "reference_per_rb"
+    assert result.subcarrier_spacing_hz == 30000.0
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

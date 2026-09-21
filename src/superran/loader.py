@@ -655,6 +655,10 @@ class Dataset:
         alpha: float = 0.8,
         rru_noise_figure_db: float = 2.0,
         tdd_rx_loss_db: float = 1.0,
+        power_model: str = "nr_scs",
+        ue_min_power_dbm: float | None = None,
+        srs_offset_db: float = 0.0,
+        closed_loop_db: float = 0.0,
     ) -> Any:
         """复算一次assignment的UL功控、per-active-RE接收功率与底噪。"""
         from . import srs_metrics as sm  # noqa: PLC0415
@@ -695,6 +699,10 @@ class Dataset:
             subcarrier_spacing_hz=_carrier.scs_khz_from_config(self.config) * 1000.0,
             rru_noise_figure_db=rru_noise_figure_db,
             tdd_rx_loss_db=tdd_rx_loss_db,
+            power_model=power_model,
+            ue_min_power_dbm=ue_min_power_dbm,
+            srs_offset_db=srs_offset_db,
+            closed_loop_db=closed_loop_db,
         )
 
     def pmi(self, index: int | None = None, *, max_rank: int = 4) -> Any:
