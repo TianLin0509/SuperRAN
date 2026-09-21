@@ -222,5 +222,36 @@ def test_scene_cache_is_fingerprinted_reused_and_rebuilt_after_tamper(
         scenes.prepare_scene("toy")
 
 
+def test_reference_calibrated_tbs_and_nonmonotone_inverse() -> None:
+    from superran import linkadapt as la
+
+    assert la.fg_adjust_tbs(0) == 0
+    assert la.fg_adjust_tbs(3896, 0.25) == 3912
+    assert la.fg_adjust_tbs(3896, 0.333) == 3904
+    assert la.fg_adjust_tbs(10000, 0.25) == 9984
+    assert la.fg_adjust_tbs(10000) == 9992
+    assert la.calc_tbs_reference(76, 28, 1) == 73776
+    assert la.calc_tbs_reference(77, 28, 1) == 75792
+    # Endpoint-based rejection and binary search both rely on a false premise.
+    assert la.calc_tbs_reference(76, 2, 1) == 3824
+    assert la.calc_tbs_reference(77, 2, 1) == 3776
+    assert la.reference_prbs_for_bits(3800, 2, 1, 77) == 76
+    assert la.reference_prbs_for_bits(3800, 2, 1, 108, "S") == 107
+    assert la.reference_prbs_for_bits(3904, 2, 1, 77) is None
+    assert la.reference_prbs_for_bits(0, 2, 1, 0) == 0
+    for slot in ("D", "S"):
+        for mcs in (0, 2, 21, 28):
+            # Exhaustive first-fit oracle over small grant sets and plateau edges.
+            vals = [la.calc_tbs_reference(p, mcs, 2, slot) for p in range(81)]
+            for demand in sorted({0, 1, max(vals) + 1, *vals}):
+                expected = next((p for p, v in enumerate(vals) if v >= demand), None)
+                assert la.reference_prbs_for_bits(demand, mcs, 2, 80, slot) == expected
+    for bad in (True, 0, -0.1, 1.01, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="code_rate"):
+            la.fg_adjust_tbs(0, bad)
+    with pytest.raises(ValueError):
+        la.reference_prbs_for_bits(0, 29, 1, 0)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
