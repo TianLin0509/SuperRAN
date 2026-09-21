@@ -253,5 +253,49 @@ def test_reference_calibrated_tbs_and_nonmonotone_inverse() -> None:
         la.reference_prbs_for_bits(0, 29, 1, 0)
 
 
+def test_reference_ldpc_plan_uses_true_thresholds_and_separate_rates() -> None:
+    from superran import reference_ldpc as ref
+
+    assert ref.REFERENCE_QM == (2,) * 6 + (4,) * 6 + (6,) * 9 + (8,) * 8
+    for boundary, upper, lower in ((75, 5, 6), (150, 4, 5), (250, 3, 4),
+                                    (750, 2, 3), (2000, 1, 2), (3840, 0, 1)):
+        assert ref.reference_block_bucket(boundary - 1) == lower
+        assert ref.reference_block_bucket(boundary) == upper
+        assert ref.reference_block_bucket(boundary + 1) == upper
+    low = ref.reference_ldpc_plan(5000, 0)
+    assert low.base_graph == "BG2" and low.effective_code_rate == 0.1523 / 2
+    assert low.curve_code_rate == 0.2 and low.block_count == 2
+    assert low.lookup_block_bits == 3840 and low.bucket_index == 0
+    high = ref.reference_ldpc_plan(10000, 28, 1)
+    assert high.base_graph == "BG1" and high.block_count == 2
+    assert high.curve_code_rate == 0.463 and high.curve_rate_index == 15
+    assert high.lookup_block_bits == 8448 and high.bucket_label == 5000
+    assert high.curve_data_status == "not_loaded"
+    # BG selection does not make small high-modulation missing curves disappear.
+    for tbs, mcs, bucket in ((200, 21, 4), (100, 6, 5), (50, 28, 6)):
+        plan = ref.reference_ldpc_plan(tbs, mcs)
+        assert plan.base_graph == "BG2" and plan.bucket_index == bucket
+        assert plan.curve_data_status == "known_missing"
+        assert not plan.as_dict()["system_profile_enabled"]
+    for mcs in range(29):
+        for bits in (24, 308, 309, 3840, 3841, 8448, 8449, 20000):
+            for rv in range(4):
+                plan = ref.reference_ldpc_plan(bits, mcs, rv)
+                limit = 3840 if plan.base_graph == "BG2" else 8448
+                assert plan.block_count == math.ceil(bits / limit)
+                assert plan.effective_code_rate == ref.REFERENCE_MCS_SE[mcs] / plan.modulation_order
+                assert plan.curve_data_status in ("known_missing", "not_loaded")
+    assert ref.reference_tb_bler(0.1, 2) == pytest.approx(0.19)
+    assert ref.reference_tb_bler(1e-20, 3) == pytest.approx(3e-20, rel=1e-12, abs=0)
+    assert ref.reference_tb_bler(0, 20) == 0
+    assert ref.reference_tb_bler(1, 20) == 1
+    for bad in (None, True, -0.1, 1.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            ref.reference_tb_bler(bad, 2)
+    for args in ((0, 0), (100, 29), (100, 0, 4), (True, 0)):
+        with pytest.raises(ValueError):
+            ref.reference_ldpc_plan(*args)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
