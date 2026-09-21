@@ -254,8 +254,16 @@ def test_reference_calibrated_tbs_and_nonmonotone_inverse() -> None:
 
 
 def test_reference_ldpc_plan_uses_true_thresholds_and_separate_rates() -> None:
+    import hashlib
+
     from superran import reference_ldpc as ref
 
+    # Frozen independently from all 58 literal rows in the supplied reply.
+    rows = [[i, ref.REFERENCE_MCS_SE[i], ref.REFERENCE_QM[i], list(rates[i])]
+            for rates in (ref.REFERENCE_BG1_RATES, ref.REFERENCE_BG2_RATES)
+            for i in range(29)]
+    assert hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest() == (
+        "c2a13d854e385a909adbb30da644c4f70df4bfc0ed5af41e71383d7bc8a3fbae")
     assert ref.REFERENCE_QM == (2,) * 6 + (4,) * 6 + (6,) * 9 + (8,) * 8
     for boundary, upper, lower in ((75, 5, 6), (150, 4, 5), (250, 3, 4),
                                     (750, 2, 3), (2000, 1, 2), (3840, 0, 1)):

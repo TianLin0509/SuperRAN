@@ -7,7 +7,7 @@ Evidence: source excerpts, not execution of the original simulator.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from numbers import Integral
 
 from .linkadapt import REFERENCE_MCS_SE
