@@ -403,17 +403,25 @@ REFERENCE_MCS_SE: tuple[float, ...] = (
 )
 
 
-def fg_adjust_tbs(tbs_bits: int) -> int:
-    """Reproduce the supplied non-calibration 参考实现 FgAdjustTbs excerpt.
+def fg_adjust_tbs(tbs_bits: int, code_rate: float | None = None) -> int:
+    """Reproduce the supplied reference TBS quantizer and calibrated overload.
 
     Positive half ties round upward, as in C++ std::round, not Python round.
-    This engineering path has no rate<=0.25 branch and is not the standard
-    transport_block_size implementation. Zero follows the supplied guard (24).
+    Passing code_rate enables the calibrated overload (3816-bit segmentation
+    when rate <= 0.25). Neither overload has the standard 3840-bit floor.
+    Zero is guarded as no transmission; the original C++ log2(0) is undefined.
     """
     if (isinstance(tbs_bits, (bool, np.bool_))
             or not isinstance(tbs_bits, (int, np.integer)) or tbs_bits < 0):
         raise ValueError("tbs_bits must be a nonnegative integer")
     bits = int(tbs_bits)
+    if code_rate is not None and (
+        isinstance(code_rate, (bool, np.bool_)) or not math.isfinite(code_rate)
+        or not 0 < code_rate <= 1
+    ):
+        raise ValueError("code_rate must be finite and in (0,1]")
+    if bits == 0:
+        return 0
     if bits <= 3824:
         n = max(3, bits.bit_length() - 1 - 6) if bits else 3
         quantized = max(24, (bits // (1 << n)) * (1 << n))
@@ -422,12 +430,16 @@ def fg_adjust_tbs(tbs_bits: int) -> int:
     step = 1 << n
     # Integer half-up avoids floating-point and Python banker's-rounding drift.
     quantized = step * ((2 * (bits - 24) + step) // (2 * step))
-    c = (quantized + 24 + 8423) // 8424 if quantized > 8424 else 1
+    if code_rate is not None and code_rate <= 0.25:
+        c = (quantized + 24 + 3815) // 3816
+    else:
+        c = (quantized + 24 + 8423) // 8424 if quantized > 8424 else 1
     return 8 * c * ((quantized + 24 + 8 * c - 1) // (8 * c)) - 24
 
 
 def calc_tbs_reference(n_prb: int, mcs: int, rank: int, slot: str = "D",
-                     *, s_slot_fraction: float = 0.715) -> int:
+                     *, s_slot_fraction: float = 0.715,
+                     code_rate: float | None = None) -> int:
     """Standalone 参考实现 TBS in bits, using the supplied 29-row SE table.
 
     Not wired into system AMC/BLER: its matching block-size curves are missing.
@@ -448,8 +460,34 @@ def calc_tbs_reference(n_prb: int, mcs: int, rank: int, slot: str = "D",
         raise ValueError("s_slot_fraction must be finite and in (0,1]")
     re_per_prb = 132 if key == "D" else math.floor(132 * s_slot_fraction)
     if not n_prb or not re_per_prb:
-        return 0  # No physical resource means no transmission.
-    return fg_adjust_tbs(int(re_per_prb * int(n_prb) * REFERENCE_MCS_SE[int(mcs)] * int(rank)))
+        return fg_adjust_tbs(0, code_rate)  # Validate even a zero-resource call.
+    return fg_adjust_tbs(
+        int(re_per_prb * int(n_prb) * REFERENCE_MCS_SE[int(mcs)] * int(rank)), code_rate)
+
+
+def reference_prbs_for_bits(payload_bits: int, mcs: int, rank: int, max_prb: int,
+                            slot: str = "D", *, s_slot_fraction: float = 0.715,
+                            code_rate: float | None = None) -> int | None:
+    """Find the first sufficient integer grant without assuming monotonic TBS.
+
+    Returns None if no grant in 1..max_prb suffices. A full-band endpoint below
+    demand does NOT imply no earlier grant can serve it (76 vs 77 PRB, MCS2).
+    This independent comparison entry is not a system scheduler switch.
+    """
+    if (isinstance(payload_bits, (bool, np.bool_))
+            or not isinstance(payload_bits, (int, np.integer)) or payload_bits < 0):
+        raise ValueError("payload_bits must be a nonnegative integer")
+    # Validate all arguments before the empty-demand early exit.
+    calc_tbs_reference(max_prb, mcs, rank, slot,
+                       s_slot_fraction=s_slot_fraction, code_rate=code_rate)
+    if payload_bits == 0:
+        return 0
+    for prb in range(1, int(max_prb) + 1):
+        if calc_tbs_reference(prb, mcs, rank, slot,
+                              s_slot_fraction=s_slot_fraction,
+                              code_rate=code_rate) >= payload_bits:
+            return prb
+    return None
 
 
 def re_per_slot(n_prb: int, n_symbols: int = 12, n_dmrs_per_prb: int = 12,

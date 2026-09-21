@@ -1679,7 +1679,7 @@ DETAIL_SPECS.update({
             "把 IR 的等效低档 MCS 写回空口 MCS，破坏预置表规定的重传身份。",
             "重传失败后继续挂第二次重传，或把窗口末 pending TB 当作成功。",
         ),
-        source_paths=("src/superran/linkadapt.py", "src/superran/bler_curves.py", "src/superran/bler_data_20b.py", "src/superran/system.py", "src/superran/experience.py", "tests/test_linkadapt.py"),
+        source_paths=("src/superran/linkadapt.py", "src/superran/reference_ldpc.py", "src/superran/bler_curves.py", "src/superran/bler_data_20b.py", "src/superran/system.py", "src/superran/experience.py", "tests/test_linkadapt.py"),
     ),
 })
 

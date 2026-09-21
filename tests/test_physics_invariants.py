@@ -74,6 +74,15 @@ def test_reference_srs_numerology_power_and_cap() -> None:
 test_reference_srs_numerology_power_and_cap()
 
 
+def test_reference_zero_bits_never_create_payload() -> None:
+    """Numeric ratchet: the old reference quantizer turned empty input into 24 bits."""
+    assert la.fg_adjust_tbs(0) == 0
+    assert la.fg_adjust_tbs(3896) == 3904  # Guard against reply's Python-round error.
+
+
+test_reference_zero_bits_never_create_payload()
+
+
 
 # ---------------------------------------------------------------------------
 # R4：同一个调度组内也必须在 dB 域聚合，不能让强 RB 抹平深衰 RB。

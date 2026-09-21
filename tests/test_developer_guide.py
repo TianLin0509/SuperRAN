@@ -55,6 +55,19 @@ def test_guide_is_offline_utf8_hash_routed_and_accessible() -> None:
     assert text.endswith("</html>\n")
     assert "�" not in text
     assert "SuperRAN 开发者文档" in text
+    from superran import reference_ldpc as ref
+
+    assert "独立参考诊断：29 档、码块选档与证据缺口" in text
+    assert "诊断预算，仍未驱动信道生成与调度主循环" in text
+    assert "不能把缺失曲线当成零误码" in text
+    for i, se in enumerate(ref.REFERENCE_MCS_SE):
+        expected = (
+            f"<td>{i}</td><td>{se:.4f}</td><td>{ref.REFERENCE_QM[i]}</td>"
+            f"<td>{se/ref.REFERENCE_QM[i]:.6f}</td>"
+            f"<td>{', '.join(f'{v:.3f}' for v in ref.REFERENCE_BG1_RATES[i])}</td>"
+            f"<td>{', '.join(f'{v:.3f}' for v in ref.REFERENCE_BG2_RATES[i])}</td>"
+        )
+        assert expected in text, f"reference MCS row {i} drift"
     assert "同站扇区共享状态与 cluster seed" in text
     assert "14 symbol 先完成估计，再取中间 symbol 为 1 slot snapshot" in text
     assert "r=p·128+h·8+v" in text

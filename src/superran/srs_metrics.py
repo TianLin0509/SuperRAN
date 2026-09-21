@@ -160,7 +160,7 @@ def calibrated_nr_noise_levels(
     )
 
 
-def open_loop_ul_tx_power_dbm(
+def _ul_power_terms(
     pathloss_db: float,
     allocated_rb: int,
     *,
@@ -168,14 +168,12 @@ def open_loop_ul_tx_power_dbm(
     p0_dbm: float = -96.0,
     alpha: float = 0.8,
     subcarrier_spacing_hz: float = float(hw.COMPANY_SCS_HZ),
-) -> float:
-    """TS 38.213-style engineering open-loop UL power-control equation.
-
-    ``p0_dbm`` and ``alpha`` are configurable engineering parameters, not a
-    claim that the standard mandates these defaults.
-    P0 excludes the numerology term: add 10*log10(SCS/15kHz) exactly once,
-    before applying the UE total-power cap.
-    """
+    power_model: str = "nr_scs",
+    ue_min_power_dbm: float | None = None,
+    srs_offset_db: float = 0.0,
+    closed_loop_db: float = 0.0,
+) -> tuple[float, float, float]:
+    """Requested total power, clipped total power, and numerology term."""
     if isinstance(allocated_rb, (bool, np.bool_)):
         raise ValueError("allocated_rb must be a positive integer")
     rb_value = float(allocated_rb)
@@ -196,12 +194,46 @@ def open_loop_ul_tx_power_dbm(
     ratio = scs / 15000.0
     if ratio not in (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0):
         raise ValueError("subcarrier_spacing_hz must be 15000 * 2**mu, mu=0..6")
+    if power_model not in ("nr_scs", "reference_per_rb"):
+        raise ValueError("power_model must be nr_scs or reference_per_rb")
+    numerology = 10.0 * math.log10(ratio) if power_model == "nr_scs" else 0.0
     requested = (
         _finite("p0_dbm", p0_dbm)
         + alpha_value * pathloss
-        + 10.0 * math.log10(ratio * rb)
+        + 10.0 * math.log10(rb)
+        + numerology
+        + _finite("srs_offset_db", srs_offset_db)
+        + _finite("closed_loop_db", closed_loop_db)
     )
-    return float(min(_finite("ue_max_power_dbm", ue_max_power_dbm), requested))
+    upper = _finite("ue_max_power_dbm", ue_max_power_dbm)
+    lower = None if ue_min_power_dbm is None else _finite("ue_min_power_dbm", ue_min_power_dbm)
+    if lower is not None and lower > upper:
+        raise ValueError("ue_min_power_dbm must not exceed ue_max_power_dbm")
+    clipped = min(upper, requested if lower is None else max(lower, requested))
+    return float(requested), float(clipped), float(numerology)
+
+
+def open_loop_ul_tx_power_dbm(
+    pathloss_db: float, allocated_rb: int, *, ue_max_power_dbm: float = 23.0,
+    p0_dbm: float = -96.0, alpha: float = 0.8,
+    subcarrier_spacing_hz: float = float(hw.COMPANY_SCS_HZ),
+    power_model: str = "nr_scs", ue_min_power_dbm: float | None = None,
+    srs_offset_db: float = 0.0, closed_loop_db: float = 0.0,
+) -> float:
+    """Explicit NR-SCS or reference per-RB diagnostic power, capped last.
+
+    nr_scs (default) includes 10log10(SCS/15kHz), with P0 excluding that term.
+    reference_per_rb follows the supplied per-RB formula without the SCS term;
+    P0 is the combined nominal+UE per-RB value. Both use actual (unscaled) RB
+    count. Reference Pmin/offset/closed-loop settings must be supplied explicitly
+    when needed; defaults are engineering choices, not a target-scene claim.
+    """
+    return _ul_power_terms(
+        pathloss_db, allocated_rb, ue_max_power_dbm=ue_max_power_dbm,
+        p0_dbm=p0_dbm, alpha=alpha, subcarrier_spacing_hz=subcarrier_spacing_hz,
+        power_model=power_model, ue_min_power_dbm=ue_min_power_dbm,
+        srs_offset_db=srs_offset_db, closed_loop_db=closed_loop_db,
+    )[1]
 
 
 @dataclass(frozen=True)
@@ -217,9 +249,27 @@ class SrsLinkBudgetResult:
     k_tc: int
     rb_indices: tuple[int, ...]
     noise: SrsNoiseLevels
+    requested_ue_tx_power_dbm: float
+    power_model: str
+    numerology_term_db: float
+    subcarrier_spacing_hz: float
+    ue_min_power_dbm: float | None
+    ue_max_power_dbm: float
+    srs_offset_db: float
+    closed_loop_db: float
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "requested_ue_tx_power_dbm": self.requested_ue_tx_power_dbm,
+            "power_model": self.power_model,
+            "numerology_term_db": self.numerology_term_db,
+            "subcarrier_spacing_hz": self.subcarrier_spacing_hz,
+            "ue_min_power_dbm": self.ue_min_power_dbm,
+            "ue_max_power_dbm": self.ue_max_power_dbm,
+            "srs_offset_db": self.srs_offset_db,
+            "closed_loop_db": self.closed_loop_db,
+            "power_limited": self.ue_tx_power_dbm != self.requested_ue_tx_power_dbm,
+            "budget_scope": "diagnostic_only_not_channel_or_scheduler_input",
             "ue_tx_power_dbm": self.ue_tx_power_dbm,
             "received_total_dbm": self.received_total_dbm,
             "received_per_active_re_dbm": self.received_per_active_re_dbm,
@@ -250,6 +300,10 @@ def srs_link_budget(
     subcarrier_spacing_hz: float = float(hw.COMPANY_SCS_HZ),
     rru_noise_figure_db: float = DEFAULT_RRU_NOISE_FIGURE_DB,
     tdd_rx_loss_db: float = DEFAULT_TDD_RX_LOSS_DB,
+    power_model: str = "nr_scs",
+    ue_min_power_dbm: float | None = None,
+    srs_offset_db: float = 0.0,
+    closed_loop_db: float = 0.0,
 ) -> SrsLinkBudgetResult:
     """Compute one SRS occasion's explicit TX/RX/noise reference planes."""
     raw_rbs = np.asarray(rb_indices)
@@ -269,13 +323,17 @@ def srs_link_budget(
         rru_noise_figure_db=rru_noise_figure_db,
         tdd_rx_loss_db=tdd_rx_loss_db,
     )
-    tx = open_loop_ul_tx_power_dbm(
+    requested, tx, numerology = _ul_power_terms(
         pathloss_db,
         int(rbs.size),
         ue_max_power_dbm=ue_max_power_dbm,
         p0_dbm=p0_dbm,
         alpha=alpha,
         subcarrier_spacing_hz=subcarrier_spacing_hz,
+        power_model=power_model,
+        ue_min_power_dbm=ue_min_power_dbm,
+        srs_offset_db=srs_offset_db,
+        closed_loop_db=closed_loop_db,
     )
     gain = _finite("antenna_gain_db", antenna_gain_db)
     pathloss = _finite("pathloss_db", pathloss_db)
@@ -295,6 +353,14 @@ def srs_link_budget(
         k_tc=int(k_tc),
         rb_indices=tuple(int(value) for value in rbs),
         noise=noise,
+        requested_ue_tx_power_dbm=requested,
+        power_model=power_model,
+        numerology_term_db=numerology,
+        subcarrier_spacing_hz=float(subcarrier_spacing_hz),
+        ue_min_power_dbm=None if ue_min_power_dbm is None else float(ue_min_power_dbm),
+        ue_max_power_dbm=float(ue_max_power_dbm),
+        srs_offset_db=float(srs_offset_db),
+        closed_loop_db=float(closed_loop_db),
     )
 
 
