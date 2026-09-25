@@ -144,7 +144,7 @@ def build_summary(base: str, head: str, ref: str, changed: list[str],
 | `02-完整diff.patch` | 这次改动的完整 diff（已排除生成物） |
 | `03-改动后完整文件/` | 被改过的源文件的**完整内容**，用来读上下文 |
 | `04-Author报告.html` | 实现者自己写的报告。**它的声称需要你核对**，不是证据 |
-| `05-项目规范/` | 仓库的物理合同与风险分档，判断口径时参考 |
+| `05-项目规范/` | 仓库的物理合同与风险分档，判断口径时参考；`pitfalls/` 是 `CLAUDE.md` 坑索引对应的全文 |
 
 ## 你的两个先天限制
 
@@ -215,6 +215,9 @@ def main() -> int:
             p = REPO / name
             if p.exists():
                 z.writestr(f"05-项目规范/{Path(name).name}", p.read_text(encoding="utf-8"))
+        # CLAUDE.md 只剩「踩过的坑」索引，正文在 docs/pitfalls/，一并带上才完整。
+        for p in sorted((REPO / "docs" / "pitfalls").glob("*.md")):
+            z.writestr(f"05-项目规范/pitfalls/{p.name}", p.read_text(encoding="utf-8"))
 
         report, report_sha = find_author_report(head, args.ref)
         if report:
