@@ -27,7 +27,7 @@ def issue(store, name, role, output, site, rotate=False):
                 db.execute("DELETE FROM sessions WHERE member=?", (mid,))
             else:
                 db.execute("INSERT INTO members VALUES(?,?,?,?,?)", (mid, name, role, digest(browser), digest(agent)))
-            json.dump({"site": site.rstrip("/"), "member": mid, "name": name, "browser_token": browser, "agent_token": agent}, stream, ensure_ascii=False, indent=2)
+            json.dump({"site": site.rstrip("/"), "member": mid, "name": name, "agent_token": agent}, stream, ensure_ascii=False, indent=2)
     return mid
 
 

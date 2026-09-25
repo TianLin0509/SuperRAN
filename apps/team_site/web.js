@@ -17,7 +17,7 @@ async function api(path,method='GET',body){
 }
 function render(){
  const names=Object.fromEntries(state.members.map(m=>[m.id,m.name]));
- $('identity').textContent=state.me.name;$('logout').hidden=false;$('loginPanel').hidden=true;$('workspace').hidden=false;
+
  const selected=$('memberFilter').value;
  $('memberFilter').innerHTML='<option value="">全部成员</option>'+state.members.map(m=>`<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('');$('memberFilter').value=selected;
  const q=$('search').value.trim().toLowerCase(),s=$('statusFilter').value,m=$('memberFilter').value;
@@ -27,10 +27,10 @@ function render(){
 async function refresh(){
  if(fetching||document.hidden)return;fetching=true;
  try{state=await api('state');render();$('sync').textContent='已同步 · '+time(state.at);}
- catch(e){$('sync').textContent='同步中断 · 显示上次内容';if(e.status===401){$('loginPanel').hidden=false;$('workspace').hidden=true;$('logout').hidden=true;}else $('notice').textContent='暂时无法同步，已有记录和本地草稿仍保留。';}
+ catch(e){$('sync').textContent='同步中断 · 显示上次内容';$('notice').textContent='暂时无法同步，已有记录和本地草稿仍保留。';}
  finally{fetching=false;}
 }
-function editable(){return current.owner===state.me.id||state.me.role==='admin';}
+function editable(){return true;}
 function readForm(){return Object.fromEntries(Object.keys(fields).map(f=>[f,$('field-'+f).value]));}
 function stash(){if(!editable())return;localSet(draftKey(current.id),{base:current,values:readForm(),release:[...document.querySelectorAll('[data-release]:checked')].map(e=>e.dataset.release),pending});if(!current.revision)localSet(draftKey('new'),current.id);}
 function showEditor(work,history,restore=true){
@@ -38,7 +38,7 @@ function showEditor(work,history,restore=true){
  if(saved){current=saved.base;pending=saved.pending||null;}
  const values=saved?.values||current,can=editable();
  $('detailTitle').textContent=current.revision?'工作记录':'记录工作';$('detailMeta').textContent=`${state.members.find(m=>m.id===current.owner)?.name||state.me.name} · ${current.revision?'持续更新同一条记录':'创建后全组可见'}`;
- $('editFields').innerHTML=Object.entries(fields).map(([f,label])=>`<div class="field"><div class="field-head"><label for="field-${f}">${label}</label>${current.locks.includes(f)?`<label class="release"><input type="checkbox" data-release="${f}" ${can?'':'disabled'}>人工保护 · 交回 agent</label>`:''}</div>${f==='status'?`<select id="field-${f}" ${can?'':'disabled'}>${['进行中','受阻','已完成'].map(s=>`<option ${s===values[f]?'selected':''}>${s}</option>`).join('')}</select>`:f==='progress'?`<textarea id="field-${f}" maxlength="12000" ${can?'':'disabled'}>${esc(values[f])}</textarea>`:`<input id="field-${f}" value="${esc(values[f])}" ${f==='title'?'required maxlength="160"':'type="url" maxlength="2000" placeholder="可选：报告或代码链接"'} ${can?'':'disabled'}>`}</div>`).join('');
+ $('editFields').innerHTML=(current.revision?'':`<div class="field"><div class="field-head"><label for="workOwner">负责人</label></div><select id="workOwner" required><option value="">请选择</option>${state.members.map(m=>`<option value="${esc(m.id)}" ${m.id===current.owner?'selected':''}>${esc(m.name)}</option>`).join('')}</select></div>`)+Object.entries(fields).map(([f,label])=>`<div class="field"><div class="field-head"><label for="field-${f}">${label}</label>${current.locks.includes(f)?`<label class="release"><input type="checkbox" data-release="${f}" ${can?'':'disabled'}>人工保护 · 交回 agent</label>`:''}</div>${f==='status'?`<select id="field-${f}" ${can?'':'disabled'}>${['进行中','受阻','已完成'].map(s=>`<option ${s===values[f]?'selected':''}>${s}</option>`).join('')}</select>`:f==='progress'?`<textarea id="field-${f}" maxlength="12000" ${can?'':'disabled'}>${esc(values[f])}</textarea>`:`<input id="field-${f}" value="${esc(values[f])}" ${f==='title'?'required maxlength="160"':'type="url" maxlength="2000" placeholder="可选：报告或代码链接"'} ${can?'':'disabled'}>`}</div>`).join('');
  for(const f of saved?.release||[]){const box=document.querySelector(`[data-release="${f}"]`);if(box){box.checked=true;$('field-'+f).disabled=true;}}
  $('save').hidden=!can;$('editError').textContent='';$('reloadDetail').hidden=true;$('discardDraft').hidden=!saved;
  $('draftNotice').textContent=saved?'已恢复本机草稿；若其他人已更新，保存时会提示核对。':can?'保存的字段将受到人工保护。未保存草稿仅留在本机。':'全组可查看；本人和负责人可以修改。';
@@ -49,16 +49,14 @@ function showEditor(work,history,restore=true){
 async function openWork(id){try{const d=await api('works/'+id);showEditor(d.work,d.history);}catch(e){$('notice').textContent=e.message;}}
 $('rows').onclick=e=>{const b=e.target.closest('[data-work]');if(b)openWork(b.dataset.work);};
 for(const id of ['search','statusFilter','memberFilter'])$(id).addEventListener('input',()=>state&&render());
-$('loginForm').onsubmit=async e=>{e.preventDefault();try{await api('login','POST',{token:$('token').value.trim()});$('token').value='';$('loginError').textContent='';await refresh();}catch(err){$('loginError').textContent=err.message;}};
-$('logout').onclick=async()=>{try{if($('detail').open){stash();$('detail').close();}await api('logout','POST',{});state=null;$('rows').replaceChildren();$('identity').textContent='';await refresh();}catch(e){$('notice').textContent=e.message;}};
-$('newWork').onclick=()=>showEditor({id:localGet(draftKey('new'))||crypto.randomUUID(),owner:state.me.id,revision:0,title:'',status:'进行中',progress:'',result_url:'',locks:[]},[]);
+$('newWork').onclick=()=>showEditor({id:localGet(draftKey('new'))||crypto.randomUUID(),owner:state.members[0]?.id||'',revision:0,title:'',status:'进行中',progress:'',result_url:'',locks:[]},[]);
 $('closeDetail').onclick=()=>{stash();$('detail').close();};$('detail').addEventListener('cancel',()=>stash());
-$('editFields').addEventListener('input',e=>{if(e.target.dataset.release)$('field-'+e.target.dataset.release).disabled=e.target.checked;pending=null;stash();});
+$('editFields').addEventListener('input',e=>{if(e.target.id==='workOwner')current.owner=e.target.value;if(e.target.dataset.release)$('field-'+e.target.dataset.release).disabled=e.target.checked;pending=null;stash();});
 $('editForm').onsubmit=async e=>{
  e.preventDefault();const values=readForm(),release=[...document.querySelectorAll('[data-release]:checked')].map(x=>x.dataset.release);
  const changes=Object.fromEntries(Object.entries(values).filter(([f,v])=>!release.includes(f)&&(current.revision===0||v!==current[f])));
  if(!pending&&!Object.keys(changes).length&&!release.length){$('detail').close();return;}
- pending=pending||{event_id:crypto.randomUUID(),expected_revision:current.revision,changes,release,source:'human'};stash();$('save').disabled=true;
+ pending=pending||{event_id:crypto.randomUUID(),expected_revision:current.revision,changes,release,source:'human',...(current.revision?{}:{owner:current.owner})};stash();$('save').disabled=true;
  try{await api('works/'+current.id,'PUT',pending);localRemove(draftKey(current.id));if(localGet(draftKey('new'))===current.id)localRemove(draftKey('new'));pending=null;$('detail').close();$('notice').textContent='已保存，全组同步可见。';await refresh();}
  catch(err){$('editError').textContent=err.message+(err.status===409?'。点击“核对最新记录”查看差异后再保存。':'。草稿已保留，可以重试保存。');$('reloadDetail').hidden=err.status!==409;stash();}
  finally{$('save').disabled=false;}

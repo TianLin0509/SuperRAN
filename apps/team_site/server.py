@@ -11,12 +11,13 @@ from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ROOT = Path(__file__).resolve().parent
 FIELDS = {"title", "status", "progress", "result_url"}
+PUBLIC_EDITOR = "shared-browser"
 
 
 def digest(value):
@@ -74,10 +75,6 @@ class Body(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class Login(Body):
-    token: str = Field(min_length=32, max_length=200)
-
-
 class Changes(Body):
     title: str | None = Field(default=None, min_length=1, max_length=160)
     status: Literal["进行中", "受阻", "已完成"] | None = None
@@ -102,6 +99,7 @@ class Changes(Body):
 
 
 class Update(Body):
+    owner: UUID | None = None
     event_id: UUID
     expected_revision: int = Field(ge=0)
     changes: Changes
@@ -125,10 +123,11 @@ def create_app(directory, origin="http://127.0.0.1:18770", base_path="/superran"
     if base_path and (not base_path.startswith("/") or base_path.endswith("/") or ".." in base_path):
         raise ValueError("base_path must be /superran or empty")
     store = Store(directory)
+    with store.db(True) as db:
+        db.execute("INSERT OR IGNORE INTO members VALUES(?,?,?,?,?)", (PUBLIC_EDITOR, "网页编辑（未署名）", "shared", digest(secrets.token_urlsafe(32)), digest(secrets.token_urlsafe(32))))
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store = store
     prefix = base_path
-    cookie_path = prefix + "/"
 
     @app.middleware("http")
     async def protect(request, call_next):
@@ -152,11 +151,10 @@ def create_app(directory, origin="http://127.0.0.1:18770", base_path="/superran"
                 row = db.execute("SELECT * FROM members WHERE agent_hash=?", (digest(bearer.removeprefix("Bearer ")),)).fetchone() if bearer.startswith("Bearer ") else None
                 kind = "agent"
             else:
-                row = db.execute("SELECT m.* FROM sessions s JOIN members m ON m.id=s.member WHERE s.hash=? AND s.expires>?",
-                                 (digest(request.cookies.get("superran_session", "")), time.time())).fetchone()
+                row = db.execute("SELECT * FROM members WHERE id=?", (PUBLIC_EDITOR,)).fetchone()
                 kind = "human"
         if not row:
-            raise HTTPException(401, "请使用个人访问码登录")
+            raise HTTPException(401, "agent 上报凭证无效")
         return dict(row), kind
 
     @app.get(prefix + "/")
@@ -177,31 +175,12 @@ def create_app(directory, origin="http://127.0.0.1:18770", base_path="/superran"
             db.execute("SELECT 1 FROM works LIMIT 1").fetchone()
         return {"ok": True}
 
-    @app.post(prefix + "/api/login")
-    def login(body: Login, response: Response):
-        with store.db(True) as db:
-            row = db.execute("SELECT id FROM members WHERE browser_hash=?", (digest(body.token),)).fetchone()
-            if not row:
-                raise HTTPException(401, "访问码不正确")
-            token = secrets.token_urlsafe(32)
-            db.execute("DELETE FROM sessions WHERE expires<?", (time.time(),))
-            db.execute("INSERT INTO sessions VALUES(?,?,?)", (digest(token), row[0], time.time()+86400*7))
-        response.set_cookie("superran_session", token, max_age=86400*7, httponly=True, secure=parts.scheme == "https", samesite="strict", path=cookie_path)
-        return {"ok": True}
-
-    @app.post(prefix + "/api/logout")
-    def logout(request: Request, response: Response):
-        with store.db(True) as db:
-            db.execute("DELETE FROM sessions WHERE hash=?", (digest(request.cookies.get("superran_session", "")),))
-        response.delete_cookie("superran_session", path=cookie_path)
-        return {"ok": True}
-
     @app.get(prefix + "/api/state")
     def state(request: Request):
         me, _ = user(request)
         with store.db() as db:
             return {"me": {k: me[k] for k in ("id", "name", "role")},
-                    "members": [dict(r) for r in db.execute("SELECT id,name FROM members ORDER BY name")],
+                    "members": [dict(r) for r in db.execute("SELECT id,name FROM members WHERE id!=? ORDER BY name", (PUBLIC_EDITOR,))],
                     "works": [public_work(r) for r in db.execute("SELECT * FROM works ORDER BY updated DESC")], "at": time.time()}
 
     @app.get(prefix + "/api/works/{wid}")
@@ -230,10 +209,12 @@ def create_app(directory, origin="http://127.0.0.1:18770", base_path="/superran"
             raise HTTPException(422, "同一字段不能同时修改和交回 agent")
         if kind == "agent" and (body.release or body.source == "human"):
             raise HTTPException(403, "agent 不能解除人工保护或冒充人工修改")
+        if kind == "human" and body.source not in ("human", "agent"):
+            raise HTTPException(401, "以 agent 来源上报需要有效凭证")
         source = "human" if kind == "human" else body.source
         with store.db(True) as db:
             row = db.execute("SELECT * FROM works WHERE id=?", (wid,)).fetchone()
-            if row and row["owner"] != me["id"] and not (kind == "human" and me["role"] == "admin"):
+            if row and kind == "agent" and row["owner"] != me["id"]:
                 raise HTTPException(403, "只能修改自己的记录")
             seen = db.execute("SELECT * FROM events WHERE member=? AND id=?", (me["id"], str(body.event_id))).fetchone()
             if seen:
@@ -245,6 +226,11 @@ def create_app(directory, origin="http://127.0.0.1:18770", base_path="/superran"
                 raise HTTPException(409, {"message": "记录已更新，请先核对最新内容；草稿已保留", "revision": current})
             if not row and (not changes.get("title") or body.release):
                 raise HTTPException(422, "新记录需要标题")
+            owner = row["owner"] if row else (str(body.owner) if kind == "human" and body.owner else me["id"])
+            if owner == PUBLIC_EDITOR or not db.execute("SELECT 1 FROM members WHERE id=?", (owner,)).fetchone():
+                raise HTTPException(422, "请选择工作负责人")
+            if body.owner is not None and str(body.owner) != owner:
+                raise HTTPException(422, "不能通过更新改换负责人")
             values = json.loads(row["fields"]) if row else {"title": "", "status": "进行中", "progress": "", "result_url": ""}
             locks = set(json.loads(row["locks"])) if row else set()
             protected = sorted(set(changes) & locks) if kind == "agent" else []
@@ -256,7 +242,7 @@ def create_app(directory, origin="http://127.0.0.1:18770", base_path="/superran"
             locks.difference_update(body.release)
             now = time.time()
             db.execute("INSERT INTO works VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,fields=excluded.fields,locks=excluded.locks,updated=excluded.updated,source=excluded.source",
-                       (wid, row["owner"] if row else me["id"], current+1, packed(values), packed(sorted(locks)), now, source))
+                       (wid, owner, current+1, packed(values), packed(sorted(locks)), now, source))
             fresh = db.execute("SELECT * FROM works WHERE id=?", (wid,)).fetchone()
             result = {"work": public_work(fresh), "applied": applied, "protected": protected, "released": body.release}
             db.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,?)", (me["id"], str(body.event_id), fingerprint, wid, now, source, packed(raw), packed(result)))

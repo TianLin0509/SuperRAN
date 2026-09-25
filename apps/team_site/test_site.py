@@ -40,13 +40,12 @@ def write(client, config, wid=None, revision=0, changes=None, **kwargs):
 
 
 def human(client, config):
-    result = client.post("/superran/api/login", json={"token": config["browser_token"]})
-    assert result.status_code == 200
+    assert client.get("/superran/api/state").status_code == 200
 
 
 def test_auth_and_all_members_visibility(site):
     client, configs, _ = site
-    assert client.get("/superran/api/state").status_code == 401
+    assert client.get("/superran/api/state").status_code == 200
     result, wid, _ = write(client, configs[1])
     assert result.status_code == 200
     assert client.get("/superran/api/state", headers=headers(configs[2])).json()["works"][0]["id"] == wid
@@ -101,16 +100,21 @@ def test_invalid_updates(site, changes):
 
 def test_origin_headers_and_source(site):
     client, configs, _ = site
-    assert client.post("/superran/api/login", json={"token": configs[0]["browser_token"]}, headers={"Origin": "https://attacker.invalid"}).status_code == 403
+    wid = str(uuid4())
+    body = {"event_id": str(uuid4()), "expected_revision": 0, "owner": configs[1]["member"], "changes": {"title": "公开创建"}, "source": "human"}
+    url = "/superran/api/works/"+wid
+    assert client.put(url, json=body, headers={"Origin": "https://attacker.invalid"}).status_code == 403
     assert client.get("/superran/api/state", headers={"Host": "attacker.invalid"}).status_code == 400
-    assert client.post("/superran/api/login", json={"token": configs[0]["agent_token"]}).status_code == 401
+    assert client.put(url, json=body, headers={"Authorization": "Bearer invalid"}).status_code == 401
+    assert client.put(url, json={**body, "source": "codex"}).status_code == 401
+    assert client.put(url, json=body).status_code == 200
+    detail = client.get(url).json()
+    assert detail["work"]["owner"] == configs[1]["member"]
+    assert detail["history"][0]["name"] == "网页编辑（未署名）"
     assert write(client, configs[0], source="human")[0].status_code == 403
-    human(client, configs[0])
-    assert client.cookies.get("superran_session")
-    assert client.post("/superran/api/logout", json={}).status_code == 200
-    assert client.get("/superran/api/state").status_code == 401
+    assert client.post("/superran/api/login", json={}).status_code == 404
     client.headers.pop("X-SuperRAN-Request")
-    assert client.post("/superran/api/login", json={"token": configs[0]["browser_token"]}).status_code == 403
+    assert client.put(url, json=body).status_code == 403
 
 
 def test_restart_persists_and_rotation_revokes(site, tmp_path):
@@ -121,7 +125,7 @@ def test_restart_persists_and_rotation_revokes(site, tmp_path):
     assert TestClient(app2).get("/superran/api/works/"+wid, headers=headers(configs[1])).json()["work"] == result.json()["work"]
     issue(store, "乙", "member", tmp_path / "rotated.json", configs[1]["site"], rotate=True)
     assert client.get("/superran/api/state", headers=headers(configs[1])).status_code == 401
-    assert client.get("/superran/api/state").status_code == 401
+    assert client.get("/superran/api/state").status_code == 200
 
 
 def adapt_reporter(reporter, client, config):
@@ -202,17 +206,15 @@ def test_concurrent_same_revision_one_winner(site):
         assert db.execute("SELECT revision FROM works WHERE id=?", (wid,)).fetchone()[0] == 2
 
 
-def test_browser_cookie_is_http_only_https(tmp_path):
-    app = create_app(tmp_path / "data", "https://example.com")
-    private = tmp_path / "private.json"
-    issue(app.state.store, "组员", "member", private, "https://example.com/superran")
-    config = json.loads(private.read_text(encoding="utf-8"))
-    client = TestClient(app, base_url="https://example.com")
-    response = client.post("/superran/api/login", json={"token": config["browser_token"]}, headers={"X-SuperRAN-Request": "1"})
-    cookie = response.headers["set-cookie"]
-    assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=strict" in cookie
-    assert "Path=/superran/" in cookie
-    assert client.get("/superran/api/state").status_code == 200
+def test_public_read_does_not_expose_credentials(site):
+    client, configs, _ = site
+    response = client.get("/superran/api/state")
+    assert response.status_code == 200
+    assert "set-cookie" not in response.headers
+    assert len(response.json()["members"]) == 3
+    for config in configs:
+        assert config["agent_token"] not in response.text
+    assert "agent_hash" not in response.text and "browser_hash" not in response.text
 
 
 def test_static_prefix_and_no_private_files(site):

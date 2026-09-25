@@ -46,7 +46,6 @@ def main():
         if not path.exists():
             issue(store, name, role, path, site)
         configs.append(json.loads(path.read_text(encoding="utf-8")))
-    (directory / "browser-access.txt").write_text("本机演示站："+site+"/\n个人访问码：\n"+configs[0]["browser_token"]+"\n\n仅用于本机虚构数据预览，不是生产凭证。\n", encoding="utf-8")
     if not marker.exists():
         marker.write_text(json.dumps({"site": site, "seeded": False}), encoding="utf-8")
     with (directory / "server.log").open("ab") as log:
@@ -76,7 +75,7 @@ def main():
         settings["seeded"] = True
     settings["pid"] = process.pid
     marker.write_text(json.dumps(settings, indent=2), encoding="utf-8")
-    print(json.dumps({"url": site+"/", "access_file": str(directory / "browser-access.txt"), "pid": process.pid}, ensure_ascii=False))
+    print(json.dumps({"url": site+"/", "pid": process.pid}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
