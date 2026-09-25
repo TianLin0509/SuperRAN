@@ -879,8 +879,11 @@ def test_single_moving_multislot_window_is_not_rejected():
 
 
 def test_primary_docs_use_the_current_rt_time_and_capability_contract():
-    """主手册和 CLAUDE 不能继续发布已删除的轮次时间原点。"""
-    claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    """主手册和 CLAUDE（含拆到 docs/pitfalls/ 的坑全文）不能继续发布已删除的轮次时间原点。"""
+    claude = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in [ROOT / "CLAUDE.md",
+                     *sorted((ROOT / "docs" / "pitfalls").glob("*.md"))])
     compact = (ROOT / "scripts" / "make_developer_guide.py").read_text(
         encoding="utf-8")
     assert "当前 direct adapter 尚未实现" not in claude
