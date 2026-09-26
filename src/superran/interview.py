@@ -326,6 +326,7 @@ class Question:
     depends_on: tuple[str, ...] = ()
     # 平台默认会让这次研究失效：用户说“默认”时也不能沿用，改取推荐值并告知。
     blocking_default: Any = None
+    default: Any = None               # 参数题的当前默认值
     # 选了某个选项后自动生效的改动：{选项值: {"overrides": {...}, "note": "..."}}
     effects: dict[Any, dict[str, Any]] = field(default_factory=dict)
 
@@ -333,7 +334,10 @@ class Question:
         out = {"key": self.key, "question": self.question, "why": self.why,
                "options": self.options, "layer": self.layer, "priority": self.priority,
                "effects": {str(k): v for k, v in self.effects.items()},
-               "depends_on": list(self.depends_on)}
+               "depends_on": list(self.depends_on),
+               # 与旧提问格式兼容的字段
+               "default": self.default, "optional": False, "allow_free": True,
+               "examples": [o["label"] for o in self.options]}
         if self.blocking_default is not None:
             out["blocking_default"] = self.blocking_default
         return out
@@ -679,10 +683,12 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
                                   layer="design", priority=int(item.get("priority", 1)) - 1))
     if not family:
         for item in extra_params or []:
-            if item["key"] not in answered:
+            # 样本数由试点方差算出来（sr_sample_size），不问用户。
+            if item["key"] not in answered and item["key"] != "num_samples":
                 cands.append(Question(key=item["key"], question=item["question"],
                                       why=item["why"], options=item["options"],
-                                      layer="param", priority=2 + int(item.get("priority", 5))))
+                                      layer="param", priority=2 + int(item.get("priority", 5)),
+                                      default=item.get("default")))
     # 比较方法时“预期增益多大”（effect_size）已经承担了预期的作用。
     if "expectation" not in answered and form != "compare_methods":
         cands.append(_expectation_question(family))

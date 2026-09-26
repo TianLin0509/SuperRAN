@@ -273,7 +273,7 @@ MCP 冒烟：
 import asyncio; from superran import server
 print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.MCP_MAJOR)
 "
-# 期望：tools: 35
+# 期望：tools: 36
 ```
 
 ---
