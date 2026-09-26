@@ -613,6 +613,26 @@ async def sr_generate(
     return out
 
 
+def _auto_serving_cell(cell_ids_by_ue: list[int], sectors_per_site: int) -> tuple[int | None, str]:
+    """按实际撒点挑服务小区：优先中心站（站 0）的扇区，取 UE 最多且 ≥2 个的那个。
+
+    没有 wrap-around，边缘站邻区不完整会低估干扰，所以先看中心站；中心站扇区都不足
+    2 个 UE 时退到全网 UE 最多的小区，并如实说明它不是中心站。
+    """
+    counts = {c: cell_ids_by_ue.count(c) for c in sorted(set(cell_ids_by_ue))}
+    center = {c: n for c, n in counts.items() if c < max(int(sectors_per_site), 1) and n >= 2}
+    if center:
+        best = max(center, key=lambda c: (center[c], -c))
+        return best, f"自动选中心站扇区 {best}（{center[best]} 个 UE；各小区 UE 数 {counts}）"
+    ok = {c: n for c, n in counts.items() if n >= 2}
+    if ok:
+        best = max(ok, key=lambda c: (ok[c], -c))
+        return best, (f"中心站扇区都不足 2 个 UE，退选小区 {best}（{ok[best]} 个 UE，不是中心站，"
+                      f"邻区可能不完整）；各小区 UE 数 {counts}")
+    return None, (f"没有任何小区有 ≥2 个 UE，测不出调度；各小区 UE 数 {counts}。"
+                  "请提高撒点密度（每扇区约 10 个 UE）后重新生成")
+
+
 def _generate_sync(
     *,
     draft_id: str | None,
@@ -2083,7 +2103,7 @@ def sr_system_sim(
     tti_trace_max_points: int = 256,
     kpi_focus: list[str] | None = None,
     kpi_intent: str = "",
-    serving_cell: int | None = None,
+    serving_cell: int | str | None = None,
     ca_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI，全部带置信区间。**
@@ -2197,7 +2217,9 @@ def sr_system_sim(
     serving_cell : 多小区数据集里只取这个 serving cell 的 UE 做单小区调度。
         **3GPP TR 36.814 的标准撒点密度是每扇区 10 个 UE**，7 站 21 扇区就要撒
         210 个；而本仿真器一次只调度一个小区，所以必须能挑出属于某个小区的那批。
-        不给（默认）时，多小区数据集仍按原来那样硬失败。
+        不给（默认）时，多小区数据集仍按原来那样硬失败。给 ``"auto"`` 时按实际撒点
+        在中心站扇区里挑 UE 最多且 ≥2 个的小区（都不足时退选全网 UE 最多的小区并说明），
+        理由写进 ``serving_cell_selection.auto_reason``。
         挑哪个小区是**物理选择**：拓扑没有 wrap-around，边缘站的邻区不完整、
         干扰被低估，应当挑被邻区包围最完整的中心站小区；结果里的
         ``serving_cell_selection`` 会回报实际选中的小区、它有几个 UE，以及
@@ -2497,10 +2519,16 @@ def sr_system_sim(
 
     # --- 按 serving cell 挑出单小区的那批 UE ------------------------------
     serving_cell_selection: dict[str, Any] | None = None
+    auto_reason = None
+    if isinstance(serving_cell, str) and serving_cell.strip().lower() == "auto":
+        serving_cell, auto_reason = _auto_serving_cell(
+            serving_cell_ids_by_ue, int(ds.config.get("sectors_per_site", 1) or 1))
+        if serving_cell is None:
+            return {"error": auto_reason}
     if serving_cell is not None:
         if (isinstance(serving_cell, bool)
                 or not isinstance(serving_cell, (int, np.integer))):
-            return {"error": "serving_cell 必须是整数小区编号或 None"}
+            return {"error": "serving_cell 必须是整数小区编号、\"auto\" 或 None"}
         # _flag 在下面才定义；这里内联同一判据（"off"/"false"/"0" 等字符串
         # 直接 bool() 会是真值，开关会无声失灵）。
         _rbpc_raw = rb_power_control_enabled
@@ -2577,6 +2605,7 @@ def sr_system_sim(
                     _iot_note = "选中小区所有样本 SIR<=SINR，IoT 无有限值"
         serving_cell_selection = {
             "requested": target_cell,
+            "auto_reason": auto_reason,
             "ues_in_cell": len(selected_ues),
             "ues_in_dataset": int(n_ue),
             "cells_in_dataset": len(set(serving_cell_ids_by_ue)),

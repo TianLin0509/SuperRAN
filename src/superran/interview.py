@@ -54,7 +54,9 @@ _METHOD_WORDS = ("算法", "方案", "码本", "预编码", "调度器", "压缩
                  "我的方法", "新方法", "type i", "type ii", "svd", "mmse", "zf", "pf",
                  "edf", "cort", "网络", "模型训练")
 _COMPARE_WORDS = ("比", "对比", "相对", "vs", "提升", "增益", "优于", "基线", "好不好")
-_DELIVER_WORDS = ("不比", "不做对比", "只要", "只需要", "给我", "交付", "导出", "数据集")
+_DELIVER_WORDS = ("只要", "只需要", "给我", "交付", "导出", "数据集")
+# 交付数据必须真的在要数据：出现这些名词才算（“给我看看站距的影响”不是交付）。
+_DATA_NOUNS = ("信道", "数据", "样本", "pdp", "pmi", "csi", "快照", "矩阵")
 _CHANGE_WORDS = ("变化", "影响", "改到", "改成", "扫", "随", "不同", "对比", "比较", "差多少",
                  "掉多少")
 _CONDITION_KEYS = {
@@ -91,6 +93,38 @@ def _num_list(text: str) -> list[float]:
     return [float(x) for x in re.findall(r"\d+(?:\.\d+)?", text)]
 
 
+_NUM = r"[-−]?\d+(?:\.\d+)?(?:e[+-]?\d+)?"
+# 扫描变量的合法范围（换算到配置单位之后）
+_SWEEP_RANGE = {
+    "isd_m": (10.0, 10000.0), "tx_power_dbm": (-30.0, 60.0), "bandwidth_hz": (1e6, 400e6),
+    "neighbor_prb_util": (0.0, 1.0), "target_prb_utilization": (0.0, 1.0),
+    "srs_period_ms": (1.0, 640.0), "ue_speed_kmh": (0.0, 600.0),
+}
+
+
+def parse_sweep_values(text: str, key: str) -> tuple[list[float], list[str]]:
+    """把扫描取值换算到配置单位：保留科学计数法、百分比、MHz/GHz/km/h（审核 R2-4）。
+
+    返回 (取值, 问题)。问题非空时说明有数值越界或无法换算，调用方不应记为已答。
+    """
+    raw = str(text).lower().replace("−", "-")
+    tokens = re.findall("(" + _NUM + r")\s*(%|mhz|ghz|khz|hz|ms|km/h|dbm|m)?", raw)
+    vals: list[float] = []
+    for num, unit in tokens:
+        v = float(num)
+        if unit == "%" or (key in {"neighbor_prb_util", "target_prb_utilization"} and v > 1.0):
+            v /= 100.0
+        elif key == "bandwidth_hz":
+            v *= {"ghz": 1e9, "mhz": 1e6, "khz": 1e3, "hz": 1.0}.get(unit, 1e6 if v < 1e4 else 1.0)
+        vals.append(v)
+    problems = []
+    lo, hi = _SWEEP_RANGE.get(key, (float("-inf"), float("inf")))
+    bad = [v for v in vals if not (lo <= v <= hi)]
+    if bad:
+        problems.append(f"{key} 的取值 {bad} 超出合法范围 [{lo:g}, {hi:g}]")
+    return vals, problems
+
+
 def read_brief(intent: str) -> Brief:
     """识别原话里已经给出的条件。只认能明确定位到原文的写法。"""
     raw = intent or ""
@@ -102,14 +136,10 @@ def read_brief(intent: str) -> Brief:
         from .plan import _ANTENNA_PRESETS  # noqa: PLC0415
 
         label = f"{m.group(1)}T{m.group(2)}R"
-        if label in _ANTENNA_PRESETS:
-            b.params["antenna_preset"] = label
-            b.evidence.append(f"「{m.group(0)}」→ 阵型 {label}")
-        else:
-            # 审核 F1：不认识的阵型不能静默沿用预设（256T 请求曾生成 64T）。
-            b.unsupported.append(f"阵型 {label} 不在支持列表 {sorted(_ANTENNA_PRESETS)}，"
-                                 "不能静默换成预设阵型")
-            b.evidence.append(f"「{m.group(0)}」→ 阵型 {label}（不支持，已阻断）")
+        # 照原话记下阵型；支持与否每轮按当前阵型重新判断（审核 R2-3），不在这里定死。
+        b.params["antenna_preset"] = label
+        b.evidence.append(f"「{m.group(0)}」→ 阵型 {label}"
+                          + ("" if label in _ANTENNA_PRESETS else "（不支持，已阻断）"))
     m = re.search(r"(?<![a-z])(cdl|tdl)\s*-?\s*([a-e])(?![a-z])", text)
     if m:
         b.params["channel_model"] = f"{m.group(1).upper()}-{m.group(2).upper()}"
@@ -155,9 +185,6 @@ def read_brief(intent: str) -> Brief:
         from .plan import _ANTENNA_PRESETS  # noqa: PLC0415
 
         vals = [f"{m.group(1)}T4R", f"{m.group(2)}T4R"]
-        for v in vals:
-            if v not in _ANTENNA_PRESETS:
-                b.unsupported.append(f"阵型 {v} 不在支持列表 {sorted(_ANTENNA_PRESETS)}")
         b.sweep = {"key": "antenna_preset", "values": vals}
         b.params.pop("antenna_preset", None)
         b.evidence.append(f"「{m.group(0)}」→ 比较天线规模 {vals}")
@@ -188,6 +215,14 @@ def read_brief(intent: str) -> Brief:
     if m:
         b.sweep = {"key": "srs_period_ms", "values": [float(m.group(1)), float(m.group(2))]}
         b.evidence.append(f"「{m.group(0)}」→ 扫 SRS 周期 {b.sweep['values']} ms")
+
+    # 原话里的硬要求：与选项回答走同一套阻断检查，推荐项不能替用户放弃（审核 R2-2）。
+    if re.search(r"(必须|需要|要|考虑|包含|带)[^，,。]{0,8}(室内穿透|穿透损耗|o2i|室内用户)", text):
+        b.design["indoor_users"] = "need_o2i"
+        b.evidence.append("原话要求室内穿透损耗 → 当前平台不支持，已阻断")
+    if re.search(r"最早截止|截止时间|deadline", text):
+        b.design["edf_meaning"] = "deadline_first"
+        b.evidence.append("原话指定最早截止时间优先调度 → 本平台只有最早排空优先，已阻断")
 
     # 基线：比较词后面紧跟的方法名
     # 基线必须是明确的比较句式（“跟 X 比 / 相对 X / 以 X 为基线 / vs X”）；
@@ -239,11 +274,12 @@ def classify_form(intent: str, brief: Brief) -> tuple[str | None, str]:
     # 审核 F10：“不做算法对比 / 不比算法”是否定句，不能因为出现“算法”“对比”就判成比较。
     negated = re.search(r"不(?:做|要|需要|用|进行)?\s*(?:算法|方案|方法)?\s*(?:对比|比较|比)",
                         text) is not None
+    # 否定只取消“比较方法”，不取消刻画一个量或扫条件（审核 R2-8）。
     has_method = any(w in text for w in _METHOD_WORDS) and not negated
     has_compare = any(w in text for w in _COMPARE_WORDS) and not negated
-    if negated or (any(w in text for w in _DELIVER_WORDS) and not has_method):
-        if negated or any(w in text for w in _DELIVER_WORDS):
-            return "deliver", "原话要数据、不做比较"
+    wants_data = any(w in text for w in _DELIVER_WORDS) and any(n in text for n in _DATA_NOUNS)
+    if wants_data and not has_method:
+        return "deliver", "原话要数据、不做比较"
     if has_method and (has_compare or "验证" in text):
         return "compare_methods", "原话在比较或验证一个方法/方案"
     if brief.sweep or (
@@ -281,6 +317,7 @@ SOURCE_SAID = "原话"
 SOURCE_ANSWERED = "用户确认"
 SOURCE_PRESET = "预设/平台默认"
 SOURCE_LIMIT = "平台未实现（写进结论边界）"
+SOURCE_DERIVED = "由用户选的组合选项带出"
 
 
 def ledger(family: str | None, params: dict[str, Any], provenance: dict[str, str],
@@ -331,6 +368,9 @@ def ledger(family: str | None, params: dict[str, Any], provenance: dict[str, str
 # ---------------------------------------------------------------------------
 
 MAX_PER_ROUND = 3
+
+# 只能由用户本人给出的内容：按推荐跑时不代答，也不记为“用户确认”。
+USER_CONTENT_KEYS = frozenset({"expectation", "effect_size"})
 
 # 系统层键的平台默认（与 sr_system_sim 签名一致，test_e2e 核对）。
 _SYSTEM_DEFAULTS: dict[str, Any] = {
@@ -697,7 +737,8 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
             mq.depends_on = edf_dep
             cands.append(mq)
     sweep_q = None
-    if form == "sweep_condition" and sweep_key and not brief.sweep and "sweep_values" not in answered:
+    has_values = bool(brief.sweep and brief.sweep.get("values"))
+    if form == "sweep_condition" and sweep_key and not has_values and "sweep_values" not in answered:
         sweep_q = _sweep_question(sweep_key, family, params)
         cands.append(sweep_q)
     if form in {"characterize", "sweep_condition"} and "quantity" not in answered:
@@ -754,7 +795,9 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
             # 比较方法时“看什么指标”是其余问题的前提，排在最前。
             cands.append(Question(key=item["key"], question=item["question"],
                                   why=item["why"], options=item["options"],
-                                  layer="design", priority=int(item.get("priority", 1)) - 1))
+                                  layer="design", priority=int(item.get("priority", 1)) - 1,
+                                  # 预期增益是用户的判断，不能按推荐代答（审核 R2-9）
+                                  user_content=item["key"] in USER_CONTENT_KEYS))
     if not family:
         for item in extra_params or []:
             # 样本数由试点方差算出来（sr_sample_size），不问用户。

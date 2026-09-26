@@ -343,7 +343,7 @@ check(c1.get("num_bs_tx_ant") == 256 and _c1["bs_panel"] == [16, 8, 2]
       and _c1["_array_defaults_applied"] == "company_256t_1to6_1536ae" and c1.get("num_samples") == 2,
       "F1：256T4R 请求落到 256 端口、16×8×2、1 驱 6，数量 2")
 d1b, p1b, _, _ = _final("给我2个128T4R信道，不比算法")
-check("request" in _blocks(d1b, p1b), "F1：不支持的 128T4R 阻断生成")
+check("antenna_preset" in _blocks(d1b, p1b), "F1：不支持的 128T4R 阻断生成")
 # F2 本小区负载与邻区负载分开；归属不明先问并阻断
 d2, p2, _, _ = _final("对比本小区负载30%到90%时的边缘速率", accept_recommended=True)
 check(d2.sweep["key"] == "target_prb_utilization" and "target_prb_utilization" not in pl.system_params(d2),
@@ -364,7 +364,7 @@ check(c4.get("tx_height_m") == 10.0 and c4.get("scenario") == "UMi_NLOS" and c4.
       "F4：微站落实 10 m 站高、UMi、33 dBm，站距档位改为 100/150/250 m")
 # F5 系统级实验必须有时间轴；预算冲突阻断
 d5, p5, _, _ = _final("SRS 周期从 10 ms 改到 20 ms，看 120 km/h 用户的边缘速率", accept_recommended=True)
-check(pl.snapshots_per_ue(d5.params) >= 8 and pl.system_params(d5).get("serving_cell") == 1
+check(pl.snapshots_per_ue(d5.params) >= 8 and pl.system_params(d5).get("serving_cell") == "auto"
       and not _blocks(d5, p5), "F5：按推荐后每 UE ≥8 快照并指定服务小区")
 d5b, p5b, _, _ = _final("SRS 周期从 10 ms 改到 20 ms，看 120 km/h 用户的边缘速率，给我 50 个样本",
                         accept_recommended=True)
@@ -400,6 +400,53 @@ check(iv.read_brief("发射功率 -10 dBm").params.get("tx_power_dbm") == -10.0
       and iv.read_brief("看UMi场景的SIR").params.get("scenario") == "UMi_NLOS",
       "原话解析：负功率与紧贴中文的 UMi")
 
+# ---- 审核第二轮（codex1 R2）：改口、分轮补答、单位换算、原话硬要求 ----
+def _rv(did, **kw):
+    return srv.sr_revise(did, **kw)
+
+
+_p = srv.sr_plan("对比带宽对SINR的影响")
+check(_rv(_p["draft_id"], accept_recommended=True)["brief"]["sweep"]["values"] == [20e6, 40e6, 100e6],
+      "R2-4：带宽档位保留 MHz 量纲（20/40/100 MHz → Hz）")
+_p = srv.sr_plan("对比本小区负载30%到90%时的边缘速率")
+check(_rv(_p["draft_id"], design={"sweep_values": "20%/80%"})["brief"]["sweep"]["values"] == [0.2, 0.8],
+      "R2-4：百分比档位换算为 0.2/0.8")
+_p = srv.sr_plan("对比站距下的干扰变化")
+_rv(_p["draft_id"], design={"deployment": "urban_macro"})
+_c = _rv(_p["draft_id"], design={"deployment": "urban_micro"}, accept_recommended=True)["resolved_config"]
+check((_c["scenario"], _c["tx_height_m"], _c["tx_power_dbm"]) == ("UMi_NLOS", 10.0, 33.0),
+      "R2-5：宏站改选微站后执行配置随之更新")
+_p = srv.sr_plan("对比负载对边缘速率的影响")
+_rv(_p["draft_id"], design={"load_owner": "target_prb_utilization"})
+check(_rv(_p["draft_id"], design={"sweep_values": "0.3/0.9"})["brief"]["sweep"]["key"]
+      == "target_prb_utilization", "R2-6：先答负载归属、后给档位，归属不丢")
+_p = srv.sr_plan("CSI压缩，跟Type II比，64T4R")
+check("effect_size" not in _rv(_p["draft_id"], accept_recommended=True)["answered_design"],
+      "R2-9：按推荐跑不代答预期增益")
+check(srv.sr_plan("不比算法，只想看密集城区下行SINR分布")["form"] == "characterize"
+      and srv.sr_plan("对比站距200/500/1000 m下的干扰，不做算法对比")["form"] == "sweep_condition",
+      "R2-8：否定只取消方法比较，保留刻画与扫描")
+_p = srv.sr_plan("只要20个64T4R信道")
+check(any(x["severity"] == "block"
+          for x in _rv(_p["draft_id"], overrides={"antenna_preset": "128T4R"})["issues"]),
+      "R2-3：改成不支持的阵型要阻断")
+_p = srv.sr_plan("只要20个128T4R信道")
+check(not any(x["severity"] == "block"
+              for x in _rv(_p["draft_id"], overrides={"antenna_preset": "64T4R"})["issues"]),
+      "R2-3：改回支持的阵型后解锁")
+_p = srv.sr_plan("评估密集城区下行SINR分布，必须考虑室内穿透损耗")
+check(any(x["severity"] == "block" for x in _rv(_p["draft_id"], accept_recommended=True)["issues"]),
+      "R2-2：原话要求 O2I，按推荐跑也不能消掉阻断")
+_p = srv.sr_plan("比较PF和EDF最早截止时间优先调度的小包时延")
+check(any(x["severity"] == "block" for x in _rv(_p["draft_id"], accept_recommended=True)["issues"]),
+      "R2-2：原话指定截止时间调度，按推荐跑也不能换成排空优先")
+# R2-7：服务小区按实际撒点挑，中心站优先、至少 2 个 UE
+check(srv._auto_serving_cell([0, 0, 3, 7, 7, 7], 3)[0] == 0,
+      "R2-7：中心站扇区有 ≥2 个 UE 时选它")
+check(srv._auto_serving_cell([1, 3, 7, 7, 7], 3)[0] == 7,
+      "R2-7：中心站扇区都不足 2 个 UE 时退选 UE 最多的小区并说明")
+check(srv._auto_serving_cell([0, 1, 2], 3)[0] is None, "R2-7：没有小区 ≥2 个 UE 时报错而不是硬选")
+
 # “按推荐跑”：所有待问问题取推荐项；False 也是合法回答；预期只能由用户本人给
 d_acc, _, _ = pl.revise_draft(d_srs.draft_id, accept_recommended=True)
 pr_acc = pl.build_proposal(d_acc, dec.classify_intent(d_acc.intent))
@@ -412,7 +459,8 @@ check("expectation" not in d_acc.design and pr_acc["needs_user_content"] == ["ex
 d2, _, ch2 = pl.revise_draft(d_isd.draft_id, design={"deployment": "urban_micro"})
 check(d2.params.get("scenario") == "UMi_NLOS" and d2.params.get("tx_power_dbm") == 33.0,
       "选“街道微站”后场景与功率随之改为 UMi / 33 dBm")
-check(d2.provenance.get("tx_power_dbm") == iv.SOURCE_ANSWERED, "改动来源记为用户确认")
+# R2-5：组合选项带出的值记为“选项带出”，不是用户独立锁定，改选部署时可以更新
+check(d2.provenance.get("tx_power_dbm") == iv.SOURCE_DERIVED, "改动来源记为由部署选项带出")
 pr2 = pl.build_proposal(d2, p_isd)
 check(not any("发射功率" in x for x in pr2["assumption_ledger"]["silently_assumed"]),
       "确认后发射功率不再是沉默假设")

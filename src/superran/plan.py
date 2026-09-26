@@ -435,16 +435,18 @@ def _apply_answer(d: Draft, key: str, value: Any, changes: list[str]) -> None:
     if value is None or value == "":  # False / 0 是合法回答（例如“关掉自适应”）
         return
     if key == "sweep_values":
-        nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", str(value))]
-        if not nums:
-            changes.append(f"扫描取值「{value}」里没有具体数值，未记为已答；请给出数值")
-            return
         skey = (d.sweep or {}).get("key") or iv.sweep_key_from_intent(d.intent, iv.Brief()) or "?"
+        nums, problems = iv.parse_sweep_values(str(value), skey)
+        if not nums or problems:
+            changes.append(f"扫描取值「{value}」" + ("；".join(problems) if problems else "里没有具体数值")
+                           + "，未记为已答；请给出合法数值")
+            return
         old = (d.sweep or {}).get("values")
         d.sweep = {"key": skey, "values": nums}
         changes.append(f"扫描 {skey}: {old} → {nums}")
-    if key == "load_owner" and d.sweep:
-        d.sweep = {**d.sweep, "key": str(value)}
+    if key == "load_owner":
+        # 先答归属、后给档位也要成立（审核 R2-6）：没有取值时先把扫描变量存下来。
+        d.sweep = {**(d.sweep or {"values": []}), "key": str(value)}
         changes.append(f"负载归属确认为 {value}，扫描变量改为 {value}")
     d.design[key] = str(value)
     d.provenance[key] = iv.SOURCE_ANSWERED
@@ -456,6 +458,7 @@ def _apply_answer(d: Draft, key: str, value: Any, changes: list[str]) -> None:
         apply: dict[str, Any] = {}
         for kk, vv in eff["overrides"].items():
             # 原话或用户直接给过的值不被组合推荐覆盖（审核 F3：53 dBm 被部署推荐改成 46）。
+            # 只有原话或用户直接给的值才锁定；由上一个组合选项带出的值可以随改选更新（审核 R2-5）。
             if d.provenance.get(kk) in {iv.SOURCE_SAID} or (
                     kk in d.user_set and d.provenance.get(kk) == iv.SOURCE_ANSWERED
                     and kk != key):
@@ -469,7 +472,7 @@ def _apply_answer(d: Draft, key: str, value: Any, changes: list[str]) -> None:
         for kk, vv in apply.items():
             if before.get(kk) != vv:
                 changes.append(f"{kk}: {before.get(kk)!r} → {vv!r}（由 {key}={value} 带出）")
-            d.provenance[kk] = iv.SOURCE_ANSWERED
+            d.provenance[kk] = iv.SOURCE_DERIVED
             if kk not in d.user_set:
                 d.user_set.append(kk)
     if eff.get("note"):
@@ -512,7 +515,8 @@ def revise_draft(
     if accept_recommended:
         for _ in range(8):  # 依赖链逐层展开：答完一层，下一层才进入前沿
             st = interview_state(d, profile)
-            todo = [q for q in st["pending"] if not q.user_content]
+            todo = [q for q in st["pending"]
+                    if not q.user_content and q.key not in iv.USER_CONTENT_KEYS]
             if not todo:
                 break
             progressed = False
@@ -598,6 +602,16 @@ def interview_blockers(d: Draft, num_samples: int | None = None) -> list[dict[st
     for msg in d.blockers:
         out.append({"severity": "block", "key": "request", "message": msg,
                     "suggestion": "改成支持的条件，或确认放弃这一项"})
+    # 阵型按当前状态判断：改成不支持的要阻断，改回支持的就解锁（审核 R2-3）。
+    requested = [str(d.params["antenna_preset"])] if d.params.get("antenna_preset") else []
+    if d.sweep and d.sweep.get("key") == "antenna_preset":
+        requested += [str(v) for v in d.sweep.get("values", [])]
+    bad = sorted({a for a in requested if a not in _ANTENNA_PRESETS})
+    if bad:
+        out.append({"severity": "block", "key": "antenna_preset",
+                    "message": f"阵型 {bad} 不在支持列表 {sorted(_ANTENNA_PRESETS)}；"
+                               "不能静默换成预设阵型生成",
+                    "suggestion": "改成支持的阵型"})
     if d.design.get("indoor_users") == "need_o2i":
         out.append({"severity": "block", "key": "indoor_users",
                     "message": "你要求必须有室内穿透损耗（O2I），平台当前没有这个机制；"
@@ -608,7 +622,10 @@ def interview_blockers(d: Draft, num_samples: int | None = None) -> list[dict[st
                     "message": "你要比的是最早截止时间优先（Earliest Deadline First），"
                                "本平台只有最早排空优先（Earliest Drain First）。",
                     "suggestion": "先实现截止时间调度器，或改比平台已有的调度器"})
-    if d.sweep and d.sweep.get("key") == "load?":
+    from . import interview as _iv  # noqa: PLC0415
+
+    _skey = (d.sweep or {}).get("key") or _iv.sweep_key_from_intent(d.intent, _iv.Brief())
+    if _skey == "load?" and d.form == "sweep_condition":
         out.append({"severity": "block", "key": "load_owner",
                     "message": "原话里的“负载”没说是本小区还是邻区：前者改变排队竞争，后者改变干扰。",
                     "suggestion": "回答 load_owner（本小区 / 邻区）"})
@@ -649,8 +666,9 @@ def system_params(d: Draft) -> dict[str, Any]:
         if f.layer == "system" and f.config_key and f.key in d.design:
             out[f.config_key] = _typed(d.design[f.key])
     if d.family == "dl_experience" and int(d.params.get("num_sites", 1) or 1) > 1:
-        # 多小区数据只调度一个服务小区；1 是中心站的一个扇区（sys_multicell_center_cell 口径）。
-        out["serving_cell"] = 1
+        # 多小区数据只调度一个服务小区：由 sr_system_sim 按实际撒点在中心站扇区里挑
+        # UE 最多（且 ≥2 个）的小区，不盲填常量（审核 R2-7：小区 1 可能没有 UE）。
+        out["serving_cell"] = "auto"
     return out
 
 
