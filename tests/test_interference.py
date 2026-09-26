@@ -246,7 +246,14 @@ sect("7  设计提示")
 
 hint = itf.design_hint(20.0)
 check(hint["band"] == "高干扰", "目标 20 dB 归入高干扰档")
-check(abs(hint["equivalent_load"] - 0.99) < 1e-3, "20 dB 对应等效负载 0.99")
+check(abs(hint["noise_sinr_loss_db"] - 10 * math.log10(100 / 99)) < 1e-3,
+      "20 dB 时噪声只让 SINR 比 SIR 低 0.044 dB（下行口径，不再折算上行负载）")
+check("equivalent_load" not in hint, "下行设计提示不再给上行口径的等效负载")
+check(all(not str(x["key"]).startswith(("pusch_load", "num_interfering_ues"))
+          for x in hint["levers"]), "只做下行：不列上行旋钮")
+check("33 dBm" in hint["levers_measured_under"],
+      "旋钮实测数字带着测量条件一起给，不被当成任意场景的预期")
+check(any("O2I" in x for x in hint["not_modeled"]), "设计提示列出未建模的室内/O2I")
 check(len(hint["levers"]) >= 5, "至少列出 5 个旋钮")
 check(all({"key", "direction", "why", "note"} <= set(x) for x in hint["levers"]),
       "每个旋钮都说清方向、原因与注意事项")
@@ -274,7 +281,9 @@ iot_block = summ.get("iot")
 check(isinstance(iot_block, dict) and "dl" in iot_block, "summary 里有 iot 块")
 dl = iot_block["dl"]
 print(f"  下行 IoT 中位数 {dl['median_db']} dB，{dl['classification']['band']}，"
-      f"等效负载 {dl['classification']['equivalent_load']}")
+      f"噪声令 SINR 低于 SIR {dl['classification']['noise_sinr_loss_db']} dB")
+check("ul" not in iot_block and iot_block.get("scope") == "downlink",
+      "数据集摘要只给下行 IoT，不给占位值推出的上行 IoT")
 check(dl["n_valid"] > 0, "有有效 IoT 样本")
 check(dl["median_db"] is not None and dl["median_db"] > 0,
       "多小区场景的 IoT 大于 0 dB（干扰确实存在）")
@@ -290,6 +299,11 @@ rep = itf.interference_report(summ["dataset_id"])
 check(rep["traffic_domain"]["dl"]["iot"]["n_valid"] > 0, "报告里有业务域 IoT")
 check(rep["iot_exact"] is True, "num_slots_per_sample=1 时 IoT 标为精确")
 check(isinstance(rep["notes"], list), "报告带 notes")
+check(rep["scope"] == "downlink" and "ul" not in rep["traffic_domain"],
+      "报告只含下行业务域")
+check(any("O2I" in x for x in rep["not_modeled"])
+      and any("负载" in x for x in rep["not_modeled"]),
+      "报告列出会改变下行 IoT 但未建模的室内/O2I 与邻区负载")
 
 # 新增的测量域列即使在 DL-only 场景下也要存在（值为 nan），
 # 否则并行合并时两块的字段集会不一致。
@@ -432,20 +446,22 @@ rep2 = itf.interference_report(summ2["dataset_id"])
 
 md = rep2.get("measurement_domain", {})
 print("  测量域：" + ", ".join(md) if md else "  测量域：空")
-check("ul_srs" in md, "paired 模式下拿到了 SRS 测量域 SIR")
+check("ul_srs" in md, "paired 模式下有 SRS 测量域一栏")
 if "ul_srs" in md:
     srs = md["ul_srs"]
-    print(f"  SRS 测量 SIR 中位数 {srs['sir_dB']['median']} dB -> "
-          f"{srs['classification']['band']}；NMSE 底 {srs['nmse_floor_db']} dB")
-    check(srs["sir_dB"]["n"] > 0, "SRS 测量 SIR 有有效样本")
-    check(srs["nmse_floor_db"] is not None, "给出了估计 NMSE 下限")
-
-# 业务域与测量域是两个独立的量，不该恰好相等
-if "ul_srs" in md and rep2["traffic_domain"].get("dl"):
-    a = md["ul_srs"]["sir_dB"]["median"]
-    b = rep2["traffic_domain"]["dl"]["sir_dB"]["median"]
-    check(a is not None and b is not None and abs(a - b) > 0.01,
-          f"测量域 SIR({a}) 与业务域 SIR({b}) 是不同的量")
+    # 当前 first-party 源的 SRS 导频 SIR 是 10 - 10·log10(干扰 UE 数) 的解析式，
+    # 不随几何变化。报告必须如实标注，不能再给它分级、算 NMSE 底。
+    want = 10.0 - 10.0 * math.log10(int(cfg2["num_interfering_ues"]))
+    print(f"  SRS 测量 SIR 中位数 {srs['sir_dB']['median']} dB（解析式 {want:.2f}）"
+          f" -> model={srs.get('model')}")
+    check(abs(srs["sir_dB"]["median"] - want) < 0.01, "SRS 导频 SIR 等于按干扰 UE 数的解析式")
+    check(srs.get("model") == "analytic_placeholder", "SRS 导频 SIR 被标为解析占位")
+    check("classification" not in srs and "nmse_floor_db" not in srs,
+          "占位值不分级、不给 NMSE 下限")
+    check(any("ul_srs" in x for x in rep2["not_modeled"]), "not_modeled 里点名 SRS 导频")
+if "dl_csirs" in md:
+    check(md["dl_csirs"].get("model") == "same_as_traffic_sir",
+          "CSI-RS 导频 SIR 逐样本等于业务域 SIR 时标为复用、不分级")
 
 # ---------------------------------------------------------------------------
 sect("9.5  本地硬件：64T 1驱3 + 图示 256T 1驱6 / 0.67λ")

@@ -45,20 +45,36 @@ _NO_INTF_SENTINEL = 49.9   # 没有干扰源时的有限哨兵值
 
 # IoT 分级。**"20 dB 以上算高干扰"是硬约定**，档位按它对齐：>= 20 dB 一律
 # 落在"高干扰"或"极高干扰"，``high_interference`` 标志就是 ``>= 20``。
-# 其余切分参考负载—噪声抬升关系 η = 1 - 10^(-IoT/10)：
-#   3 dB -> 50% 负载、6 dB -> 75%、10 dB -> 90%、13 dB -> 95%、
-#   20 dB -> 99%、30 dB -> 99.9%。
+#
+# SuperRAN 当前只仿下行，所以每档的含义按下行物理写：IoT 回答的是"热噪声
+# 还剩多大影响"。SINR 比 SIR 低多少由它唯一决定：
+#     SIR - SINR = 10·log10(IoT / (IoT - 1))      （IoT 取线性值）
+#   3 dB -> 3.0 dB、6 dB -> 1.3 dB、13 dB -> 0.22 dB、20 dB -> 0.04 dB。
+# 旧版把 IoT 换算成"等效负载 1-1/IoT"，那是上行噪声抬升/CDMA 极点容量的
+# 关系，放在下行会把"信号和干扰都远高于噪声"误读成"小区快满载了"，已撤下。
 IOT_BANDS: tuple[tuple[float, str, str], ...] = (
-    (3.0, "轻载", "干扰远低于热噪声，等效负载 < 50%，接近单小区"),
-    (6.0, "低干扰", "干扰与热噪声同量级，等效负载 50%~75%"),
-    (13.0, "中等干扰", "干扰主导但仍有噪声余量，等效负载 75%~95%"),
-    (20.0, "较高干扰", "干扰主导，等效负载 95%~99%，但还没到现场认定的高干扰线"),
-    (30.0, "高干扰", "等效负载 99%~99.9%，链路自适应会持续压在低阶 MCS"),
-    (float("inf"), "极高干扰", "等效负载 > 99.9%，接近极点容量，边缘用户基本不可用"),
+    (3.0, "噪声受限", "干扰低于热噪声：提高功率或缩小站距能直接抬高 SINR"),
+    (6.0, "低干扰", "干扰与热噪声同量级：噪声仍让 SINR 比 SIR 低 1.3~3 dB"),
+    (13.0, "中等干扰", "干扰主导：噪声只让 SINR 比 SIR 低 0.2~1.3 dB，再加功率收益递减"),
+    (20.0, "较高干扰", "干扰主导：SINR 已基本等于 SIR，加功率几乎不改善 SINR"),
+    (30.0, "高干扰", "强干扰受限：SINR 与 SIR 相差不到 0.05 dB，只有降干扰（协调/波束/功控）有效"),
+    (float("inf"), "极高干扰", "干扰比热噪声高 30 dB 以上：通常意味着发射功率相对站距偏大，先核对功率与室内比例假设"),
 )
 
 # "算不算高干扰"的门限。改它等于改现场约定，改之前先和用户对齐。
 HIGH_IOT_THRESHOLD_DB = 20.0
+
+# 会明显改变下行 IoT、但 first-party 信道层当前没有建模的因素。报告里原样
+# 列出，避免把"模型没有这个机制"读成"这个因素不重要"。
+DL_IOT_NOT_MODELED: tuple[str, ...] = (
+    "室内用户与 O2I 穿透损耗：所有 UE 在室外、高 1.5 m；38.901 UMa/UMi 评估假设"
+    " 80% 用户在室内。室内用户的信号与干扰同时衰减，SIR 近似不变，但干扰相对热"
+    "噪声（IoT）会显著降低——当前 IoT 相对这类部署偏高。",
+    "邻区负载：信道层每个邻区恒满功率发射，pdsch_load / prb_utilization 不进入"
+    "下行 IoT；负载只在系统级 neighbor_prb_util 生效。",
+    "拓扑边缘：没有 wrap-around，统计包含外圈小区的用户，它们的邻区不完整，"
+    "IoT 相对中心站偏低。",
+)
 
 # 测量域 SIR 分级。门限取自导频污染对 LS 估计的影响：
 # 残余干扰功率决定信道估计 NMSE 的下限，SIR 15 dB 对应 NMSE 底 ~-15 dB，
@@ -103,9 +119,8 @@ def iot_db(sinr_db: Any, sir_db: Any) -> np.ndarray:
 def load_factor_from_iot(iot: Any) -> np.ndarray:
     """由 IoT 反推等效小区负载 η = 1 - 10^(-IoT/10)。
 
-    来自上行极点容量关系：噪声抬升 = 1/(1-η)。这是个**解释性**换算，
-    用来把 "IoT 20 dB" 翻译成 "等效 99% 负载" 这种直觉，
-    不代表仿真里真的按这个负载调度。
+    **上行口径**：来自上行极点容量关系，噪声抬升 = 1/(1-η)。SuperRAN 当前
+    只仿下行，下行报告不再使用它；仅保留给 ``sr_iot_convert`` 的显式换算。
     """
     v = np.asarray(iot, dtype=np.float64)
     return 1.0 - np.power(10.0, -v / 10.0)
@@ -126,16 +141,27 @@ def _classify(value: float, bands: tuple[tuple[float, str, str], ...]) -> tuple[
     return bands[-1][1], bands[-1][2]
 
 
+def noise_sinr_loss_db(iot: Any) -> np.ndarray:
+    """热噪声让下行 SINR 比 SIR 低多少（dB）：``10·log10(IoT/(IoT-1))``。
+
+    由 ``1/SINR = 1/SIR + N/S`` 与 ``IoT = (I+N)/N`` 直接推出，逐样本精确。
+    IoT → 0 dB（无干扰）时趋于无穷：此时 SINR 就是 SNR，谈不上"与 SIR 之差"。
+    """
+    v = np.power(10.0, np.asarray(iot, dtype=np.float64) / 10.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = 10.0 * np.log10(v / (v - 1.0))
+    return np.where(v > 1.0, out, np.inf)
+
+
 def classify_iot(value: float) -> dict[str, Any]:
-    """把一个 IoT 值翻成人能读的等级 + 等效负载。"""
+    """把一个下行 IoT 值翻成人能读的等级，以及噪声还让 SINR 损失多少。"""
     label, why = _classify(value, IOT_BANDS)
+    loss = float(noise_sinr_loss_db(value)) if math.isfinite(value) else float("nan")
     return {
         "iot_db": round(float(value), 2) if math.isfinite(value) else None,
         "band": label,
         "meaning": why,
-        "equivalent_load": (
-            round(float(load_factor_from_iot(value)), 4) if math.isfinite(value) else None
-        ),
+        "noise_sinr_loss_db": round(loss, 3) if math.isfinite(loss) else None,
         "high_interference": bool(math.isfinite(value) and value >= HIGH_IOT_THRESHOLD_DB),
     }
 
@@ -279,6 +305,67 @@ def _dist(v: np.ndarray) -> dict[str, Any]:
     }
 
 
+def describe_measurement_domain(
+    ul_sir_meas: Any, dl_sir_meas: Any, traffic_sir: Any, *, num_interfering_ues: int,
+) -> tuple[dict[str, Any], list[str]]:
+    """导频（测量域）SIR 的画像；只有逐样本真正仿出来的量才分级。
+
+    两种已知的非仿真来源要识别出来而不是分级：
+      * SRS：按干扰 UE 数的解析式 ``10 - 10·log10(N)``，与几何、站距无关；
+      * CSI-RS：逐样本等于业务域 SIR，是复用而不是单独建模。
+    返回 ``(blocks, not_modeled_notes)``。
+    """
+    ul = np.asarray(ul_sir_meas, dtype=np.float64)
+    dl = np.asarray(dl_sir_meas, dtype=np.float64)
+    tsir = np.asarray(traffic_sir, dtype=np.float64)
+    n_intf = int(num_interfering_ues or 0)
+    srs_formula = max(10.0 - 10.0 * math.log10(max(n_intf, 1)), -20.0)
+    blocks: dict[str, Any] = {}
+    for name, arr, label in (
+        ("ul_srs", ul, "SRS（上行导频，基站侧收，用作下行预编码 CSI）"),
+        ("dl_csirs", dl, "CSI-RS（下行导频，终端侧收）"),
+    ):
+        if not arr.size or not np.isfinite(arr).any():
+            continue
+        finite = arr[np.isfinite(arr)]
+        is_sentinel = np.isclose(finite, _NO_INTF_SENTINEL, atol=1e-3)
+        real = finite[~is_sentinel]
+        block: dict[str, Any] = {
+            "pilot": label,
+            "sir_dB": _dist(real if real.size else finite),
+            "n_no_interferer": int(is_sentinel.sum()),
+        }
+        if name == "ul_srs" and real.size and np.allclose(real, srs_formula, atol=1e-6):
+            block["model"] = "analytic_placeholder"
+            block["meaning"] = (
+                f"未逐样本仿真：SIR = 10 - 10·log10(干扰 UE 数 {n_intf}) = "
+                f"{srs_formula:.2f} dB，与几何、站距、功率无关，不能用来比较场景。"
+            )
+        elif (
+            name == "dl_csirs" and real.size and tsir.shape == arr.shape
+            and np.allclose(arr, tsir, atol=1e-6, equal_nan=True)
+        ):
+            block["model"] = "same_as_traffic_sir"
+            block["meaning"] = "逐样本等于业务域 SIR（复用），没有单独的导频干扰模型。"
+        elif real.size:
+            block["model"] = "simulated"
+            block["classification"] = classify_measurement_sir(float(np.median(real)))
+            block["nmse_floor_db"] = _r(float(np.median(estimation_nmse_floor_db(real))))
+            block["frac_below_15db"] = round(float(np.mean(real < 15.0)), 4)
+        blocks[name] = block
+    placeholders = [
+        k for k, v in blocks.items()
+        if v.get("model") in {"analytic_placeholder", "same_as_traffic_sir"}
+    ]
+    notes = []
+    if placeholders:
+        notes.append(
+            "导频（测量域）干扰：" + "、".join(placeholders)
+            + " 不是逐样本仿真结果，未分级；详见各块的 meaning。"
+        )
+    return blocks, notes
+
+
 def interference_report(dataset_id: str) -> dict[str, Any]:
     """一个数据集的完整干扰画像：业务域 IoT + 测量域 SIR。
 
@@ -312,9 +399,10 @@ def interference_report(dataset_id: str) -> dict[str, Any]:
         "num_cells": n_cells,
         "num_interfering_ues": cfg.get("num_interfering_ues"),
         "pdsch_load": cfg.get("pdsch_load"),
-        "pusch_load": cfg.get("pusch_load"),
+        "scope": "downlink",
         "traffic_domain": {},
         "measurement_domain": {},
+        "not_modeled": [],
         "notes": [],
     }
 
@@ -341,18 +429,16 @@ def interference_report(dataset_id: str) -> dict[str, Any]:
     else:
         out["notes"].append("数据集缺 sinr_dB 或 sir_dB，无法算业务域 IoT。")
 
-    if ul_sinr.size and ul_sir_geo.size:
-        st_ul = iot_stats(ul_sinr, ul_sir_geo)
-        out["traffic_domain"]["ul"] = {
-            "iot": st_ul.as_dict(),
-            "sinr_dB": _dist(ul_sinr),
-            "sir_dB": _dist(ul_sir_geo),
-        }
-    elif ul_sinr.size:
-        out["traffic_domain"]["ul"] = {"sinr_dB": _dist(ul_sinr), "iot": None}
-        out["notes"].append(
-            "上行只有 SINR 没有几何 SIR，算不出上行 IoT。"
-            "first-party source 会把该量显式写进 sample.meta；旧数据集可能没有这一列。"
+    if (summary.get("sample_meta") or {}).get("implementation") == "superran-first-party":
+        out["not_modeled"].extend(DL_IOT_NOT_MODELED)
+
+    # 上行业务域不在当前能力范围：数据集里的 ul_sinr_dB 由一个按干扰 UE 数
+    # 的解析占位式合成，ul_sir_geo_dB 直接复用下行几何 SIR。给它分级只会
+    # 让人把占位值当成"上行轻载"。
+    if ul_sinr.size or ul_sir_geo.size:
+        out["not_modeled"].append(
+            "上行业务域干扰：SuperRAN 当前只仿下行，数据里的上行 SINR 是占位值、"
+            "上行几何 SIR 复用下行，不输出上行 IoT。"
         )
 
     first_party_slots = (
@@ -369,27 +455,12 @@ def interference_report(dataset_id: str) -> dict[str, Any]:
         out["iot_exact"] = True
 
     # --- 测量域 ---------------------------------------------------------
-    for name, arr, label in (
-        ("ul_srs", ul_sir_meas, "SRS（上行导频，基站侧收）"),
-        ("dl_csirs", dl_sir_meas, "CSI-RS（下行导频，终端侧收）"),
-    ):
-        if not arr.size or not np.isfinite(arr).any():
-            continue
-        finite = arr[np.isfinite(arr)]
-        sentinel_n = int(np.isclose(finite, _NO_INTF_SENTINEL, atol=1e-3).sum())
-        real = finite[~np.isclose(finite, _NO_INTF_SENTINEL, atol=1e-3)]
-        block: dict[str, Any] = {
-            "pilot": label,
-            "sir_dB": _dist(real if real.size else finite),
-            "n_no_interferer": sentinel_n,
-        }
-        if real.size:
-            med = float(np.median(real))
-            block["classification"] = classify_measurement_sir(med)
-            block["nmse_floor_db"] = _r(float(np.median(estimation_nmse_floor_db(real))))
-            block["frac_below_15db"] = round(float(np.mean(real < 15.0)), 4)
-        out["measurement_domain"][name] = block
-
+    md, md_notes = describe_measurement_domain(
+        ul_sir_meas, dl_sir_meas, sir,
+        num_interfering_ues=int(cfg.get("num_interfering_ues", 0) or 0),
+    )
+    out["measurement_domain"] = md
+    out["not_modeled"].extend(md_notes)
     if not out["measurement_domain"]:
         out["notes"].append(
             "数据集里没有测量域 SIR（ul_sir_dB / dl_sir_dB）。"
@@ -408,7 +479,7 @@ def interference_report(dataset_id: str) -> dict[str, Any]:
 # 其中至少两条与直觉相反，见下面的 note。
 #
 # 基线：7 站 21 小区、ISD 200 m、UMi 默认 33 dBm、NF 7 dB、100 MHz
-#       -> 下行 IoT 24.9 dB、上行 IoT 0.7 dB
+#       -> 下行 IoT 24.9 dB（输出时随 LEVER_ANCHOR_CONDITIONS 一起给）
 IOT_LEVERS: tuple[dict[str, Any], ...] = (
     {
         "key": "isd_m",
@@ -453,26 +524,15 @@ IOT_LEVERS: tuple[dict[str, Any], ...] = (
         "note": "**这条与直觉相反。** 拿它做「轻载 vs 满载」对比会得到两批一模一样的数据，"
                 "从而得出「负载不影响性能」的假结论。要造下行强弱干扰对比请用 isd_m。",
     },
-    {
-        "key": "pusch_load × (num_ues / 小区数)",
-        "direction": "调大 -> 提高上行 IoT",
-        "why": "上行干扰按同时发射的邻区 UE 数线性叠加",
-        "range": "每小区 UE 数 >= 2 才有效",
-        "measured": "21 UE（每小区 1 个）：满载与轻载无差别；"
-                    "105 UE（每小区 5 个）+ 满载：上行 IoT 0.7 -> 5.4 dB",
-        "note": "调度 UE 数是 max(1, 每小区UE数 x 负载)，每小区只有 1 个 UE 时取整后恒为 1。",
-    },
-    {
-        "key": "num_interfering_ues",
-        "direction": "**主要影响测量域，不是业务域**",
-        "why": "它决定每个邻区同时发 SRS 的 UE 数，直接打在导频上；"
-               "而进入上行 SINR 的数量另有上限（见 pusch_load 那条）",
-        "range": "0 ~ 32",
-        "measured": "10 -> 24：上行 IoT 0.71 -> 0.69（无变化）；"
-                    "但 12 个干扰 UE 就能把 SRS 测量域 SIR 打到 -2.4 dB（测量已失效）",
-        "note": "**这条也与直觉相反。** 另外它按 max_per_ue_intf_cells x N 生成信道，"
-                "是耗时大头：设 0 比设 10 快 1.62 倍、设 2 快 1.40 倍（交错重测中位数）。",
-    },
+)
+
+
+# ``measured`` 数字的来源条件。它们与用户当前场景（功率、站数、传播场景、
+# 阵列）通常不同，直接拿来当预期会差十几 dB——输出时必须带着条件一起给。
+LEVER_ANCHOR_CONDITIONS = (
+    "历史实测（当前版本未重测）：7 站 21 小区、UMi_NLOS、ISD 200 m、33 dBm、"
+    "NF 7 dB、100 MHz、64T、每档 42 样本。数字只说明方向与斜率；"
+    "换功率/站数/场景后绝对值会平移，以本次 sr_probe_scenario 为准。"
 )
 
 
@@ -484,13 +544,15 @@ def design_hint(target_iot_db: float) -> dict[str, Any]:
     """
     target = float(target_iot_db)
     band, why = _classify(target, IOT_BANDS)
-    load = load_factor_from_iot(target)
+    loss = float(noise_sinr_loss_db(target))
     return {
         "target_iot_db": round(target, 2),
         "band": band,
         "meaning": why,
-        "equivalent_load": round(float(load), 4),
+        "noise_sinr_loss_db": round(loss, 3) if math.isfinite(loss) else None,
         "levers": list(IOT_LEVERS),
+        "levers_measured_under": LEVER_ANCHOR_CONDITIONS,
+        "not_modeled": list(DL_IOT_NOT_MODELED),
         "suggested_preset": _suggest_preset(target),
         "verification": (
             "生成后调 sr_interference_report 复核 IoT 中位数；"
@@ -503,7 +565,7 @@ def _suggest_preset(target: float) -> str:
     if target >= 20.0:
         return "high_iot_dense"
     if target >= 13.0:
-        return "multicell_7site（pdsch_load 提到 0.9）"
+        return "multicell_7site（信道层负载不影响下行 IoT，靠站距/功率调）"
     if target >= 6.0:
         return "multicell_19site"
     return "single_cell_64t4r（无小区间干扰）"

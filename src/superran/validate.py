@@ -884,7 +884,8 @@ def check_iot_sane(ds: Any) -> Check:
     if st.n_valid:
         cls = itf.classify_iot(st.median_db)
         parts.append(
-            f"中位数 {st.median_db:.1f} dB（{cls['band']}，等效负载 {cls['equivalent_load']}）"
+            f"中位数 {st.median_db:.1f} dB（{cls['band']}，"
+            f"噪声让 SINR 比 SIR 低 {cls['noise_sinr_loss_db']} dB）"
         )
         parts.append(f"5%~95% {st.p5_db:.1f}~{st.p95_db:.1f} dB")
     if violations:

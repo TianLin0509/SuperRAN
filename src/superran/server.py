@@ -342,6 +342,7 @@ def sr_capabilities() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         models = {"error": str(exc)}
     from . import hardware as hw
+    from . import interference as itf
 
     return {
         "physical_core": "superran-first-party",
@@ -355,6 +356,16 @@ def sr_capabilities() -> dict[str, Any]:
         "channel_models": models,
         # 本地默认硬件与载波。**面板是 8x4x2 时自动生效**，不需要调用方写。
         "default_hardware": hw.describe(),
+        # 能力边界：Agent 读到 link=BOTH、上行天线数等字段时，最容易误以为上行
+        # 业务也能仿。这里写死范围，并列出会影响下行结论但尚未建模的机制。
+        "scope": {
+            "traffic_direction": "downlink_only",
+            "uplink_note": (
+                "上行只作为下行预编码的 SRS 信道估计来源存在；上行业务、上行 IoT、"
+                "上行功控/调度都不在当前范围，不要向用户询问或报告上行干扰。"
+            ),
+            "not_modeled_dl_interference": list(itf.DL_IOT_NOT_MODELED),
+        },
         "note": (
             "CDL 系列含每条径的角度（AoD/AoA/ZoD/ZoA），TDL 系列没有。"
             "凡是依赖角度的课题（波束管理、定位）必须用 CDL。"
@@ -1570,10 +1581,12 @@ def sr_interference_report(dataset_id: str) -> dict[str, Any]:
 
     **业务域和测量域是两回事**，报告分开给：
 
-    * ``traffic_domain``——PDSCH/PUSCH 受到的干扰，用 IoT（噪声抬升 (I+N)/N）
-      刻画。20 dB 以上算高干扰，同时给出等效小区负载。
-    * ``measurement_domain``——SRS / CSI-RS 导频受到的干扰，决定信道估计精度。
-      给出估计 NMSE 的下限。这两列只在 ``link="BOTH"`` 生成的数据里有。
+    * ``traffic_domain.dl``——PDSCH 受到的干扰，用 IoT（(I+N)/N）刻画；20 dB
+      以上算高干扰，并给出噪声还让 SINR 比 SIR 低多少。**只做下行**，不输出上行 IoT。
+    * ``measurement_domain``——导频 SIR。只有逐样本仿真的量才分级；按干扰 UE 数
+      的解析占位（SRS）或复用业务域 SIR（CSI-RS）会标 ``model`` 并说明，不分级。
+    * ``not_modeled``——会改变下行 IoT 但当前没有建模的机制（室内/O2I、信道层
+      邻区负载、拓扑边缘）。**解读 IoT 绝对值前必须先看这一栏。**
 
     IoT 由几何 SIR 与 SINR 推出（``IoT = SIR/(SIR-SINR)``，线性域）。
     当前 first-party ``snr_dB`` / ``sinr_dB`` 共享预数字波束、每 RB 参考，
@@ -1597,11 +1610,11 @@ def sr_iot_convert(
     """IoT 相关的换算与分级。三种用法，给哪组参数就算哪个。
 
     * 给 ``sinr_db`` + ``sir_db``：算这一点的 IoT（两者必须来自同一几何预算）。
-    * 给 ``iot_db``：分级 + 换成等效小区负载。
-    * 给 ``load``：由等效负载反推 IoT。
+    * 给 ``iot_db``：分级，并给出噪声让 SINR 比 SIR 低多少。
+    * 给 ``load``：按**上行**极点容量关系 ``IoT = 1/(1-load)`` 反推 IoT。
 
-    等效负载用的是上行极点容量关系 ``IoT = 1/(1-load)``，是**解释性**换算，
-    帮助把 "IoT 20 dB" 读成 "等效 99% 负载"，不代表仿真真按这个负载调度。
+    ``load`` 换算只是上行口径的教学用途：SuperRAN 当前只仿下行，下行 IoT 不能
+    读成小区负载（下行邻区负载在信道层没有建模）。
     """
     from . import interference as itf
 
@@ -1616,6 +1629,7 @@ def sr_iot_convert(
     if load is not None:
         out["from_load"] = {
             "load": load,
+            "applies_to": "上行噪声抬升（极点容量）；下行 IoT 不能按它读成负载",
             **itf.classify_iot(itf.iot_from_load(float(load))),
         }
     if not out:
@@ -1660,7 +1674,8 @@ async def sr_probe_scenario(
     再与不变 SIR 重算 SINR/IoT。20-ray 内核的已测基准约 1.80×，不是固定 SLA。
 
     回的是：干扰画像（IoT，多小区才有）、链路预算（SNR/SINR/SIR 分布）、
-    几何量（路损、距离、视距比例、多普勒）、测量域导频 SIR（link=BOTH 才有）。
+    几何量（路损、距离、视距比例、多普勒）、``not_modeled``（会影响下行 IoT 但未建模的机制）。
+    只做下行；与 ``sr_generate`` 用同一套默认 AAU 阵列，IoT/SNR 与正式生成逐位一致。
 
     ``not_available`` 里明确列出探测模式**给不了**的量——谱效、吞吐、时延扩展
     估计、宽带预编码。这些必须跑正式生成，别拿探测结果替代。

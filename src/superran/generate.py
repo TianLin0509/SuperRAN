@@ -1158,15 +1158,9 @@ def generate(
         from . import interference as _intf  # noqa: PLC0415
 
         st = _intf.iot_stats(sinr_arr, sir_arr)
-        iot_block = {"dl": st.as_dict()}
-        ul_geo = payload.get("scalar__ul_sir_geo_dB")
-        ul_sinr = payload.get("scalar__ul_sinr_dB")
-        if ul_geo is not None and ul_sinr is not None and np.isfinite(ul_geo).any():
-            iot_block["ul"] = _intf.iot_stats(ul_sinr, ul_geo).as_dict()
-        else:
-            _ul_why = _intf.last_install_failure()
-            if _ul_why:
-                iot_block["ul_missing_reason"] = _ul_why
+        # 只做下行：上行 SINR 是占位值，不给上行 IoT 分级（见 interference_report）。
+        iot_block = {"dl": st.as_dict(), "scope": "downlink",
+                     "not_modeled": list(_intf.DL_IOT_NOT_MODELED)}
 
     # 预注册口径随数据一起存档。**必须在生成时绑定，事后补绑没有意义**——
     # 预注册的全部价值就在于"看数据之前写下的"，事后写的只是记录。

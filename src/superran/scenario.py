@@ -278,26 +278,17 @@ def probe(
     # 历史结果结构继续可读；新生成的 probe 这里恒为 0。
     corr = snr_correction_db(rb_probe, rb_full)
     snr_clamped = np.zeros_like(arr["snr_dB"], dtype=bool)
-    ul_snr_clamped = np.zeros_like(arr["ul_snr_dB"], dtype=bool)
     snr_full = np.where(
         snr_clamped, np.nan, arr["snr_dB"] + corr
-    )
-    ul_snr_full = np.where(
-        ul_snr_clamped,
-        np.nan,
-        arr["ul_snr_dB"] + corr,
     )
     cells = int(cfg.get("num_sites", 1) or 1) * int(cfg.get("sectors_per_site", 1) or 1)
     # 单小区没有干扰源时 49.9 dB 只是有限哨兵（真实 SIR 是 ∞）。是否为哨兵
     # 必须由拓扑决定，不能只看数值：多小区弱干扰也可能合法夹到 49.9 dB。
     sinr_full = _probe_sinr_from_snr_sir(
         snr_full, arr["sir_dB"], num_cells=cells)
-    ul_sinr_full = _probe_sinr_from_snr_sir(
-        ul_snr_full, arr["ul_sir_geo_dB"], num_cells=cells)
     n_snr_clamped = int(np.sum(snr_clamped & np.isfinite(arr["snr_dB"])))
 
     dl_iot = itf.iot_stats(sinr_full, arr["sir_dB"])
-    ul_iot = itf.iot_stats(ul_sinr_full, arr["ul_sir_geo_dB"])
 
     out: dict[str, Any] = {
         "mode": "probe",
@@ -327,12 +318,11 @@ def probe(
             "snr_dB": _dist(snr_full),
             "sinr_dB": _dist(sinr_full),
             "sir_dB": _dist(arr["sir_dB"]),
-            "ul_snr_dB": _dist(ul_snr_full),
-            "ul_sinr_dB": _dist(ul_sinr_full),
         },
         "interference": {
+            "scope": "downlink",
             "dl_iot": dl_iot.as_dict() if cells > 1 else None,
-            "ul_iot": ul_iot.as_dict() if (cells > 1 and ul_iot.n_valid) else None,
+            "not_modeled": list(itf.DL_IOT_NOT_MODELED) if cells > 1 else [],
         },
         "not_available": list(PROBE_NOT_AVAILABLE),
         "note": (
@@ -363,25 +353,14 @@ def probe(
             "要完整的链路预算分布请跑正式生成。"
         )
 
-    # 测量域（只有 link=BOTH 才有）
-    md: dict[str, Any] = {}
-    for key, label in (("ul_sir_dB", "SRS（上行导频）"), ("dl_sir_dB", "CSI-RS（下行导频）")):
-        v = arr[key]
-        real = v[np.isfinite(v) & ~np.isclose(v, 49.9, atol=1e-3)]
-        if real.size:
-            md[key] = {
-                "pilot": label,
-                "sir_dB": _dist(real),
-                "classification": itf.classify_measurement_sir(float(np.median(real))),
-                "nmse_floor_db": _r(float(np.median(itf.estimation_nmse_floor_db(real)))),
-            }
+    # 测量域（只有 link=BOTH 才有）；与 interference_report 同一套判定。
+    md, md_notes = itf.describe_measurement_domain(
+        arr["ul_sir_dB"], arr["dl_sir_dB"], arr["sir_dB"],
+        num_interfering_ues=int(cfg.get("num_interfering_ues", 0) or 0),
+    )
+    out["interference"]["not_modeled"].extend(md_notes)
     if md:
         out["measurement_domain"] = md
-    elif str(cfg.get("link", "DL")).upper() != "BOTH":
-        out["measurement_domain_note"] = (
-            "link 不是 BOTH，没有测量域 SIR。要看 SRS/CSI-RS 受到的导频干扰，"
-            "把 link 设成 BOTH 再探测。"
-        )
 
     return out
 
