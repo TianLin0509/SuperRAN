@@ -1166,6 +1166,20 @@ for f in _verified:
     check(np.allclose(d_sir, v["sir_shift_db"], atol=1e-9),
           f"{f.label}：SIR 变化 {v['sir_shift_db']:+g} dB，与表中说法一致")
 
+# 仿真器从不读取的键：源码静态核对。哪天信道生成路径开始读它，这里变红，
+# 逼着把它从 INERT_CONFIG_KEYS 拿掉、同时改因子表与提问。
+_sim_src = "\n".join(
+    (ROOT / "src" / "superran" / name).read_text(encoding="utf-8")
+    for name in ("native.py", "channelhub.py", "generate.py", "sionna_rt.py", "scenario.py")
+)
+for _k in fx.INERT_CONFIG_KEYS:
+    check(re.search(rf"[\"']{_k}[\"']", _sim_src) is None,
+          f"{_k} 确实不被信道生成路径读取（与“不生效”的声明一致）")
+_iss_inert = _dec.check_guards(_dec.classify_intent("下行干扰评估"), {"num_sites": 7, "ue_distribution": "hotspot",
+                                        "train_penetration_loss_db": 20.0})
+check({"ue_distribution", "train_penetration_loss_db"} <= {i["key"] for i in _iss_inert},
+      "用户设了不生效的键时当场警告")
+
 _nl = next(f for f in fx.factors_for("dl_interference") if f.key == "neighbor_load")
 check(_nl.status == fx.NOT_MODELED and _nl.verify is not None,
       "邻区负载标为未建模，且这个“未建模”本身有对账（改负载逐位不变）")

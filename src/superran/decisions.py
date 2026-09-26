@@ -532,9 +532,9 @@ _UE_DIST = Decision(
     question="用户怎么撒点？",
     default="uniform",
     why=(
-        "均匀撒点是标准做法；热点分布会把用户往少数几处集中，边缘用户比例"
-        "和干扰强度都上升，更能拉开干扰协调类算法的差距。撒点方式一换，"
-        "SINR 分布整体平移，跨实验对比会失效。"
+        "**当前内核只实现了均匀撒点**：hotspot / clustered 写进配置也不生效，"
+        "数据与均匀撒点逐位相同。热点分布本应让边缘用户比例和干扰尾部变化，"
+        "需要时只能把结论边界写成“均匀撒点下”。"
     ),
     options=[
         Option("uniform", "均匀分布", "标准做法", recommended=True),
@@ -840,7 +840,7 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
                   "干扰水平", "干扰强度", "干扰画像", "干扰评估", "下行干扰",
                   "sinr分布", "sir分布", "干扰受限", "覆盖受限"),
         design_keys=("expectation", "model_assumptions", "metric_scan"),
-        decision_keys=("tx_power_dbm", "isd_m", "num_sites", "ue_distribution", "num_samples"),
+        decision_keys=("tx_power_dbm", "isd_m", "num_sites", "num_samples"),
         sweeps=(_LOAD_SWEEP,),
         pitfalls=(
             "IoT 的绝对值由发射功率、噪声底和室内比例决定，平台默认是室外、46 dBm、"
@@ -860,7 +860,7 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         label="干扰协调 / 调度",
         keywords=("干扰", "interference", "协调", "调度", "schedul", "comp", "协作", "icic", "功控"),
         design_keys=("baseline", "metric", "scope"),
-        decision_keys=("num_sites", "tx_power_dbm", "ue_distribution", "tdd_pattern", "num_samples"),
+        decision_keys=("num_sites", "tx_power_dbm", "tdd_pattern", "num_samples"),
         sweeps=(_LOAD_SWEEP,),
         pitfalls=(
             "轻载场景下干扰问题被掩盖，容易得出「算法没用」的结论。",
@@ -882,7 +882,7 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         label="移动性 / 切换",
         keywords=("切换", "handover", "移动性", "mobility", "轨迹", "重选", "乒乓"),
         design_keys=("baseline", "metric"),
-        decision_keys=("ue_speed_kmh", "mobility_mode", "num_sites", "ue_distribution", "num_samples"),
+        decision_keys=("ue_speed_kmh", "mobility_mode", "num_sites", "num_samples"),
         sweeps=(_SPEED_SWEEP,),
         pitfalls=(
             "静止模型下样本之间没有时序关系，切换判决无从谈起——必须选移动模型。",
@@ -937,7 +937,7 @@ TASK_PROFILES: tuple[TaskProfile, ...] = (
         label="信道表征 / 嵌入学习",
         keywords=("表征", "embedding", "charting", "嵌入", "自监督", "对比学习", "mae", "预训练"),
         design_keys=("baseline", "metric", "scope"),
-        decision_keys=("channel_model", "antenna_preset", "scenario", "ue_distribution", "num_samples"),
+        decision_keys=("channel_model", "antenna_preset", "scenario", "num_samples"),
         sweeps=(_SCATTER_SWEEP, _LOS_SWEEP),
         pitfalls=(
             "表征学习需要的样本量比常规仿真大一个量级，先估算好数据体积。",
@@ -1214,15 +1214,15 @@ def also_configurable(profile: TaskProfile) -> list[str]:
         "scenario": "传播场景", "channel_model": "信道模型", "antenna_preset": "天线配置",
         "snr_range_dB": "信噪比范围", "bandwidth_hz": "带宽", "ue_speed_kmh": "移动速度",
         "channel_est_mode": "信道估计方式", "pilot_type": "导频类型", "link": "上下行",
-        "tdd_pattern": "TDD配比", "num_sites": "站点数", "ue_distribution": "撒点方式",
+        "tdd_pattern": "TDD配比", "num_sites": "站点数",
         "prb_utilization": "邻区负载", "mobility_mode": "移动模型", "num_samples": "样本数",
         "num_slots_per_sample": "连续时隙数", "subcarrier_spacing": "子载波间隔",
-        "topology_layout": "站点布局", "hypercell_size": "超级小区规模",
+        "topology_layout": "站点布局",
     }
     extra = [
         "载波频率", "终端天线数", "用户数", "站间距", "发射功率",
         "噪声系数", "SRS跳频", "干扰用户数", "随机种子", "扇区数",
-        "多TRP联合", "高铁穿透损耗", "轨道偏移", "自定义站点坐标", "自定义用户坐标",
+        "多TRP联合", "轨道偏移", "自定义站点坐标", "自定义用户坐标",
     ]
     return [v for k, v in labels.items() if k not in asked] + extra
 
@@ -1339,6 +1339,24 @@ def check_guards(profile: TaskProfile, cfg: dict[str, Any]) -> list[dict[str, st
                 "key": "link",
                 "message": "互易性课题需要成对的上下行信道，只取单向无法对比。",
                 "suggestion": 'link 设为 "both"',
+            }
+        )
+
+    from .factors import INERT_CONFIG_KEYS  # noqa: PLC0415
+
+    for key in ("ue_distribution", "num_hotspots", "train_penetration_loss_db", "hypercell_size"):
+        val = cfg.get(key)
+        if val is None or (key == "ue_distribution" and str(val) == "uniform") or (
+            key == "hypercell_size" and int(val or 1) <= 1
+        ):
+            continue
+        issues.append(
+            {
+                "severity": "warn",
+                "key": key,
+                "message": f"设了 {key}={val}，但仿真器不读这个键：{INERT_CONFIG_KEYS[key]}。"
+                           "生成的数据与不设时逐位相同。",
+                "suggestion": "按未设置解读结果，并把这一点写进结论边界",
             }
         )
 

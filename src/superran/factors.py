@@ -164,15 +164,24 @@ DL_INTERFERENCE: tuple[Factor, ...] = (
     ),
     Factor(
         key="ue_distribution",
-        label="用户撒点",
-        status=MODELED,
+        label="用户撒点（均匀 / 热点 / 成簇）",
+        status=NOT_MODELED,
         impact=2,
-        effect_iot="决定采到哪些位置：均匀撒点看全区，热点/成簇会改变边缘用户占比",
-        effect_sir="同上，分布形状变化",
-        magnitude="影响分布形状与分位数，中位数通常变化较小",
-        ask="用户按均匀撒点，还是有热点/成簇？只看分布中位数时均匀即可。",
-        platform_default="uniform",
+        effect_iot="热点靠近边缘时 IoT 尾部变重、靠近站点时变轻；决定统计采到哪些位置",
+        effect_sir="同上，改变分布形状与分位数",
+        magnitude=(
+            "当前内核只有均匀撒点：ue_distribution / num_hotspots 不被读取，"
+            "设成 hotspot 与 uniform 逐位相同（测试核对）"
+        ),
+        ask=(
+            "平台目前只能均匀撒点。如果你关心热点区域或室内聚集用户，"
+            "结果只代表均匀分布下的统计，这一点要写进结论边界。"
+        ),
+        platform_default="uniform（唯一实现）",
         config_key="ue_distribution",
+        verify={"set": {"ue_distribution": "hotspot", "num_hotspots": 3},
+                "base": {"ue_distribution": "uniform"},
+                "in_shift_db": 0.0, "sir_shift_db": 0.0},
     ),
     Factor(
         key="scenario",
@@ -201,6 +210,18 @@ DL_INTERFERENCE: tuple[Factor, ...] = (
                 "in_shift_db": -2.0, "sir_shift_db": 0.0},
     ),
 )
+
+# 配置里能写、提问层也会问，但仿真器（信道生成路径）从不读取的键。用户设了
+# 它们，数据不会有任何变化——必须当场说清。tests/test_interference.py 用源码
+# 静态检查确认它们确实没被读取；哪天实现了，测试变红，逼着把它从这里拿掉。
+INERT_CONFIG_KEYS: dict[str, str] = {
+    "ue_distribution": "当前内核只有均匀撒点，hotspot / clustered 不生效",
+    "num_hotspots": "热点撒点未实现",
+    "prb_utilization": "信道层邻区恒满发；负载只在系统级 neighbor_prb_util 生效",
+    "pdsch_load": "信道层邻区恒满发；负载只在系统级 neighbor_prb_util 生效",
+    "train_penetration_loss_db": "车体穿透损耗未实现，高铁预设里的 20 dB 不生效",
+    "hypercell_size": "超级小区合并未实现，设多少都按独立小区算",
+}
 
 # 在看到任何结果之前让用户写下预期。探测结果与它对照，差距大就先停下查假设。
 EXPECTATION_QUESTION: dict[str, Any] = {
