@@ -216,6 +216,12 @@ class Draft:
     round_no: int = 1  # 当前问到第几轮
     created_at: float = field(default_factory=time.time)
     history: list[str] = field(default_factory=list)
+    # --- 访谈状态（interview.py）；旧草稿没有这些键时取默认值 ---
+    form: str | None = None            # 结论形态
+    family: str | None = None          # 目标量属于哪张因子表
+    sweep: dict[str, Any] | None = None  # 扫描变量与取值
+    provenance: dict[str, str] = field(default_factory=dict)  # 键 → 谁定的
+    brief_evidence: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -230,6 +236,11 @@ class Draft:
             "round_no": self.round_no,
             "created_at": self.created_at,
             "history": self.history,
+            "form": self.form,
+            "family": self.family,
+            "sweep": self.sweep,
+            "provenance": self.provenance,
+            "brief_evidence": self.brief_evidence,
         }
 
 
@@ -324,9 +335,18 @@ def create_draft(
     preset: str | None = None,
     overrides: dict[str, Any] | None = None,
 ) -> tuple[Draft, dec.TaskProfile]:
-    """从自然语言意图建一份提案。"""
+    """从自然语言意图建一份提案。原话里已经给出的条件直接写进草稿，不再重问。"""
+    from . import interview as iv  # noqa: PLC0415
+
     profile = dec.classify_intent(intent)
+    brief = iv.read_brief(intent)
+    form, _ = iv.classify_form(intent, brief)
+    family = iv.metric_family(intent)
     preset_name = preset or _guess_preset(intent, profile)
+    # 目标量落在干扰/速率上却挑了单小区骨架：没有邻区就没有干扰。原话明说单小区除外。
+    if (preset is None and family and brief.params.get("num_sites") != 1
+            and int(load_presets().get(preset_name, {}).get("config", {}).get("num_sites", 1) or 1) <= 1):
+        preset_name = "company_64t4r_multicell"
     presets = load_presets()
     if preset is not None and preset_name not in presets:
         raise ValueError(
@@ -362,12 +382,18 @@ def create_draft(
     params.setdefault("num_samples", 200)
     params.setdefault("seed", 42)
 
-    user_set: list[str] = []
+    provenance: dict[str, str] = {}
+    dependency_notes: list[str] = []
+    if brief.params:
+        dependency_notes += _apply_dependent_overrides(params, dict(brief.params))
+        provenance.update({k: iv.SOURCE_SAID for k in brief.params})
+    user_set: list[str] = sorted(brief.params)
     if overrides:
-        dependency_notes = _apply_dependent_overrides(params, overrides)
-        user_set = sorted(overrides)
-    else:
-        dependency_notes = []
+        dependency_notes += _apply_dependent_overrides(params, overrides)
+        user_set = sorted(set(user_set) | set(overrides))
+        provenance.update({k: iv.SOURCE_SAID for k in overrides})
+    design = dict(brief.design)
+    provenance.update({k: iv.SOURCE_SAID for k in brief.design})
 
     d = Draft(
         draft_id="d_" + uuid.uuid4().hex[:8],
@@ -377,7 +403,13 @@ def create_draft(
         preset=preset_name,
         params=params,
         user_set=user_set,
+        design=design,
         history=[f"由意图创建，场景骨架 {preset_name}", *dependency_notes],
+        form=form,
+        family=family,
+        sweep=brief.sweep,
+        provenance=provenance,
+        brief_evidence=list(brief.evidence),
     )
     save_draft(d)
     return d, profile
@@ -408,10 +440,36 @@ def revise_draft(
             d.user_set.append(k)
     changes.extend(dependency_notes)
 
+    from . import interview as iv  # noqa: PLC0415
+
+    for k in raw_overrides:
+        d.provenance[k] = iv.SOURCE_ANSWERED
     for k, v in (design or {}).items():
-        if v:
-            d.design[k] = str(v)
-            changes.append(f"实验设计 {k}: {str(v)[:40]}")
+        if not v:
+            continue
+        d.design[k] = str(v)
+        d.provenance[k] = iv.SOURCE_ANSWERED
+        changes.append(f"实验设计 {k}: {str(v)[:40]}")
+        if k == "form" and str(v) in iv.FORMS:
+            d.form = str(v)
+        if k == "sweep_values" and d.sweep is None:
+            nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", str(v))]
+            if nums:
+                d.sweep = {"key": iv.sweep_key_from_intent(d.intent, iv.Brief()) or "?",
+                           "values": nums}
+        # 选项自带的改动（例如“街道微站”→ UMi + 33 dBm）当场生效，并记进变更。
+        eff = iv.answer_effects(k, v, d.family)
+        if eff.get("overrides"):
+            before_eff = {kk: d.params.get(kk) for kk in eff["overrides"]}
+            changes.extend(_apply_dependent_overrides(d.params, dict(eff["overrides"])))
+            for kk, vv in eff["overrides"].items():
+                if before_eff.get(kk) != vv:
+                    changes.append(f"{kk}: {before_eff.get(kk)!r} → {vv!r}（由 {k}={v} 带出）")
+                d.provenance[kk] = iv.SOURCE_ANSWERED
+                if kk not in d.user_set:
+                    d.user_set.append(kk)
+        if eff.get("note"):
+            changes.append(eff["note"])
 
     # 用户回应过一轮就推进轮次，下次 build_proposal 问新的一批。
     # 注意即使用户只是"确认默认值"（值没变、changes 为空）也要推进——
@@ -453,26 +511,58 @@ def build_proposal(
 
     另外 ``sweeps`` 给出建议的对比组，``pitfalls`` 是这类课题的常见坑。
     """
+    from . import interview as iv  # noqa: PLC0415
+
     ch_cfg, own = resolved_config(d)
 
-    # 本轮该问什么由 MCP 自己算：已答的不再问，一轮最多 4 个
-    rnd = dec.next_round(
-        profile,
-        answered_design=set(d.design),
-        answered_params=set(d.user_set),
-        round_no=d.round_no,
-    )
+    # 本轮问什么：由结论形态与目标量的影响因子表决定（interview.py），
+    # 不再由任务模板决定。原话、用户回答过的都不问。
+    answered = set(d.design) | set(d.user_set) | set(d.provenance)
+    sweep_key = (d.sweep or {}).get("key") if d.sweep else iv.sweep_key_from_intent(
+        d.intent, iv.Brief())
+    led = iv.ledger(d.family, ch_cfg, d.provenance, sweep_key=sweep_key)
+    extra_design = []
+    if d.form == "compare_methods":
+        for key, prio in (("metric", 1), ("effect_size", 3)):
+            q = dec._DESIGN.get(key)
+            if q is not None and not (key == "metric" and "metric_words" in d.design):
+                extra_design.append({**q.as_dict(), "priority": prio})
+    extra_params = [x.as_dict() for x in dec.decisions_for(profile, limit=99)]
+    common = dict(intent=d.intent, form=d.form, family=d.family,
+                  brief=iv.Brief(params={}, design=dict(d.design), sweep=d.sweep),
+                  answered=answered, led=led, sweep_key=sweep_key,
+                  extra_design=extra_design, extra_params=extra_params, params=ch_cfg)
+    this_round = iv.frontier(**common)
+    pending = iv.frontier(**common, limit=None)
 
-    questions = []
-    for item in rnd["questions"]:
-        questions.append(
-            {
-                **item,
-                "current": d.params.get(item["key"], item["default"]),
-                "user_specified": item["key"] in d.user_set,
-            }
-        )
-    design = [{**q, "answered": d.design.get(q["key"])} for q in rnd["design_questions"]]
+    round_q = []
+    for q in this_round:
+        item = q.as_dict()
+        if q.layer == "param":
+            item["current"] = d.params.get(q.key)
+            item["user_specified"] = q.key in d.user_set
+        else:
+            item["answered"] = d.design.get(q.key)
+        round_q.append(item)
+    design = [q for q in round_q if q["layer"] == "design"]
+    questions = [q for q in round_q if q["layer"] == "param"]
+    rnd = {
+        "round": d.round_no,
+        "focus": "前沿问题" if round_q else "已问完",
+        "rationale": (
+            "只问前提已满足、会改变结论、且只能由人回答的问题；可查的事实平台自己查，"
+            "其余假设列在 assumption_ledger 里，用户可随时改。"
+            if round_q else "影响结论的假设都已确认或已列明，可以生成。"
+        ),
+        "has_more": len(pending) > len(this_round),
+        "remaining_count": max(len(pending) - len(this_round), 0),
+        "target_rounds": f"每轮最多 {iv.MAX_PER_ROUND} 问，通常 1~2 轮",
+        "remaining_all_optional": len(pending) <= len(this_round),
+        "stop_hint": (
+            "用户说「随便 / 默认就行 / 就这样」时立刻停止提问直接生成；"
+            "剩下的沉默假设照 assumption_ledger 原样复述给用户，不要当作已确认。"
+        ),
+    }
 
     issues = dec.check_guards(profile, d.params)
     presets = load_presets()
@@ -490,6 +580,15 @@ def build_proposal(
         "preset": d.preset,
         "preset_label": presets.get(d.preset, {}).get("label", d.preset),
         "preset_summary": presets.get(d.preset, {}).get("summary", ""),
+        # --- 读懂了什么 ---
+        "form": d.form,
+        "form_label": iv.FORMS[d.form]["label"] if d.form else None,
+        "conclusion_sentence": iv.FORMS[d.form]["sentence"] if d.form else None,
+        "brief": {"evidence": d.brief_evidence, "sweep": d.sweep},
+        "restatement": iv.restatement(d.form, d.family, iv.Brief(evidence=d.brief_evidence),
+                                      sweep_key, led, d.intent),
+        "glossary_notes": iv.glossary_notes(d.intent),
+        "assumption_ledger": {k: v for k, v in led.items() if not k.startswith("_")},
         # --- 本轮提问 ---
         "round": rnd["round"],
         "round_focus": rnd["focus"],

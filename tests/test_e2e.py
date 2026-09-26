@@ -97,7 +97,8 @@ print(f"  第 {proposal['round']} 轮 · {proposal['round_focus']}：{len(rq)} �
 print(f"  首个问题     {rq[0]['question']}  [{rq[0]['layer']}]")
 print(f"    why       {rq[0]['why'][:70]}…")
 check(proposal["ready_to_go"], "提案可直接生成（用户不表态也能走）")
-check(2 <= len(rq) <= 4, f"一轮 2~4 问（实际 {len(rq)}）")
+check(1 <= len(rq) <= 3, f"一轮 1~3 问（实际 {len(rq)}；只问前沿问题）")
+check(all(sum(o["recommended"] for o in q["options"]) == 1 for q in rq), "每题恰好一个推荐项")
 check(all(q.get("why") for q in rq), "每个问题都带 why")
 check(all(q.get("options") for q in rq), "每个问题都带选项")
 check("num_bs_tx_ant" in proposal["resolved_config"], "抽象参数已翻译成 ChannelHub 实参")
@@ -223,6 +224,107 @@ check(paths3.aoa_rad is None, "TDL 确实没有角度（与 CDL 形成对照）"
 res3 = dlv.build_code(s3["dataset_id"], "角度")
 print(f"  取货提示：{res3['notes']}")
 check(bool(res3["notes"]), "TDL 要角度时给出了警告")
+
+# ---------------------------------------------------------------------------
+sect("9  访谈：先读原话，只问会改变结论、而平台在替人拍的事")
+# 这 5 句是 2026-09-26 的基线案例：旧流程在每一句上都问错了（见 interview.py 文档）。
+import inspect  # noqa: E402
+
+from superran import factors as fx  # noqa: E402
+from superran import interview as iv  # noqa: E402
+from superran import server as srv  # noqa: E402
+
+
+def _round1(text):
+    d, p = pl.create_draft(text)
+    pr = pl.build_proposal(d, p)
+    return d, p, pr, [q["key"] for q in pr["round_questions"]]
+
+
+d_isd, p_isd, pr_isd, k_isd = _round1("我想用superRAN来做一个无线仿真，来对比下站间距下的干扰变化情况")
+print(f"  站距 → {d_isd.form} {k_isd}")
+check(d_isd.form == "sweep_condition", "站距-干扰识别为“扫一个条件”")
+check({"formal_or_scan", "deployment"} <= set(k_isd) and "baseline" not in k_isd,
+      "站距案例第一轮：说明生成层变量没有配对判决、问部署；不问码本基线")
+check(any("发射功率" in x for x in pr_isd["assumption_ledger"]["silently_assumed"]),
+      "发射功率 46 dBm 列为沉默假设")
+check(any("撒点" in x for x in pr_isd["assumption_ledger"]["conclusion_limits"]),
+      "未实现且无选项的撒点列为结论边界而不是待答问题")
+
+d_sinr, _, pr_sinr, k_sinr = _round1("评估一下密集城区下行 SINR 分布")
+print(f"  SINR 分布 → {d_sinr.form} {d_sinr.preset} {k_sinr}")
+check(d_sinr.preset == "company_64t4r_multicell", "干扰/SINR 类目标量不会落到单小区骨架")
+check("deployment" in k_sinr and not {"channel_model", "snr_range_dB"} & set(k_sinr),
+      "SINR 分布先问部署，不问信道模型和信噪比范围")
+
+d_csi, _, _, k_csi = _round1("验证一个 CSI 压缩的想法，单小区 64T4R，跟 Type II 码本比")
+print(f"  CSI → {d_csi.form} {k_csi} baseline={d_csi.design.get('baseline')}")
+check(d_csi.form == "compare_methods" and "baseline" not in k_csi,
+      "原话已给基线（Type II）就不再问")
+check(d_csi.params.get("antenna_preset") == "64T4R" and d_csi.params.get("num_sites") == 1,
+      "原话里的阵型与单小区直接写进草稿")
+
+d_pdp, _, pr_pdp, k_pdp = _round1("只要 20 个 64T4R CDL-C 信道，给我 PDP，不比算法")
+print(f"  PDP → {d_pdp.form} {k_pdp}")
+check(d_pdp.form == "deliver" and not k_pdp, "数据交付不提问（不问指标、不问基线）")
+check(d_pdp.params.get("num_samples") == 20 and d_pdp.params.get("channel_model") == "CDL-C",
+      "数量与信道模型取自原话")
+
+d_srs, _, _, k_srs = _round1("SRS 周期从 10 ms 改到 20 ms，看 120 km/h 用户的边缘速率")
+print(f"  SRS → {d_srs.form} {d_srs.sweep} {k_srs}")
+check(d_srs.sweep == {"key": "srs_period_ms", "values": [10.0, 20.0]}
+      and d_srs.params.get("ue_speed_kmh") == 120.0, "扫描变量与速度取自原话")
+check("srs_period_adaptive" in k_srs and "baseline" not in k_srs,
+      "比较 SRS 周期第一轮就问要不要关自适应周期")
+
+# 设计时没见过的 4 句（泛化检查，防止只对上面 5 句过拟合）
+d_ant, _, _, k_ant = _round1("64T 和 32T 在 500 m 站距下的下行边缘速率差多少")
+check(d_ant.sweep and d_ant.sweep["key"] == "antenna_preset" and "formal_or_scan" in k_ant,
+      "“64T 和 32T 差多少”识别为扫天线规模（生成层，先说明无配对判决）")
+d_load, _, _, _ = _round1("我想知道邻区负载从 30% 到 90% 时用户体验速率掉多少")
+check(d_load.sweep == {"key": "neighbor_prb_util", "values": [0.3, 0.9]},
+      "“负载从 30% 到 90%”识别为扫系统级邻区负载")
+d_pe, _, pr_pe, _ = _round1("PF 和 EDF 调度对小包时延的影响对比")
+bq = next(q for q in pr_pe["round_questions"] if q["key"] == "baseline")
+tq = next(q for q in pr_pe["round_questions"] if q["key"] == "traffic_model")
+check("baseline" not in d_pe.design and "PF" in bq["options"][0]["label"]
+      and "码本" not in bq["question"], "“PF 和 EDF”不替用户认定基线，基线题在两者之间选")
+check(next(o for o in tq["options"] if o["recommended"])["value"] == "mixed",
+      "关心小包时延时推荐大小包混合话务")
+check(any("Earliest Drain First" in x for x in pr_pe["glossary_notes"]),
+      "原话提到 EDF 时说明本平台 EDF 的含义")
+d_umi, _, pr_umi, k_umi = _round1("帮我看下 UMi 场景的 SIR 分布，站距 200 m")
+check(d_umi.params.get("scenario") == "UMi_NLOS" and "deployment" not in k_umi,
+      "原话已给 UMi 就不再问部署类型")
+txq = next((q for q in pr_umi["round_questions"] if q["key"] == "tx_power_dbm"), None)
+check(txq is None or next(o for o in txq["options"] if o["recommended"])["value"] == 33.0,
+      "UMi 场景下功率推荐 33 dBm")
+
+# 选项自带改动：选“街道微站”当场把场景与功率改掉，并记下是谁定的
+d2, _, ch2 = pl.revise_draft(d_isd.draft_id, design={"deployment": "urban_micro"})
+check(d2.params.get("scenario") == "UMi_NLOS" and d2.params.get("tx_power_dbm") == 33.0,
+      "选“街道微站”后场景与功率随之改为 UMi / 33 dBm")
+check(d2.provenance.get("tx_power_dbm") == iv.SOURCE_ANSWERED, "改动来源记为用户确认")
+pr2 = pl.build_proposal(d2, p_isd)
+check(not any("发射功率" in x for x in pr2["assumption_ledger"]["silently_assumed"]),
+      "确认后发射功率不再是沉默假设")
+
+# 预期对照：方向对、量级够的假设才列为候选；当前已经是 33 dBm 时不再拿功率解释
+g46 = fx.explain_gap("iot_dl_db", 10.0, 28.5, cfg={"tx_power_dbm": 46.0})
+g33 = fx.explain_gap("iot_dl_db", 10.0, 28.5, cfg={"tx_power_dbm": 33.0})
+check(any("功率" in c["factor"] for c in g46["candidates"])
+      and not any("功率" in c["factor"] for c in g33["candidates"]),
+      "预期偏差解释参考当前配置")
+check(fx.explain_gap("iot_dl_db", 27.0, 28.5)["candidates"] == [], "差距在阈值内视为一致")
+
+# 体验因子表里写的系统级默认值必须与 sr_system_sim 的签名一致
+_sig = inspect.signature(srv.sr_system_sim).parameters
+for f in fx.DL_EXPERIENCE:
+    if f.layer == "system" and f.config_key in _sig:
+        default = _sig[f.config_key].default
+        check(str(default).lower() in f.platform_default.lower()
+              or str(default) in f.platform_default,
+              f"{f.label} 的平台默认（{f.platform_default}）与 sr_system_sim 默认 {default!r} 一致")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 68)

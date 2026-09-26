@@ -1665,6 +1665,7 @@ async def sr_probe_scenario(
     preset: str | None = None,
     config: dict[str, Any] | None = None,
     num_samples: int = 30,
+    expectation: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """花几十秒看清一个场景长什么样，再决定要不要花几十分钟正式跑。
 
@@ -1685,6 +1686,9 @@ async def sr_probe_scenario(
     preset : 预设名（sr_list_presets 查）。与 config 二选一。
     config : 直接给配置。给了 preset 时作为覆盖项。
     num_samples : 探测样本数。30 看中位数够用，看 5% 分位建议 100 以上。
+    expectation : 用户事先写下的预期，例如 ``{"iot_dl_db": 10, "sinr_db": 5}``。
+        给了就回 ``expectation_check``：差多少、哪些假设（功率、室内、负载、统计
+        对象）方向对且量级够、能解释这个差距。**差距大时先对齐假设再正式生成。**
     """
     from . import scenario as sc
 
@@ -1705,6 +1709,52 @@ async def sr_probe_scenario(
     out["preset"] = preset
     if dep_notes:
         out["dependent_override_notes"] = dep_notes
+    if expectation:
+        from . import factors as fx
+
+        measured = {
+            "iot_dl_db": ((out.get("interference") or {}).get("dl_iot") or {}).get("median_db"),
+            "sinr_db": out["link_budget"]["sinr_dB"].get("median"),
+            "sir_db": out["link_budget"]["sir_dB"].get("median"),
+            "snr_db": out["link_budget"]["snr_dB"].get("median"),
+        }
+        checks = []
+        for key, want in expectation.items():
+            got = measured.get(key)
+            if got is None:
+                checks.append({"metric": key, "error": f"探测不给 {key}；可比的有 {sorted(measured)}"})
+            else:
+                checks.append(fx.explain_gap(key, float(want), float(got), cfg=cfg))
+        out["expectation_check"] = checks
+    return _jsonable(out)
+
+
+@tool()
+async def sr_sensitivity(
+    draft_id: str,
+    num_samples: int = 21,
+    keys: list[str] | None = None,
+) -> dict[str, Any]:
+    """**哪个假设最要紧，让仿真器自己量。** 在草稿当前配置上，把发射功率、场景、
+    站数、站距、噪声系数、邻区负载、撒点各换一种取值，用探测模式实测下行 IoT /
+    SIR / SINR 中位变多少，按影响排序。
+
+    用途是决定先问用户什么：变化大的必须对齐；变化为 0（``inert``）说明仿真器根本
+    不读这个键，不用问但要写进结论边界。每个变体跑一次探测，19 站配置下每个约
+    二三十秒；只想看几项时用 ``keys`` 限定（取值见返回的 ``factor``）。
+    """
+    from . import interview as iv
+
+    try:
+        d = pl.load_draft(draft_id)
+    except (KeyError, ValueError) as exc:
+        return {"error": str(exc)}
+    cfg, _ = pl.resolved_config(d)
+    sweep_key = (d.sweep or {}).get("key")
+    out = await anyio.to_thread.run_sync(functools.partial(
+        iv.measure_sensitivity, cfg, sweep_key=sweep_key, keys=keys,
+        num_samples=max(7, int(num_samples))))
+    out["draft_id"] = draft_id
     return _jsonable(out)
 
 

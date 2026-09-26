@@ -1188,16 +1188,17 @@ check({"室内用户比例与穿透损耗（O2I）", "邻区负载（邻区有�
       <= set(_cl["must_disclose"]), "未建模且影响大的因素被列入必须告知")
 check(bool(_cl["expectation_question"]["question"]), "清单带“先写下预期”的问题")
 
-# 用这次暴露问题的原话走一遍提问：必须识别为干扰画像，并先问预期与模型假设、
-# 问发射功率，而不是问码本基线或信道层无效的负载率。
+# 用这次暴露问题的原话走一遍提问：必须识别为干扰画像，第一轮先问扫描取值、
+# 能不能要配对结论、对标哪种部署（部署一题定下场景与功率），预期留到后面的轮次；
+# 不问码本基线或信道层无效的负载率。
 _prof = _dec.classify_intent("我想用superRAN来做一个无线仿真，来对比下站间距下的干扰变化情况")
 check(_prof.task == "interference_scan", f"站间距-干扰意图识别为干扰画像（实际 {_prof.task}）")
 _d, _p = pl.create_draft("对比下站间距下的干扰变化情况")
 _prop = pl.build_proposal(_d, _p)
 _keys = [q["key"] for q in _prop["round_questions"]]
 print(f"  第 1 轮问题：{_keys}")
-check({"expectation", "model_assumptions", "tx_power_dbm"} <= set(_keys),
-      "第 1 轮就问预期、模型假设与发射功率")
+check({"formal_or_scan", "deployment"} <= set(_keys),
+      "第 1 轮就说明站距换数据集（无配对判决）并问部署类型（定场景与功率）")
 check("baseline" not in _keys and "prb_utilization" not in _keys,
       "不问码本基线，也不问信道层无效的负载率")
 check(_prop["factor_checklist"] and _prop["factor_checklist"]["must_disclose"],
@@ -1205,6 +1206,21 @@ check(_prop["factor_checklist"] and _prop["factor_checklist"]["must_disclose"],
 _iss = _dec.check_guards(_p, {"num_sites": 7, "prb_utilization": 0.3})
 check(any(i["key"] == "prb_utilization" and "满载" in i["message"] for i in _iss),
       "用户设部分负载时当场说明信道层按满载算")
+
+# 敏感度实测：同一批位置上只换一个假设。功率 -13 dB 在强干扰下几乎全落在 I/N 上，
+# SIR 一点不动；负载与撒点仿真器不读，必须测出恰好 0（inert）。
+from superran import interview as _iv  # noqa: E402
+
+_sens = _iv.measure_sensitivity(
+    {**_fx_base, "tx_power_dbm": 46.0}, keys=["tx_power_dbm", "neighbor_load", "ue_distribution"],
+    num_samples=7)
+_rows = {r["factor"]: r for r in _sens["rows"]}
+print(f"  敏感度：{[(k, r['delta']['iot_dl_db'], r['inert']) for k, r in _rows.items()]}")
+check(_rows["tx_power_dbm"]["delta"]["sir_db"] == 0.0
+      and _rows["tx_power_dbm"]["delta"]["iot_dl_db"] < -10.0,
+      "敏感度实测：功率 46→33 dBm 时 IoT 大降、SIR 不变")
+check(_rows["neighbor_load"]["inert"] and _rows["ue_distribution"]["inert"],
+      "敏感度实测：负载与撒点被识别为仿真器不读（inert）")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
