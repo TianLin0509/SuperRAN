@@ -20,8 +20,9 @@
 探测**给不了**谱效、吞吐、时延扩展估计、宽带预编码——这些必须跑正式生成，
 返回里的 `not_available` 会列清楚。
 
-两条实测边界：探测口径下 `snr_dB` 会因为定义里的 `-10log10(RB)` 而整体抬高，
-高信噪比场景可能先撞 ±50 dB 夹逼再被减回去（`scenario.probe` 会剔除并计数）；
+两条实测边界：探测把载波压到 24 RB 时原始 `snr_dB` 会整体抬高 `10log10(272/24)`，
+报告已减回全带口径；探测与 `sr_generate` 使用同一套默认 AAU 阵列（2026-09-26
+修复前漏了 12.77 dB 阵列增益，旧探测的 SNR/IoT 偏低，SIR 不受影响）；
 `doppler_hz` 是 `|v|/lambda` 最大 Doppler，CDL 内只做一次逐 ray 方向投影；
 不再依赖每 UE 至少两个 snapshot。`mobility_mode=static` 仅冻结跨 snapshot 几何，
 若 `ue_speed_kmh>0`，快照内部仍有相应的小尺度 Doppler。
@@ -30,42 +31,60 @@
 `*_NLOS` 仍按 38.901 的距离条件概率抽 LOS/NLOS，不能把后缀误读成强制 NLOS。
 判断一批数据是不是视距看 `scenario` 字段，不看 `los_ratio`。
 
-## 干扰强度用 IoT 说话
+## 下行干扰：先对齐假设，再看数
 
-**业务域和测量域是两回事，混起来的结论一定是错的：**
+**SuperRAN 当前只仿下行业务。** 上行业务、上行 IoT 不在范围内，不要向用户询问或
+报告；SRS 只作为下行预编码的信道估计来源出现。
 
-| | 是什么 | 决定什么 | 怎么看 |
+### 先问什么：影响因子清单
+
+`sr_plan` 对干扰类意图会附带 `factor_checklist`（来源 `src/superran/factors.py`），
+按对下行 IoT/SIR 的影响排序，并标明平台是否建模：
+
+| 因素 | 平台 | 对 IoT | 对 SIR |
 |---|---|---|---|
-| 业务域 | PDSCH/PUSCH 受到的干扰 | 吞吐、MCS 选择 | IoT `(I+N)/N`，>= 20 dB 算高干扰 |
-| 测量域 | SRS / CSI-RS 导频受到的干扰 | 信道估计精度、预编码好不好 | 导频域 SIR、估计 NMSE 下限 |
+| 发射功率 | 建模，默认 46 dBm | dB 对 dB | 不变 |
+| 室内比例 / O2I | **未建模**，全室外 | 室内部署会低十几 dB（38.901 低损模型估算，未实测） | 近似不变 |
+| 邻区负载 | **信道层未建模**，恒满发 | η=50% 约 -3 dB（系统级才有） | 若建模 +3 dB |
+| 站间距 | 建模 | 大幅变化 | 几 dB（视距概率、断点、下倾） |
+| 统计对象 | 部分：无 wrap-around | 含外圈小区偏低 | 偏高 |
+| 撒点、场景、噪声系数 | 建模 | 见清单 | 见清单 |
 
-实网里最难查的一类问题正是"业务域 SINR 看着还行、测量域已经崩了"——
-预编码用的是被污染的信道估计。测量域的量**只在 `link="BOTH"` 时才产生**。
-实测一组对照：`srs_congested` 与 `srs_clean_reference` 只差导频配置，
-业务域 IoT 差 0.06 dB（噪声），SRS 测量域 SIR 差 **17.9 dB**。
+用法：impact=1 的因素用户没提到时，主动说出平台取值；`must_disclose` 里的未建模项
+必须告诉用户会让结果偏向哪边。发射功率、噪声系数、邻区负载三条说法由
+`tests/test_interference.py` 第 11 节逐样本对账，表和仿真器不会悄悄不一致。
 
-- `sr_interference_report(dataset_id)` —— 两个域一起给，含等效小区负载
-- `sr_design_interference(target_iot_db=20)` —— 要造某个干扰强度该动哪些旋钮
-- `sr_iot_convert(...)` —— IoT / 等效负载 / 分级之间换算
+**先写预期，再探测对照。** 让用户先说预期量级与来源；`sr_probe_scenario`
+几十秒给出同口径的 IoT/SIR/SINR（与正式生成用同一套 AAU 阵列，逐位一致）。
+偏差超过约 5 dB 先回到清单查假设，对齐后再正式生成。
 
-主算法用 `IoT = SIR/(SIR-SINR)`（线性域），`sr_interference_report` 已经这么算。
-当前 first-party `snr_dB/sinr_dB` 共享**预数字波束、每 RB**参考，因此
-`snr_dB-sinr_dB` 数学上等价，可作一致性旁证；外部/旧数据未声明信号参考时，
-不能把这条等式当跨源契约。
-`num_slots_per_sample > 1` 时这个式子只是近似（`sinr_dB` 是各 slot 的 dB 均值、
-`sir_dB` 只取最后一个 slot），`iot_exact` 会标成 false。
+### IoT 怎么读
 
-**声称"高干扰"之前必须复核**：`sr_gate` 里的 IoT 自洽性检查会给出实测中位数与
-等级。预设里的 `label` 写的是设计意图，不是保证达标的实测值。
+IoT = (I+N)/N，回答“干扰比热噪声高多少”，也就是“噪声还剩多大影响”：
+SINR 比 SIR 低 `10·log10(IoT/(IoT-1))` dB——3 dB 时低 3 dB，13 dB 时低 0.22 dB，
+20 dB 时低 0.04 dB。**不要把下行 IoT 换算成“等效负载”**，那是上行极点容量关系；
+下行 IoT 很高常常只是“信号与干扰都远高于噪声”（例如小站距配宏站功率）。
 
-当前信道级几何预算把每个非服务小区都视为活动，真正能动其 IoT 的是站间距、
-功率、方向图和噪声底；`pdsch_load` 不参与这条预算。体验/系统级的 PRB 利用率与
-`neighbor_prb_util` 才负责调度负载，不能把两层旋钮混用。所有目标 IoT 都必须
-生成后用 `sr_interference_report` 实测校准，预设标签不是保证值。
-系统级仿真里的邻区负载是另一回事，见 `system-sim.md` 的 `neighbor_prb_util`。
+主算法用 `IoT = SIR/(SIR-SINR)`（线性域）。当前 first-party `snr_dB/sinr_dB`
+共享**预数字波束、每 RB**参考，`snr_dB-sinr_dB` 可作一致性旁证；外部/旧数据未声明
+信号参考时不能当跨源契约。`num_slots_per_sample > 1` 时式子只是近似，`iot_exact`
+会标成 false。
 
-`num_interfering_ues` 是**上行旋钮，下行不读它**，所以 `srs_congested` 这类
-"高测量干扰场景"本质是上行场景。
+- `sr_interference_report(dataset_id)` —— 下行业务域 IoT/SIR/SINR，外加
+  `not_modeled`（室内/O2I、信道层负载、拓扑边缘）。**解读绝对值前先看这一栏。**
+- `sr_design_interference(target_iot_db)` —— 各旋钮的方向与斜率；其中实测数字带
+  `levers_measured_under`（UMi、33 dBm、7 站的历史条件），不能直接当本次预期。
+- `sr_iot_convert(...)` —— IoT 分级与噪声造成的 SINR 损失；`load` 换算只是上行口径。
+
+### 导频（测量域）干扰：目前是占位
+
+数据集里的 SRS 导频 SIR 是 `10 - 10·log10(干扰 UE 数)` 的解析式，与几何、站距、
+功率无关；CSI-RS 导频 SIR 逐样本等于业务域 SIR。报告会把它们标成
+`analytic_placeholder` / `same_as_traffic_sir` 且不分级。**不能用它们比较场景**，
+也不能说“业务域还行、测量域已崩”——那需要逐样本导频干扰仿真，当前没有。
+
+**声称"高干扰"之前必须复核**：`sr_gate` 的 IoT 自洽性检查给出实测中位数与等级；
+预设 `label` 是设计意图，不是实测值。
 
 ## 射线追踪
 

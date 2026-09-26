@@ -1460,11 +1460,10 @@ slot 上采用同一大尺度预算，因此 IoT 仍为 exact。只有历史来�
 `sir_dB` 是**业务域**几何 SIR（决定吞吐）；`ul_sir_dB` / `dl_sir_dB` 是
 **测量域**导频 SIR（决定信道估计精度）。两者可以差十几个 dB。
 
-实测一组对照：`srs_congested` 与 `srs_clean_reference` 只差导频配置，
-业务域 IoT 差 0.06 dB（噪声），SRS 测量域 SIR 差 **17.9 dB**（-10.50 vs +7.37）。
-只看业务域会认为这两个场景是同一件事。
-
-测量域两列**只在 `link="BOTH"`（paired）时才产生**，单向链路的数据里根本没有。
+**当前 first-party 数据里的测量域两列不是逐样本仿真**：`ul_sir_dB` 是
+`10 - 10·log10(num_interfering_ues)` 的解析占位，`dl_sir_dB` 逐样本等于 `sir_dB`。
+`interference_report` 会标 `analytic_placeholder` / `same_as_traffic_sir` 并不分级；
+旧文档里 17.9 dB 的测量域对照来自旧内核。SuperRAN 只仿下行业务，上行 IoT 不输出。
 
 ### 上行几何 SIR 走显式 metadata，钩子只兼容旧内核
 

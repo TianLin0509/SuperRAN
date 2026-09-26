@@ -160,18 +160,19 @@ IoT（噪声抬升 `(I+N)/N`）由几何 SIR 与 SINR **精确推出**——
 
 ```python
 sr_interference_report(dataset_id)
-# traffic_domain.dl.iot   → 28.3 dB，高干扰，等效负载 0.9985
-# measurement_domain.ul_srs → SIR -10.5 dB，测量已失效，NMSE 底 10.5 dB
+# traffic_domain.dl.iot  → 中位数、分级，以及噪声还让 SINR 比 SIR 低多少
+# not_modeled            → 室内/O2I、信道层邻区负载、拓扑边缘（解读绝对值前先看）
 ```
 
-**业务域和测量域是两回事。** 实测一组对照：`srs_congested` 与
-`srs_clean_reference` 只差导频配置，业务域 IoT 差 **0.06 dB**（噪声），
-SRS 测量域 SIR 差 **17.9 dB**（−10.50 vs +7.37）。
-只看业务域 SINR 会认为这两个场景是同一件事。
+**只做下行。** 上行业务与上行 IoT 不在范围内。导频（SRS/CSI-RS）干扰目前是
+解析占位（SRS = 10 − 10·log10(干扰 UE 数)，CSI-RS 复用业务域 SIR），报告会标出并
+不分级；早先“srs_congested 与 srs_clean_reference 测量域 SIR 差 17.9 dB”的对照
+来自旧内核，不代表当前数据。下行 IoT 不再换算成“等效负载”（那是上行口径）。
 
-哪些旋钮真的能动 IoT 是**实测过的**，`sr_design_interference` 会给出实测值——
-其中两条与直觉相反：`pdsch_load` 对下行 IoT **完全无效**（0.2 与 1.0 逐位相同），
-`num_interfering_ues` 影响的是测量域而非业务域上行 IoT。
+**问之前先对齐假设。** 干扰类意图的 `sr_plan` 附带 `factor_checklist`：发射功率
+（IoT 与它 dB 对 dB）、室内比例/O2I（未建模）、邻区负载（信道层未建模，恒满发，
+`pdsch_load` 改了逐位相同）、站距、统计对象。发射功率、噪声系数与“负载不进信道层”
+三条由测试逐样本对账。
 
 **六点七、系统级问的是"这个小区里的用户实际体验到多快"。** 链路级回答"这个信道
 能跑多快"，系统级把连续几秒的 TTI、话务到达、PF 调度、HARQ、OLLA 和 CSI 老化串起来，
@@ -434,7 +435,7 @@ python scripts/install_agent_skills.py --role lead
 |---|---|
 | `sr_capabilities` / `sr_list_presets` / `sr_list_scenes` | 能力与场景发现 |
 | `sr_probe_scenario` / `sr_compare_scenarios` | **几十秒探场景**：把 RB/符号压到最小，几何量与全量逐位相同；多预设并排 |
-| `sr_interference_report` / `sr_design_interference` / `sr_iot_convert` | **干扰画像**：业务域 IoT 与测量域 SIR 分开报；哪些旋钮真能动 IoT；IoT ↔ 等效负载换算 |
+| `sr_interference_report` / `sr_design_interference` / `sr_iot_convert` | **干扰画像**：下行 IoT/SIR/SINR 与未建模因素；哪些旋钮真能动 IoT；IoT 分级 |
 | `sr_missing_slots` | **结论模板还缺哪些槽** —— 决定该主动问什么 |
 | `sr_plan` / `sr_revise` | 分轮协商：实验设计 + 参数 + 对比组 + 陷阱 |
 | `sr_generate` | 生成数据集，返回句柄与统计摘要 |
