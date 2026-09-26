@@ -419,14 +419,36 @@ def revise_draft(
     draft_id: str,
     overrides: dict[str, Any] | None = None,
     design: dict[str, str] | None = None,
+    *,
+    accept_recommended: bool = False,
 ) -> tuple[Draft, dec.TaskProfile, list[str]]:
     """差分修正：只说改什么，不用重述整个需求。
 
-    ``design`` 记录实验设计层的回答（基线、指标、推广范围）。它不影响仿真
-    参数，但会写进计划书——这是三个月后回看时最有价值的部分。
+    ``design`` 记录实验设计层的回答（基线、指标、推广范围）。选项自带的配置改动
+    当场生效。``accept_recommended=True`` 对应用户说“按推荐跑”：所有待问问题
+    （含后续轮次）一律取推荐项，逐条记进变更，而不是沿用平台默认。
     """
     d = load_draft(draft_id)
     profile = next((p for p in dec.TASK_PROFILES if p.task == d.task), dec.TASK_PROFILES[-1])
+    design = dict(design or {})
+    overrides = dict(overrides or {})
+    if accept_recommended:
+        for _ in range(8):  # 依赖链逐层展开：答完一层，下一层才进入前沿
+            st = interview_state(d, profile)
+            # 预期、预期增益只能由用户本人给出，不能拿推荐项代答。
+            todo = [q for q in st["pending"]
+                    if q.key not in design and q.key not in overrides
+                    and q.key not in _USER_CONTENT_KEYS]
+            if not todo:
+                break
+            for q in todo:
+                rec = next((o["value"] for o in q.options if o.get("recommended")), None)
+                if rec is None:
+                    continue
+                (overrides if q.layer == "param" else design)[q.key] = rec
+            d.design.update({k: str(v) for k, v in design.items()})
+            d.params.update({k: v for k, v in overrides.items()})
+            d.user_set = sorted(set(d.user_set) | set(overrides))
 
     changes: list[str] = []
     raw_overrides = dict(overrides or {})
@@ -445,7 +467,7 @@ def revise_draft(
     for k in raw_overrides:
         d.provenance[k] = iv.SOURCE_ANSWERED
     for k, v in (design or {}).items():
-        if not v:
+        if v is None or v == "":  # False / 0 是合法回答（例如“关掉自适应”），不能当空值丢掉
             continue
         d.design[k] = str(v)
         d.provenance[k] = iv.SOURCE_ANSWERED
@@ -483,6 +505,61 @@ def revise_draft(
     return d, profile, changes
 
 
+_USER_CONTENT_KEYS = frozenset({"expectation", "effect_size"})
+
+
+def _typed(value: str) -> Any:
+    """design 里的回答按字符串存；给系统仿真时还原成布尔/数值。"""
+    low = str(value).strip().lower()
+    if low in {"true", "false"}:
+        return low == "true"
+    try:
+        f = float(low)
+        return int(f) if f.is_integer() and "." not in low else f
+    except ValueError:
+        return value
+
+
+def system_params(d: Draft) -> dict[str, Any]:
+    """已确认的系统层回答 → 直接传给 sr_system_sim 的参数，避免 Agent 转述时丢失。"""
+    from . import factors as fx  # noqa: PLC0415
+
+    if not d.family:
+        return {}
+    out: dict[str, Any] = {}
+    for f in fx.factors_for(d.family):
+        if f.layer == "system" and f.config_key and f.key in d.design:
+            out[f.config_key] = _typed(d.design[f.key])
+    return out
+
+
+def interview_state(d: Draft, profile: dec.TaskProfile) -> dict[str, Any]:
+    """访谈的当前状态：台账、这一轮的问题、全部待问问题（按依赖与影响排好）。"""
+    from . import interview as iv  # noqa: PLC0415
+
+    ch_cfg, _ = resolved_config(d)
+    answered = set(d.design) | set(d.user_set) | set(d.provenance)
+    sweep_key = (d.sweep or {}).get("key") if d.sweep else iv.sweep_key_from_intent(
+        d.intent, iv.Brief())
+    led = iv.ledger(d.family, ch_cfg, d.provenance, sweep_key=sweep_key)
+    extra_design = []
+    if d.form == "compare_methods":
+        for key, prio in (("metric", 1), ("effect_size", 3)):
+            q = dec._DESIGN.get(key)
+            if q is not None and not (key == "metric" and "metric_words" in d.design):
+                extra_design.append({**q.as_dict(), "priority": prio})
+    extra_params = [x.as_dict() for x in dec.decisions_for(profile, limit=99)]
+    common = dict(intent=d.intent, form=d.form, family=d.family,
+                  brief=iv.Brief(params={}, design=dict(d.design), sweep=d.sweep),
+                  answered=answered, led=led, sweep_key=sweep_key,
+                  extra_design=extra_design, extra_params=extra_params, params=ch_cfg)
+    return {
+        "sweep_key": sweep_key, "ledger": led, "config": ch_cfg,
+        "this_round": iv.frontier(**common),
+        "pending": iv.frontier(**common, limit=None),
+    }
+
+
 def resolved_config(d: Draft) -> tuple[dict[str, Any], dict[str, Any]]:
     """定稿：拆出真正交给 ChannelHub 的配置和自用参数。"""
     return translate(d.params)
@@ -517,23 +594,14 @@ def build_proposal(
 
     # 本轮问什么：由结论形态与目标量的影响因子表决定（interview.py），
     # 不再由任务模板决定。原话、用户回答过的都不问。
-    answered = set(d.design) | set(d.user_set) | set(d.provenance)
-    sweep_key = (d.sweep or {}).get("key") if d.sweep else iv.sweep_key_from_intent(
-        d.intent, iv.Brief())
-    led = iv.ledger(d.family, ch_cfg, d.provenance, sweep_key=sweep_key)
-    extra_design = []
-    if d.form == "compare_methods":
-        for key, prio in (("metric", 1), ("effect_size", 3)):
-            q = dec._DESIGN.get(key)
-            if q is not None and not (key == "metric" and "metric_words" in d.design):
-                extra_design.append({**q.as_dict(), "priority": prio})
-    extra_params = [x.as_dict() for x in dec.decisions_for(profile, limit=99)]
-    common = dict(intent=d.intent, form=d.form, family=d.family,
-                  brief=iv.Brief(params={}, design=dict(d.design), sweep=d.sweep),
-                  answered=answered, led=led, sweep_key=sweep_key,
-                  extra_design=extra_design, extra_params=extra_params, params=ch_cfg)
-    this_round = iv.frontier(**common)
-    pending = iv.frontier(**common, limit=None)
+    st = interview_state(d, profile)
+    sweep_key, led = st["sweep_key"], st["ledger"]
+    this_round, pending = st["this_round"], st["pending"]
+    blocking = [
+        {"key": q.key, "question": q.question, "default": q.blocking_default,
+         "recommended": next((o["value"] for o in q.options if o.get("recommended")), None)}
+        for q in pending if q.blocking_default is not None
+    ]
 
     round_q = []
     for q in this_round:
@@ -559,8 +627,9 @@ def build_proposal(
         "target_rounds": f"每轮最多 {iv.MAX_PER_ROUND} 问，通常 1~2 轮",
         "remaining_all_optional": len(pending) <= len(this_round),
         "stop_hint": (
-            "用户说「随便 / 默认就行 / 就这样」时立刻停止提问直接生成；"
-            "剩下的沉默假设照 assumption_ledger 原样复述给用户，不要当作已确认。"
+            "用户说「按推荐跑」→ sr_revise(draft_id, accept_recommended=True)，所有待问问题取推荐项；"
+            "用户说「默认就行」→ 停止提问，但 blocking_defaults 里的项默认会让研究失效，"
+            "必须改用推荐值并告诉用户，其余沉默假设照 assumption_ledger 复述，不当作已确认。"
         ),
     }
 
@@ -591,6 +660,12 @@ def build_proposal(
         # 开跑前必须说清、但不需要用户选的事实（例如生成层变量没有配对判决）。
         "upfront_notices": iv.upfront_notices(d.form, sweep_key, d.intent),
         "assumption_ledger": {k: v for k, v in led.items() if not k.startswith("_")},
+        # 平台默认会让这次研究失效的项：用户说“默认”时也不能沿用。
+        "blocking_defaults": blocking,
+        # 已确认的系统层回答，原样传给 sr_system_sim（信道生成参数在 resolved_config）。
+        "system_params": system_params(d),
+        "needs_user_content": sorted(
+            k for k in _USER_CONTENT_KEYS if any(q.key == k for q in pending)),
         # --- 本轮提问 ---
         "round": rnd["round"],
         "round_focus": rnd["focus"],

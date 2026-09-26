@@ -42,7 +42,7 @@ def validate() -> list[str]:
         "development_branch": "develop",
         "release_branch": "main",
         "merge_method": "squash",
-        "mcp_tool_count": 35,
+        "mcp_tool_count": 36,
         "rehearsal_merge_allowed": False,
     }
     for key, value in expected.items():

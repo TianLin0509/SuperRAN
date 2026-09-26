@@ -52,6 +52,9 @@ class Factor:
     options: tuple[tuple[Any, str, str], ...] = ()
     # 只在扫这个变量时才要问（例如只有比较 SRS 周期时才必须问自适应周期）。
     only_for_sweep: str | None = None
+    # 对哪类比较是决定性的：扫描变量名，或 "scheduler"（比较调度器）。影响等级衡量的是
+    # 目标量绝对值；比较/扫描要的是差值，决定差值的因素要提前问。
+    decisive_for: tuple[str, ...] = ()
     # 预期与探测对不上时，这个假设能解释多大的偏差：
     # {"metric": 指标, "if": 另一种取值的说法, "delta_db": 估计变化, "basis": 依据}
     gap_hint: dict[str, Any] | None = field(default=None, compare=False)
@@ -241,6 +244,29 @@ DL_INTERFERENCE: tuple[Factor, ...] = (
         ),
     ),
     Factor(
+        key="carrier_bandwidth",
+        label="载频与带宽",
+        status=MODELED,
+        impact=2,
+        effect_iot="带宽决定每 RB 的功率与噪声底：同一总功率下带宽越宽，每 RB 功率越低，IoT 越低",
+        effect_sir="载频改变路损与视距概率，SIR 随之小幅变化",
+        magnitude="100→20 MHz 同功率时 IoT +7 dB（历史实测，UMi 33 dBm 条件）",
+        ask="载频、带宽按 2.6 GHz / 100 MHz 吗？",
+        platform_default="2.6 GHz、100 MHz（272 RB）",
+        config_key="bandwidth_hz",
+    ),
+    Factor(
+        key="downtilt",
+        label="天线下倾与方向图",
+        status=PARTIAL,
+        impact=2,
+        effect_iot="下倾决定邻区主瓣打到本小区的程度，站距越小越敏感",
+        effect_sir="直接改变 SIR 分布",
+        magnitude="默认 64T 子阵固定下倾 6°，阵元方向图是 3GPP 式参数化模型（非实测）",
+        ask="下倾按默认 6° 可以吗？站距很小（<200 m）时它对干扰影响很大。",
+        platform_default="固定 6° 下倾，参数化阵元方向图",
+    ),
+    Factor(
         key="noise_figure_db",
         label="终端噪声系数",
         status=MODELED,
@@ -337,6 +363,7 @@ DL_EXPERIENCE: tuple[Factor, ...] = (
         ask="用户速度按多少？这决定 CSI 老化的程度，平台会按它生成连续轨迹。",
         platform_default="预设值（多为 3 km/h），单快照",
         config_key="ue_speed_kmh",
+        decisive_for=("srs_period_ms", "scheduler"),
         options=(
             (3.0, "3 km/h · 步行", "几乎不老化"),
             (30.0, "30 km/h · 城区车速", ""),
@@ -355,10 +382,28 @@ DL_EXPERIENCE: tuple[Factor, ...] = (
         platform_default="不标定（target_prb_utilization=None）：按每 UE 到达率自然形成",
         config_key="target_prb_utilization",
         layer="system",
+        decisive_for=("scheduler",),
         options=(
             (0.6, "PRB 利用率标定到 60%", "现网忙时典型，调度器差异可见"),
             (0.3, "标定到 30%", "轻中载"),
             (0.9, "标定到 90%", "接近拥塞，差异最大"),
+        ),
+    ),
+    Factor(
+        key="num_ues",
+        label="每小区用户数",
+        status=MODELED,
+        impact=2,
+        effect="决定调度竞争与 PF 多用户分集；不标定负载时，负载也由它和到达率自然形成",
+        magnitude="每小区几个用户与十几个用户，调度器差异可以完全不同",
+        ask="每小区大概多少活跃用户？",
+        platform_default="预设值（company_64t4r_multicell 为 21 UE / 21 小区，即每小区约 1 个）",
+        config_key="num_ues",
+        decisive_for=("scheduler",),
+        options=(
+            (210, "每小区约 10 个（210 UE / 21 小区）", "调度竞争可见"),
+            (105, "每小区约 5 个", ""),
+            (21, "每小区约 1 个（预设）", "几乎没有调度竞争"),
         ),
     ),
     Factor(
@@ -372,6 +417,7 @@ DL_EXPERIENCE: tuple[Factor, ...] = (
         platform_default="关闭（SU，mu_enabled=False）",
         config_key="mu_enabled",
         layer="system",
+        decisive_for=("srs_period_ms",),
         options=(
             (False, "SU（默认）", "口径简单"),
             (True, "开 MU（两用户配对）", "容量上界更高，边缘收益小"),

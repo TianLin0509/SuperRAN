@@ -88,7 +88,7 @@ def test_reciprocity_versions_are_explicit_and_not_shape_heuristics() -> None:
 
 def test_mcp_surface_stays_complete_without_external_source_tree() -> None:
     tools = asyncio.run(server.mcp.list_tools())
-    assert len(tools) == 35
+    assert len(tools) == 36
     capabilities = {item.name: item for item in channelhub.probe_capabilities()}
     assert capabilities["internal_sim"].available
     assert all("ChannelHub" not in item.missing for item in capabilities.values())

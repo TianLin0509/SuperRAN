@@ -117,7 +117,8 @@ def read_brief(intent: str) -> Brief:
     m = re.search(r"(\d+(?:\.\d+)?)\s*km/h", text)
     if m:
         b.params["ue_speed_kmh"] = float(m.group(1))
-        b.evidence.append(f"「{m.group(0)}」→ 速度 {m.group(1)} km/h")
+        b.evidence.append(f"「{m.group(0)}」→ 速度 {m.group(1)} km/h（按全部用户理解；"
+                          "若只是一部分高速用户混在低速人群里，要另说）")
     m = re.search(r"(\d+(?:\.\d+)?)\s*dbm", text)
     if m:
         b.params["tx_power_dbm"] = float(m.group(1))
@@ -300,6 +301,12 @@ def ledger(family: str | None, params: dict[str, Any], provenance: dict[str, str
 
 MAX_PER_ROUND = 3
 
+# 系统层键的平台默认（与 sr_system_sim 签名一致，test_e2e 核对）。
+_SYSTEM_DEFAULTS: dict[str, Any] = {
+    "traffic_model": "ftp3", "neighbor_prb_util": 0.3, "srs_period_adaptive": True,
+    "mu_enabled": False, "target_prb_utilization": None,
+}
+
 KEY_LABELS = {
     "isd_m": "站间距", "srs_period_ms": "SRS 周期", "ue_speed_kmh": "用户速度",
     "neighbor_prb_util": "邻区负载", "antenna_preset": "天线规模",
@@ -315,13 +322,21 @@ class Question:
     options: list[dict[str, Any]]
     layer: str = "design"            # design：记进约定；param：直接改配置
     priority: int = 5
+    # 依赖的其他问题：它们这一轮还没答时，本题留到下一轮（grilling 的前沿规则）。
+    depends_on: tuple[str, ...] = ()
+    # 平台默认会让这次研究失效：用户说“默认”时也不能沿用，改取推荐值并告知。
+    blocking_default: Any = None
     # 选了某个选项后自动生效的改动：{选项值: {"overrides": {...}, "note": "..."}}
     effects: dict[Any, dict[str, Any]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"key": self.key, "question": self.question, "why": self.why,
-                "options": self.options, "layer": self.layer, "priority": self.priority,
-                "effects": {str(k): v for k, v in self.effects.items()}}
+        out = {"key": self.key, "question": self.question, "why": self.why,
+               "options": self.options, "layer": self.layer, "priority": self.priority,
+               "effects": {str(k): v for k, v in self.effects.items()},
+               "depends_on": list(self.depends_on)}
+        if self.blocking_default is not None:
+            out["blocking_default"] = self.blocking_default
+        return out
 
 
 def _opts(pairs: list[tuple[Any, str, str]]) -> list[dict[str, Any]]:
@@ -432,6 +447,10 @@ def upfront_notices(form: str | None, sweep_key: str | None, intent: str) -> lis
             f"{KEY_LABELS.get(sweep_key, sweep_key)}属于信道生成层变量：每一档是一批独立的数据，"
             "目前只能给各档分布对照 + 机制解释，给不了“A 比 B 高 X dB 且显著”这种配对结论"
             "（需要先给平台补跨数据集按位置配对的判决）。")
+    if sweep_key == "srs_period_ms":
+        notes.append("比较 SRS 周期需要信道随时间演化：平台会按速度生成连续轨迹，每 UE ≥8 个"
+                     "时间相关快照；单快照数据上 SRS 周期不起作用。另外当前 SRS 导频干扰是解析"
+                     "占位，结论不含上行导频污染的影响。")
     notes.extend(glossary_notes(intent))
     return notes
 
@@ -486,7 +505,7 @@ def _quantity_question(family: str | None) -> Question | None:
             ("sinr", "以 SINR 为主", "关心用户体验"),
             ("iot", "以 IoT 为主", "关心干扰受限程度"),
         ]),
-        priority=2,
+        priority=3,
     )
 
 
@@ -590,10 +609,14 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
     if form == "compare_methods":
         if re.search(r"(?<![a-z])edf(?![a-z])", (intent or "").lower()) and "edf_meaning" not in answered:
             cands.append(_edf_question())
+        edf_dep = ("edf_meaning",) if re.search(r"(?<![a-z])edf(?![a-z])", (intent or "").lower()) else ()
         if "baseline" not in brief.design and "baseline" not in answered:
-            cands.append(_baseline_question(intent))
+            bq = _baseline_question(intent)
+            bq.depends_on = edf_dep
+            cands.append(bq)
         mq = _metric_question(family, intent)
         if mq is not None and "metric" not in answered:
+            mq.depends_on = edf_dep
             cands.append(mq)
     sweep_q = None
     if form == "sweep_condition" and sweep_key and not brief.sweep and "sweep_values" not in answered:
@@ -613,9 +636,9 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
         q.priority = min(factors[k].impact for k in deploy_keys if k in factors)
         cands.append(q)
         silent -= {"tx_power_dbm", "scenario"}
-        # 站距档位依赖部署类型：部署没定时，扫描档位排在它后面。
+        # 站距档位依赖部署类型（UMa 与 UMi 的合理站距不同）：部署没定时留到下一轮。
         if sweep_q is not None and sweep_key == "isd_m":
-            sweep_q.priority = q.priority + 1
+            sweep_q.depends_on = ("deployment",)
     for key in sorted(silent, key=lambda k: factors[k].impact if k in factors else 9):
         f = factors.get(key)
         if f is None or key in answered or not f.options:
@@ -623,6 +646,18 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
         fq = _contextual(_factor_question(f), intent=intent, params=params or {})
         if f.only_for_sweep and f.only_for_sweep == sweep_key:
             fq.priority -= 1  # 专为这个扫描变量存在的前提（例如 SRS 自适应周期），先问
+        compare_kind = "scheduler" if (form == "compare_methods" and any(
+            "调度" in m for m in named_methods(intent))) else None
+        if sweep_key in f.decisive_for or (compare_kind and compare_kind in f.decisive_for):
+            fq.priority = min(fq.priority, 1) - 1  # 决定比较差值的因素，提前
+        rec = next((o["value"] for o in fq.options if o["recommended"]), None)
+        default = (params or {}).get(f.config_key) if f.layer == "generation" else _SYSTEM_DEFAULTS.get(f.config_key)
+        if rec is not None and default is not None and str(rec) != str(default) and (
+                (f.key == "srs_period_adaptive" and sweep_key == "srs_period_ms")
+                or (f.key == "traffic_model" and any(w in (intent or "") for w in ("时延", "小包")))):
+            fq.blocking_default = default
+            fq.priority = min(fq.priority, 0) - 1
+            fq.why += f" 注意：平台默认 {default} 会让这次研究失效，用户说“默认”时也要改为推荐值。"
         cands.append(fq)
     for key in led.get("_interpret_keys", []):
         f = factors.get(key)
@@ -653,7 +688,11 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
         cands.append(_expectation_question(family))
 
     cands.sort(key=lambda q: q.priority)
-    return cands if limit is None else cands[:limit]
+    if limit is None:
+        return cands
+    pending = {q.key for q in cands}
+    ready = [q for q in cands if not (set(q.depends_on) & pending - answered)]
+    return ready[:limit]
 
 
 QUESTION_BUILDERS = {

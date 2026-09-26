@@ -501,6 +501,7 @@ def sr_revise(
     draft_id: str,
     overrides: dict[str, Any] | None = None,
     design: dict[str, str] | None = None,
+    accept_recommended: bool = False,
 ) -> dict[str, Any]:
     """差分修正一份提案——用户只说改什么，不必重述整个需求。
 
@@ -511,11 +512,15 @@ def sr_revise(
         sr_revise(draft_id, design={"baseline": "3GPP Type II 码本",
                                      "metric": "NMSE 与频谱效率损失"})
 
-    design 不影响任何仿真参数，但会写进计划书——三个月后回看时，
-    这部分比参数值有用得多。
+    design 会写进计划书；选项自带的配置改动（例如“街道微站”→ UMi + 33 dBm）当场生效。
+
+    accept_recommended=True 对应用户说“按推荐跑”：所有待问问题（含后续轮次）
+    一律取推荐项并逐条列进 changes。用户只说“默认”时不要用它，但返回里的
+    ``blocking_defaults`` 必须改为推荐值——那些默认会让这次研究失效。
     """
     try:
-        draft, profile, changes = pl.revise_draft(draft_id, overrides, design)
+        draft, profile, changes = pl.revise_draft(
+            draft_id, overrides, design, accept_recommended=accept_recommended)
     except (KeyError, ValueError) as exc:
         return {"error": str(exc)}
     proposal = pl.build_proposal(draft, profile, max_questions=5)

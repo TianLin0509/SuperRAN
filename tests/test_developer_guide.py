@@ -400,7 +400,7 @@ def test_every_module_public_symbol_tool_test_skill_and_preset_is_carried() -> N
     for name in detailed_exemptions:
         assert f'<code>{name}.py</code>' in text
     assert meta["public_symbols"] == len(public_symbols)
-    assert meta["mcp_tools"] == len(tools) == 35
+    assert meta["mcp_tools"] == len(tools) == 36
     assert meta["test_files"] == len(test_files)
     assert meta["skill_files"] == len(skill_files)
     assert preset_count > 0
@@ -594,7 +594,7 @@ def test_member_and_lead_pages_keep_role_install_and_rehearsal_boundaries() -> N
     assert workflow["development_branch"] == "develop"
     assert workflow["release_branch"] == "main"
     assert workflow["merge_method"] == "squash"
-    assert workflow["mcp_tool_count"] == 35
+    assert workflow["mcp_tool_count"] == 36
     assert workflow["rehearsal_merge_allowed"] is False
     assert workflow["author_modes"] == {
         "identity_selects_mode": False,

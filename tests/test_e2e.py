@@ -244,9 +244,8 @@ def _round1(text):
 d_isd, p_isd, pr_isd, k_isd = _round1("我想用superRAN来做一个无线仿真，来对比下站间距下的干扰变化情况")
 print(f"  站距 → {d_isd.form} {k_isd}")
 check(d_isd.form == "sweep_condition", "站距-干扰识别为“扫一个条件”")
-check({"deployment", "sweep_values"} <= set(k_isd) and "baseline" not in k_isd
-      and k_isd.index("deployment") < k_isd.index("sweep_values"),
-      "站距案例第一轮：先问部署再问站距档位（档位依赖部署）；不问码本基线")
+check("deployment" in k_isd and "sweep_values" not in k_isd and "baseline" not in k_isd,
+      "站距案例第一轮问部署；站距档位依赖部署，留到下一轮；不问码本基线")
 check(any("生成层变量" in n for n in pr_isd["upfront_notices"]),
       "生成层变量没有配对判决作为开跑前声明给出，不占提问名额")
 check(any("室内" in x for x in pr_isd["assumption_ledger"]["conclusion_limits"])
@@ -291,15 +290,19 @@ d_load, _, _, _ = _round1("我想知道邻区负载从 30% 到 90% 时用户体�
 check(d_load.sweep == {"key": "neighbor_prb_util", "values": [0.3, 0.9]},
       "“负载从 30% 到 90%”识别为扫系统级邻区负载")
 d_pe, _, pr_pe, _ = _round1("PF 和 EDF 调度对小包时延的影响对比")
-bq = next(q for q in pr_pe["round_questions"] if q["key"] == "baseline")
-_pend = pl.build_proposal(*pl.revise_draft(d_pe.draft_id, design={
-    "edf_meaning": "drain_first", "baseline": "PF 调度", "metric": "small_delay_p95"})[:2])
-tq = next((q for q in _pend["round_questions"] if q["key"] == "traffic_model"), None)
+_pe2d, _pe2p, _ = pl.revise_draft(d_pe.draft_id, design={"edf_meaning": "drain_first"})
+_pend2 = pl.interview_state(_pe2d, _pe2p)["pending"]
+bq = next(q.as_dict() for q in _pend2 if q.key == "baseline")
+tq = next((q for q in pr_pe["round_questions"] if q["key"] == "traffic_model"), None)
 check("baseline" not in d_pe.design and "PF" in bq["options"][0]["label"]
       and "码本" not in bq["question"], "“PF 和 EDF”不替用户认定基线，基线题在两者之间选")
 k_pe = [q["key"] for q in pr_pe["round_questions"]]
-check(k_pe[:2] == ["edf_meaning", "baseline"], "先确认 EDF 指哪个，再问基线（基线依赖它）")
-mq = next(q for q in pr_pe["round_questions"] if q["key"] == "metric")
+check(k_pe[0] == "edf_meaning" and "baseline" not in k_pe,
+      "先确认 EDF 指哪个；基线依赖它，留到下一轮")
+check("traffic_model" in k_pe and any(b["key"] == "traffic_model" and b["recommended"] == "mixed"
+                                      for b in pr_pe["blocking_defaults"]),
+      "看小包时延时默认 FTP3 会让研究失效：列入 blocking_defaults，第一轮就问")
+mq = next(q.as_dict() for q in _pend2 if q.key == "metric")
 check(next(o for o in mq["options"] if o["recommended"])["value"] == "small_delay_p95",
       "比较调度器的主指标题推荐小包完成时延 P95")
 check(tq is None or next(o for o in tq["options"] if o["recommended"])["value"] == "mixed",
@@ -312,6 +315,14 @@ check(d_umi.params.get("scenario") == "UMi_NLOS" and "deployment" not in k_umi,
 txq = next((q for q in pr_umi["round_questions"] if q["key"] == "tx_power_dbm"), None)
 check(txq is None or next(o for o in txq["options"] if o["recommended"])["value"] == 33.0,
       "UMi 场景下功率推荐 33 dBm")
+
+# “按推荐跑”：所有待问问题取推荐项；False 也是合法回答；预期只能由用户本人给
+d_acc, _, _ = pl.revise_draft(d_srs.draft_id, accept_recommended=True)
+pr_acc = pl.build_proposal(d_acc, dec.classify_intent(d_acc.intent))
+check(pr_acc["system_params"].get("srs_period_adaptive") is False,
+      "按推荐跑后 SRS 自适应确实被关掉（False 不被当成空值丢掉）")
+check("expectation" not in d_acc.design and pr_acc["needs_user_content"] == ["expectation"],
+      "预期不被推荐项代答，仍列为需要用户本人给出")
 
 # 选项自带改动：选“街道微站”当场把场景与功率改掉，并记下是谁定的
 d2, _, ch2 = pl.revise_draft(d_isd.draft_id, design={"deployment": "urban_micro"})
