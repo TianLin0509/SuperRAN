@@ -588,6 +588,8 @@ def build_proposal(
         "restatement": iv.restatement(d.form, d.family, iv.Brief(evidence=d.brief_evidence),
                                       sweep_key, led, d.intent),
         "glossary_notes": iv.glossary_notes(d.intent),
+        # 开跑前必须说清、但不需要用户选的事实（例如生成层变量没有配对判决）。
+        "upfront_notices": iv.upfront_notices(d.form, sweep_key, d.intent),
         "assumption_ledger": {k: v for k, v in led.items() if not k.startswith("_")},
         # --- 本轮提问 ---
         "round": rnd["round"],

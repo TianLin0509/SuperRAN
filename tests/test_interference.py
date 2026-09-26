@@ -1197,8 +1197,8 @@ _d, _p = pl.create_draft("对比下站间距下的干扰变化情况")
 _prop = pl.build_proposal(_d, _p)
 _keys = [q["key"] for q in _prop["round_questions"]]
 print(f"  第 1 轮问题：{_keys}")
-check({"formal_or_scan", "deployment"} <= set(_keys),
-      "第 1 轮就说明站距换数据集（无配对判决）并问部署类型（定场景与功率）")
+check("deployment" in _keys and any("生成层变量" in n for n in _prop["upfront_notices"]),
+      "第 1 轮就问部署类型（定场景与功率），并声明站距换数据集、无配对判决")
 check("baseline" not in _keys and "prb_utilization" not in _keys,
       "不问码本基线，也不问信道层无效的负载率")
 check(_prop["factor_checklist"] and _prop["factor_checklist"]["must_disclose"],

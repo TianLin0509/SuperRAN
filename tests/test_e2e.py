@@ -244,8 +244,14 @@ def _round1(text):
 d_isd, p_isd, pr_isd, k_isd = _round1("我想用superRAN来做一个无线仿真，来对比下站间距下的干扰变化情况")
 print(f"  站距 → {d_isd.form} {k_isd}")
 check(d_isd.form == "sweep_condition", "站距-干扰识别为“扫一个条件”")
-check({"formal_or_scan", "deployment"} <= set(k_isd) and "baseline" not in k_isd,
-      "站距案例第一轮：说明生成层变量没有配对判决、问部署；不问码本基线")
+check({"deployment", "sweep_values"} <= set(k_isd) and "baseline" not in k_isd
+      and k_isd.index("deployment") < k_isd.index("sweep_values"),
+      "站距案例第一轮：先问部署再问站距档位（档位依赖部署）；不问码本基线")
+check(any("生成层变量" in n for n in pr_isd["upfront_notices"]),
+      "生成层变量没有配对判决作为开跑前声明给出，不占提问名额")
+check(any("室内" in x for x in pr_isd["assumption_ledger"]["conclusion_limits"])
+      and not any("室内" in x for x in pr_isd["assumption_ledger"]["silently_assumed"]),
+      "未建模项一律进结论边界，不混在沉默假设里")
 check(any("发射功率" in x for x in pr_isd["assumption_ledger"]["silently_assumed"]),
       "发射功率 46 dBm 列为沉默假设")
 check(any("撒点" in x for x in pr_isd["assumption_ledger"]["conclusion_limits"]),
@@ -274,22 +280,29 @@ d_srs, _, _, k_srs = _round1("SRS 周期从 10 ms 改到 20 ms，看 120 km/h �
 print(f"  SRS → {d_srs.form} {d_srs.sweep} {k_srs}")
 check(d_srs.sweep == {"key": "srs_period_ms", "values": [10.0, 20.0]}
       and d_srs.params.get("ue_speed_kmh") == 120.0, "扫描变量与速度取自原话")
-check("srs_period_adaptive" in k_srs and "baseline" not in k_srs,
-      "比较 SRS 周期第一轮就问要不要关自适应周期")
+check(k_srs and k_srs[0] == "srs_period_adaptive" and "baseline" not in k_srs,
+      "比较 SRS 周期第一题就问要不要关自适应周期")
 
 # 设计时没见过的 4 句（泛化检查，防止只对上面 5 句过拟合）
 d_ant, _, _, k_ant = _round1("64T 和 32T 在 500 m 站距下的下行边缘速率差多少")
-check(d_ant.sweep and d_ant.sweep["key"] == "antenna_preset" and "formal_or_scan" in k_ant,
-      "“64T 和 32T 差多少”识别为扫天线规模（生成层，先说明无配对判决）")
+check(d_ant.sweep and d_ant.sweep["key"] == "antenna_preset",
+      "“64T 和 32T 差多少”识别为扫天线规模")
 d_load, _, _, _ = _round1("我想知道邻区负载从 30% 到 90% 时用户体验速率掉多少")
 check(d_load.sweep == {"key": "neighbor_prb_util", "values": [0.3, 0.9]},
       "“负载从 30% 到 90%”识别为扫系统级邻区负载")
 d_pe, _, pr_pe, _ = _round1("PF 和 EDF 调度对小包时延的影响对比")
 bq = next(q for q in pr_pe["round_questions"] if q["key"] == "baseline")
-tq = next(q for q in pr_pe["round_questions"] if q["key"] == "traffic_model")
+_pend = pl.build_proposal(*pl.revise_draft(d_pe.draft_id, design={
+    "edf_meaning": "drain_first", "baseline": "PF 调度", "metric": "small_delay_p95"})[:2])
+tq = next((q for q in _pend["round_questions"] if q["key"] == "traffic_model"), None)
 check("baseline" not in d_pe.design and "PF" in bq["options"][0]["label"]
       and "码本" not in bq["question"], "“PF 和 EDF”不替用户认定基线，基线题在两者之间选")
-check(next(o for o in tq["options"] if o["recommended"])["value"] == "mixed",
+k_pe = [q["key"] for q in pr_pe["round_questions"]]
+check(k_pe[:2] == ["edf_meaning", "baseline"], "先确认 EDF 指哪个，再问基线（基线依赖它）")
+mq = next(q for q in pr_pe["round_questions"] if q["key"] == "metric")
+check(next(o for o in mq["options"] if o["recommended"])["value"] == "small_delay_p95",
+      "比较调度器的主指标题推荐小包完成时延 P95")
+check(tq is None or next(o for o in tq["options"] if o["recommended"])["value"] == "mixed",
       "关心小包时延时推荐大小包混合话务")
 check(any("Earliest Drain First" in x for x in pr_pe["glossary_notes"]),
       "原话提到 EDF 时说明本平台 EDF 的含义")

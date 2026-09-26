@@ -251,7 +251,6 @@ def sweep_key_from_intent(intent: str, brief: Brief) -> str | None:
 SOURCE_SAID = "原话"
 SOURCE_ANSWERED = "用户确认"
 SOURCE_PRESET = "预设/平台默认"
-SOURCE_NOT_MODELED = "平台未建模"
 SOURCE_LIMIT = "平台未实现（写进结论边界）"
 
 
@@ -270,11 +269,9 @@ def ledger(family: str | None, params: dict[str, Any], provenance: dict[str, str
         elif f.key in provenance or key in provenance:
             source = provenance.get(f.key) or provenance.get(key) or SOURCE_ANSWERED
             value = params.get(key, provenance.get(f"{f.key}__value", "已确认"))
-        elif f.status == fx.NOT_MODELED and not f.options:
-            # 平台没实现、也没有可选项：不是“待回答”，是结论边界，必须写进结论。
-            source, value = SOURCE_LIMIT, f.platform_default
         elif f.status == fx.NOT_MODELED:
-            source, value = SOURCE_NOT_MODELED, f.platform_default
+            # 平台没实现：改不了，是结论边界，必须写进结论。有选项的另问“按哪种方式解读”。
+            source, value = SOURCE_LIMIT, f.platform_default
         else:
             source = SOURCE_PRESET
             value = params.get(key, f.platform_default) if f.layer == "generation" else f.platform_default
@@ -282,16 +279,19 @@ def ledger(family: str | None, params: dict[str, Any], provenance: dict[str, str
             "key": f.key, "label": f.label, "value": value, "source": source,
             "impact": f.impact, "status": f.status, "layer": f.layer,
         })
-    silent = [
-        it for it in items
-        if it["impact"] <= 2 and it["source"] in {SOURCE_PRESET, SOURCE_NOT_MODELED}
+    silent = [it for it in items if it["impact"] <= 2 and it["source"] == SOURCE_PRESET]
+    interpret = [
+        it["key"] for it in items
+        if it["source"] == SOURCE_LIMIT and it["impact"] <= 2
+        and any(f.key == it["key"] and f.options for f in fx.factors_for(family))
     ]
     return {"family": family, "items": items,
             "silently_assumed": [f"{it['label']} = {it['value']}（{it['source']}）"
                                  for it in silent],
             "conclusion_limits": [f"{it['label']}：{it['value']}"
                                   for it in items if it["source"] == SOURCE_LIMIT],
-            "_silent_keys": [it["key"] for it in silent]}
+            "_silent_keys": [it["key"] for it in silent],
+            "_interpret_keys": interpret}
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +299,12 @@ def ledger(family: str | None, params: dict[str, Any], provenance: dict[str, str
 # ---------------------------------------------------------------------------
 
 MAX_PER_ROUND = 3
+
+KEY_LABELS = {
+    "isd_m": "站间距", "srs_period_ms": "SRS 周期", "ue_speed_kmh": "用户速度",
+    "neighbor_prb_util": "邻区负载", "antenna_preset": "天线规模",
+    "tx_power_dbm": "发射功率", "num_sites": "站数", "bandwidth_hz": "带宽",
+}
 
 
 @dataclass
@@ -396,9 +402,12 @@ def _baseline_question(intent: str = "") -> Question:
     )
 
 
-def _sweep_question(key: str, family: str | None) -> Question:
+def _sweep_question(key: str, family: str | None, params: dict[str, Any] | None = None) -> Question:
+    micro = str((params or {}).get("scenario", "")).startswith("UMi")
     values = {
-        "isd_m": [("200/500/1000", "200 / 500 / 1000 m", "密集城区到郊区"),
+        "isd_m": [("100/150/250", "100 / 150 / 250 m", "街道微站常见站距"),
+                  ("100/200/300", "100 / 200 / 300 m", "微站到密集宏站")] if micro else
+                 [("200/500/1000", "200 / 500 / 1000 m", "密集城区到郊区"),
                   ("200/300/500", "200 / 300 / 500 m", "集中在城区"),
                   ("500/1000/1732", "500 / 1000 / 1732 m", "城区到农村")],
         "srs_period_ms": [("10/20", "10 ms vs 20 ms", "现网常见两档"),
@@ -408,24 +417,76 @@ def _sweep_question(key: str, family: str | None) -> Question:
     }.get(key, [("low/high", "两档：低 / 高", ""), ("3pt", "三档", "")])
     return Question(
         key="sweep_values",
-        question=f"{key} 扫哪几个取值？",
+        question=f"{KEY_LABELS.get(key, key)}扫哪几档？",
         why="扫描取值决定能看到的是趋势还是一个点。",
         options=_opts(values),
         priority=1,
     )
 
 
-def _generation_sweep_question(key: str) -> Question:
+def upfront_notices(form: str | None, sweep_key: str | None, intent: str) -> list[str]:
+    """开跑前必须说清、但不需要用户选择的事实。"""
+    notes = []
+    if form == "sweep_condition" and sweep_key and SWEEP_LAYER.get(sweep_key) == "generation":
+        notes.append(
+            f"{KEY_LABELS.get(sweep_key, sweep_key)}属于信道生成层变量：每一档是一批独立的数据，"
+            "目前只能给各档分布对照 + 机制解释，给不了“A 比 B 高 X dB 且显著”这种配对结论"
+            "（需要先给平台补跨数据集按位置配对的判决）。")
+    notes.extend(glossary_notes(intent))
+    return notes
+
+
+def _edf_question() -> Question:
     return Question(
-        key="formal_or_scan",
-        question=(f"{key} 属于信道生成层变量：每个取值是一批独立的数据，目前没有跨数据集的"
-                  "配对统计判决。你要的结果是哪种？"),
-        why="这决定能不能说“A 比 B 高 X dB 且显著”。提前说清，避免跑完才发现只能给分布对照。",
+        key="edf_meaning",
+        question="你说的 EDF 指哪一个？",
+        why="本平台实现的是 Earliest Drain First（最早排空优先）；若你指 Earliest Deadline "
+            "First（按包时延预算），平台当前没有这个调度器——这决定这道题能不能直接做。",
         options=_opts([
-            ("scan", "各取值的分布对照 + 机制解释", "现在就能做"),
-            ("formal", "必须要可引用的统计结论", "需要先给平台加“按位置配对”的跨数据集判决"),
+            ("drain_first", "最早排空优先（本平台的 EDF）", "按可发送量与队列排序，可以直接比"),
+            ("deadline_first", "最早截止时间优先（按时延预算）", "当前没有，需要先实现或改比其他调度器"),
         ]),
-        priority=1,
+        priority=-1,
+    )
+
+
+def _metric_question(family: str | None, intent: str) -> Question | None:
+    text = (intent or "").lower()
+    if family == "dl_experience":
+        opts = [("small_delay_p95", "小包完成时延 P95", "尾部最能拉开调度器差距；需有限到达话务"),
+                ("edge_rate_p5", "5% 边缘体验速率", "关心边缘用户"),
+                ("cell_tput", "小区吞吐", "关心容量；宜作护栏指标")]
+        if not any(w in text for w in ("时延", "小包")):
+            opts = [opts[1], opts[0], opts[2]]
+    elif family == "dl_interference":
+        opts = [("sinr_p5", "SINR 5% 分位", "边缘链路质量"),
+                ("sinr_median", "SINR 中位", "整体水平"),
+                ("iot_median", "IoT 中位", "干扰相对噪声")]
+    else:
+        return None
+    return Question(
+        key="metric",
+        question="主判断指标（要预注册）用哪个？其余作护栏。",
+        why="比较方法的结论要落在一个事先定下的指标上；看完结果再换指标就成了挑赢的那个。",
+        options=_opts(opts),
+        priority=0,
+    )
+
+
+def _quantity_question(family: str | None) -> Question | None:
+    if family != "dl_interference":
+        return None
+    return Question(
+        key="quantity",
+        question="主要看哪个量、为了回答什么？",
+        why="SIR 讲干扰几何，IoT 讲干扰比噪声高多少（干扰受限还是噪声受限），SINR 是用户链路"
+            "实际拿到的；随站距等条件变化时三者走向可以完全不同。",
+        options=_opts([
+            ("all", "三个一起看，讲清机制", "例如评估加密站点值不值"),
+            ("sinr", "以 SINR 为主", "关心用户体验"),
+            ("iot", "以 IoT 为主", "关心干扰受限程度"),
+        ]),
+        priority=2,
     )
 
 
@@ -526,13 +587,22 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
         # 数据任务不问基线、不问指标；原话没给的才补问，其余走默认并在台账里列出。
         return []
 
-    if form == "compare_methods" and "baseline" not in brief.design and "baseline" not in answered:
-        cands.append(_baseline_question(intent))
-    if form == "sweep_condition" and sweep_key:
-        if not brief.sweep and "sweep_values" not in answered:
-            cands.append(_sweep_question(sweep_key, family))
-        if SWEEP_LAYER.get(sweep_key) == "generation" and "formal_or_scan" not in answered:
-            cands.append(_generation_sweep_question(sweep_key))
+    if form == "compare_methods":
+        if re.search(r"(?<![a-z])edf(?![a-z])", (intent or "").lower()) and "edf_meaning" not in answered:
+            cands.append(_edf_question())
+        if "baseline" not in brief.design and "baseline" not in answered:
+            cands.append(_baseline_question(intent))
+        mq = _metric_question(family, intent)
+        if mq is not None and "metric" not in answered:
+            cands.append(mq)
+    sweep_q = None
+    if form == "sweep_condition" and sweep_key and not brief.sweep and "sweep_values" not in answered:
+        sweep_q = _sweep_question(sweep_key, family, params)
+        cands.append(sweep_q)
+    if form in {"characterize", "sweep_condition"} and "quantity" not in answered:
+        qq = _quantity_question(family)
+        if qq is not None:
+            cands.append(qq)
 
     silent = set(led.get("_silent_keys", []))
     factors = {f.key: f for f in fx.factors_for(family)} if family else {}
@@ -543,14 +613,30 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
         q.priority = min(factors[k].impact for k in deploy_keys if k in factors)
         cands.append(q)
         silent -= {"tx_power_dbm", "scenario"}
+        # 站距档位依赖部署类型：部署没定时，扫描档位排在它后面。
+        if sweep_q is not None and sweep_key == "isd_m":
+            sweep_q.priority = q.priority + 1
     for key in sorted(silent, key=lambda k: factors[k].impact if k in factors else 9):
         f = factors.get(key)
         if f is None or key in answered or not f.options:
             continue
-        cands.append(_contextual(_factor_question(f), intent=intent, params=params or {}))
+        fq = _contextual(_factor_question(f), intent=intent, params=params or {})
+        if f.only_for_sweep and f.only_for_sweep == sweep_key:
+            fq.priority -= 1  # 专为这个扫描变量存在的前提（例如 SRS 自适应周期），先问
+        cands.append(fq)
+    for key in led.get("_interpret_keys", []):
+        f = factors.get(key)
+        if f is None or key in answered:
+            continue
+        q = _factor_question(f)
+        q.question = "（平台改不了，只选怎么解读）" + q.question
+        q.priority += 1
+        cands.append(q)
     # 没有因子表的目标量（例如 CSI 压缩的 NMSE），退回任务模板里的设计题与参数题，
     # 但原话已经给过的一律不问。
     for item in extra_design or []:
+        if item["key"] == "metric" and form == "compare_methods" and _metric_question(family, intent):
+            continue
         if item["key"] not in answered:
             # 比较方法时“看什么指标”是其余问题的前提，排在最前。
             cands.append(Question(key=item["key"], question=item["question"],
@@ -572,7 +658,7 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
 
 QUESTION_BUILDERS = {
     "form": _form_question, "baseline": _baseline_question,
-    "deployment": _deployment_question,
+    "deployment": _deployment_question, "edf_meaning": _edf_question,
 }
 
 
@@ -611,7 +697,7 @@ def restatement(form: str | None, family: str | None, brief: Brief, sweep_key: s
         parts.append("原话已定：" + "；".join(brief.evidence))
     if led.get("silently_assumed"):
         parts.append("平台替你假设了：" + "；".join(led["silently_assumed"]))
-    parts.extend(glossary_notes(intent))
+    parts.extend(upfront_notices(form, sweep_key, intent))
     return "\n".join(parts)
 
 

@@ -84,7 +84,7 @@ class Factor:
 DL_INTERFERENCE: tuple[Factor, ...] = (
     Factor(
         key="tx_power_dbm",
-        label="基站发射功率（功率谱密度）",
+        label="基站总发射功率（均分到各 RB）",
         status=MODELED,
         impact=1,
         effect_iot="信号与干扰同比例变化，热噪声不变：I/N 与功率 dB 对 dB 变化",
@@ -181,7 +181,7 @@ DL_INTERFERENCE: tuple[Factor, ...] = (
     ),
     Factor(
         key="stat_scope",
-        label="统计对象（全网 / 中心站）",
+        label="统计范围（站数；无 wrap-around）",
         status=PARTIAL,
         impact=2,
         effect_iot="外圈小区的邻区不完整，把它们算进来会拉低 IoT",
@@ -282,7 +282,8 @@ DL_EXPERIENCE: tuple[Factor, ...] = (
         options=(
             ("ftp3", "有限到达（FTP3 文件下载）", "体验速率与完成时延有意义；平台默认"),
             ("full_buffer", "满缓冲", "看容量与边缘用户分到的发送速率"),
-            ("mixed", "大小包混合", "同时看小包时延与大包速率"),
+            ("mixed", "大小包混合", "默认一半 UE 小包 1500 B、20 次/秒，一半大包 500 kB、2 次/秒；"
+             "同时看小包时延与大包速率"),
         ),
     ),
     Factor(
@@ -330,7 +331,8 @@ DL_EXPERIENCE: tuple[Factor, ...] = (
         label="用户速度与时间轴",
         status=MODELED,
         impact=2,
-        effect="速度决定信道老化快慢；要体现老化，每 UE 需要 ≥8 个时间相关快照，独立撒点不行",
+        effect=("速度决定信道老化快慢；要体现老化，每 UE 需要 ≥8 个时间相关快照，独立撒点不行。"
+                "时间轴也是 PF 多用户分集的前提：单快照下信道不随时间起伏，比较调度器会系统性低估 PF"),
         magnitude="3 km/h 下几乎不老化，60 km/h 以上 SRS/CSI 时延的影响才明显",
         ask="用户速度按多少？这决定 CSI 老化的程度，平台会按它生成连续轨迹。",
         platform_default="预设值（多为 3 km/h），单快照",
@@ -339,6 +341,24 @@ DL_EXPERIENCE: tuple[Factor, ...] = (
             (3.0, "3 km/h · 步行", "几乎不老化"),
             (30.0, "30 km/h · 城区车速", ""),
             (120.0, "120 km/h · 高速", "老化明显"),
+        ),
+    ),
+    Factor(
+        key="cell_load",
+        label="本小区负载（资源有多紧）",
+        status=MODELED,
+        impact=1,
+        effect="调度器之间的差别主要出现在资源紧张时；轻载下 PF、EDF 等几乎没有差别",
+        magnitude="比较调度器时是决定性的：负载轻，任何调度器的时延都差不多",
+        ask=("本小区负载按多紧来比？推荐把 PRB 利用率标定到现网忙时水平（例如 50%~70%），"
+             "否则由每 UE 到达率自然形成。"),
+        platform_default="不标定（target_prb_utilization=None）：按每 UE 到达率自然形成",
+        config_key="target_prb_utilization",
+        layer="system",
+        options=(
+            (0.6, "PRB 利用率标定到 60%", "现网忙时典型，调度器差异可见"),
+            (0.3, "标定到 30%", "轻中载"),
+            (0.9, "标定到 90%", "接近拥塞，差异最大"),
         ),
     ),
     Factor(
