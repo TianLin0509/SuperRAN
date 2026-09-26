@@ -1237,6 +1237,15 @@ _probe_inert = sc.probe({**_fx_base, "num_ues": 3, "train_penetration_loss_db": 
 _nm = " ".join(_probe_inert["interference"]["not_modeled"])
 check("train_penetration_loss_db" in _nm and "hypercell_size" in _nm,
       "探测结果点名配置里不生效的键")
+# 审核 R2-1：单小区（不算邻区干扰）的数据，摘要也必须永久带着“未生效”说明
+_sc_sum = gen.generate({**_fx_base, "num_sites": 1, "sectors_per_site": 1, "num_ues": 1,
+                        "ue_distribution": "hotspot"}, num_samples=1, workers=1)
+_persisted = gen.load_summary(_sc_sum["dataset_id"])
+check(any("ue_distribution" in x for x in _persisted.get("not_effective_config", [])),
+      "单小区热点数据的持久摘要保留 ue_distribution 未生效的说明")
+check(any("ue_distribution" in x
+          for x in itf.interference_report(_sc_sum["dataset_id"]).get("not_effective_config", [])),
+      "干扰报告对单小区数据也列出未生效的键")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)

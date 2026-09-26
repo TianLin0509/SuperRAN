@@ -1150,6 +1150,8 @@ def generate(
             if str(model) not in {"", "None"}
         }
 
+    from .factors import inert_keys_in as _inert_config  # noqa: PLC0415
+
     # IoT（噪声抬升）。主公式由同口径几何 SIR 与 SINR 推出。当前 first-party
     # SNR/SINR 也共享预波束每-RB参考，因此 snr-sinr 是等价的一致性旁证；主公式
     # 仍不依赖外部/旧数据源是否遵守该 SNR 契约。
@@ -1242,6 +1244,9 @@ def generate(
         "interference_note": interference_note,
         "rs_opportunity": rs_opportunity_block,
         "iot": iot_block,
+        # 配置里写了、仿真器却不读的键，与是否计算邻区干扰无关，随摘要永久存档
+        # （审核 R2-1：单小区热点数据的摘要曾丢失“未生效”说明）。
+        "not_effective_config": _inert_config(cfg),
         "collect_ssb": ssb_on,
         "shape": {
             "N": int(shape[0]), "T": int(shape[1]), "RB": int(shape[2]),

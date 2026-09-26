@@ -958,8 +958,8 @@ hst_350kmh:
   summary: 站点沿轨道两侧交错、间距 580 m、轨道偏移 30 m，350 km/h 线性移动——这两项生效。
     **车体穿透损耗 20 dB 与车厢内撒点（train_length_m / train_width_m）当前内核不读，
     未生效**：链路预算没有被压低 20 dB，结论只代表开阔地高速场景。
-  typical_for: [高铁, 切换, 多普勒补偿, 车体穿透, 沿线覆盖]
-  verify: sr_probe_scenario 看多普勒中位数与路损；路损应明显高于同距离的开阔场景
+  typical_for: [高铁, 切换, 多普勒补偿, 沿线覆盖]
+  verify: sr_probe_scenario 看多普勒中位数；路损与开阔地相同（车体穿透未生效），不要按“车厢内”解读
   caveat: 不是 38.104 HST-SFN 一致性配置（那套是单频网合并）。
     train_penetration_loss_db、train_length_m、train_width_m 当前不生效。
   expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
@@ -1007,8 +1007,8 @@ hst_hypercell_comp:
   summary: 设计意图是在 hst_350kmh 基础上把相邻 3 站编成同一个 PCI（超级小区），
     并让最强的 2 个 TRP 联合发送。**当前内核不读 hypercell_size 与 joint_trp_count，
     超级小区与联合发送都未生效，数据与 hst_350kmh 相同**；车体穿透同样未生效。
-  typical_for: [超级小区, CoMP 联合发送, 切换优化, 单频网]
-  verify: 与 hst_350kmh 并排 sr_compare_scenarios，看 IoT 与 SINR 的变化方向
+  typical_for: [高铁, 沿线覆盖（超级小区与联合发送待实现）]
+  verify: 当前数据与 hst_350kmh 相同；在超级小区/联合发送实现前不做并排对比
   caveat: hypercell_size、joint_trp_count、train_penetration_loss_db 当前不生效；
     不能用本预设比较超级小区或联合发送的收益。
   expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
