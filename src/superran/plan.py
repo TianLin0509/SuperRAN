@@ -148,6 +148,12 @@ def preset_summaries() -> list[dict[str, Any]]:
         for key in ("expect", "verify", "caveat"):
             if body.get(key):
                 item[key] = body[key]
+        # 预设里写了、仿真器却不读的键：机器可见地列出来，而不只写在 YAML 注释里。
+        from . import factors as fx  # noqa: PLC0415
+
+        inert = fx.inert_keys_in(cfg)
+        if inert:
+            item["not_effective"] = inert
         out.append(item)
     return out
 

@@ -435,7 +435,30 @@ INERT_CONFIG_KEYS: dict[str, str] = {
     "pdsch_load": "信道层邻区恒满发；负载只在系统级 neighbor_prb_util 生效",
     "train_penetration_loss_db": "车体穿透损耗未实现，高铁预设里的 20 dB 不生效",
     "hypercell_size": "超级小区合并未实现，设多少都按独立小区算",
+    "joint_trp_count": "多 TRP 联合发送未实现，仍按单 TRP 服务",
+    "train_length_m": "车厢内撒点未实现，UE 按普通方式撒点",
+    "train_width_m": "车厢内撒点未实现，UE 按普通方式撒点",
 }
+
+
+def inert_keys_in(cfg: dict[str, Any] | None) -> list[str]:
+    """配置里设了、但仿真器不读的键，逐条说明。用于所有机器返回（预设、探测、报告）。
+
+    “取默认值”不算设置：均匀撒点、超级小区规模 1、负载 1.0 本来就是仿真器的行为。
+    """
+    out = []
+    for key, why in INERT_CONFIG_KEYS.items():
+        if not cfg or key not in cfg or cfg[key] is None:
+            continue
+        val = cfg[key]
+        if key == "ue_distribution" and str(val) == "uniform":
+            continue
+        if key in {"hypercell_size", "joint_trp_count"} and int(val or 1) <= 1:
+            continue
+        if key in {"prb_utilization", "pdsch_load"} and float(val) >= 1.0:
+            continue
+        out.append(f"{key}={val} 不生效：{why}")
+    return out
 
 # 在看到任何结果之前让用户写下预期。探测结果与它对照，差距大就先停下查假设。
 EXPECTATION_QUESTION: dict[str, Any] = {

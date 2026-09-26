@@ -1222,6 +1222,22 @@ check(_rows["tx_power_dbm"]["delta"]["sir_db"] == 0.0
 check(_rows["neighbor_load"]["inert"] and _rows["ue_distribution"]["inert"],
       "敏感度实测：负载与撒点被识别为仿真器不读（inert）")
 
+# 预设里写了、仿真器却不读的键：必须机器可见地披露（审核 F11），不能只写在 YAML 注释。
+_sums = {s["preset"]: s for s in pl.preset_summaries()}
+for _name, _keys in (("hotspot_cluster", ["ue_distribution"]),
+                     ("hst_350kmh", ["train_penetration_loss_db"]),
+                     ("hst_hypercell_comp", ["hypercell_size", "joint_trp_count"])):
+    _ne = " ".join(_sums[_name].get("not_effective", []))
+    check(all(k in _ne for k in _keys), f"sr_list_presets 对 {_name} 列出不生效的 {_keys}")
+    _text = _sums[_name]["label"] + _sums[_name]["summary"]
+    check("未实现" in _text or "未生效" in _text or "不读" in _text,
+          f"{_name} 的标签/说明不再宣称未实现的机制有效")
+_probe_inert = sc.probe({**_fx_base, "num_ues": 3, "train_penetration_loss_db": 20.0,
+                         "hypercell_size": 3}, num_samples=3)
+_nm = " ".join(_probe_inert["interference"]["not_modeled"])
+check("train_penetration_loss_db" in _nm and "hypercell_size" in _nm,
+      "探测结果点名配置里不生效的键")
+
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:

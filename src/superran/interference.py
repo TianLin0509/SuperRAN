@@ -431,6 +431,9 @@ def interference_report(dataset_id: str) -> dict[str, Any]:
 
     if (summary.get("sample_meta") or {}).get("implementation") == "superran-first-party":
         out["not_modeled"].extend(DL_IOT_NOT_MODELED)
+    from .factors import inert_keys_in  # noqa: PLC0415
+
+    out["not_modeled"].extend(inert_keys_in(cfg))
 
     # 上行业务域不在当前能力范围：数据集里的 ul_sinr_dB 由一个按干扰 UE 数
     # 的解析占位式合成，ul_sir_geo_dB 直接复用下行几何 SIR。给它分级只会
