@@ -1458,6 +1458,7 @@ DETAIL_SPECS.update({
         promise="把 Agent 式仿真从“模型会聊天”还原成一条可重复执行的编译链：有限任务画像负责识别问题类型，结论槽位决定真正需要追问什么，Draft 保存差分与历史，算法目录和说明书再从同一 resolved config 派生。读完后应能判断一次页面修改究竟有没有进入真实执行。",
         principles=(
             "当前任务分类器是<strong>确定性关键词命中计分</strong>，不是隐藏的 LLM 分类调用。每个 <code>TaskProfile</code> 定义正向关键词、实验设计问题、参数决策、推荐默认、sweep 和物理 guard；最高分画像胜出，无命中则回到 <code>generic</code>。这使相同 intent 在不同机器和模型版本下仍得到相同执行骨架，但同义改写可能漏判，所以 Agent 的语言理解只能帮助补全显式 intent，不能绕开有限画像合同。",
+            "2026-09-26 起，<strong>问什么由访谈层 <code>interview.py</code> 决定</strong>，任务画像只提供骨架、hints 与 guard。访谈先读原话（<code>read_brief</code>：阵型、样本数、基线、速度、扫描取值等直接写进 Draft 并记“原话”来源，不再重问），再判结果形态（交付数据 / 刻画一个量 / 扫一个条件 / 比较方法——交付数据零提问，只有比较方法问基线），然后按目标量的影响因子表建假设台账，把影响大却没人确认的“沉默假设”变成前沿问题，每轮 ≤3 题；选项可带配置改动（例如“街道微站”→ UMi + 33 dBm），<code>revise_draft</code> 当场应用并记来源。拿不准先后时 <code>sr_sensitivity</code> 在用户配置上实测每个假设的影响，Δ 为 0 的键仿真器不读，不问但写进结论边界。",
             "问题数量由<strong>结论所需槽位</strong>而不是可配置字段总数决定。基线、主指标、适用范围、控制变量、方向性假设和失败判据缺一项，最终结论就可能不可解释；而阵列、信道、接收机等高影响参数只需在会改变结论时追问。<code>also_configurable</code> 是透明度清单，不是把数百个字段继续问给用户。样本量要由试点差值方差和目标效应计算，不能让用户凭感觉填一个数字。",
             "配置合并是一条有方向的偏序：项目默认提供可运行底座，preset 提供成套场景，task hints 注入意图可可靠推导的参数，用户 override 最后覆盖。右侧优先不等于右侧可以绕过 guard；类型、枚举、物理可行性和跨字段约束仍在 resolved 阶段检查。Draft 只保存显式差分与回答历史，因此第二轮修改一个字段不会把第一轮已经确认的设置恢复成旧默认。",
             "算法目录有两个互补视角。<code>algorithms.py</code> 生成“本次到底用了什么”的实例清单和推导；<code>algo_defs.py</code>/<code>algo_defs2.py</code> 描述算法族、替代项、输入输出和 caveat。前者必须由 resolved config 逐项派生，后者负责解释选择空间。若页面只展示一份静态算法宣传文案，用户无法知道这次究竟使用 LS 还是 LMMSE、EBF 还是 NEBF。",
@@ -1466,7 +1467,7 @@ DETAIL_SPECS.update({
         ),
         implementation=(
             ("画像并解释", "<code>classify_intent()</code> 对规范化 intent 做关键词命中与分数排序并返回 profile；<code>decisions_for()</code>/<code>design_questions_for()</code> 按画像给出参数问题与实验设计问题，sweep 和 guard 由同一 profile 派生。"),
-            ("按槽位追问", "<code>next_round()</code> 先检查结论槽位和高影响参数，第一轮尽量一次问全，第二轮只补剩余项；用户接受默认时立即收敛，轮数有硬上限。"),
+            ("按前沿追问", "<code>interview.frontier()</code> 依赖顺序为结果形态 → 形态必需项（基线 / 扫描取值 / 生成层变量能否配对）→ 沉默假设（按影响）→ 预期；每轮 ≤3 题，已答与原话已给的不问。旧 <code>next_round()</code> 保留给没有因子表的参数兜底。"),
             ("形成可修订 Draft", "<code>create_draft()</code> 合并 defaults、preset、task hints 与 overrides，保存 draft_id、params、design、history 和 user_set；<code>build_proposal()</code> 每次从 Draft 导出 resolved_config，<code>revise_draft()</code> 只应用本轮 delta。"),
             ("派生真实算法清单", "<code>algorithm_list()</code> 从 resolved config 选择数据源、估计、预编码、接收机、链路自适应和调度项；<code>derivations()</code> 读取同一配置中的阵列、功率与时序值。"),
             ("生成与回传说明书", "<code>build_spec()</code> 画出拓扑、频域、PDP、TDD 与算法链；bridge 校验 host、token、Content-Type、payload size、editable key、标量类型和 nonce 后才返回配置 delta。"),
@@ -1481,7 +1482,7 @@ DETAIL_SPECS.update({
         ),
         checks=(
             ("分类可重复", "同一 intent 多次运行得到同一 TaskProfile、同一命中证据和稳定 generic fallback；不依赖外部模型状态。"),
-            ("两轮收敛", "代表性任务在目标两轮内填满结论槽位；默认接受、已回答项和 also_configurable 不会制造重复问题。"),
+            ("前沿收敛", "5 句基线表述的第一轮问题由 test_e2e 第 9 节锁定：原话已给的不问、交付数据零提问、比较 SRS 周期先问自适应周期；逐轮作答后沉默假设清零。"),
             ("优先级可证明", "defaults→preset→task hints→user overrides 用冲突值逐层测试，最终值与 explicit/history 均可追溯。"),
             ("目录来自配置", "切换 channel_est_mode、precoder、power_constraint 或 traffic_model 后，algorithm_list、derivations 与 caveat 同步变化。"),
             ("桥接最小权限", "非 loopback、错误 token、未知键、嵌套对象、超大 payload、过期 draft 与重放 nonce 全部拒绝；合法 delta 幂等。"),
@@ -1497,7 +1498,7 @@ DETAIL_SPECS.update({
             "把说明书页面收到 ACK 当成 Gate 通过或结果可信。",
             "把产品首页上的 Mock 示意图当作真实参数值；真实运行必须打开 sr_spec_sheet 返回的本次专属页面。",
         ),
-        source_paths=("src/superran/decisions.py", "src/superran/plan.py", "src/superran/algorithms.py", "src/superran/algo_defs.py", "src/superran/algo_defs2.py", "src/superran/spec.py", "src/superran/webui.py", "src/superran/bridge.py"),
+        source_paths=("src/superran/decisions.py", "src/superran/plan.py", "src/superran/interview.py", "src/superran/algorithms.py", "src/superran/algo_defs.py", "src/superran/algo_defs2.py", "src/superran/spec.py", "src/superran/webui.py", "src/superran/bridge.py"),
     ),
 })
 

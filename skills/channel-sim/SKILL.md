@@ -8,7 +8,7 @@ description: >
 
 # SuperRAN 仿真 Agent 手册
 
-手册修订：2026-09-12。配合 `superran` MCP（35 个 `sr_*` 工具）使用。
+手册修订：2026-09-12。配合 `superran` MCP（36 个 `sr_*` 工具）使用。
 仓库 `skills/channel-sim/` 是内容真源；`superran` 是由安装器生成的显式点名入口，
 正文与参考文件相同，只有名称和触发范围不同。不得手工维护另一份正文。
 安装与校验见仓库 `INSTALL_AGENT.md`；当前能力以工具 schema、配置回显及本次证据为准。
@@ -33,7 +33,10 @@ description: >
 ## 需求落实成实验约定
 
 开始实跑前读 `references/asking.md` 与 `references/experiment-agreement.md`。
-只问会改变通信解释或实验公平性的未决条件，通常一轮不超过三个关键问题。
+只问会改变通信解释或实验公平性的未决条件，一轮不超过三个关键问题。
+`sr_plan` 先读原话（已给的条件不再问）、判断结果形态（交付 / 刻画 / 扫条件 / 比较方法），
+给出 `restatement` 与假设台账；问什么由目标量的影响因子表决定，拿不准先后时用
+`sr_sensitivity` 让仿真器实测每个假设的影响。先复述、再问、再请用户写预期。
 有依赖就先问上游；能从现有数据、能力、场景查到的事实由 Agent 查。不要机械转发
 `round_questions`；工具可能重复询问已答条件，或把“调度”识别成泛化干扰任务。
 干扰画像类意图（站距/IoT/干扰水平）会走 `interference_scan`，第一轮先问预期与模型假设。
@@ -145,12 +148,12 @@ description: >
 需求入口：`references/asking.md` → `references/experiment-agreement.md`。
 方法来源：`references/clarification-sources.md`；载波聚合：`references/carrier-aggregation.md`。
 
-**35 个 `sr_*` 工具全在这张表里。** 每份 reference 开头写了"什么时候读这一份"，低频细节需要时读那一份，**不要凭印象答**。压力测试记录见 `references/pressure-tests.md`。
+**36 个 `sr_*` 工具全在这张表里。** 每份 reference 开头写了"什么时候读这一份"，低频细节需要时读那一份，**不要凭印象答**。压力测试记录见 `references/pressure-tests.md`。
 
 | 在哪一步 | 工具 | 细节 |
 |---|---|---|
 | 0 环境自查 | `sr_capabilities` | — |
-| 1 对齐目标 | `sr_list_datasets` `sr_missing_slots` `sr_plan` `sr_revise` `sr_lock_analysis` `sr_spec_sheet` `sr_await_config` | `asking.md` `spec-sheet.md` |
+| 1 对齐目标 | `sr_list_datasets` `sr_missing_slots` `sr_plan` `sr_revise` `sr_sensitivity` `sr_lock_analysis` `sr_spec_sheet` `sr_await_config` | `asking.md` `spec-sheet.md` |
 | 2 生成数据 | `sr_list_presets` `sr_list_scenes` `sr_probe_scenario` `sr_compare_scenarios` `sr_generate` `sr_gate` `sr_validate` `sr_calibrate` `sr_describe_dataset` `sr_deliver` | `scenarios-and-interference.md`（含射线追踪）`default-hardware.md` `performance.md` |
 | 3 对比 · 链路级 | `sr_sample_size` `sr_link_performance` `sr_compare_arms` `sr_throughput` `sr_sweep_snr` `sr_mcs_info` `sr_bler_curve` `sr_tdd_mcs` | `gates-and-stats.md`（**18 项体检**明细、Wilcoxon、预注册、「声称与证据」表）`link-adaptation.md` |
 | 3 对比 · 系统级 | `sr_system_scene` `sr_system_sim` `sr_compare_system_results` | `system-sim.md` |

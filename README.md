@@ -270,7 +270,7 @@ Agent 不用规划；`has_more_rounds` 为 false 或用户说"随便"就停。
 
 ## 文档
 
-- **[SuperRAN 开发者文档 `docs/index.html`](docs/index.html)** —— 当前实现的主入口：无线物理、64T4R/192×64 阵列、SRS/LMMSE、EBF/PEBF/NEBF、独立 BF Gain 章节、SU/MU、唯一的 `experience_v2` 系统路径（容量 = `full_buffer` 话务）、HARQ N 进程、运行时 CQI、话务/PF/KPI、35 个 MCP 工具、Skill、全部公开 API 与本次审计修复；单文件离线可打开
+- **[SuperRAN 开发者文档 `docs/index.html`](docs/index.html)** —— 当前实现的主入口：无线物理、64T4R/192×64 阵列、SRS/LMMSE、EBF/PEBF/NEBF、独立 BF Gain 章节、SU/MU、唯一的 `experience_v2` 系统路径（容量 = `full_buffer` 话务）、HARQ N 进程、运行时 CQI、话务/PF/KPI、36 个 MCP 工具、Skill、全部公开 API 与本次审计修复；单文件离线可打开
 - **[安装说明 `SETUP.html`](SETUP.html)** —— 由哪几块拼成、要装什么、怎么装、装完先跑什么、排错
 - **[`INSTALL_AGENT.md`](INSTALL_AGENT.md)** —— 写给 AI agent 看的安装步骤，丢给它自己装
 - **[能力手册 `CAPABILITIES.html`](CAPABILITIES.html)** —— 能产生哪些信道、能拿到哪些观察量（含形状与单位）、参数全表、能力边界
@@ -429,15 +429,16 @@ python scripts/install_agent_skills.py --role lead
 （§7.8.2 指标3，Annex A.1 圆周定义）、PRB 奇异值最大/次大/比值三条 CDF
 （指标4，10log10 尺度）。参考曲线在 R1-165974 / R1-165975 / R1-1909704。
 
-## MCP 工具（35 个）
+## MCP 工具（36 个）
 
 | 工具 | 作用 |
 |---|---|
 | `sr_capabilities` / `sr_list_presets` / `sr_list_scenes` | 能力与场景发现 |
-| `sr_probe_scenario` / `sr_compare_scenarios` | **几十秒探场景**：把 RB/符号压到最小，几何量与全量逐位相同；多预设并排 |
+| `sr_probe_scenario` / `sr_compare_scenarios` | **几十秒探场景**：把 RB/符号压到最小，与正式生成逐位一致；带 `expectation` 时给出预期偏差与候选解释 |
 | `sr_interference_report` / `sr_design_interference` / `sr_iot_convert` | **干扰画像**：下行 IoT/SIR/SINR 与未建模因素；哪些旋钮真能动 IoT；IoT 分级 |
 | `sr_missing_slots` | **结论模板还缺哪些槽** —— 决定该主动问什么 |
-| `sr_plan` / `sr_revise` | 分轮协商：实验设计 + 参数 + 对比组 + 陷阱 |
+| `sr_plan` / `sr_revise` | **访谈**：读懂原话 → 结论形态 → 假设台账 → 每轮 ≤3 个前沿问题；选项自带配置改动 |
+| `sr_sensitivity` | **哪个假设最要紧由仿真器实测**：每个假设换一种取值，IoT/SIR/SINR 变多少；变化为 0 的键不用问 |
 | `sr_generate` | 生成数据集，返回句柄与统计摘要 |
 | `sr_deliver` | 按自然语言点单生成取货代码 |
 | `sr_validate` / `sr_gate` | **可信度体检 / 门 1**：18 项 |
