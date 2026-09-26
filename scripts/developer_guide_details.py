@@ -842,6 +842,7 @@ DETAIL_SPECS.update({
             "SIR 只描述信号与干扰，SINR 还包含噪声；必须在同一功率参考面上先用 S/SIR 得到 I，再用 S/SINR 得到 I+N，二者相减才是 N。若用不同的 BF 状态、RB 带宽或 dB/线性单位，可能算出负噪声，这不是可截零的小误差，而是口径不一致的报警。",
             "邻区 PRB 利用率是干扰输入，表示邻区每个资源被激活的概率/占用序列；本小区 serving-cell PRB utilization 是调度输出。二者名称相似但因果方向相反。邻区负载可按小区、RBG和时间抽样，并通过 CRN 在算法 A/B 中保持一致；本小区不能用这个输入直接替代实测结果。",
             "逐 RBG 功率重分配会同时改变目标信号和对其他小区的干扰。如果所有小区同步把 RBG0 抬高，RBG0 的信号与主要同频干扰可能同比增长，在噪声非主导区 SINR几乎不升；其他 16 个 RBG 功率下降后，信号下降，而来自未同步邻区或噪声并不同比下降，SINR普遍变差。即便只有服务小区调整，频率选择性、MCS/TBS 离散、饱和和 <code>log(1+γ)</code> 的凹性也使“集中功率”通常不等价于均匀功率。",
+            "下行 IoT 的绝对值由几项假设决定：发射功率与噪声系数（dB 对 dB 改 I/N、不改 SIR）、室内比例/O2I（未建模，全室外会让 IoT 偏高十几 dB）、信道层邻区负载（未建模，恒满发）、统计对象（无 wrap-around）。<code>factors.py</code> 把它们按影响排序、标明是否建模，<code>sr_plan</code> 据此先问预期与假设；表里可验证的说法由测试逐样本对账，仿真器不读取的配置键列在 <code>INERT_CONFIG_KEYS</code> 并由源码静态核对。",
             "系统体验还增加资源匹配效应：业务包可能需要多个 RBG 才完整发送。把功率集中到一个 RBG，那个 RBG 的额外容量可能变成 padding，而其余 RBG 少一点就跨过 MCS/TBS 门限，导致需要更多 RBG或多一个 TTI。性能下降不是总功率丢了，而是功率在频率、干扰和离散业务上的边际价值不同。",
         ),
         implementation=(
@@ -860,13 +861,14 @@ DETAIL_SPECS.update({
             ("输入输出分离", "neighbor_prb_util 只控制邻区干扰，serving_cell_prb_utilization 只由本小区真实 grant 统计。"),
             ("功率守恒", "每 TTI/RBG 功率向量满足总功率及所选每天线约束，诊断与实际链路使用同一向量。"),
             ("机制证据", "功率重分配结果附逐 RBG SINR/MCS/TBS/padding，能解释总 KPI 变化而非只报均值。"),
+            ("因子表对账", "发射功率 −6 dB 时 I/N 逐样本 −6 dB、SIR 不变；负载与撒点改动逐位不变；不生效的键不出现在信道生成源码中。"),
         ),
         pitfalls=(
             "认为总功率相同就必有相同容量，忽略频率选择、干扰、噪声和离散 TBS。",
             "把邻区配置的 30% load 当作本小区结果页的 30% PRB 利用率。",
             "所有小区共享同一功率/占用随机序列却未声明，制造不真实同步。",
         ),
-        source_paths=("src/superran/interference.py", "src/superran/power_control.py", "src/superran/experience.py"),
+        source_paths=("src/superran/interference.py", "src/superran/factors.py", "src/superran/power_control.py", "src/superran/experience.py"),
     ),
     "carrier-aggregation": DetailSpec(
         promise="在同站同步载波间协调共享业务，保持各载波物理反馈独立。",
