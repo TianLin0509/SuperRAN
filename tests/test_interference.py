@@ -1128,6 +1128,71 @@ check(bool(_skill_claims) and _skill_claims == {n_tools},
       f"channel-sim Skill 声称的 MCP 工具数等于 {n_tools}")
 
 # ---------------------------------------------------------------------------
+sect("11  影响因子表与仿真器对账（表里的说法必须是仿真器的真实行为）")
+
+from superran import decisions as _dec  # noqa: E402
+from superran import factors as fx  # noqa: E402
+
+_fx_base = {
+    "scenario": "UMa_NLOS", "channel_model": "CDL-C", "num_sites": 7,
+    "sectors_per_site": 3, "isd_m": 300.0, "num_ues": 7, "seed": 11,
+    "num_bs_tx_ant": 4, "num_bs_rx_ant": 4, "bs_panel": [2, 1, 2],
+    "antenna_model_mode": "legacy_64", "num_ue_tx_ant": 4, "num_ue_rx_ant": 4,
+    "bandwidth_hz": 100e6, "subcarrier_spacing": 30000, "num_rb": 24,
+    "carrier_freq_hz": 2.6e9, "link": "DL", "num_interfering_ues": 0,
+    "measurements": {"ssb_rsrp": False}, "num_samples": 7,
+}
+
+
+def _fx_run(cfg):
+    rows = [(float(s.sir_dB), float(s.sinr_dB))
+            for s, _ in zip(ch.iter_samples("internal_sim", dict(cfg)), range(7))]
+    sir_v, sinr_v = np.array(rows).T
+    iot_lin = 10 ** (itf.iot_db(sinr_v, sir_v) / 10)
+    return sir_v, 10 * np.log10(iot_lin - 1.0)   # SIR, I/N（dB）
+
+
+_verified = [f for f in fx.factors_for("dl_interference") if f.verify]
+check(len(_verified) >= 3, f"至少 3 条说法有对账（实际 {len(_verified)}）")
+for f in _verified:
+    v = f.verify
+    sir0, in0 = _fx_run({**_fx_base, **v["base"]})
+    sir1, in1 = _fx_run({**_fx_base, **v["set"]})
+    d_in, d_sir = in1 - in0, sir1 - sir0
+    print(f"  {f.label}：I/N 逐样本变化 {np.round(d_in, 6).tolist()}，"
+          f"SIR 最大变化 {float(np.max(np.abs(d_sir))):.2e} dB")
+    check(np.allclose(d_in, v["in_shift_db"], atol=1e-6),
+          f"{f.label}：I/N 逐样本变化 {v['in_shift_db']:+g} dB，与表中说法一致")
+    check(np.allclose(d_sir, v["sir_shift_db"], atol=1e-9),
+          f"{f.label}：SIR 变化 {v['sir_shift_db']:+g} dB，与表中说法一致")
+
+_nl = next(f for f in fx.factors_for("dl_interference") if f.key == "neighbor_load")
+check(_nl.status == fx.NOT_MODELED and _nl.verify is not None,
+      "邻区负载标为未建模，且这个“未建模”本身有对账（改负载逐位不变）")
+_cl = fx.checklist("dl_interference")
+check({"室内用户比例与穿透损耗（O2I）", "邻区负载（邻区有多少资源在发）"}
+      <= set(_cl["must_disclose"]), "未建模且影响大的因素被列入必须告知")
+check(bool(_cl["expectation_question"]["question"]), "清单带“先写下预期”的问题")
+
+# 用这次暴露问题的原话走一遍提问：必须识别为干扰画像，并先问预期与模型假设、
+# 问发射功率，而不是问码本基线或信道层无效的负载率。
+_prof = _dec.classify_intent("我想用superRAN来做一个无线仿真，来对比下站间距下的干扰变化情况")
+check(_prof.task == "interference_scan", f"站间距-干扰意图识别为干扰画像（实际 {_prof.task}）")
+_d, _p = pl.create_draft("对比下站间距下的干扰变化情况")
+_prop = pl.build_proposal(_d, _p)
+_keys = [q["key"] for q in _prop["round_questions"]]
+print(f"  第 1 轮问题：{_keys}")
+check({"expectation", "model_assumptions", "tx_power_dbm"} <= set(_keys),
+      "第 1 轮就问预期、模型假设与发射功率")
+check("baseline" not in _keys and "prb_utilization" not in _keys,
+      "不问码本基线，也不问信道层无效的负载率")
+check(_prop["factor_checklist"] and _prop["factor_checklist"]["must_disclose"],
+      "提案附带影响因子清单")
+_iss = _dec.check_guards(_p, {"num_sites": 7, "prb_utilization": 0.3})
+check(any(i["key"] == "prb_utilization" and "满载" in i["message"] for i in _iss),
+      "用户设部分负载时当场说明信道层按满载算")
+
+# ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 if FAILED:
     print(f"FAILED {len(FAILED)} 项：")

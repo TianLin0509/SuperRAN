@@ -477,6 +477,12 @@ def build_proposal(
     issues = dec.check_guards(profile, d.params)
     presets = load_presets()
 
+    factor_block = None
+    if profile.factor_metric:
+        from . import factors as fx  # noqa: PLC0415
+
+        factor_block = fx.checklist(profile.factor_metric, cfg=ch_cfg)
+
     return {
         "draft_id": d.draft_id,
         "task": d.task,
@@ -504,6 +510,9 @@ def build_proposal(
         "also_configurable": dec.also_configurable(profile),
         "suggested_sweeps": dec.sweep_suggestions(profile),
         "pitfalls": list(profile.pitfalls),
+        # 结论落在哪个物理量上，就把决定它的因素按影响排好给出来：已建模的问
+        # 取值，未建模的必须告诉用户会偏向哪边。这是提问的知识来源，不是问卷。
+        "factor_checklist": factor_block,
         "issues": issues,
         "ready_to_go": not any(i["severity"] == "block" for i in issues),
         "can_generate_now": True,
@@ -521,6 +530,13 @@ def build_proposal(
             "或用户说「随便」就直接生成。"
             "remaining_all_optional 为 true 时，下一轮请包装成一句可跳过的话"
             "（「剩下这些都有合理默认值，要不要直接跑？」），不要再摆一屏选项。"
+            + (
+                "**有 factor_checklist 时**：用户没提到的 impact=1 因素要主动说出平台"
+                "的取值；must_disclose 里的未建模项必须告诉用户会让结果偏向哪边。"
+                "先让用户写下预期，再跑 sr_probe_scenario 对照，偏差大先回到清单"
+                "查假设，对齐后再正式生成。"
+                if factor_block else ""
+            )
         ),
     }
 
