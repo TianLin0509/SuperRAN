@@ -316,6 +316,90 @@ txq = next((q for q in pr_umi["round_questions"] if q["key"] == "tx_power_dbm"),
 check(txq is None or next(o for o in txq["options"] if o["recommended"])["value"] == 33.0,
       "UMi 场景下功率推荐 33 dBm")
 
+# ---- 审核 20260926-codex1 的 11 个反例：检查回答之后的最终执行配置，而不只是首轮问法 ----
+from superran import generate as _gen  # noqa: E402
+from superran import hardware as _hw  # noqa: E402
+
+
+def _final(text, **revise):
+    d, p = pl.create_draft(text)
+    if revise:
+        d, p, ch = pl.revise_draft(d.draft_id, **revise)
+    else:
+        ch = []
+    return d, p, pl.resolved_config(d)[0], ch
+
+
+def _blocks(d, p):
+    return [i["key"] for i in pl.draft_issues(d, p) if i["severity"] == "block"]
+
+
+# F1 256T 请求必须生成 256T；不支持的阵型阻断，不静默沿用预设
+d1, p1, c1, _ = _final("给我2个256T4R信道，不比算法")
+_c1 = dict(c1)
+_gen._ensure_bs_panel(_c1)
+_hw.apply_array_defaults(_c1)
+check(c1.get("num_bs_tx_ant") == 256 and _c1["bs_panel"] == [16, 8, 2]
+      and _c1["_array_defaults_applied"] == "company_256t_1to6_1536ae" and c1.get("num_samples") == 2,
+      "F1：256T4R 请求落到 256 端口、16×8×2、1 驱 6，数量 2")
+d1b, p1b, _, _ = _final("给我2个128T4R信道，不比算法")
+check("request" in _blocks(d1b, p1b), "F1：不支持的 128T4R 阻断生成")
+# F2 本小区负载与邻区负载分开；归属不明先问并阻断
+d2, p2, _, _ = _final("对比本小区负载30%到90%时的边缘速率", accept_recommended=True)
+check(d2.sweep["key"] == "target_prb_utilization" and "target_prb_utilization" not in pl.system_params(d2),
+      "F2：扫本小区负载，且不被推荐值固定")
+d2b, p2b, _, _ = _final("对比负载30%到90%时的边缘速率")
+check(d2b.sweep["key"] == "load?" and "load_owner" in _blocks(d2b, p2b),
+      "F2：负载归属不明时先问、阻断生成")
+# F3 原话给的功率不被组合推荐覆盖，冲突要写明
+d3, p3, c3, ch3 = _final("发射功率53 dBm，对比站距200/500/1000 m的下行干扰", accept_recommended=True)
+check(c3.get("tx_power_dbm") == 53.0 and any("冲突" in x for x in ch3),
+      "F3：53 dBm 保留，并写明与推荐的冲突")
+# F4 选微站：站高 10 m 真正写进配置；下游站距档位随之重算
+d4, p4, _, _ = _final("对比下站间距下的干扰变化情况", design={"deployment": "urban_micro"})
+d4, p4, ch4 = pl.revise_draft(d4.draft_id, accept_recommended=True)
+c4 = pl.resolved_config(d4)[0]
+check(c4.get("tx_height_m") == 10.0 and c4.get("scenario") == "UMi_NLOS" and c4.get("tx_power_dbm") == 33.0
+      and d4.sweep["values"] == [100.0, 150.0, 250.0],
+      "F4：微站落实 10 m 站高、UMi、33 dBm，站距档位改为 100/150/250 m")
+# F5 系统级实验必须有时间轴；预算冲突阻断
+d5, p5, _, _ = _final("SRS 周期从 10 ms 改到 20 ms，看 120 km/h 用户的边缘速率", accept_recommended=True)
+check(pl.snapshots_per_ue(d5.params) >= 8 and pl.system_params(d5).get("serving_cell") == 1
+      and not _blocks(d5, p5), "F5：按推荐后每 UE ≥8 快照并指定服务小区")
+d5b, p5b, _, _ = _final("SRS 周期从 10 ms 改到 20 ms，看 120 km/h 用户的边缘速率，给我 50 个样本",
+                        accept_recommended=True)
+check(d5b.params.get("num_samples") == 50 and "num_samples" in _blocks(d5b, p5b),
+      "F5：用户限定的样本预算不被擅改，与时间轴冲突时阻断")
+# F6 不支持的回答阻断，且未建模事实不从结论边界消失
+d6, p6, _, _ = _final("评估一下密集城区下行 SINR 分布", design={"indoor_users": "need_o2i"})
+pr6 = pl.build_proposal(d6, p6)
+check(not pr6["ready_to_go"] and any("室内" in x for x in pr6["assumption_ledger"]["conclusion_limits"]),
+      "F6：要求 O2I 时阻断，室内仍在结论边界")
+d6b, p6b, _, _ = _final("PF 和 EDF 调度对小包时延的影响对比", design={"edf_meaning": "deadline_first"})
+pr6b = pl.build_proposal(d6b, p6b)
+check(not pr6b["ready_to_go"] and not pr6b["round_questions"],
+      "F6：要截止时间调度时阻断，不再给排空优先的基线选项")
+# F7 修改扫描取值替换执行计划；占位选项不算已答
+d7, p7, _, _ = _final("对比下站间距200/500/1000 m下的干扰变化情况", design={"sweep_values": "100/200/300"})
+check(d7.sweep == {"key": "isd_m", "values": [100.0, 200.0, 300.0]}, "F7：新扫描取值替换执行计划")
+d7b, p7b, _, _ = _final("对比发射功率对SINR的影响", accept_recommended=True)
+check(d7b.sweep and d7b.sweep["key"] == "tx_power_dbm" and len(d7b.sweep["values"]) >= 2,
+      "F7：按推荐后扫描列表是具体数值")
+# F8 敏感度变体必须不同于基准；零差值只在静态核对过时才算“不读”
+check([lab for k, _, lab in iv._alternatives({"noise_figure_db": 9.0}, None) if k == "noise_figure_db"]
+      == ["终端噪声系数 9 → 7 dB"], "F8：NF 已是 9 dB 时变体为 7 dB")
+check(iv.classify_zero({"noise_figure_db": 7.0}, {"iot_dl_db": 0.0}) == {"inert": False, "no_change_observed": True},
+      "F8：未经静态核对的零差值不判为仿真器不读")
+# F9 / F10 数据交付
+d9, p9, _, _ = _final("只要20个PDP，不比算法")
+check(d9.form == "deliver" and d9.params.get("num_samples") == 20, "F9：只要 20 个 PDP 就生成 20 个")
+d10, p10, _, _ = _final("给我20个64T4R CDL-C信道，不做算法对比")
+check(d10.form == "deliver" and not pl.build_proposal(d10, p10)["round_questions"],
+      "F10：“不做算法对比”识别为交付数据")
+check(iv.read_brief("发射功率 -10 dBm").params.get("tx_power_dbm") == -10.0
+      and iv.read_brief("看UMi场景的SIR").params.get("scenario") == "UMi_NLOS",
+      "原话解析：负功率与紧贴中文的 UMi")
+
 # “按推荐跑”：所有待问问题取推荐项；False 也是合法回答；预期只能由用户本人给
 d_acc, _, _ = pl.revise_draft(d_srs.draft_id, accept_recommended=True)
 pr_acc = pl.build_proposal(d_acc, dec.classify_intent(d_acc.intent))

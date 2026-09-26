@@ -639,7 +639,7 @@ def _generate_sync(
     else:
         raise ValueError("需要 draft_id 或 intent 其中之一")
 
-    issues = dec.check_guards(profile, draft.params)
+    issues = pl.draft_issues(draft, profile, num_samples)
     blockers = [i for i in issues if i["severity"] == "block"]
     if blockers:
         return _jsonable(

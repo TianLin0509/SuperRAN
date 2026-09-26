@@ -43,10 +43,11 @@ class Brief:
     design: dict[str, str] = field(default_factory=dict)
     sweep: dict[str, Any] | None = None
     evidence: list[str] = field(default_factory=list)
+    unsupported: list[str] = field(default_factory=list)  # 原话里平台做不到的条件
 
     def as_dict(self) -> dict[str, Any]:
-        return {"params": self.params, "design": self.design,
-                "sweep": self.sweep, "evidence": self.evidence}
+        return {"params": self.params, "design": self.design, "sweep": self.sweep,
+                "evidence": self.evidence, "unsupported": self.unsupported}
 
 
 _METHOD_WORDS = ("算法", "方案", "码本", "预编码", "调度器", "压缩", "估计器", "估计算法",
@@ -60,7 +61,8 @@ _CONDITION_KEYS = {
     "站间距": "isd_m", "站距": "isd_m", "isd": "isd_m",
     "速度": "ue_speed_kmh", "车速": "ue_speed_kmh",
     "srs 周期": "srs_period_ms", "srs周期": "srs_period_ms",
-    "邻区负载": "neighbor_prb_util", "负载": "neighbor_prb_util",
+    "邻区负载": "neighbor_prb_util", "本小区负载": "target_prb_utilization",
+    "服务小区负载": "target_prb_utilization", "负载": "load?",
     "发射功率": "tx_power_dbm", "功率": "tx_power_dbm",
     "带宽": "bandwidth_hz", "站数": "num_sites",
 }
@@ -74,6 +76,7 @@ SWEEP_LAYER: dict[str, str] = {
     "carrier_freq_hz": "generation", "channel_model": "generation",
     "antenna_preset": "generation", "scenario": "generation",
     "srs_period_ms": "system", "neighbor_prb_util": "system", "scheduler": "system",
+    "target_prb_utilization": "system", "load?": "system",
     "mu_enabled": "system", "traffic_model": "system",
 }
 
@@ -96,14 +99,24 @@ def read_brief(intent: str) -> Brief:
 
     m = re.search(r"(\d+)\s*t\s*(\d+)\s*r", text)
     if m:
-        b.params["antenna_preset"] = f"{m.group(1)}T{m.group(2)}R"
-        b.evidence.append(f"「{m.group(0)}」→ 阵型 {b.params['antenna_preset']}")
-    m = re.search(r"\b(cdl|tdl)\s*-?\s*([a-e])\b", text)
+        from .plan import _ANTENNA_PRESETS  # noqa: PLC0415
+
+        label = f"{m.group(1)}T{m.group(2)}R"
+        if label in _ANTENNA_PRESETS:
+            b.params["antenna_preset"] = label
+            b.evidence.append(f"「{m.group(0)}」→ 阵型 {label}")
+        else:
+            # 审核 F1：不认识的阵型不能静默沿用预设（256T 请求曾生成 64T）。
+            b.unsupported.append(f"阵型 {label} 不在支持列表 {sorted(_ANTENNA_PRESETS)}，"
+                                 "不能静默换成预设阵型")
+            b.evidence.append(f"「{m.group(0)}」→ 阵型 {label}（不支持，已阻断）")
+    m = re.search(r"(?<![a-z])(cdl|tdl)\s*-?\s*([a-e])(?![a-z])", text)
     if m:
         b.params["channel_model"] = f"{m.group(1).upper()}-{m.group(2).upper()}"
         b.evidence.append(f"「{m.group(0)}」→ 信道模型 {b.params['channel_model']}")
     # “20 个 64T4R CDL-C 信道”：数量与“信道/样本”之间允许夹阵型、模型名，但不跨分句。
-    m = re.search(r"(\d+)\s*个[^，,。；;]{0,24}?(?:信道|样本|快照)", raw)
+    m = re.search(r"(\d+)\s*个[^，,。；;]{0,24}?(?:信道|样本|快照|pdp|pmi|csi|srs|数据)",
+                  raw, flags=re.I)
     if m:
         b.params["num_samples"] = int(m.group(1))
         b.evidence.append(f"「{m.group(0)}」→ 样本数 {m.group(1)}")
@@ -119,9 +132,9 @@ def read_brief(intent: str) -> Brief:
         b.params["ue_speed_kmh"] = float(m.group(1))
         b.evidence.append(f"「{m.group(0)}」→ 速度 {m.group(1)} km/h（按全部用户理解；"
                           "若只是一部分高速用户混在低速人群里，要另说）")
-    m = re.search(r"(\d+(?:\.\d+)?)\s*dbm", text)
+    m = re.search(r"([-−]?\d+(?:\.\d+)?)\s*dbm", text)
     if m:
-        b.params["tx_power_dbm"] = float(m.group(1))
+        b.params["tx_power_dbm"] = float(m.group(1).replace("−", "-"))
         b.evidence.append(f"「{m.group(0)}」→ 发射功率 {m.group(1)} dBm")
     m = re.search(r"(\d+(?:\.\d+)?)\s*ghz", text)
     if m:
@@ -132,22 +145,33 @@ def read_brief(intent: str) -> Brief:
         b.params["bandwidth_hz"] = float(bws[0]) * 1e6
         b.evidence.append(f"「{bws[0]} MHz」→ 带宽")
 
-    m = re.search(r"\b(uma|umi|rma|inf)\b", text)
+    m = re.search(r"(?<![a-z])(uma|umi|rma|inf)(?![a-z])", text)
     if m:
         name = {"uma": "UMa_NLOS", "umi": "UMi_NLOS", "rma": "RMa_NLOS", "inf": "InF"}[m.group(1)]
         b.params["scenario"] = name
         b.evidence.append(f"「{m.group(0)}」→ 场景 {name}")
     m = re.search(r"(\d+)\s*t(?:\s*\d+\s*r)?\s*(?:和|与|vs\.?|对比|跟)\s*(\d+)\s*t", text)
     if m:
+        from .plan import _ANTENNA_PRESETS  # noqa: PLC0415
+
         vals = [f"{m.group(1)}T4R", f"{m.group(2)}T4R"]
+        for v in vals:
+            if v not in _ANTENNA_PRESETS:
+                b.unsupported.append(f"阵型 {v} 不在支持列表 {sorted(_ANTENNA_PRESETS)}")
         b.sweep = {"key": "antenna_preset", "values": vals}
         b.params.pop("antenna_preset", None)
         b.evidence.append(f"「{m.group(0)}」→ 比较天线规模 {vals}")
-    m = re.search(r"负载[^0-9]{0,6}(\d+)\s*%\s*(?:到|至|~|-|和)\s*(\d+)\s*%", raw)
+    m = re.search(r"(本小区|服务小区|小区内|邻区|相邻小区)?\s*负载[^0-9]{0,6}(\d+)\s*%\s*"
+                  r"(?:到|至|~|-|和)\s*(\d+)\s*%", raw)
     if m:
-        b.sweep = {"key": "neighbor_prb_util",
-                   "values": [float(m.group(1)) / 100, float(m.group(2)) / 100]}
-        b.evidence.append(f"「{m.group(0)}」→ 扫邻区负载 {b.sweep['values']}")
+        # 审核 F2：本小区负载（排队竞争）与邻区负载（干扰）是两个因果问题，不能混成一个。
+        owner = m.group(1) or ""
+        key = ("neighbor_prb_util" if "邻" in owner
+               else "target_prb_utilization" if owner else "load?")
+        b.sweep = {"key": key, "values": [float(m.group(2)) / 100, float(m.group(3)) / 100]}
+        what = {"neighbor_prb_util": "邻区负载", "target_prb_utilization": "本小区负载",
+                "load?": "负载（归属待确认）"}[key]
+        b.evidence.append(f"「{m.group(0)}」→ 扫{what} {b.sweep['values']}")
 
     # 扫描变量：站距列表、SRS 周期"从 A 改到 B"
     m = re.search(r"(?:站间距|站距|isd)[^0-9]{0,6}((?:\d+\s*[/、,，和]\s*)+\d+)\s*m", text)
@@ -212,10 +236,14 @@ FORMS: dict[str, dict[str, str]] = {
 def classify_form(intent: str, brief: Brief) -> tuple[str | None, str]:
     """判断结论形态；拿不准返回 None（由第一轮问题来定，而不是猜）。"""
     text = (intent or "").lower()
-    has_method = any(w in text for w in _METHOD_WORDS)
-    has_compare = any(w in text for w in _COMPARE_WORDS)
-    if any(w in text for w in _DELIVER_WORDS) and not (has_method and "不比" not in text):
-        return "deliver", "原话要数据、不做比较"
+    # 审核 F10：“不做算法对比 / 不比算法”是否定句，不能因为出现“算法”“对比”就判成比较。
+    negated = re.search(r"不(?:做|要|需要|用|进行)?\s*(?:算法|方案|方法)?\s*(?:对比|比较|比)",
+                        text) is not None
+    has_method = any(w in text for w in _METHOD_WORDS) and not negated
+    has_compare = any(w in text for w in _COMPARE_WORDS) and not negated
+    if negated or (any(w in text for w in _DELIVER_WORDS) and not has_method):
+        if negated or any(w in text for w in _DELIVER_WORDS):
+            return "deliver", "原话要数据、不做比较"
     if has_method and (has_compare or "验证" in text):
         return "compare_methods", "原话在比较或验证一个方法/方案"
     if brief.sweep or (
@@ -256,7 +284,7 @@ SOURCE_LIMIT = "平台未实现（写进结论边界）"
 
 
 def ledger(family: str | None, params: dict[str, Any], provenance: dict[str, str],
-           *, sweep_key: str | None = None) -> dict[str, Any]:
+           *, sweep_key: str | None = None, answers: dict[str, str] | None = None) -> dict[str, Any]:
     """决定目标量的每个假设：现在取什么、谁定的。影响大且没人确认的就是沉默假设。"""
     if not family:
         return {"family": None, "items": [], "silently_assumed": []}
@@ -265,14 +293,17 @@ def ledger(family: str | None, params: dict[str, Any], provenance: dict[str, str
         if f.only_for_sweep and f.only_for_sweep != sweep_key:
             continue
         key = f.config_key or f.key
+        answers = answers or {}
         if key == sweep_key or f.key == sweep_key:
             source, value = "扫描变量", "见扫描取值"
+        elif f.status == fx.NOT_MODELED:
+            # 平台没实现：改不了，是结论边界。回答了“怎么解读”也不能把它从边界里移走（审核 F6）。
+            source, value = SOURCE_LIMIT, f.platform_default
+            if f.key in answers:
+                value = f"{f.platform_default}（解读：{answers[f.key]}）"
         elif f.key in provenance or key in provenance:
             source = provenance.get(f.key) or provenance.get(key) or SOURCE_ANSWERED
-            value = params.get(key, provenance.get(f"{f.key}__value", "已确认"))
-        elif f.status == fx.NOT_MODELED:
-            # 平台没实现：改不了，是结论边界，必须写进结论。有选项的另问“按哪种方式解读”。
-            source, value = SOURCE_LIMIT, f.platform_default
+            value = answers.get(f.key, params.get(key, "已确认"))
         else:
             source = SOURCE_PRESET
             value = params.get(key, f.platform_default) if f.layer == "generation" else f.platform_default
@@ -327,6 +358,7 @@ class Question:
     # 平台默认会让这次研究失效：用户说“默认”时也不能沿用，改取推荐值并告知。
     blocking_default: Any = None
     default: Any = None               # 参数题的当前默认值
+    user_content: bool = False        # 只能由用户本人给出（预期、自定义取值），不按推荐代答
     # 选了某个选项后自动生效的改动：{选项值: {"overrides": {...}, "note": "..."}}
     effects: dict[Any, dict[str, Any]] = field(default_factory=dict)
 
@@ -433,7 +465,25 @@ def _sweep_question(key: str, family: str | None, params: dict[str, Any] | None 
                           ("10/20/40", "10 / 20 / 40 ms", "看趋势")],
         "ue_speed_kmh": [("3/30/120", "3 / 30 / 120 km/h", "步行到高速"),
                          ("3/60", "3 vs 60 km/h", "两档对照")],
-    }.get(key, [("low/high", "两档：低 / 高", ""), ("3pt", "三档", "")])
+        "tx_power_dbm": [("33/40/46", "33 / 40 / 46 dBm", "微站到宏站"),
+                         ("40/46/53", "40 / 46 / 53 dBm", "宏站功率区间")],
+        "bandwidth_hz": [("20e6/40e6/100e6", "20 / 40 / 100 MHz", ""),
+                         ("20e6/100e6", "20 vs 100 MHz", "两档对照")],
+        "neighbor_prb_util": [("0.3/0.6/0.9", "30% / 60% / 90%", "轻载到重载"),
+                              ("0.3/0.9", "30% vs 90%", "两档对照")],
+        "target_prb_utilization": [("0.3/0.6/0.9", "30% / 60% / 90%", "轻载到重载"),
+                                   ("0.3/0.9", "30% vs 90%", "两档对照")],
+    }.get(key)
+    if values is None:
+        # 不认识的扫描变量不给占位选项（审核 F7：“low/high”被当成已答），请用户给数值。
+        return Question(
+            key="sweep_values",
+            question=f"{KEY_LABELS.get(key, key)}扫哪几档？请直接给出具体数值。",
+            why="扫描取值决定能看到的是趋势还是一个点；平台对这个变量没有可靠的默认档位。",
+            options=_opts([("custom", "我直接给数值", "例如 3 个取值"),
+                           ("two_points", "只比两档（请给出两个数值）", "")]),
+            priority=1, user_content=True,
+        )
     return Question(
         key="sweep_values",
         question=f"{KEY_LABELS.get(key, key)}扫哪几档？",
@@ -470,6 +520,19 @@ def _edf_question() -> Question:
             ("deadline_first", "最早截止时间优先（按时延预算）", "当前没有，需要先实现或改比其他调度器"),
         ]),
         priority=-1,
+    )
+
+
+def _load_owner_question() -> Question:
+    return Question(
+        key="load_owner",
+        question="你说的负载是本小区的，还是邻区的？",
+        why="本小区负载改变排队与资源竞争，邻区负载改变干扰；两者回答的是不同的因果问题。",
+        options=_opts([
+            ("target_prb_utilization", "本小区负载（资源竞争）", "标定本小区 PRB 利用率"),
+            ("neighbor_prb_util", "邻区负载（干扰）", "邻区 PRB 占用率"),
+        ]),
+        priority=-2,
     )
 
 
@@ -527,6 +590,7 @@ def _expectation_question(family: str | None) -> Question:
             ("none", "没有预期，先看平台给什么", "可以，但结论前要逐条核对假设"),
         ]),
         priority=3,
+        user_content=True,
     )
 
 
@@ -545,9 +609,12 @@ def _deployment_question() -> Question:
         layer="design",
         priority=1,
         effects={
-            "urban_macro": {"overrides": {"scenario": "UMa_NLOS", "tx_power_dbm": 46.0}},
-            "urban_micro": {"overrides": {"scenario": "UMi_NLOS", "tx_power_dbm": 33.0}},
-            "reduced_macro": {"overrides": {"scenario": "UMa_NLOS", "tx_power_dbm": 40.0}},
+            "urban_macro": {"overrides": {"scenario": "UMa_NLOS", "tx_power_dbm": 46.0,
+                                          "tx_height_m": 25.0}},
+            "urban_micro": {"overrides": {"scenario": "UMi_NLOS", "tx_power_dbm": 33.0,
+                                          "tx_height_m": 10.0}},
+            "reduced_macro": {"overrides": {"scenario": "UMa_NLOS", "tx_power_dbm": 40.0,
+                                            "tx_height_m": 25.0}},
         },
     )
 
@@ -596,7 +663,8 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
              extra_design: list[dict[str, Any]] | None = None,
              extra_params: list[dict[str, Any]] | None = None,
              limit: int | None = MAX_PER_ROUND,
-             params: dict[str, Any] | None = None) -> list[Question]:
+             params: dict[str, Any] | None = None,
+             answers: dict[str, str] | None = None) -> list[Question]:
     """这一轮的问题：前提已满足、会改变结论、只能由人回答，最多 MAX_PER_ROUND 个。
 
     依赖顺序（grilling 的前沿）：结论形态 → 形态必需项（基线 / 扫描取值）→
@@ -610,6 +678,12 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
         # 数据任务不问基线、不问指标；原话没给的才补问，其余走默认并在台账里列出。
         return []
 
+    answers = answers or {}
+    if sweep_key == "load?" and "load_owner" not in answered:
+        cands.append(_load_owner_question())
+    if form == "compare_methods" and answers.get("edf_meaning") == "deadline_first":
+        # 用户要的调度器平台没有：不再给“最早排空优先”的基线/指标选项（审核 F6），由阻断项处理。
+        return []
     if form == "compare_methods":
         if re.search(r"(?<![a-z])edf(?![a-z])", (intent or "").lower()) and "edf_meaning" not in answered:
             cands.append(_edf_question())
@@ -704,6 +778,7 @@ def frontier(*, intent: str, form: str | None, family: str | None, brief: Brief,
 QUESTION_BUILDERS = {
     "form": _form_question, "baseline": _baseline_question,
     "deployment": _deployment_question, "edf_meaning": _edf_question,
+    "load_owner": _load_owner_question,
 }
 
 
@@ -766,11 +841,26 @@ def _alternatives(cfg: dict[str, Any], sweep_key: str | None) -> list[tuple[str,
     if sweep_key != "isd_m" and cfg.get("isd_m"):
         isd = float(cfg["isd_m"])
         alts.append(("isd_m", {"isd_m": isd * 2.0}, f"站距 {isd:g} → {isd * 2:g} m"))
-    alts.append(("noise_figure_db", {"noise_figure_db": 9.0}, "终端噪声系数 7 → 9 dB"))
-    alts.append(("neighbor_load", {"prb_utilization": 0.5, "pdsch_load": 0.5},
-                 "信道层邻区负载 1.0 → 0.5"))
-    alts.append(("ue_distribution", {"ue_distribution": "hotspot"}, "撒点 均匀 → 热点"))
-    return alts
+    nf = float(cfg.get("noise_figure_db", 7.0) or 7.0)
+    nf_alt = 7.0 if nf != 7.0 else 9.0
+    alts.append(("noise_figure_db", {"noise_figure_db": nf_alt}, f"终端噪声系数 {nf:g} → {nf_alt:g} dB"))
+    load = float(cfg.get("prb_utilization", 1.0) or 1.0)
+    load_alt = 0.5 if load != 0.5 else 1.0
+    alts.append(("neighbor_load", {"prb_utilization": load_alt, "pdsch_load": load_alt},
+                 f"信道层邻区负载 {load:g} → {load_alt:g}"))
+    dist = str(cfg.get("ue_distribution", "uniform"))
+    dist_alt = "hotspot" if dist != "hotspot" else "uniform"
+    alts.append(("ue_distribution", {"ue_distribution": dist_alt}, f"撒点 {dist} → {dist_alt}"))
+    # 每个变体都必须真的改了东西，否则零差值没有意义（审核 F8：NF 已是 9 还“7→9”）。
+    return [(k, ch, lab) for k, ch, lab in alts if any(cfg.get(ck) != cv for ck, cv in ch.items())]
+
+
+def classify_zero(change: dict[str, Any], delta: dict[str, float | None]) -> dict[str, bool]:
+    """零差值怎么读：只有键在静态核对过的 INERT_CONFIG_KEYS 里才能说“仿真器不读”；
+    否则只能说“这次小样本没观察到变化”。"""
+    zero = all(v == 0 for v in delta.values() if v is not None)
+    verified = all(k in fx.INERT_CONFIG_KEYS for k in change)
+    return {"inert": zero and verified, "no_change_observed": zero and not verified}
 
 
 def measure_sensitivity(cfg: dict[str, Any], *, sweep_key: str | None = None,
@@ -801,8 +891,8 @@ def measure_sensitivity(cfg: dict[str, Any], *, sweep_key: str | None = None,
         got = med(sc.probe({**base_cfg, **change}, num_samples=num_samples))
         delta = {k: (None if got[k] is None or base[k] is None else round(got[k] - base[k], 2))
                  for k in base}
-        inert = all(v == 0 for v in delta.values() if v is not None)
-        rows.append({"factor": key, "change": label, "delta": delta, "inert": inert})
+        rows.append({"factor": key, "change": label, "delta": delta,
+                     **classify_zero(change, delta)})
     rows.sort(key=lambda r: -abs(r["delta"].get("iot_dl_db") or 0.0))
     return {
         "base": base,
@@ -811,7 +901,8 @@ def measure_sensitivity(cfg: dict[str, Any], *, sweep_key: str | None = None,
         "elapsed_s": round(_time.perf_counter() - t0, 1),
         "how_to_use": (
             "按 |ΔIoT|（或 |ΔSINR|）从大到小决定先问谁：变化大的假设必须和用户对齐，"
-            "变化小的可以用默认值并在台账里写明；inert=true 的键仿真器不读，不要当成可调旋钮。"
+            "变化小的可以用默认值并在台账里写明；inert=true 表示该键经源码核对不被读取，"
+            "no_change_observed=true 只表示这次小样本没看到变化，不能据此说“未实现”。"
             "这是小样本探测的中位差，只用于排序提问，不是结论。"
         ),
     }

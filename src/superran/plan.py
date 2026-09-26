@@ -28,6 +28,7 @@ _HANDLE_RE = re.compile(r"[A-Za-z0-9_-]+")
 # 也负责把 ChannelHub 根本不支持的参数（如 snr_range_dB）挑出来另作处理。
 
 _ANTENNA_PRESETS: dict[str, dict[str, int]] = {
+    "256T4R": {"num_bs_tx_ant": 256, "num_bs_rx_ant": 256, "num_ue_tx_ant": 4, "num_ue_rx_ant": 4},
     "64T4R": {"num_bs_tx_ant": 64, "num_bs_rx_ant": 64, "num_ue_tx_ant": 4, "num_ue_rx_ant": 4},
     "32T4R": {"num_bs_tx_ant": 32, "num_bs_rx_ant": 32, "num_ue_tx_ant": 4, "num_ue_rx_ant": 4},
     "16T2R": {"num_bs_tx_ant": 16, "num_bs_rx_ant": 16, "num_ue_tx_ant": 2, "num_ue_rx_ant": 2},
@@ -228,6 +229,7 @@ class Draft:
     sweep: dict[str, Any] | None = None  # 扫描变量与取值
     provenance: dict[str, str] = field(default_factory=dict)  # 键 → 谁定的
     brief_evidence: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)  # 原话里平台做不到的条件
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -247,6 +249,7 @@ class Draft:
             "sweep": self.sweep,
             "provenance": self.provenance,
             "brief_evidence": self.brief_evidence,
+            "blockers": self.blockers,
         }
 
 
@@ -416,9 +419,61 @@ def create_draft(
         sweep=brief.sweep,
         provenance=provenance,
         brief_evidence=list(brief.evidence),
+        blockers=list(brief.unsupported),
     )
     save_draft(d)
     return d, profile
+
+
+def _apply_answer(d: Draft, key: str, value: Any, changes: list[str]) -> None:
+    """把一个设计层回答落到草稿：记录、生效选项改动、更新扫描计划。所有入口共用这一条路径。
+
+    审核 F3/F4/F7 的教训：回答只记进 design 而不进执行配置，历史与实际就会分叉。
+    """
+    from . import interview as iv  # noqa: PLC0415
+
+    if value is None or value == "":  # False / 0 是合法回答（例如“关掉自适应”）
+        return
+    if key == "sweep_values":
+        nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", str(value))]
+        if not nums:
+            changes.append(f"扫描取值「{value}」里没有具体数值，未记为已答；请给出数值")
+            return
+        skey = (d.sweep or {}).get("key") or iv.sweep_key_from_intent(d.intent, iv.Brief()) or "?"
+        old = (d.sweep or {}).get("values")
+        d.sweep = {"key": skey, "values": nums}
+        changes.append(f"扫描 {skey}: {old} → {nums}")
+    if key == "load_owner" and d.sweep:
+        d.sweep = {**d.sweep, "key": str(value)}
+        changes.append(f"负载归属确认为 {value}，扫描变量改为 {value}")
+    d.design[key] = str(value)
+    d.provenance[key] = iv.SOURCE_ANSWERED
+    changes.append(f"实验设计 {key}: {str(value)[:40]}")
+    if key == "form" and str(value) in iv.FORMS:
+        d.form = str(value)
+    eff = iv.answer_effects(key, value, d.family)
+    if eff.get("overrides"):
+        apply: dict[str, Any] = {}
+        for kk, vv in eff["overrides"].items():
+            # 原话或用户直接给过的值不被组合推荐覆盖（审核 F3：53 dBm 被部署推荐改成 46）。
+            if d.provenance.get(kk) in {iv.SOURCE_SAID} or (
+                    kk in d.user_set and d.provenance.get(kk) == iv.SOURCE_ANSWERED
+                    and kk != key):
+                if d.params.get(kk) != vv:
+                    changes.append(f"保留用户给定的 {kk}={d.params.get(kk)!r}；"
+                                   f"与 {key}={value} 的推荐 {vv!r} 冲突，未覆盖")
+                continue
+            apply[kk] = vv
+        before = {kk: d.params.get(kk) for kk in apply}
+        changes.extend(_apply_dependent_overrides(d.params, apply))
+        for kk, vv in apply.items():
+            if before.get(kk) != vv:
+                changes.append(f"{kk}: {before.get(kk)!r} → {vv!r}（由 {key}={value} 带出）")
+            d.provenance[kk] = iv.SOURCE_ANSWERED
+            if kk not in d.user_set:
+                d.user_set.append(kk)
+    if eff.get("note"):
+        changes.append(eff["note"])
 
 
 def revise_draft(
@@ -430,88 +485,67 @@ def revise_draft(
 ) -> tuple[Draft, dec.TaskProfile, list[str]]:
     """差分修正：只说改什么，不用重述整个需求。
 
-    ``design`` 记录实验设计层的回答（基线、指标、推广范围）。选项自带的配置改动
-    当场生效。``accept_recommended=True`` 对应用户说“按推荐跑”：所有待问问题
-    （含后续轮次）一律取推荐项，逐条记进变更，而不是沿用平台默认。
+    ``design`` 记录实验设计层的回答，选项自带的配置改动当场生效。
+    ``accept_recommended=True`` 对应用户说“按推荐跑”：逐层展开依赖，每一层的回答
+    先生效再算下一层推荐（审核 F4：选了微站，站距档位也要随之改）；原话给定的值
+    不被覆盖；只能由用户本人给的内容（预期、预期增益、自定义扫描取值）不代答；
+    时间轴等必需的配置调整一并落实。
     """
+    from . import interview as iv  # noqa: PLC0415
+
     d = load_draft(draft_id)
     profile = next((p for p in dec.TASK_PROFILES if p.task == d.task), dec.TASK_PROFILES[-1])
-    design = dict(design or {})
-    overrides = dict(overrides or {})
+    changes: list[str] = []
+
+    raw_overrides = dict(overrides or {})
+    before = dict(d.params)
+    changes.extend(_apply_dependent_overrides(d.params, raw_overrides))
+    for k, v in raw_overrides.items():
+        if before.get(k) != v:
+            changes.append(f"{k}: {before.get(k)!r} → {v!r}")
+        if k not in d.user_set:
+            d.user_set.append(k)
+        d.provenance[k] = iv.SOURCE_ANSWERED
+    for k, v in (design or {}).items():
+        _apply_answer(d, k, v, changes)
+
     if accept_recommended:
         for _ in range(8):  # 依赖链逐层展开：答完一层，下一层才进入前沿
             st = interview_state(d, profile)
-            # 预期、预期增益只能由用户本人给出，不能拿推荐项代答。
-            todo = [q for q in st["pending"]
-                    if q.key not in design and q.key not in overrides
-                    and q.key not in _USER_CONTENT_KEYS]
+            todo = [q for q in st["pending"] if not q.user_content]
             if not todo:
                 break
+            progressed = False
             for q in todo:
                 rec = next((o["value"] for o in q.options if o.get("recommended")), None)
                 if rec is None:
                     continue
-                (overrides if q.layer == "param" else design)[q.key] = rec
-            d.design.update({k: str(v) for k, v in design.items()})
-            d.params.update({k: v for k, v in overrides.items()})
-            d.user_set = sorted(set(d.user_set) | set(overrides))
+                progressed = True
+                if q.layer == "param":
+                    old = d.params.get(q.key)
+                    changes.extend(_apply_dependent_overrides(d.params, {q.key: rec}))
+                    if old != rec:
+                        changes.append(f"{q.key}: {old!r} → {rec!r}（按推荐）")
+                    if q.key not in d.user_set:
+                        d.user_set.append(q.key)
+                    d.provenance[q.key] = iv.SOURCE_ANSWERED
+                else:
+                    _apply_answer(d, q.key, rec, changes)
+            if not progressed:
+                break
+        for adj in required_adjustments(d):
+            old = d.params.get(adj["key"])
+            d.params[adj["key"]] = adj["to"]
+            changes.append(f"{adj['key']}: {old!r} → {adj['to']!r}（{adj['why']}）")
 
-    changes: list[str] = []
-    raw_overrides = dict(overrides or {})
-    before = dict(d.params)
-    dependency_notes = _apply_dependent_overrides(d.params, raw_overrides)
-    for k, v in raw_overrides.items():
-        old = before.get(k)
-        if old != v:
-            changes.append(f"{k}: {old!r} → {v!r}")
-        if k not in d.user_set:
-            d.user_set.append(k)
-    changes.extend(dependency_notes)
-
-    from . import interview as iv  # noqa: PLC0415
-
-    for k in raw_overrides:
-        d.provenance[k] = iv.SOURCE_ANSWERED
-    for k, v in (design or {}).items():
-        if v is None or v == "":  # False / 0 是合法回答（例如“关掉自适应”），不能当空值丢掉
-            continue
-        d.design[k] = str(v)
-        d.provenance[k] = iv.SOURCE_ANSWERED
-        changes.append(f"实验设计 {k}: {str(v)[:40]}")
-        if k == "form" and str(v) in iv.FORMS:
-            d.form = str(v)
-        if k == "sweep_values" and d.sweep is None:
-            nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", str(v))]
-            if nums:
-                d.sweep = {"key": iv.sweep_key_from_intent(d.intent, iv.Brief()) or "?",
-                           "values": nums}
-        # 选项自带的改动（例如“街道微站”→ UMi + 33 dBm）当场生效，并记进变更。
-        eff = iv.answer_effects(k, v, d.family)
-        if eff.get("overrides"):
-            before_eff = {kk: d.params.get(kk) for kk in eff["overrides"]}
-            changes.extend(_apply_dependent_overrides(d.params, dict(eff["overrides"])))
-            for kk, vv in eff["overrides"].items():
-                if before_eff.get(kk) != vv:
-                    changes.append(f"{kk}: {before_eff.get(kk)!r} → {vv!r}（由 {k}={v} 带出）")
-                d.provenance[kk] = iv.SOURCE_ANSWERED
-                if kk not in d.user_set:
-                    d.user_set.append(kk)
-        if eff.get("note"):
-            changes.append(eff["note"])
-
-    # 用户回应过一轮就推进轮次，下次 build_proposal 问新的一批。
-    # 注意即使用户只是"确认默认值"（值没变、changes 为空）也要推进——
-    # 否则下一轮会把同样的问题再问一遍。
-    if overrides or design:
+    # 用户回应过一轮就推进轮次；即使只是“确认默认值”也要推进，否则会重复问。
+    if overrides or design or accept_recommended:
         d.round_no += 1
         d.history.append(
             f"第 {d.round_no - 1} 轮：" + ("；".join(changes) if changes else "确认默认值")
         )
     save_draft(d)
     return d, profile, changes
-
-
-_USER_CONTENT_KEYS = frozenset({"expectation", "effect_size"})
 
 
 def _typed(value: str) -> Any:
@@ -526,6 +560,81 @@ def _typed(value: str) -> Any:
         return value
 
 
+# 系统仿真每 UE 至少要 8 个时间相关快照（可由多个单时隙样本组成）；否则 CSI 老化恒为 0、
+# PF 分集被低估（skills/channel-sim/references/system-sim.md）。
+MIN_SNAPSHOTS_PER_UE = 8
+
+
+def snapshots_per_ue(params: dict[str, Any], num_samples: int | None = None) -> float:
+    n = int(num_samples if num_samples is not None else params.get("num_samples", 200) or 0)
+    ues = max(int(params.get("num_ues", 1) or 1), 1)
+    slots = max(int(params.get("num_slots_per_sample", 1) or 1), 1)
+    return n * slots / ues
+
+
+def needs_time_axis(d: Draft) -> bool:
+    return d.family == "dl_experience"
+
+
+def required_adjustments(d: Draft) -> list[dict[str, Any]]:
+    """为满足物理前提必须做、且用户没有限定预算时才可以自动做的配置调整。"""
+    from . import interview as iv  # noqa: PLC0415
+
+    out = []
+    if needs_time_axis(d) and snapshots_per_ue(d.params) < MIN_SNAPSHOTS_PER_UE:
+        if d.provenance.get("num_samples") not in {iv.SOURCE_SAID, iv.SOURCE_ANSWERED}:
+            ues = max(int(d.params.get("num_ues", 1) or 1), 1)
+            slots = max(int(d.params.get("num_slots_per_sample", 1) or 1), 1)
+            need = -(-MIN_SNAPSHOTS_PER_UE * ues // slots)
+            out.append({"key": "num_samples", "from": d.params.get("num_samples"), "to": need,
+                        "why": f"系统仿真每 UE 需 ≥{MIN_SNAPSHOTS_PER_UE} 个时间相关快照"
+                               f"（{ues} UE × {slots} 时隙/样本）"})
+    return out
+
+
+def interview_blockers(d: Draft, num_samples: int | None = None) -> list[dict[str, str]]:
+    """访谈层发现、会让这次实验答非所问的阻断项。提案与 sr_generate 共用。"""
+    out: list[dict[str, str]] = []
+    for msg in d.blockers:
+        out.append({"severity": "block", "key": "request", "message": msg,
+                    "suggestion": "改成支持的条件，或确认放弃这一项"})
+    if d.design.get("indoor_users") == "need_o2i":
+        out.append({"severity": "block", "key": "indoor_users",
+                    "message": "你要求必须有室内穿透损耗（O2I），平台当前没有这个机制；"
+                               "用现有模型跑会得到全室外的结果，答非所问。",
+                    "suggestion": "先实现 O2I，或改为“只比较 SIR 与相对趋势”"})
+    if d.design.get("edf_meaning") == "deadline_first":
+        out.append({"severity": "block", "key": "edf_meaning",
+                    "message": "你要比的是最早截止时间优先（Earliest Deadline First），"
+                               "本平台只有最早排空优先（Earliest Drain First）。",
+                    "suggestion": "先实现截止时间调度器，或改比平台已有的调度器"})
+    if d.sweep and d.sweep.get("key") == "load?":
+        out.append({"severity": "block", "key": "load_owner",
+                    "message": "原话里的“负载”没说是本小区还是邻区：前者改变排队竞争，后者改变干扰。",
+                    "suggestion": "回答 load_owner（本小区 / 邻区）"})
+    if needs_time_axis(d):
+        spu = snapshots_per_ue(d.params, num_samples)
+        if spu < MIN_SNAPSHOTS_PER_UE:
+            from . import interview as iv  # noqa: PLC0415
+
+            fixed = d.provenance.get("num_samples") in {iv.SOURCE_SAID, iv.SOURCE_ANSWERED} \
+                or num_samples is not None
+            out.append({
+                "severity": "block", "key": "num_samples",
+                "message": (f"每 UE 只有 {spu:.2f} 个快照，系统仿真需要 ≥{MIN_SNAPSHOTS_PER_UE} 个"
+                            "时间相关快照；否则 CSI 老化恒为 0、PF 分集被低估。"
+                            + ("你给定的样本预算与这一前提冲突。" if fixed else "")),
+                "suggestion": ("增加样本数或减少 UE 数；或确认接受单快照（不能用于老化/调度比较）"
+                               if fixed else "sr_revise(accept_recommended=True) 会按需调整样本数"),
+            })
+    return out
+
+
+def draft_issues(d: Draft, profile: dec.TaskProfile, num_samples: int | None = None) -> list[dict[str, str]]:
+    """物理组合检查 + 访谈阻断项。"""
+    return dec.check_guards(profile, d.params) + interview_blockers(d, num_samples)
+
+
 def system_params(d: Draft) -> dict[str, Any]:
     """已确认的系统层回答 → 直接传给 sr_system_sim 的参数，避免 Agent 转述时丢失。"""
     from . import factors as fx  # noqa: PLC0415
@@ -533,9 +642,15 @@ def system_params(d: Draft) -> dict[str, Any]:
     if not d.family:
         return {}
     out: dict[str, Any] = {}
+    sweep_key = (d.sweep or {}).get("key")
     for f in fx.factors_for(d.family):
+        if f.config_key == sweep_key:
+            continue  # 扫描变量按各臂取值传，不固定成一个值（审核 F2）
         if f.layer == "system" and f.config_key and f.key in d.design:
             out[f.config_key] = _typed(d.design[f.key])
+    if d.family == "dl_experience" and int(d.params.get("num_sites", 1) or 1) > 1:
+        # 多小区数据只调度一个服务小区；1 是中心站的一个扇区（sys_multicell_center_cell 口径）。
+        out["serving_cell"] = 1
     return out
 
 
@@ -547,7 +662,7 @@ def interview_state(d: Draft, profile: dec.TaskProfile) -> dict[str, Any]:
     answered = set(d.design) | set(d.user_set) | set(d.provenance)
     sweep_key = (d.sweep or {}).get("key") if d.sweep else iv.sweep_key_from_intent(
         d.intent, iv.Brief())
-    led = iv.ledger(d.family, ch_cfg, d.provenance, sweep_key=sweep_key)
+    led = iv.ledger(d.family, ch_cfg, d.provenance, sweep_key=sweep_key, answers=d.design)
     extra_design = []
     if d.form == "compare_methods":
         for key, prio in (("metric", 1), ("effect_size", 3)):
@@ -558,7 +673,8 @@ def interview_state(d: Draft, profile: dec.TaskProfile) -> dict[str, Any]:
     common = dict(intent=d.intent, form=d.form, family=d.family,
                   brief=iv.Brief(params={}, design=dict(d.design), sweep=d.sweep),
                   answered=answered, led=led, sweep_key=sweep_key,
-                  extra_design=extra_design, extra_params=extra_params, params=ch_cfg)
+                  extra_design=extra_design, extra_params=extra_params, params=ch_cfg,
+                  answers=dict(d.design))
     return {
         "sweep_key": sweep_key, "ledger": led, "config": ch_cfg,
         "this_round": iv.frontier(**common),
@@ -639,7 +755,7 @@ def build_proposal(
         ),
     }
 
-    issues = dec.check_guards(profile, d.params)
+    issues = draft_issues(d, profile)
     presets = load_presets()
 
     factor_block = None
@@ -670,8 +786,9 @@ def build_proposal(
         "blocking_defaults": blocking,
         # 已确认的系统层回答，原样传给 sr_system_sim（信道生成参数在 resolved_config）。
         "system_params": system_params(d),
-        "needs_user_content": sorted(
-            k for k in _USER_CONTENT_KEYS if any(q.key == k for q in pending)),
+        "needs_user_content": sorted({q.key for q in pending if q.user_content}),
+        # 为满足物理前提需要做的配置调整（例如每 UE ≥8 快照）；按推荐跑时自动落实。
+        "required_adjustments": required_adjustments(d),
         # --- 本轮提问 ---
         "round": rnd["round"],
         "round_focus": rnd["focus"],
