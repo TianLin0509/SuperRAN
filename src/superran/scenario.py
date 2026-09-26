@@ -117,10 +117,16 @@ def probe_config(cfg: dict[str, Any]) -> tuple[dict[str, Any], int, int]:
     逐位相同，**只有 sinr_dB 一个字段偏**，看起来像是探测模式本身有问题。
     实际是配置缺 panel 导致连全量跑出来的 SINR 都不是真 SINR。
     """
+    from . import hardware as hw  # noqa: PLC0415
     from .generate import _ensure_bs_panel, _rb_from_bandwidth  # noqa: PLC0415
 
     out = dict(cfg)
     _ensure_bs_panel(out)
+    # 与 sr_generate 同一套默认阵列：64T/256T 面板切到真实 AAU 子阵模型。
+    # 漏掉这一步时阵元峰值增益与 1 驱 3 子阵增益（64T 合计 12.77 dB）不进
+    # 接收功率——各小区同减，SIR 逐位不变，但 SNR 与 IoT 整体偏低。
+    hw.apply_array_defaults(out)
+    hw.strip_markers(out)
     rb_full = int(out.get("num_rb") or _rb_from_bandwidth(out))
     rb_probe = min(PROBE_NUM_RB, rb_full)
     out["num_rb"] = rb_probe
