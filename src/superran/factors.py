@@ -22,7 +22,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 MODELED = "modeled"
@@ -38,12 +38,23 @@ class Factor:
     label: str
     status: str                      # MODELED / NOT_MODELED / PARTIAL
     impact: int                      # 1 = 能改变结论量级，数字越大越次要
-    effect_iot: str                  # 对下行 IoT（干扰相对热噪声）的作用
-    effect_sir: str                  # 对下行 SIR 的作用
     magnitude: str                   # 量级与依据（实测 / 标准估算 / 未测）
     ask: str                         # 该怎么问用户（完整人话）
     platform_default: str            # 用户不答时平台实际用什么
+    effect_iot: str = ""             # 对下行 IoT（干扰相对热噪声）的作用
+    effect_sir: str = ""             # 对下行 SIR 的作用
+    effect: str = ""                 # 对其他指标（速率、时延）的作用
     config_key: str | None = None    # 可配置时对应的配置键
+    # 这个键在哪一层生效：generation（换它就是换一批信道数据）或 system
+    # （同一批数据上换参数即可，能做同数据、同随机流的配对比较）。
+    layer: str = "generation"
+    # 提问时给用户的选项：(取值, 标签, 取舍说明)，第一个是推荐项。
+    options: tuple[tuple[Any, str, str], ...] = ()
+    # 只在扫这个变量时才要问（例如只有比较 SRS 周期时才必须问自适应周期）。
+    only_for_sweep: str | None = None
+    # 预期与探测对不上时，这个假设能解释多大的偏差：
+    # {"metric": 指标, "if": 另一种取值的说法, "delta_db": 估计变化, "basis": 依据}
+    gap_hint: dict[str, Any] | None = field(default=None, compare=False)
     verify: dict[str, Any] | None = field(default=None, compare=False)
 
     def as_dict(self, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -54,6 +65,8 @@ class Factor:
             "impact": self.impact,
             "effect_iot": self.effect_iot,
             "effect_sir": self.effect_sir,
+            "effect": self.effect,
+            "layer": self.layer,
             "magnitude": self.magnitude,
             "ask": self.ask,
             "platform_default": self.platform_default,
@@ -85,6 +98,14 @@ DL_INTERFERENCE: tuple[Factor, ...] = (
         config_key="tx_power_dbm",
         verify={"set": {"tx_power_dbm": 40.0}, "base": {"tx_power_dbm": 46.0},
                 "in_shift_db": -6.0, "sir_shift_db": 0.0},
+        options=(
+            (46.0, "46 dBm · 宏站满功率", "平台默认；站距 500 m 左右的宏站"),
+            (40.0, "40 dBm · 降功率宏站", "站距 200~300 m 的宏站常见"),
+            (33.0, "33 dBm · 微站", "站距 200 m 以内的街道微站"),
+        ),
+        gap_hint={"metric": "iot_dl_db", "if": "按 33 dBm 微站功率", "delta_db": -13.0,
+                  "basis": "I/N 与功率 dB 对 dB（测试逐样本核对）",
+                  "only_if_above": ("tx_power_dbm", 33.0), "per_db_of": "tx_power_dbm"},
     ),
     Factor(
         key="indoor_users",
@@ -103,6 +124,13 @@ DL_INTERFERENCE: tuple[Factor, ...] = (
             "如果对标的是 80% 室内的部署，IoT 绝对值会偏高十几 dB，只能看趋势和 SIR。"
         ),
         platform_default="全部室外，1.5 m",
+        options=(
+            ("accept_outdoor", "按全室外解读", "IoT 当上界看，重点看趋势与 SIR"),
+            ("indoor_major", "用户以室内为主", "只比较 SIR 与相对趋势，IoT 绝对值不作结论"),
+            ("need_o2i", "必须有室内穿透损耗", "当前做不了，需要先补 O2I 建模"),
+        ),
+        gap_hint={"metric": "iot_dl_db", "if": "80% 室内（38.901 部署假设）", "delta_db": -16.0,
+                  "basis": "38.901 低损耗 O2I 模型 2.6 GHz 手算，未在本平台实测"},
     ),
     Factor(
         key="neighbor_load",
@@ -125,6 +153,13 @@ DL_INTERFERENCE: tuple[Factor, ...] = (
         verify={"set": {"prb_utilization": 0.3, "pdsch_load": 0.3},
                 "base": {"prb_utilization": 1.0, "pdsch_load": 1.0},
                 "in_shift_db": 0.0, "sir_shift_db": 0.0},
+        options=(
+            ("full_load", "按满载上界", "信道层现状；干扰最坏"),
+            ("system_level", "按实际负载（改走系统级）", "neighbor_prb_util 设成现网负载"),
+            ("both", "两者都要", "信道层给上界，系统级给典型"),
+        ),
+        gap_hint={"metric": "iot_dl_db", "if": "邻区负载 50%", "delta_db": -3.0,
+                  "basis": "干扰按激活概率缩放的估算；信道层未建模"},
     ),
     Factor(
         key="isd_m",
@@ -161,6 +196,12 @@ DL_INTERFERENCE: tuple[Factor, ...] = (
         ),
         platform_default="全部小区的用户一起统计",
         config_key="num_sites",
+        options=(
+            (19, "19 站 57 小区", "更接近中心站口径，耗时约 3 倍"),
+            (7, "7 站 21 小区", "快；外圈邻区不全，IoT 偏低"),
+        ),
+        gap_hint={"metric": "iot_dl_db", "if": "只看中心站", "delta_db": 6.5,
+                  "basis": "中心站与边缘站小区场景实测相差约 6.5 dB"},
     ),
     Factor(
         key="ue_distribution",
@@ -194,6 +235,10 @@ DL_INTERFERENCE: tuple[Factor, ...] = (
         ask="宏站（UMa）还是街道微站（UMi）？载频按 2.6 GHz 吗？",
         platform_default="UMa（38.901 视距概率抽样），2.6 GHz",
         config_key="scenario",
+        options=(
+            ("UMa_NLOS", "宏站（UMa，25 m 站高）", "38.901 城区宏站"),
+            ("UMi_NLOS", "街道微站（UMi，10 m 站高）", "小站距、低功率部署"),
+        ),
     ),
     Factor(
         key="noise_figure_db",
@@ -208,6 +253,109 @@ DL_INTERFERENCE: tuple[Factor, ...] = (
         config_key="noise_figure_db",
         verify={"set": {"noise_figure_db": 9.0}, "base": {"noise_figure_db": 7.0},
                 "in_shift_db": -2.0, "sir_shift_db": 0.0},
+    ),
+)
+
+# ---------------------------------------------------------------------------
+# 下行体验：体验速率 / 边缘速率 / 完成时延（系统级 sr_system_sim）
+# ---------------------------------------------------------------------------
+# 默认值取自 sr_system_sim 的签名；改签名时同步改这里（对账测试会核对）。
+
+DL_EXPERIENCE: tuple[Factor, ...] = (
+    Factor(
+        key="traffic_model",
+        label="话务模型",
+        status=MODELED,
+        impact=1,
+        effect=(
+            "决定哪些 KPI 有意义：满缓冲下标准 DRB 忙期吞吐为 None，边缘看窗口发送速率"
+            "的 5% 分位；体验速率与小包完成时延需要有限到达话务"
+        ),
+        magnitude="口径切换，不是数值偏移：换话务模型等于换了要回答的问题",
+        ask=(
+            "速率/时延按哪种话务口径？满缓冲看的是小区容量下每个用户能分到多少；"
+            "有限到达（文件下载、小包）看的是用户实际体验与完成时延，两者数值与含义都不同。"
+        ),
+        platform_default="ftp3（500 kB 文件、每 UE 2 次/秒）",
+        config_key="traffic_model",
+        layer="system",
+        options=(
+            ("ftp3", "有限到达（FTP3 文件下载）", "体验速率与完成时延有意义；平台默认"),
+            ("full_buffer", "满缓冲", "看容量与边缘用户分到的发送速率"),
+            ("mixed", "大小包混合", "同时看小包时延与大包速率"),
+        ),
+    ),
+    Factor(
+        key="neighbor_prb_util",
+        label="系统级邻区负载",
+        status=MODELED,
+        impact=1,
+        effect="邻区按这个占用率抽样发射：负载越高，本小区用户 SINR 越低、MCS 越低",
+        magnitude=(
+            "系统级默认 30%；注意信道数据的 IoT/SINR 是按邻区满载算的，两层口径不同，"
+            "引用干扰数和引用速率时负载假设不一致"
+        ),
+        ask="邻区负载按多少？系统级默认 30%，现网忙时常见 50%~70%，满载是最坏情况。",
+        platform_default="0.3（± 0.05 抖动）",
+        config_key="neighbor_prb_util",
+        layer="system",
+        options=(
+            (0.3, "30% · 平台默认", "轻中载"),
+            (0.6, "60% · 忙时典型", ""),
+            (1.0, "100% · 满载最坏", "与信道层 IoT 口径一致"),
+        ),
+    ),
+    Factor(
+        key="srs_period_adaptive",
+        label="SRS 周期自适应",
+        status=MODELED,
+        impact=1,
+        effect="开着时实际 SRS 周期由资源分配决定，名义上的 10/20 ms 可能被改成同一个值",
+        magnitude="比较 SRS 周期时是决定性的：不关掉，两组可能跑成同一个周期",
+        ask=(
+            "比较 SRS 周期时，要不要关掉自适应、强制按 10 ms / 20 ms 跑？"
+            "不关的话平台会按资源情况自选周期，两组可能变成同一个周期。"
+        ),
+        platform_default="开启（srs_period_adaptive=True）",
+        config_key="srs_period_adaptive",
+        layer="system",
+        only_for_sweep="srs_period_ms",
+        options=(
+            (False, "关掉，强制名义周期", "比较周期时必须这样"),
+            (True, "保留自适应", "看现网策略下的效果，但两组实际周期要事后核对"),
+        ),
+    ),
+    Factor(
+        key="ue_speed_kmh",
+        label="用户速度与时间轴",
+        status=MODELED,
+        impact=2,
+        effect="速度决定信道老化快慢；要体现老化，每 UE 需要 ≥8 个时间相关快照，独立撒点不行",
+        magnitude="3 km/h 下几乎不老化，60 km/h 以上 SRS/CSI 时延的影响才明显",
+        ask="用户速度按多少？这决定 CSI 老化的程度，平台会按它生成连续轨迹。",
+        platform_default="预设值（多为 3 km/h），单快照",
+        config_key="ue_speed_kmh",
+        options=(
+            (3.0, "3 km/h · 步行", "几乎不老化"),
+            (30.0, "30 km/h · 城区车速", ""),
+            (120.0, "120 km/h · 高速", "老化明显"),
+        ),
+    ),
+    Factor(
+        key="mu_enabled",
+        label="MU-MIMO",
+        status=PARTIAL,
+        impact=2,
+        effect="开 MU 提升小区容量，边缘用户收益小得多；只支持两用户配对、每 UE rank 1~2",
+        magnitude="单小区满缓冲实测小区吞吐 +64%，5% 边缘仅 +7%",
+        ask="要不要开 MU？默认只做 SU。",
+        platform_default="关闭（SU，mu_enabled=False）",
+        config_key="mu_enabled",
+        layer="system",
+        options=(
+            (False, "SU（默认）", "口径简单"),
+            (True, "开 MU（两用户配对）", "容量上界更高，边缘收益小"),
+        ),
     ),
 )
 
@@ -240,6 +388,11 @@ EXPECTATION_QUESTION: dict[str, Any] = {
 
 METRIC_FACTORS: dict[str, tuple[Factor, ...]] = {
     "dl_interference": DL_INTERFERENCE,
+    # 速率落在 SINR 上，所以干扰侧影响最大的几项也在清单里（降一级）。
+    "dl_experience": DL_EXPERIENCE + tuple(
+        replace(f, impact=f.impact + 1)
+        for f in DL_INTERFERENCE if f.key in {"tx_power_dbm", "indoor_users", "stat_scope"}
+    ),
 }
 
 
@@ -264,3 +417,52 @@ def checklist(metric: str = "dl_interference",
             "对齐后再正式生成。"
         ),
     }
+
+
+def explain_gap(metric: str, expected: float, measured: float,
+                *, cfg: dict[str, Any] | None = None,
+                threshold_db: float = 3.0) -> dict[str, Any]:
+    """用户预期与探测对不上时，哪些假设能解释这个差距（方向对、量级够）。
+
+    只列出因子表里有 ``gap_hint`` 的条目，按“换成另一种取值后能补上多少差距”排序。
+    这是**候选解释**，不是结论：量级来自对账测试或标准估算，依据随条目给出。
+    """
+    gap = float(expected) - float(measured)
+    out: dict[str, Any] = {
+        "metric": metric, "expected": expected, "measured": round(float(measured), 2),
+        "gap_db": round(gap, 2),
+    }
+    if abs(gap) < threshold_db:
+        out["verdict"] = f"与预期相差 {gap:+.1f} dB，在 ±{threshold_db:g} dB 内，视为一致"
+        out["candidates"] = []
+        return out
+    seen: set[str] = set()
+    cands = []
+    for table in METRIC_FACTORS.values():
+        for f in table:
+            h = f.gap_hint
+            if not h or h.get("metric") != metric or f.key in seen:
+                continue
+            seen.add(f.key)
+            delta = float(h["delta_db"])
+            cond = h.get("only_if_above")
+            if cond and cfg is not None:
+                cur = cfg.get(cond[0])
+                if cur is not None and float(cur) <= float(cond[1]):
+                    continue  # 当前已经是那种取值，解释不了
+                if cur is not None and h.get("per_db_of") == cond[0]:
+                    delta = -(float(cur) - float(cond[1]))  # 1:1 斜率，按当前值算
+            if delta * gap <= 0:
+                continue  # 方向不对，解释不了
+            cands.append({
+                "factor": f.label, "status": f.status, "if": h["if"],
+                "would_change_db": delta, "covers_share": round(min(abs(delta) / abs(gap), 1.0), 2),
+                "basis": h["basis"],
+            })
+    cands.sort(key=lambda c: -abs(c["would_change_db"]))
+    out["verdict"] = (
+        f"探测比预期{'高' if gap < 0 else '低'} {abs(gap):.1f} dB。先核对下列假设，"
+        "对齐后再正式生成；它们加起来能否补上差距要重新探测确认。"
+    )
+    out["candidates"] = cands
+    return out
