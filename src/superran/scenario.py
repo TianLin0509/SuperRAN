@@ -193,6 +193,12 @@ def _probe_sinr_from_snr_sir(
     return _sinr_from_snr_sir(snr_db, sir_db)
 
 
+def _inert_notes(cfg: dict[str, Any]) -> list[str]:
+    from . import factors as fx  # noqa: PLC0415
+
+    return fx.inert_keys_in(cfg)
+
+
 def probe(
     cfg: dict[str, Any],
     num_samples: int = 30,
@@ -322,7 +328,8 @@ def probe(
         "interference": {
             "scope": "downlink",
             "dl_iot": dl_iot.as_dict() if cells > 1 else None,
-            "not_modeled": list(itf.DL_IOT_NOT_MODELED) if cells > 1 else [],
+            "not_modeled": (list(itf.DL_IOT_NOT_MODELED) if cells > 1 else [])
+            + _inert_notes(cfg),
         },
         "not_available": list(PROBE_NOT_AVAILABLE),
         "note": (

@@ -1159,8 +1159,10 @@ def generate(
 
         st = _intf.iot_stats(sinr_arr, sir_arr)
         # 只做下行：上行 SINR 是占位值，不给上行 IoT 分级（见 interference_report）。
+        from .factors import inert_keys_in as _inert  # noqa: PLC0415
+
         iot_block = {"dl": st.as_dict(), "scope": "downlink",
-                     "not_modeled": list(_intf.DL_IOT_NOT_MODELED)}
+                     "not_modeled": list(_intf.DL_IOT_NOT_MODELED) + _inert(cfg)}
 
     # 预注册口径随数据一起存档。**必须在生成时绑定，事后补绑没有意义**——
     # 预注册的全部价值就在于"看数据之前写下的"，事后写的只是记录。
