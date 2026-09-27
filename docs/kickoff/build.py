@@ -7,6 +7,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = Path(__file__).resolve().parent
+ARCHIVE_NOTICE = ('> 历史开工资料（2026-09-25），仅供追溯，不再作为当前启动要求。\n'
+                  '> 当前开发以仓库 AGENTS.md 与 .agents/SYNC.md 为准；下文分工和旧交接指令不构成现行授权。\n\n')
 PEOPLE = [
  dict(id='lin',name='林田',area='基础版本与共同规则',task='把团队研究接到一个可维护的底座上',
  question='哪些能力可以直接研究，哪些必须先补校验或扩展？',
@@ -180,7 +182,8 @@ HANDOFF = '''# 一项工作的交付说明
 '''
 
 def prompt(p):
-    return f'''我是{p['name']}，参与 SuperRAN 团队工作。请先读取 CLAUDE.md、AGENTS.md、INSTALL_AGENT.md 和本任务书；当前代码基线由林田发放，不自行切换到远端最新版本。
+    return f'''【历史任务摘录，仅供追溯】当前开工请先读取仓库 AGENTS.md 与 .agents/SYNC.md；下面的旧基线、bundle 和远端指令不作为现行流程或授权。
+我是{p['name']}，参与 SuperRAN 团队工作。请先读取 CLAUDE.md、AGENTS.md、INSTALL_AGENT.md 和本任务书；当前代码基线由林田发放，不自行切换到远端最新版本。
 本任务：{p['task']}。
 要回答：{p['question']}
 前两个有效工作日：{p['first']}
@@ -197,13 +200,13 @@ def main():
     people = OUT/'tasks'
     people.mkdir(exist_ok=True)
     for p in PEOPLE:
-        text=f"# {p['name']}｜{p['task']}\n\n状态：开工会讨论稿，待本人确认。\n\n"
+        text=f"# {p['name']}｜{p['task']}\n\n" + ARCHIVE_NOTICE + "历史状态：开工会讨论稿，待本人确认。\n\n"
         for key,label in [('question','研究问题'),('first','前两个有效工作日'),('case','首个校验'),('day10','第10个有效工作日交付'),('later','后续六周'),('asset','平台沉淀'),('review','复核协作建议'),('limit','边界'),('confirm','会上确认')]:
             text+=f'## {label}\n\n{p[key]}\n\n'
         text+='## 交给 agent 的开工指令\n\n'+prompt(p)+'\n'
         (people/(p['id']+'.md')).write_text(text,encoding='utf-8')
-    (OUT/'TEAM-GUIDE.md').write_text(COMMON,encoding='utf-8')
-    (OUT/'HANDOFF.md').write_text(HANDOFF,encoding='utf-8')
+    (OUT/'TEAM-GUIDE.md').write_text(COMMON.replace('\n\n', '\n\n' + ARCHIVE_NOTICE, 1),encoding='utf-8')
+    (OUT/'HANDOFF.md').write_text(HANDOFF.replace('\n\n', '\n\n' + ARCHIVE_NOTICE, 1),encoding='utf-8')
     template=(OUT/'template.html').read_text(encoding='utf-8')
     data=json.dumps([{**p,'prompt':prompt(p)} for p in PEOPLE],ensure_ascii=False).replace('</','<\\/')
     (OUT/'index.html').write_text(template.replace('@@PEOPLE@@',data),encoding='utf-8')
