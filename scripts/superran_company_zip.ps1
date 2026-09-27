@@ -31,10 +31,13 @@ try {
     git check-ref-format "refs/heads/$Branch"
     if ($LASTEXITCODE -ne 0) { throw '分支名称不合法' }
     Write-Host "正在从阿里云核对 $Branch ..." -ForegroundColor DarkGray
-    git fetch --quiet --no-tags $remote "refs/heads/$Branch"
-    if ($LASTEXITCODE -ne 0) { throw '取回云端分支失败，未打包' }
-    $sha = (git rev-parse --verify 'FETCH_HEAD^{commit}').Trim()
-    if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-f]{40}$') { throw '未取得确定的完整版本' }
+    $advertised = @(git ls-remote --heads $remote "refs/heads/$Branch")
+    if ($LASTEXITCODE -ne 0 -or $advertised.Count -ne 1) { throw '未取得唯一云端分支版本' }
+    $sha = ($advertised[0] -split '\s+')[0]
+    if ($sha -notmatch '^[0-9a-f]{40}$') { throw '未取得确定的完整版本' }
+    # FETCH_HEAD 是同仓库各 worktree 共用的临时文件，不能用它重新选择版本。
+    git fetch --quiet --no-tags $remote $sha
+    if ($LASTEXITCODE -ne 0) { throw '取回确定云端版本失败，未打包' }
     $short = $sha.Substring(0, 7)
     $date = Get-Date -Format "yyyyMMdd"
 
