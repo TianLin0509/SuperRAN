@@ -613,26 +613,57 @@ async def sr_generate(
     return out
 
 
-def _auto_serving_cell(cell_ids_by_ue: list[int], sectors_per_site: int,
-                       topology_layout: str = "hexagonal") -> tuple[int | None, str]:
-    """按实际撒点挑服务小区：优先中心站（站 0）的扇区，取 UE 最多且 ≥2 个的那个。
+def _center_cells(config: dict[str, Any]) -> tuple[set[int] | None, str]:
+    """按数据集的真实站址几何找中心站：离全部站址质心最近的站（并列时都算）。
+
+    站址用生成时同一个构造函数重建，线形拓扑的中心是中间那个站，而不是编号 0（审核 R3-7）。
+    重建不了就返回 None，由调用方要求用户显式指定服务小区。
+    """
+    from . import native  # noqa: PLC0415
+
+    if not config.get("custom_site_positions") and config.get("topology_layout", "hexagonal") not in {"hexagonal", "linear"}:
+        return None, "未提供可重建的拓扑或自定义站址"
+    try:
+        cells = native.InternalSimSource(dict(config))._build_sites()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"无法从数据集配置重建站址（{exc}）"
+    if not cells:
+        return None, "数据集配置里没有站址"
+    site_pos: dict[int, np.ndarray] = {}
+    for c in cells:
+        pos = np.asarray(c.position[:2], dtype=float)
+        if pos.shape != (2,) or not np.all(np.isfinite(pos)):
+            return None, "数据集站址包含非有限坐标"
+        site_pos.setdefault(int(c.site_id), pos)
+    centroid = np.mean(list(site_pos.values()), axis=0)
+    dist = {sid: float(np.linalg.norm(pos - centroid)) for sid, pos in site_pos.items()}
+    dmin = min(dist.values())
+    center_sites = {sid for sid, d in dist.items() if d <= dmin + 1e-6}
+    ids = {int(c.cell_id) for c in cells if int(c.site_id) in center_sites}
+    layout = "custom" if config.get("custom_site_positions") else str(config.get("topology_layout", "hexagonal"))
+    return ids, f"{layout} 拓扑中心站 {sorted(center_sites)}（离站址质心 {dmin:.0f} m），扇区 {sorted(ids)}"
+
+
+def _auto_serving_cell(cell_ids_by_ue: list[int], config: dict[str, Any]) -> tuple[int | None, str]:
+    """按实际撒点和站址几何挑服务小区：优先中心站的扇区，取 UE 最多且 ≥2 个的那个。
 
     没有 wrap-around，边缘站邻区不完整会低估干扰，所以先看中心站；中心站扇区都不足
     2 个 UE 时退到全网 UE 最多的小区，并如实说明它不是中心站。
     """
-    if topology_layout != "hexagonal":
-        return None, (f"serving_cell=auto 只支持已知站 0 为中心的 hexagonal 拓扑；"
-                      f"当前拓扑为 {topology_layout!r}，请按实际站点位置显式指定 serving_cell。")
     counts = {c: cell_ids_by_ue.count(c) for c in sorted(set(cell_ids_by_ue))}
-    center = {c: n for c, n in counts.items() if c < max(int(sectors_per_site), 1) and n >= 2}
+    center_ids, where = _center_cells(config)
+    if center_ids is None:
+        return None, (f"{where}，无法判断哪个是中心站；请显式传 serving_cell=<小区编号>。"
+                      f"各小区 UE 数 {counts}")
+    center = {c: n for c, n in counts.items() if c in center_ids and n >= 2}
     if center:
         best = max(center, key=lambda c: (center[c], -c))
-        return best, f"自动选中心站扇区 {best}（{center[best]} 个 UE；各小区 UE 数 {counts}）"
+        return best, f"自动选中心站扇区 {best}（{center[best]} 个 UE；{where}；各小区 UE 数 {counts}）"
     ok = {c: n for c, n in counts.items() if n >= 2}
     if ok:
         best = max(ok, key=lambda c: (ok[c], -c))
         return best, (f"中心站扇区都不足 2 个 UE，退选小区 {best}（{ok[best]} 个 UE，不是中心站，"
-                      f"邻区可能不完整）；各小区 UE 数 {counts}")
+                      f"邻区可能不完整；{where}）；各小区 UE 数 {counts}")
     return None, (f"没有任何小区有 ≥2 个 UE，测不出调度；各小区 UE 数 {counts}。"
                   "请提高撒点密度（每扇区约 10 个 UE）后重新生成")
 
@@ -2525,10 +2556,7 @@ def sr_system_sim(
     serving_cell_selection: dict[str, Any] | None = None
     auto_reason = None
     if isinstance(serving_cell, str) and serving_cell.strip().lower() == "auto":
-        serving_cell, auto_reason = _auto_serving_cell(
-            serving_cell_ids_by_ue, int(ds.config.get("sectors_per_site", 1) or 1),
-            "custom" if ds.config.get("custom_site_positions")
-            else str(ds.config.get("topology_layout", "hexagonal")))
+        serving_cell, auto_reason = _auto_serving_cell(serving_cell_ids_by_ue, dict(ds.config))
         if serving_cell is None:
             return {"error": auto_reason}
     if serving_cell is not None:

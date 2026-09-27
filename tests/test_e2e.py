@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import subprocess
 import sys
 import tempfile
@@ -460,15 +461,106 @@ check(any(x["severity"] == "block" for x in _rv(_p["draft_id"], accept_recommend
 _p = srv.sr_plan("比较PF和EDF最早截止时间优先调度的小包时延")
 check(any(x["severity"] == "block" for x in _rv(_p["draft_id"], accept_recommended=True)["issues"]),
       "R2-2：原话指定截止时间调度，按推荐跑也不能换成排空优先")
-# R2-7：服务小区按实际撒点挑，中心站优先、至少 2 个 UE
-check(srv._auto_serving_cell([0, 0, 3, 7, 7, 7], 3)[0] == 0,
+# R2-7 / R3-7：服务小区按实际撒点和站址几何挑，中心站优先、至少 2 个 UE
+_hex = {"num_sites": 7, "sectors_per_site": 3, "isd_m": 500.0}
+check(srv._auto_serving_cell([0, 0, 3, 7, 7, 7], _hex)[0] == 0,
       "R2-7：中心站扇区有 ≥2 个 UE 时选它")
-check(srv._auto_serving_cell([1, 3, 7, 7, 7], 3)[0] == 7,
-      "R2-7：中心站扇区都不足 2 个 UE 时退选 UE 最多的小区并说明")
-check(srv._auto_serving_cell([0, 1, 2], 3)[0] is None, "R2-7：没有小区 ≥2 个 UE 时报错而不是硬选")
-for _layout in ("linear", "custom"):
-    check(srv._auto_serving_cell([0, 0, 9, 9, 9], 3, _layout)[0] is None,
-          f"R4：{_layout} 拓扑自动选中心站必须拒绝并要求显式小区")
+_fb = srv._auto_serving_cell([1, 3, 7, 7, 7], _hex)
+check(_fb[0] == 7 and "不是中心站" in _fb[1], "R2-7：中心站扇区都不足 2 个 UE 时退选 UE 最多的小区并说明")
+check(srv._auto_serving_cell([0, 1, 2], _hex)[0] is None, "R2-7：没有小区 ≥2 个 UE 时报错而不是硬选")
+_lin = {"num_sites": 5, "sectors_per_site": 1, "isd_m": 500.0, "topology_layout": "linear"}
+_pick = srv._auto_serving_cell([0, 0, 0, 2, 2, 4], _lin)
+check(_pick[0] == 2 and "中心站 [2]" in _pick[1],
+      f"R3-7：线形拓扑中心站是中间的站 2，不是编号 0 的边缘站：{_pick}")
+_edge = srv._auto_serving_cell([0, 0, 0, 2, 4], _lin)
+check(_edge[0] == 0 and "不是中心站" in _edge[1], f"R3-7：退选边缘站必须说明不是中心站：{_edge}")
+check(srv._auto_serving_cell([0, 0], {"custom_site_positions": [[0, 0, 1, 2]]})[0] is None,
+      "R3-7：站址重建失败时不猜中心站，要求显式 serving_cell")
+
+# R3-2/R3-4/R3-5：原话里的扫描与修订共用一套带单位/类型/范围的解析与校验
+for _t, _v in (("对比发射功率33和53 dBm下的SINR", [33.0, 53.0]),
+               ("对比带宽20/100 MHz对SINR的影响", [20e6, 100e6]),
+               ("对比64T4R和256T4R下的SINR", ["64T4R", "256T4R"]),
+               ("SRS 周期从 10 ms 改到 20 ms，看 120 km/h 用户的边缘速率", [10.0, 20.0])):
+    _r = _rv(srv.sr_plan(_t)["draft_id"], accept_recommended=True)
+    check(_r["brief"]["sweep"]["values"] == _v, f"R3-2：原话给的档位按推荐跑也不增删替换：{_t} → {_r['brief']['sweep']}")
+_p = srv.sr_plan("对比64T4R和256T4R下的SINR")
+_r = srv.sr_revise(_p["draft_id"], design={"sweep_values": "32T4R/64T4R"}, accept_recommended=True)
+check(_r["brief"]["sweep"]["values"] == ["32T4R", "64T4R"] and _r["ready_to_go"],
+      f"R3-4：阵型扫描按标签解析，不拆成数字：{_r['brief']['sweep']}")
+check(iv.read_brief("64T 和 32T 在 500 m 站距下的下行边缘速率差多少").params.get("isd_m") == 500.0,
+      "R3-2：扫阵型时标量站距照常读取")
+for _t in ("对比本小区负载30%到150%时的边缘速率", "对比站距0/500/1000 m下的干扰"):
+    _r = _rv(srv.sr_plan(_t)["draft_id"], accept_recommended=True)
+    check(not _r["ready_to_go"] and any(x.get("key") == "sweep_values" for x in _r["issues"]),
+          f"R3-5：原话里越界的扫描值同样被阻断：{_t}")
+# R3-3：否定作用于紧随其后的要求
+_r = _rv(srv.sr_plan("评估城区下行SINR分布，不需要考虑室内穿透损耗")["draft_id"], accept_recommended=True)
+check(_r["answered_design"].get("indoor_users") != "need_o2i" and _r["ready_to_go"],
+      "R3-3：“不需要考虑室内穿透”是接受全室外，不是要求 O2I")
+_r = _rv(srv.sr_plan("比较PF与EDF的小包时延，EDF是最早排空，不是最早截止时间优先")["draft_id"],
+         accept_recommended=True)
+check(_r["answered_design"].get("edf_meaning") == "drain_first",
+      "R3-3：“是最早排空，不是最早截止”按排空理解")
+# R3-6：要看分布/变化是分析任务，不是只交付数据
+check(srv.sr_plan("给我看看不同站距下信道的SINR分布，不做算法对比")["form"] == "sweep_condition",
+      "R3-6：“给我看看…分布”不是交付数据")
+check(srv.sr_plan("只要 500 m 站距的信道数据")["form"] == "deliver", "R3-6：纯要数据仍是交付")
+
+# R4：否定修饰它自己的要求；数量列表按量纲归属，共用尾单位不串成载频。
+for _text in (
+    "比较PF与EDF的小包时延，EDF不是最早排空，是最早截止时间优先",
+    "比较PF与EDF的小包时延，EDF是最早截止时间优先，不是最早排空",
+    "评估城区下行SINR，不比算法，要考虑室内穿透损耗",
+    "评估城区下行SINR，要考虑室内穿透损耗，不比算法",
+    "评估城区下行SINR，不能忽略室内穿透损耗",
+    "评估城区下行SINR，不是不需要考虑室内穿透损耗",
+):
+    _r = _rv(srv.sr_plan(_text)["draft_id"], accept_recommended=True)
+    check(not _r["ready_to_go"], f"R4：明确要求未实现机制，否定其他要求不能解锁：{_text}")
+for _text in (
+    "比较PF与EDF，EDF是最早排空，不是最早截止时间优先",
+    "比较PF与EDF，EDF不是最早截止时间优先，是最早排空",
+):
+    check(iv.read_brief(_text).design.get("edf_meaning") == "drain_first",
+          f"R4：被否定的截止语义不能覆盖排空语义：{_text}")
+for _text in (
+    "对比发射功率33/53 dBm，20 MHz带宽下的SINR",
+    "对比功率33dBm和53dBm，100MHz带宽下的SINR",
+):
+    _r = _rv(srv.sr_plan(_text)["draft_id"], accept_recommended=True)
+    check(_r["brief"]["sweep"]["values"] == [33.0, 53.0], "R4：其他量的数值不混进功率扫描")
+for _text in ("对比带宽0.02/0.1 GHz下的SINR", "对比带宽20/100 MHz、载频3.5 GHz下的SINR"):
+    _r = _rv(srv.sr_plan(_text)["draft_id"], accept_recommended=True)
+    check(_r["brief"]["sweep"]["values"] == [20e6, 100e6], "R4：共享尾单位按整组换算")
+    check(iv.read_brief(_text).params.get("carrier_freq_hz") == (3.5e9 if "载频" in _text else None),
+          "R4：带宽单位为GHz时不误写载频，独立载频仍保留")
+_p = srv.sr_plan("对比带宽对SINR的影响")
+_r = _rv(_p["draft_id"], design={"sweep_values": "0.02/0.1 GHz"}, accept_recommended=True)
+check(_r["brief"]["sweep"]["values"] == [20e6, 100e6], "R4：后续回答复用原话的共享单位规则")
+check(bool(iv.parse_sweep_values("33dBm/20MHz", "tx_power_dbm")[1]),
+      "R4：后续回答量纲不匹配必须报错")
+_p = srv.sr_plan("对比发射功率对SINR的影响")
+_r = _rv(_p["draft_id"], design={"sweep_values": "33 dBm/20 MHz"})
+check(not _r["ready_to_go"] and any(x["key"] == "sweep_values" for x in _r["issues"]),
+      "R4：错误扫描回答持久阻断，而不只是返回一条修改提示")
+_r = _rv(_p["draft_id"], accept_recommended=True)
+check(not _r["ready_to_go"] and pl.load_draft(_p["draft_id"]).sweep_error is not None,
+      "R4：错误扫描回答重新加载和按推荐跑后仍阻断")
+_g = asyncio.run(srv.sr_generate(draft_id=_p["draft_id"], num_samples=2))
+check(_g.get("status") == "blocked" and any(x["key"] == "sweep_values" for x in _g["issues"]),
+      "R4：实际生成入口拒绝带无效扫描回答的草稿")
+_r = _rv(_p["draft_id"], design={"sweep_values": "33/53 dBm"}, accept_recommended=True)
+check(_r["ready_to_go"] and pl.load_draft(_p["draft_id"]).sweep_error is None
+      and _r["brief"]["sweep"]["values"] == [33.0, 53.0],
+      "R4：用户补合法档位后自动解除扫描阻断")
+check(iv.parse_sweep_values("20MHz/0.1GHz", "bandwidth_hz")[0] == [20e6, 100e6],
+      "R4：显式混合频率单位分别换算")
+check(iv.read_brief("对比带宽20 vs 100 MHz下的SINR").sweep["values"] == [20e6, 100e6],
+      "R4：比较连接词vs不是数值单位")
+check(not iv.validate_sweep("neighbor_prb_util", [0.0, 1.0])
+      and bool(iv.validate_sweep("target_prb_utilization", [0.0, 1.0])),
+      "R4：邻区可完全不活动/满活动，本小区负载校准目标遵循系统的开区间合同")
 
 # “按推荐跑”：所有待问问题取推荐项；False 也是合法回答；预期只能由用户本人给
 d_acc, _, _ = pl.revise_draft(d_srs.draft_id, accept_recommended=True)

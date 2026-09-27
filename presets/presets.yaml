@@ -480,10 +480,11 @@ low_iot_reference:
 
 high_iot_uplink:
   group: 干扰场景
-  label: 上行高干扰 · 邻区满调度
-  summary: 上行 IoT 是干扰抬升的经典口径（基站侧噪声抬升）。邻区每小区多个 UE 满负载同发。
-  typical_for: [上行干扰, 功控, 上行调度, 接收机算法]
-  verify: sr_interference_report 看 traffic_domain.ul.iot；上行 IoT 由 pusch_load 乘每小区 UE 数决定
+  label: 上行高干扰（上行业务未建模，当前仅作下行场景使用）
+  summary: 设计意图是邻区满调度下的上行噪声抬升。**SuperRAN 当前只仿下行业务，上行 IoT
+    不输出**；本预设的信道仍可按下行 7 站 UMi 场景使用，上行结论不成立。
+  typical_for: [下行多小区干扰]
+  verify: sr_interference_report 看 traffic_domain.dl.iot；上行干扰没有可验证的输出
   expect:   # 2026-09-26 重测：sr_probe_scenario 105 样本，与 sr_generate 同一套默认阵列
     cells: 21
     iot_dl_db: 39.9      # 极高干扰
@@ -493,7 +494,6 @@ high_iot_uplink:
     distance_m: 99.79
     los_ratio: 0.571
     doppler_hz: 9.72
-    srs_meas_sir_db: -9.88   # 测量已失效
     ms_per_sample: 750
   config:
     source: internal_sim
@@ -525,10 +525,11 @@ high_iot_uplink:
 
 srs_congested:
   group: 测量干扰
-  label: SRS 测量拥塞 · 邻区多 UE 同发、无序列跳变
-  summary: 每个邻区 24 个 UE 同时发 SRS，comb=2、关掉组跳与序列跳，导频碰撞最严重。
-  typical_for: [信道估计鲁棒性, SRS 容量, 导频污染, 上行 CSI 获取]
-  verify: sr_interference_report 看 measurement_domain.ul_srs.sir_dB 中位数与 nmse_floor_db
+  label: SRS 测量拥塞（导频干扰为解析占位，不能比较导频方案）
+  summary: 设计意图是邻区 24 个 UE 同发 SRS、comb=2、关跳变的导频碰撞。**当前 SRS 导频
+    SIR 只是按干扰 UE 数的解析式，不随导频配置逐样本仿真**，报告会标为占位且不给 NMSE 下限。
+  typical_for: [下行多小区干扰]
+  verify: sr_interference_report 的 measurement_domain.ul_srs.model 应为 analytic_placeholder
   expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
     iot_dl_db: 37.71      # 极高干扰
@@ -538,7 +539,6 @@ srs_congested:
     distance_m: 118.02
     los_ratio: 0.571
     doppler_hz: 9.72
-    srs_meas_sir_db: -10.5   # 测量已失效
     ms_per_sample: 746
   config:
     source: internal_sim
@@ -565,10 +565,11 @@ srs_congested:
 
 srs_clean_reference:
   group: 测量干扰
-  label: SRS 测量干净对照 · 少 UE、comb 4、开组跳
-  summary: 与 srs_congested 配对。邻区只有 2 个 UE 发 SRS，comb=4 并开组跳变。
-  typical_for: [测量干扰对照, 消融实验]
-  verify: 与 srs_congested 只差导频配置，两者 measurement_domain 之差就是导频方案的净效应
+  label: SRS 测量干净对照（导频干扰为解析占位，暂停作对照）
+  summary: 设计意图是与 srs_congested 只差导频配置（2 个 UE、comb 4、开组跳）。**导频干扰
+    当前是解析占位，两者之差不是导频方案的效果**；在逐样本导频干扰实现前不做这组对比。
+  typical_for: [下行多小区干扰]
+  verify: 与 srs_congested 的下行业务域结果应一致；measurement_domain 两者差值不作结论
   expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
     iot_dl_db: 37.71      # 极高干扰
@@ -578,7 +579,6 @@ srs_clean_reference:
     distance_m: 118.02
     los_ratio: 0.571
     doppler_hz: 9.72
-    srs_meas_sir_db: 7.37   # 测量严重受损
     ms_per_sample: 748
   config:
     source: internal_sim
@@ -613,14 +613,12 @@ srs_hopping_partial_band:
   expect:   # 未重测：当前主干探测即报错（SRS 周期 5 ms 不受资源分配器支持），下列为旧内核数字
     cells: 21
     iot_dl_db: 26.66      # 高干扰
-    iot_ul_db: 1.57
     sinr_db: 14.37
     sir_db: 14.39
     pathloss_db: 92.76
     distance_m: 86.21
     los_ratio: 0.46
     doppler_hz: 97.22
-    srs_meas_sir_db: -20.13   # 测量已失效
     ms_per_sample: 2109
   config:
     source: internal_sim
