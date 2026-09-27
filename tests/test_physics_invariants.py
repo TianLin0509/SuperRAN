@@ -3189,6 +3189,37 @@ def test_probe_uses_the_same_antenna_budget_as_generation():
     np.testing.assert_allclose(probe_rx, full_rx, atol=1e-9, rtol=0)
 
 
+def test_auto_serving_cell_uses_site_geometry():
+    """站编号不能代替物理位置：线形和自定义网的中心不一定是站 0。"""
+    from superran import server
+    import inspect
+
+    def choose(ids, config):
+        # Keep the same physical assertion executable on the unfixed API:
+        # it must fail on the selected site, not on a changed argument type.
+        if "config" in inspect.signature(server._auto_serving_cell).parameters:
+            return server._auto_serving_cell(ids, config)
+        return server._auto_serving_cell(ids, config.get("sectors_per_site", 1),
+                                         config.get("topology_layout", "custom"))
+
+    cfg = {"num_sites": 7, "sectors_per_site": 1, "isd_m": 580.0,
+           "topology_layout": "linear"}
+    selected, reason = choose([0, 0, 3, 3, 3, 3], cfg)
+    assert selected == 3, (selected, reason)
+    assert "中心站 [3]" in reason
+    custom = {"sectors_per_site": 1,
+              "custom_site_positions": [[1000, 100], [0, 100], [500, 100]]}
+    selected, reason = choose([0, 0, 0, 2, 2], custom)
+    assert selected == 2, (selected, reason)
+    assert "custom" in reason and "中心站 [2]" in reason
+    selected, reason = choose([0, 0, 3], cfg)
+    assert selected == 0 and "不是中心站" in reason
+    selected, reason = choose(
+        [0, 0], {"custom_site_positions": [[float("nan"), 0]]})
+    assert selected is None and "显式传 serving_cell" in reason
+
+
+test_auto_serving_cell_uses_site_geometry()
 test_probe_uses_the_same_antenna_budget_as_generation()
 test_r1_doppler_uses_spatial_ray_aoa()
 test_r1_space_time_transport_uses_same_rays()
