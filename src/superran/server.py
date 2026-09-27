@@ -2527,7 +2527,8 @@ def sr_system_sim(
     if isinstance(serving_cell, str) and serving_cell.strip().lower() == "auto":
         serving_cell, auto_reason = _auto_serving_cell(
             serving_cell_ids_by_ue, int(ds.config.get("sectors_per_site", 1) or 1),
-            str(ds.config.get("topology_layout", "hexagonal")))
+            "custom" if ds.config.get("custom_site_positions")
+            else str(ds.config.get("topology_layout", "hexagonal")))
         if serving_cell is None:
             return {"error": auto_reason}
     if serving_cell is not None:
