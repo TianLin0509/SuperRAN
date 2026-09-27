@@ -5,6 +5,17 @@
 >
 > 人看的版本在 `SETUP.html`（组成、架构、三种用法）和 `README.md`。
 
+## 开发 Agent 首次接入
+
+私有仓库使用维护者分配的个人账号和 Git 凭据管理器；凭据不放 URL、仓库或报告。
+每台电脑 clone 一份主仓库。已有 GitHub checkout 不要覆盖：先读现有改动，再运行
+`python scripts/agent_repo.py init`，它保留 GitHub 历史读取并关闭其推送，配置阿里云 origin。
+此命令不修改源码、索引或本地分支，也不上传代码。自定义远端冲突会停止并保留现场。
+安装下面的依赖后执行 `python scripts/agent_repo.py doctor --online`，验证仓库地址、
+钩子、Python 导入与云端可读性；这不是完整仿真验收，也不证明拥有推送权限。
+读取 `AGENTS.md`、完整 `CLAUDE.md` 和 `.agents/AUTHOR.md`，按 `.agents/SYNC.md` 开工。
+所有目录按本机环境选择；文档中的历史维护者路径不作为安装前提。
+
 ## 你的任务
 
 把 superran 装到用户机器上并验证可用。产出是一句话：能用 / 不能用及原因。
@@ -60,7 +71,7 @@ Windows 上如果 `python` 打不开（跳到应用商店），试 `py -3`、
 只需要一个仓库。不得搜索、clone 或配置 MSG-Platform / ChannelHub 源码树：
 
 ```bash
-git clone https://github.com/TianLin0509/SuperRAN.git
+git clone https://ai.lt-stockpartner.tech/repos/superran/SuperRAN.git
 cd SuperRAN
 ```
 

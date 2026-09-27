@@ -9,7 +9,7 @@ SuperRAN 由**一位维护者**（无线通信工程师）主导，Agent 是执�
 - 独立验证并合入主干（合并位）：`.agents/MERGER.md`
 - 需要几个 Reviewer：`.agents/RISK.md`（按文件路径查表，不许自己估）
 - 主干闸门与项目配置：`.agents/project.json`（主干名、合并前跑哪些测试、worktree 放哪）
-- 同步 GitHub：`.agents/SYNC.md`（**只**在维护者明确说“同步 GitHub”时执行；日常合并全在本地）
+- 阿里云跨电脑交接：`.agents/SYNC.md`；唯一日常远端为项目配置里的私有 Gitea，GitHub 仅保留历史读取
 - 仿真设计、数据生成或性能结论：`skills/channel-sim/SKILL.md`
 
 三条铁律：**一个提交只动一个物理机制**；**审核发现的物理 bug，修复时必须补一条
@@ -20,9 +20,10 @@ SuperRAN 由**一位维护者**（无线通信工程师）主导，Agent 是执�
 `.agents/report.example.json`，**不要手写 HTML**。看当前状态用
 `python scripts/superran_board.py`。
 
-`develop` 是唯一主线，主工作区就是 `C:\Vibe\Wireless\SuperRAN`；并行任务用
-`git worktree add` 建到 `C:\Vibe\Worktrees\SuperRAN\<任务>`，**禁止再 clone 一份**。
-Agent 默认不 push、不建 PR、不合并远端。
+`develop` 是唯一开发主线；每台电脑首次从阿里云 clone 一份主仓库，路径由本机决定。
+同一台电脑的并行任务用独立 worktree，不重复 clone；首次接入见 `INSTALL_AGENT.md`。
+工作位上传候选分支，由不同会话的合并位拉取同一完整 SHA、独立审核并运行本地闸门，
+再按回执发布到云端；跨电脑传输不依赖共享 `.git`。主仓库禁止直接提交。
 
 > `skills/superran-lead/` 与 `skills/superran-member-task/` 是已废弃的多人「组长-组员」
 > 流程（含 FORMAL/REHEARSAL 模式、Fork 推送等），**不要再按它们工作**，一律以

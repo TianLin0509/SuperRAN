@@ -4,8 +4,8 @@
 
 ## 坑 1：你跑的可能不是你自己的代码
 
-`site-packages` 里的 `__editable__.superran-0.1.0.pth` **硬指向主仓库**
-`C:\Vibe\Wireless\SuperRAN\src`。所以在任何 worktree 里 `import superran`
+`site-packages` 里的 editable 安装记录可能**硬指向本机主仓库**
+（维护者机器的历史路径为 `C:\Vibe\Wireless\SuperRAN\src`）。所以在任何 worktree 里 `import superran`
 拿到的都是主仓库的代码，**不是你这个工作区的代码**。
 
 而读文件的断言（`CLAUDE.md`、`skills/`、`docs/`）用的又是你工作区的文件——
@@ -15,13 +15,13 @@
 
 PowerShell：
 ```powershell
-$env:PYTHONPATH = "C:\Vibe\Worktrees\SuperRAN\<你的目录>\src"
+$env:PYTHONPATH = (Join-Path (Get-Location) 'src')  # 先进入本任务 worktree
 python -c "import superran; print(superran.__file__)"
 ```
 
 Git Bash：
 ```bash
-export PYTHONPATH='C:\Vibe\Worktrees\SuperRAN\<你的目录>\src'
+export PYTHONPATH="$(pwd)/src"  # 先进入本任务 worktree
 python -c "import superran; print(superran.__file__)"
 ```
 
