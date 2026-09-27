@@ -1237,6 +1237,12 @@ _probe_inert = sc.probe({**_fx_base, "num_ues": 3, "train_penetration_loss_db": 
 _nm = " ".join(_probe_inert["interference"]["not_modeled"])
 check("train_penetration_loss_db" in _nm and "hypercell_size" in _nm,
       "探测结果点名配置里不生效的键")
+# 审核 R3-1：预设文本不能再引用报告已不输出的字段（上行 IoT、导频 NMSE 下限、导频“净效应”）
+_preset_text = (ROOT_PRESETS := Path(__file__).resolve().parents[1] / "presets" / "presets.yaml").read_text(
+    encoding="utf-8")
+for _gone in ("traffic_domain.ul", "nmse_floor_db", "srs_meas_sir_db", "iot_ul_db", "净效应"):
+    check(_gone not in _preset_text, f"预设不再引用已删除/占位的验证量 {_gone}")
+
 # 审核 R2-1：单小区（不算邻区干扰）的数据，摘要也必须永久带着“未生效”说明
 _sc_sum = gen.generate({**_fx_base, "num_sites": 1, "sectors_per_site": 1, "num_ues": 1,
                         "ue_distribution": "hotspot"}, num_samples=1, workers=1)

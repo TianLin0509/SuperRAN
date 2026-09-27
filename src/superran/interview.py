@@ -57,6 +57,7 @@ _COMPARE_WORDS = ("比", "对比", "相对", "vs", "提升", "增益", "优于",
 _DELIVER_WORDS = ("只要", "只需要", "给我", "交付", "导出", "数据集")
 # 交付数据必须真的在要数据：出现这些名词才算（“给我看看站距的影响”不是交付）。
 _DATA_NOUNS = ("信道", "数据", "样本", "pdp", "pmi", "csi", "快照", "矩阵")
+_ANALYSIS_CUES = ("看看", "分布", "变化", "影响", "评估", "分析", "怎么变", "趋势", "统计")
 _CHANGE_WORDS = ("变化", "影响", "改到", "改成", "扫", "随", "不同", "对比", "比较", "差多少",
                  "掉多少")
 _CONDITION_KEYS = {
@@ -102,42 +103,142 @@ _SWEEP_RANGE = {
 }
 
 
-def sweep_value_issues(values: list[Any], key: str) -> list[str]:
-    """验证已换算到配置单位的档位；原话和后续回答共用。"""
-    if key == "antenna_preset":
-        from .plan import _ANTENNA_PRESETS  # noqa: PLC0415
-
-        bad = [v for v in values if v not in _ANTENNA_PRESETS]
-        return [f"不支持的阵型档位：{bad}"] if bad else []
-    lo, hi = _SWEEP_RANGE.get(key, (float("-inf"), float("inf")))
-    if key == "load?":
-        lo, hi = 0.0, 1.0
-    try:
-        bad = [v for v in values if not (lo <= float(v) <= hi)]
-    except (TypeError, ValueError):
-        return [f"{key} 的档位必须是具体数值"]
-    return [f"{key} 的取值 {bad} 超出合法范围 [{lo:g}, {hi:g}]"] if bad else []
+_ANT_TOKEN = r"(\d+)\s*t(?:\s*(\d+)\s*r)?(?![a-z0-9])"
+_UNITS = {
+    "isd_m": {"m"}, "tx_power_dbm": {"dbm"},
+    "bandwidth_hz": {"ghz", "mhz", "khz", "hz"},
+    "neighbor_prb_util": {"%"}, "target_prb_utilization": {"%"}, "load?": {"%"},
+    "srs_period_ms": {"ms"}, "ue_speed_kmh": {"km/h"},
+}
+# Read the entire unit before deciding which quantity owns it: MHz must never
+# backtrack to an unlabelled number in a power list.
+_QUANTITY = re.compile(r"(" + _NUM + r")\s*(km/h|(?!vs(?![a-z]))[a-z]+|%)?(?![\d.a-z%])")
 
 
 def parse_sweep_values(text: str, key: str) -> tuple[list[Any], list[str]]:
-    """把扫描取值换算到配置单位：保留科学计数法、百分比、MHz/GHz/km/h（审核 R2-4）。
+    """扫描取值的唯一解析器：原话、后续回答、执行前检查都用它（审核 R3 要求同一套规则）。
 
-    返回 (取值, 问题)。问题非空时说明有数值越界或无法换算，调用方不应记为已答。
+    数值量换算到配置单位（科学计数法、百分比、MHz/GHz/km/h）；阵型保留完整标签
+    （“32T4R/64T4R”不拆成数字，审核 R3-4）。返回 (取值, 问题)，问题来自 validate_sweep。
     """
     raw = str(text).lower().replace("−", "-")
     if key == "antenna_preset":
-        labels = [f"{a}T{b}R" for a, b in re.findall(r"(\d+)\s*t\s*(\d+)\s*r", raw)]
-        return labels, sweep_value_issues(labels, key)
-    tokens = re.findall("(" + _NUM + r")\s*(%|mhz|ghz|khz|hz|ms|km/h|dbm|m)?", raw)
-    vals: list[float] = []
-    for num, unit in tokens:
+        vals: list[Any] = [f"{m.group(1)}T{m.group(2) or 4}R" for m in re.finditer(_ANT_TOKEN, raw)]
+        return vals, validate_sweep(key, vals)
+    tokens = [(m.group(1), m.group(2) or "") for m in _QUANTITY.finditer(raw)]
+    invalid_units = sorted({unit for _, unit in tokens if unit and unit not in _UNITS.get(key, set())})
+    if invalid_units:
+        return [], [f"{key} 的单位 {invalid_units} 不匹配；请使用 {sorted(_UNITS.get(key, set()))}"]
+    vals = []
+    for i, (num, unit) in enumerate(tokens):
+        # A trailing unit belongs to the preceding unlabelled list (0.02/0.1 GHz).
+        # Explicit units keep their own scale (20 MHz/0.1 GHz).
+        if not unit:
+            unit = next((u for _, u in tokens[i + 1:] if u), "") or next(
+                (u for _, u in reversed(tokens[:i]) if u), "")
         v = float(num)
-        if unit == "%" or (key in {"neighbor_prb_util", "target_prb_utilization"} and v > 1.0):
+        if unit == "%" or (key in {"neighbor_prb_util", "target_prb_utilization", "load?"} and v > 1.0):
             v /= 100.0
         elif key == "bandwidth_hz":
             v *= {"ghz": 1e9, "mhz": 1e6, "khz": 1e3, "hz": 1.0}.get(unit, 1e6 if v < 1e4 else 1.0)
         vals.append(v)
-    return vals, sweep_value_issues(vals, key)
+    return vals, validate_sweep(key, vals)
+
+
+def validate_sweep(key: str, values: list[Any]) -> list[str]:
+    """扫描取值的唯一校验器：类型、范围、阵型是否支持。原话与修订的值都在执行前再过一遍。"""
+    if not values:
+        return []
+    if key == "antenna_preset":
+        from .plan import _ANTENNA_PRESETS  # noqa: PLC0415
+
+        bad = [v for v in values if str(v) not in _ANTENNA_PRESETS]
+        return [f"阵型 {bad} 不在支持列表 {sorted(_ANTENNA_PRESETS)}"] if bad else []
+    lo, hi = _SWEEP_RANGE.get("neighbor_prb_util" if key == "load?" else key,
+                              (float("-inf"), float("inf")))
+    try:
+        if key == "target_prb_utilization":
+            # The serving-cell load calibrator accepts an open (0,1) target;
+            # neighbour activity legitimately includes 0 and 1.
+            bad = [v for v in values if not (0.0 < float(v) < 1.0)]
+        else:
+            bad = [v for v in values if not (lo <= float(v) <= hi)]
+    except (TypeError, ValueError, OverflowError):
+        return [f"{key} 的档位必须是具体数值"]
+    interval = "(0, 1)" if key == "target_prb_utilization" else f"[{lo:g}, {hi:g}]"
+    return [f"{key} 的取值 {bad} 超出合法范围 {interval}"] if bad else []
+
+
+# 原话里“条件词 + 两个以上取值”就是扫描。按条件词在原话里出现的位置取最早的那个。
+_SWEEP_WORDS: tuple[tuple[str, str], ...] = (
+    (r"(?:本小区|服务小区|小区内)\s*负载", "target_prb_utilization"),
+    (r"(?:邻区|相邻小区)\s*负载", "neighbor_prb_util"),
+    (r"(?<!区)(?<!小区)负载", "load?"),
+    (r"站间距|站距|isd", "isd_m"),
+    (r"发射功率|功率", "tx_power_dbm"),
+    (r"带宽", "bandwidth_hz"),
+    (r"srs\s*周期", "srs_period_ms"),
+    (r"速度|车速", "ue_speed_kmh"),
+)
+_SEP = r"\s*(?:/|、|,|，|和|与|到|至|~|vs\.?|及|或|改到|改成|变为|-)\s*"
+
+
+def _quantity_span(text: str, start: int, key: str) -> tuple[int, list[re.Match]]:
+    """Read one quantity list, stopping before another dimension or condition."""
+    tokens = []
+    end = start
+    pos = start
+    while m := _QUANTITY.match(text, pos):
+        unit = m.group(2)
+        if unit and unit not in _UNITS[key]:
+            break
+        # An unlabelled number followed by a different condition belongs to that
+        # condition, even when a comma could otherwise extend the current list.
+        following = text[m.end():]
+        if any(other != key and re.match(r"\s*(?:" + word + ")", following)
+               for word, other in _SWEEP_WORDS):
+            break
+        tokens.append(m)
+        end = m.end()
+        sep = re.match(_SEP, text[end:])
+        if sep is None:
+            break
+        pos = end + sep.end()
+    return end, tokens
+
+
+def _quantity_mentions(text: str):
+    for word, key in _SWEEP_WORDS:
+        for m in re.finditer("(?:" + word + r")\s*(?:(?:从|为|是|取|设为|分别为|分别取)\s*)?", text):
+            end, tokens = _quantity_span(text, m.end(), key)
+            if tokens:
+                yield key, m.start(), end, tokens
+
+
+def _extract_sweep(text: str) -> tuple[str, list[Any], str] | None:
+    best = None
+    ant = re.search(r"(\d+\s*t(?:\s*\d+\s*r)?(?:\s*(?:和|与|vs\.?|对比|跟|/|、|,|，)\s*"
+                    r"\d+\s*t(?:\s*\d+\s*r)?)+)(?![a-z0-9])", text)
+    if ant:
+        vals, _ = parse_sweep_values(ant.group(1), "antenna_preset")
+        if len(vals) >= 2:
+            best = (ant.start(), "antenna_preset", vals, ant.group(0))
+    for key, start, end, tokens in _quantity_mentions(text):
+        vals, _ = parse_sweep_values(text[tokens[0].start():end], key)
+        if len(vals) >= 2 and (best is None or start < best[0]):
+            best = (start, key, vals, text[start:end])
+    return None if best is None else (best[1], best[2], best[3])
+
+
+def _negated_before(text: str, idx: int) -> bool:
+    """否定必须通过紧邻的谓词修饰该要求，不能跨分句或另一个宾语。"""
+    clause = re.split(r"[，,。；;！？!?\n]|但是|而是|但", text[:idx])[-1]
+    negation = r"不能|不允许|不可以|不得|不(?:是|用|需(?:要)?|必|要)?|无需|无须|非|忽略|别"
+    predicate = r"再|去|来|额外|特意|考虑|包含|采用|使用|实现|引入|带上|的|是|需要|要"
+    tail = re.search(r"(?:(?:" + negation + "|" + predicate + r")\s*)+$", clause)
+    # “不能忽略” / “不得不考虑” positively require the mechanism. Count the
+    # complete adjoining predicate, rather than matching its last negation only.
+    return bool(tail and len(re.findall(negation, tail.group(0))) % 2)
 
 
 def read_brief(intent: str) -> Brief:
@@ -181,11 +282,28 @@ def read_brief(intent: str) -> Brief:
     if m:
         b.params["tx_power_dbm"] = float(m.group(1).replace("−", "-"))
         b.evidence.append(f"「{m.group(0)}」→ 发射功率 {m.group(1)} dBm")
-    m = re.search(r"(\d+(?:\.\d+)?)\s*ghz", text)
+    # Resolve explicitly named bandwidth first, then hide those spans from the
+    # carrier reader. GHz is a unit of both quantities, not a carrier label.
+    frequency_text = list(text)
+    for key, start, end, tokens in _quantity_mentions(text):
+        if key == "bandwidth_hz":
+            values, _ = parse_sweep_values(text[tokens[0].start():end], key)
+            if len(values) == 1:
+                b.params[key] = values[0]
+                b.evidence.append(f"「{text[start:end]}」→ 带宽 {values[0]} Hz")
+            frequency_text[start:end] = " " * (end - start)
+    for m in re.finditer(r"(" + _NUM + r")\s*(ghz|mhz|khz|hz)\s*(?:的)?带宽", text):
+        values, _ = parse_sweep_values(m.group(1) + m.group(2), "bandwidth_hz")
+        if values:
+            b.params["bandwidth_hz"] = values[0]
+            b.evidence.append(f"「{m.group(0)}」→ 带宽 {values[0]} Hz")
+        frequency_text[m.start():m.end()] = " " * (m.end() - m.start())
+    frequency_text = "".join(frequency_text)
+    m = re.search(r"(" + _NUM + r")\s*ghz", frequency_text)
     if m:
         b.params["carrier_freq_hz"] = float(m.group(1)) * 1e9
         b.evidence.append(f"「{m.group(0)}」→ 载频 {m.group(1)} GHz")
-    bws = re.findall(r"(\d+)\s*mhz", text)
+    bws = re.findall(r"(" + _NUM + r")\s*mhz", frequency_text)
     if len(bws) == 1 and "+" not in text:
         b.params["bandwidth_hz"] = float(bws[0]) * 1e6
         b.evidence.append(f"「{bws[0]} MHz」→ 带宽")
@@ -196,56 +314,46 @@ def read_brief(intent: str) -> Brief:
         name = base if base == "InF" else base + "_" + (m.group(2) or "nlos").upper()
         b.params["scenario"] = name
         b.evidence.append(f"「{m.group(0)}」→ 场景 {name}")
-    m = re.search(r"(\d+)\s*t(?:\s*\d+\s*r)?\s*(?:和|与|vs\.?|对比|跟)\s*(\d+)\s*t", text)
-    if m:
-        from .plan import _ANTENNA_PRESETS  # noqa: PLC0415
-
-        vals = [f"{m.group(1)}T4R", f"{m.group(2)}T4R"]
-        b.sweep = {"key": "antenna_preset", "values": vals}
-        b.params.pop("antenna_preset", None)
-        b.evidence.append(f"「{m.group(0)}」→ 比较天线规模 {vals}")
-    m = re.search(r"(本小区|服务小区|小区内|邻区|相邻小区)?\s*负载[^0-9]{0,6}(\d+)\s*%\s*"
-                  r"(?:到|至|~|-|和)\s*(\d+)\s*%", raw)
-    if m:
-        # 审核 F2：本小区负载（排队竞争）与邻区负载（干扰）是两个因果问题，不能混成一个。
-        owner = m.group(1) or ""
-        key = ("neighbor_prb_util" if "邻" in owner
-               else "target_prb_utilization" if owner else "load?")
-        b.sweep = {"key": key, "values": [float(m.group(2)) / 100, float(m.group(3)) / 100]}
+    # 扫描：条件词 + 两个以上取值，一律走同一个解析器与校验器（审核 R3-2/R3-5）。
+    # 原话给了几档就是几档；推荐值不能增删或替换。越界值照原样记下，由执行前检查阻断。
+    sw = _extract_sweep(text)
+    if sw is not None:
+        key, vals, seg = sw
+        b.sweep = {"key": key, "values": vals}
+        if key in b.params:
+            b.params.pop(key)
+        if key == "antenna_preset":
+            b.params.pop("antenna_preset", None)
+        problems = validate_sweep(key, vals)
         what = {"neighbor_prb_util": "邻区负载", "target_prb_utilization": "本小区负载",
-                "load?": "负载（归属待确认）"}[key]
-        b.evidence.append(f"「{m.group(0)}」→ 扫{what} {b.sweep['values']}")
-
-    # 扫描变量：站距列表、SRS 周期"从 A 改到 B"
-    m = re.search(r"(?:站间距|站距|isd)[^0-9]{0,6}((?:\d+\s*[/、,，和]\s*)+\d+)\s*m", text)
-    if m:
-        vals = _num_list(m.group(1))
-        b.sweep = {"key": "isd_m", "values": vals}
-        b.evidence.append(f"「{m.group(0)}」→ 扫站距 {vals}")
-    else:
-        m = re.search(r"(?:站间距|站距|isd)\s*(\d+)\s*m", text)
+                "load?": "负载（归属待确认）"}.get(key, key)
+        b.evidence.append(f"「{seg.strip()}」→ 扫{what} {vals}" + (f"（{problems[0]}，已阻断）" if problems else ""))
+    if sw is None or sw[0] != "isd_m":
+        m = re.search(r"(?:站间距|站距|isd)\s*(\d+(?:\.\d+)?)\s*m|(\d+(?:\.\d+)?)\s*m\s*(?:的)?\s*(?:站间距|站距)", text)
         if m:
-            b.params["isd_m"] = float(m.group(1))
-            b.evidence.append(f"「{m.group(0)}」→ 站距 {m.group(1)} m")
-    m = re.search(r"srs\s*周期[^0-9]{0,8}(\d+)\s*ms[^0-9]{0,8}(\d+)\s*ms", text)
-    if m:
-        b.sweep = {"key": "srs_period_ms", "values": [float(m.group(1)), float(m.group(2))]}
-        b.evidence.append(f"「{m.group(0)}」→ 扫 SRS 周期 {b.sweep['values']} ms")
-
-    m = re.search(r"(?:发射)?功率\s*(" + _NUM + r"\s*(?:dbm)?\s*"
-                  r"(?:(?:和|与|到|至|vs\.?|/|、|,)\s*" + _NUM
-                  + r"\s*(?:dbm)?\s*)+)dbm", text)
-    if m:
-        vals, _ = parse_sweep_values(m.group(1), "tx_power_dbm")
-        b.sweep = {"key": "tx_power_dbm", "values": vals}
-        b.params.pop("tx_power_dbm", None)
-        b.evidence.append(f"「{m.group(0)}」→ 扫发射功率 {vals} dBm")
+            b.params["isd_m"] = float(m.group(1) or m.group(2))
+            b.evidence.append(f"「{m.group(0)}」→ 站距 {m.group(1) or m.group(2)} m")
 
     # 原话里的硬要求：与选项回答走同一套阻断检查，推荐项不能替用户放弃（审核 R2-2）。
-    if re.search(r"(必须|需要|要|考虑|包含|带)[^，,。]{0,8}(室内穿透|穿透损耗|o2i|室内用户)", text):
-        b.design["indoor_users"] = "need_o2i"
-        b.evidence.append("原话要求室内穿透损耗 → 当前平台不支持，已阻断")
-    if re.search(r"最早截止|截止时间|deadline", text):
+    # 否定作用于紧随其后的要求：“不需要考虑室内穿透”是接受平台边界，不是要求 O2I（审核 R3-3）。
+    for m in re.finditer(r"室内穿透(?:损耗)?|穿透损耗|o2i|室内用户", text):
+        if _negated_before(text, m.start()):
+            if "indoor_users" not in b.design:
+                b.design["indoor_users"] = "accept_outdoor"
+                b.evidence.append("原话不要求室内穿透 → 接受全室外")
+        else:
+            b.design["indoor_users"] = "need_o2i"
+            b.evidence.append("原话要求室内穿透损耗 → 当前平台不支持，已阻断")
+    meanings = {"deadline_first" if re.search(r"截止|deadline", m.group(0)) else "drain_first"
+                for m in re.finditer(r"最早排空|(?:earliest\s+)?drain(?:\s+first)?|"
+                                     r"最早截止(?:时间)?|截止时间|(?:earliest\s+)?deadline(?:\s+first)?", text)
+                if not _negated_before(text, m.start())}
+    if "drain_first" in meanings:
+        b.design["edf_meaning"] = "drain_first"
+        b.evidence.append("原话说明 EDF 指最早排空优先（本平台实现）")
+    # A positive unsupported requirement cannot be erased by the supported
+    # meaning elsewhere; ambiguous conflicting descriptions stay blocked.
+    if "deadline_first" in meanings:
         b.design["edf_meaning"] = "deadline_first"
         b.evidence.append("原话指定最早截止时间优先调度 → 本平台只有最早排空优先，已阻断")
 
@@ -303,7 +411,9 @@ def classify_form(intent: str, brief: Brief) -> tuple[str | None, str]:
     has_method = any(w in text for w in _METHOD_WORDS) and not negated
     has_compare = any(w in text for w in _COMPARE_WORDS) and not negated
     wants_data = any(w in text for w in _DELIVER_WORDS) and any(n in text for n in _DATA_NOUNS)
-    if wants_data and not has_method:
+    # 想看某个量怎么分布/怎么变，就是分析任务，不是只交付数据（审核 R3-6：“给我看看…分布”）。
+    wants_analysis = any(w in text for w in _ANALYSIS_CUES)
+    if wants_data and not has_method and not wants_analysis:
         return "deliver", "原话要数据、不做比较"
     if has_method and (has_compare or "验证" in text):
         return "compare_methods", "原话在比较或验证一个方法/方案"

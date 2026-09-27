@@ -640,7 +640,7 @@ def interview_blockers(d: Draft, num_samples: int | None = None) -> list[dict[st
 
     _skey = (d.sweep or {}).get("key") or _iv.sweep_key_from_intent(d.intent, _iv.Brief())
     if d.sweep:
-        for problem in _iv.sweep_value_issues(d.sweep.get("values", []), _skey):
+        for problem in _iv.validate_sweep(_skey, d.sweep.get("values", [])):
             out.append({"severity": "block", "key": "sweep_values", "message": problem,
                         "suggestion": "通过 sweep_values 给出合法档位；原话中的越界值不会被推荐覆盖"})
     if _skey == "load?" and d.form == "sweep_condition":
