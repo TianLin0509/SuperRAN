@@ -401,6 +401,10 @@ check(iv.read_brief("发射功率 -10 dBm").params.get("tx_power_dbm") == -10.0
       "原话解析：负功率与紧贴中文的 UMi")
 
 # ---- 审核第二轮（codex1 R2）：改口、分轮补答、单位换算、原话硬要求 ----
+for _scenario in ("UMa_LOS", "UMa_NLOS", "UMi_LOS", "UMi_NLOS", "RMa_LOS", "RMa_NLOS"):
+    _sd, _sp, _sc, _ = _final(f"给我2个4T4R {_scenario} 信道，不做算法对比")
+    check(_sc["scenario"] == _scenario, f"R4：原话 {_scenario} 的 LOS/NLOS 限定进入执行配置")
+
 def _rv(did, **kw):
     return srv.sr_revise(did, **kw)
 

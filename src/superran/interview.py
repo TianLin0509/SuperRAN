@@ -175,9 +175,10 @@ def read_brief(intent: str) -> Brief:
         b.params["bandwidth_hz"] = float(bws[0]) * 1e6
         b.evidence.append(f"「{bws[0]} MHz」→ 带宽")
 
-    m = re.search(r"(?<![a-z])(uma|umi|rma|inf)(?![a-z])", text)
+    m = re.search(r"(?<![a-z])(uma|umi|rma|inf)(?:[_\s-]*(nlos|los))?(?![a-z])", text)
     if m:
-        name = {"uma": "UMa_NLOS", "umi": "UMi_NLOS", "rma": "RMa_NLOS", "inf": "InF"}[m.group(1)]
+        base = {"uma": "UMa", "umi": "UMi", "rma": "RMa", "inf": "InF"}[m.group(1)]
+        name = base if base == "InF" else base + "_" + (m.group(2) or "nlos").upper()
         b.params["scenario"] = name
         b.evidence.append(f"「{m.group(0)}」→ 场景 {name}")
     m = re.search(r"(\d+)\s*t(?:\s*\d+\s*r)?\s*(?:和|与|vs\.?|对比|跟)\s*(\d+)\s*t", text)
