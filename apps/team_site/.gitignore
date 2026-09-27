@@ -1,0 +1,7 @@
+# Private runtime state must live outside the source tree.
+*.sqlite
+*.sqlite-*
+*.log
+private/
+data/
+member-*.json

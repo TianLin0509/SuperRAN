@@ -8,6 +8,7 @@
 - 合并位：`.agents/MERGER.md`，独立审核并运行绑定任务与主干完整 SHA 的闸门。
 - 风险与知识：`.agents/RISK.md`、`.agents/TESTING.md`、`.agents/OUTPUT.md`。
 - 仿真设计、数据生成或性能结论：`skills/channel-sim/SKILL.md`。
+- 共享工作记录：配置了 `SUPERRAN_REPORT_CONFIG` 时读取 `.agents/TEAM_SITE.md`，在工作进展变化时主动上报；它不代替开发、自测和合并流程。
 
 `develop` 是唯一开发主线；`main` 是独立发布引用，只有维护者明确发起发布时才更新。
 日常不推送、不建 PR；远端同步另按 `.agents/SYNC.md` 执行。工作位不得审核或合并自己写的分支。
