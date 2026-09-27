@@ -74,6 +74,26 @@ def remote_sha(name, branch):
     return rows[0].split()[0] if rows else "EMPTY"
 
 
+def fetch_snapshot(name, branch, expected=None):
+    """Fetch the immutable advertised commit, never a shared FETCH_HEAD/ref.
+
+Other agents may fetch between any two commands. The captured SHA remains the
+identity of this operation even when their fetch overwrites Git's scratch state.
+"""
+    pinned = remote_sha(name, branch)
+    if pinned == "EMPTY":
+        raise RuntimeError("云端分支不存在，无法绑定开工或审核版本。")
+    sha(pinned)
+    if expected is not None and pinned != expected:
+        raise RuntimeError("候选分支已变化，拒绝沿用旧审核。")
+    git("fetch", "--no-tags", "--no-write-fetch-head", name, pinned)
+    if git("rev-parse", "--verify", f"{pinned}^{{commit}}") != pinned:
+        raise RuntimeError("取回对象不是预期的完整提交。")
+    if expected is not None and remote_sha(name, branch) != expected:
+        raise RuntimeError("候选分支在取回期间发生变化，必须重新审核。")
+    return pinned
+
+
 def receipt_path(commit):
     common = Path(git("rev-parse", "--git-common-dir"))
     if not common.is_absolute():
@@ -151,8 +171,7 @@ def start(args):
         raise RuntimeError("任务分支需要 feat/、fix/ 或 chore/ 前缀。")
     git("check-ref-format", f"refs/heads/{args.branch}")
     trunk = config()["trunk"]
-    git("fetch", "--no-tags", name, f"refs/heads/{trunk}")
-    base = git("rev-parse", "FETCH_HEAD")
+    base = fetch_snapshot(name, trunk)
     target = Path(args.path).resolve()
     if target.exists() or target == ROOT or ROOT in target.parents:
         raise RuntimeError("任务路径必须是仓库外的新目录。")
@@ -169,8 +188,8 @@ def submit(args):
     candidate = git("rev-parse", "HEAD")
     base = sha(args.base)
     git("merge-base", "--is-ancestor", base, candidate)
-    git("fetch", "--no-tags", name, f"refs/heads/{config()['trunk']}")
-    git("merge-base", "--is-ancestor", base, git("rev-parse", "FETCH_HEAD"))
+    trunk = fetch_snapshot(name, config()["trunk"])
+    git("merge-base", "--is-ancestor", base, trunk)
     git("push", name, f"{candidate}:refs/heads/{branch}")
     if remote_sha(name, branch) != candidate:
         raise RuntimeError("候选上传后读回不一致，未形成有效交付。")
@@ -182,9 +201,7 @@ def fetch_candidate(args):
     name = remote()
     expected = sha(args.sha)
     git("check-ref-format", f"refs/heads/{args.branch}")
-    git("fetch", "--no-tags", name, f"refs/heads/{args.branch}")
-    if git("rev-parse", "FETCH_HEAD") != expected:
-        raise RuntimeError("候选分支已变化，拒绝沿用旧审核。")
+    fetch_snapshot(name, args.branch, expected)
     local = f"review/{expected}"
     existing = git("branch", "--list", local)
     if existing:
