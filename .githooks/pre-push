@@ -20,6 +20,12 @@
 # 推特性分支不受影响，随便推。
 # ─────────────────────────────────────────────────────────────────────────────
 
+# New cloud checkouts fail closed: the legacy environment switch cannot bypass
+# the receipt/SHA checks. Older workflow fixtures retain their offline contract.
+if [ -f scripts/agent_repo.py ]; then
+  exec python scripts/agent_repo.py check-push "$1" "$2"
+fi
+
 [ "$HUB_ALLOW_TRUNK_PUSH" = "1" ] && exit 0
 
 # ② + ③：从项目配置读。读不到就留空，只靠兜底名单。

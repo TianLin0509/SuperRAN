@@ -2,7 +2,7 @@
 
 开始任何任务前，必须完整读取本仓库的 `CLAUDE.md`；它是无线物理、实现边界和测试映射的唯一开发规范。
 
-当前入口是 AI 群聊「开发」场景，一个群聊一项任务：
+当前入口是 Agent 开发协作：每台电脑一份主仓库，每个任务一份 worktree：
 
 - 工作位：`.agents/AUTHOR.md`，在自己的 worktree 实现、自测、本地提交。
 - 合并位：`.agents/MERGER.md`，独立审核并运行绑定任务与主干完整 SHA 的闸门。
@@ -10,7 +10,8 @@
 - 仿真设计、数据生成或性能结论：`skills/channel-sim/SKILL.md`。
 
 `develop` 是唯一开发主线；`main` 是独立发布引用，只有维护者明确发起发布时才更新。
-日常不推送、不建 PR；远端同步另按 `.agents/SYNC.md` 执行。工作位不得审核或合并自己写的分支。
+阿里云私有 Gitea 是唯一日常远端；先读 `INSTALL_AGENT.md`，跨电脑候选交接和主干发布按
+`.agents/SYNC.md` 执行。GitHub 仅留历史，不再日常写入。工作位不得审核或合并自己的分支。
 合并位只有亲验 PASS 后才可执行本地合并，任务或主干 SHA 变化就重审。
 
 `skills/superran-lead/`、`skills/superran-member-task/` 和 `docs/team/` 是历史流程档案，

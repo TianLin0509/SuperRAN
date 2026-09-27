@@ -1,5 +1,8 @@
 # SuperRAN
 
+Agent 开发入口：[安装与接入](INSTALL_AGENT.md) → [协作合同](AGENTS.md) → [跨电脑交接](.agents/SYNC.md)。
+日常代码以 [阿里云私有仓库](https://ai.lt-stockpartner.tech/repos/superran/SuperRAN) 为准；GitHub 仅保留历史。
+
 给 Agent 用的无线仿真信道供应站 —— **面向蒙特卡洛验证**。
 
 你提一个无线算法优化思路，它给你可信的信道场景实例、配套的物理观察量，
