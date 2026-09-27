@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import superran  # noqa: E402
 from superran import (  # noqa: E402
     bridge,
     gates,  # noqa: E402
@@ -510,6 +512,10 @@ def test_end_to_end_company_channel_is_64_by_4_with_real_estimate() -> None:
     )
     summary = gen.generate(cfg, num_samples=1, workers=1)
     dataset = load(summary["dataset_id"])
+    # 落盘的数据集要能回答「哪一版 SuperRAN 生成的」：包版本号与 Git 提交并列。
+    assert summary["provenance"]["superran_version"] == superran.__version__
+    assert dataset.summary["provenance"]["superran_version"] == superran.__version__
+    assert "git_commit" in dataset.summary["provenance"]
     assert dataset.h_true.shape == dataset.h_est.shape == (1, 1, 16, 64, 4)
     assert dataset.h_dl_est is not None
     assert dataset.h_dl_est.shape == dataset.h_true.shape
@@ -654,6 +660,22 @@ def test_fourth_audit_evidence_guards_are_not_self_defeating(
     assert not bridge._remember_nonce("n3")
     assert bridge._seen == {"n3"}
     bridge._seen.clear()
+
+
+def test_package_version_is_single_and_recorded_in_provenance() -> None:
+    """两处版本号必须一致；合并入口每次合入 develop 会同步抬 patch 位。"""
+    root = Path(__file__).resolve().parents[1]
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    init = (root / "src" / "superran" / "__init__.py").read_text(encoding="utf-8")
+    declared = re.findall(r'^version\s*=\s*"([^"]+)"\s*$', pyproject, re.M)
+    runtime = re.findall(r'^__version__\s*=\s*"([^"]+)"\s*$', init, re.M)
+    assert len(declared) == 1 and len(runtime) == 1, (declared, runtime)
+    assert declared[0] == runtime[0] == superran.__version__
+    assert re.fullmatch(r"\d+\.\d+\.\d+", superran.__version__)
+    # 导入的必须是本工作区的包，否则上面比对的是两份不同的源码。
+    assert Path(superran.__file__).resolve() == (root / "src" / "superran" / "__init__.py").resolve()
+    snap = provenance.snapshot(source="unit-test")
+    assert snap["superran_version"] == superran.__version__
 
 
 def test_provenance_and_semantic_dataset_digest_contract() -> None:

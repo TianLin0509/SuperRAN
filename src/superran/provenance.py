@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 import scipy
 
+from . import __version__ as SUPERRAN_VERSION
 from . import bler_data_20b
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -88,6 +89,9 @@ def _collect_base() -> dict[str, Any]:
         # 实测挂死。宁可把 Git 状态标 unknown，也不在非主线程启动外部进程。
         return {
             "version": PROVENANCE_VERSION,
+            # 包版本号给人看「跑的是哪一版」；每次合入 develop 自动 patch +1。
+            # 完整代码身份仍以 git_commit / source_tree_sha256 为准。
+            "superran_version": SUPERRAN_VERSION,
             "git_commit": None,
             "git_branch": None,
             "git_dirty": None,
@@ -100,6 +104,7 @@ def _collect_base() -> dict[str, Any]:
     source_tree_sha256, source_file_count = _source_tree_fingerprint()
     return {
         "version": PROVENANCE_VERSION,
+        "superran_version": SUPERRAN_VERSION,
         "git_commit": _git_text(["rev-parse", "HEAD"]),
         "git_branch": _git_text(["branch", "--show-current"]),
         "git_dirty": bool(status),

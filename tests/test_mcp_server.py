@@ -174,7 +174,11 @@ async def main() -> None:
 
             print("\n" + "=" * 68 + "\n2  sr_capabilities\n" + "=" * 68)
             caps = _payload(await session.call_tool("sr_capabilities", {}))
-            engines = {e["name"]: e for e in caps.get("engines", [])}
+            import superran
+
+            check(caps.get("superran_version") == superran.__version__,
+                  f"服务信息带包版本号 v{caps.get('superran_version')}，与本工作区源码一致")
+            engines ={e["name"]: e for e in caps.get("engines", [])}
             for e in engines.values():
                 print(f"  {e['name']:<16} {'可用' if e['available'] else '不可用'}")
             check(engines.get("internal_sim", {}).get("available") is True, "internal_sim 报告可用")

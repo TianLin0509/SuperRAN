@@ -17,6 +17,7 @@ from typing import Any
 
 import anyio
 
+from . import __version__ as _SUPERRAN_VERSION
 from ._lazy import lazy_module
 
 # 这里的 ``np`` 是占位模块：只是让 ``import superran.server`` 本身保持便宜
@@ -345,6 +346,8 @@ def sr_capabilities() -> dict[str, Any]:
     from . import interference as itf
 
     return {
+        # 包版本号：每次合入 develop 自动 patch +1，用来确认本服务跑的是哪一版。
+        "superran_version": _SUPERRAN_VERSION,
         "physical_core": "superran-first-party",
         "physical_core_root": str(ch.project_root()),
         "external_source_tree": None,
@@ -3286,7 +3289,7 @@ def main() -> None:
     _resolve_lazy_modules()
     info = ch.warmup()
     print(
-        f"[superran] warmup {'ok' if info.get('ok') else 'FAILED'} "
+        f"[superran] v{_SUPERRAN_VERSION} warmup {'ok' if info.get('ok') else 'FAILED'} "
         f"{info.get('elapsed_s')}s {info.get('error', '')} | BLAS 线程上限 "
         + (f"{cap}（SUPERRAN_BLAS_THREADS=auto 放开）" if cap else "不限（auto）"),
         file=sys.stderr,
