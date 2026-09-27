@@ -53,7 +53,7 @@ sr_system_sim(
     min_pairing_mcs=4, pf_gain_threshold=0.0, orthogonalization_mode="select",
     mu_olla_step_up_db=0.01, mu_olla_step_down_db=None,
     # —— 载波 / TDD / 邻区 ——
-    tdd_pattern="DDDSU", s_slot_dl_fraction=0.7,
+    tdd_pattern="DDDSU", s_slot_dl_fraction=0.715,
     neighbor_prb_util=0.3, neighbor_load_jitter=0.05,
     # —— CSI 老化 / SRS / CQI 上报 ——
     csi_aging=True, srs_period_ms=10.0, srs_hopping=True,
@@ -394,8 +394,13 @@ ACK 了的字节，不跟着 buffer 口径走。默认的 `auto`（= `scheduled_
 
 `serving_cell_prb_utilization` 是**结果 KPI**：KPI 窗口内所有可用 DL 调度机会的
 `allocated PRB-equivalent / available PRB-equivalent`；D slot 权重 1，S slot 按当前
-工程口径权重 0.7。分母不纳入纯 UL/保护 TTI，所以 full-buffer 下应为 100%。旧字段
+配置权重（默认 0.715）。分母不纳入纯 UL/保护 TTI；资源填满时为 100%，但满缓冲不保证
+每个用户在每个时隙都具备发送资格。旧字段
 `resource_utilization` 是它的兼容别名。
+
+这个权重不直接等于吞吐比例。当前 D 时隙净资源为 132 RE/PRB，S 时隙先算
+`floor(132 × s_slot_dl_fraction)`，默认得到 94 RE/PRB，再乘实际 PRB 数并量化 TBS。
+不能先折符号再扣开销，也不能在已经扣完开销的 S 预算上重复扣除。
 
 `tti_occupied_rbg_distribution` 每个可用 DL TTI 只记一次，横轴固定为 0..17 个已占用
 RBG，**包含 idle TTI 的 0 桶**。不要拿 `rbg_size_hist` 代替：后者是每个非零 grant

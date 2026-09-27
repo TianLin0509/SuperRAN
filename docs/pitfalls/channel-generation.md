@@ -179,9 +179,10 @@ first-party source 的 `doppler_hz` 明确定义为最大 Doppler
 速度投影到最近站的径向、随后又在 CDL 内投影一次，会把高铁场景严重压低；
 `hst_350kmh` 在 2.6 GHz 下现在稳定为 **842.59 Hz**，与解析值一致。
 
-`mobility_mode=static` 只表示跨 snapshot 的 UE 几何位置固定、样本间不构成连续
-轨迹；它不覆盖 `ue_speed_kmh`。因此可用 `static + 3 km/h` 生成独立位置快照下的
-步行小尺度时变。要真正零 Doppler，必须显式设 `ue_speed_kmh=0`。
+`mobility_mode=static` 表示 UE 几何位置固定，不覆盖 `ue_speed_kmh`。同 UE 的各轮样本
+仍使用同一组散射体、沿连续时钟推进；`static + 3 km/h` 会有小尺度时变，相邻快照
+不能当成独立信道实现。逐径 Doppler 使用同一 UE 的运动方向，不为不同 BS 重抽方向。
+要零 Doppler 须显式设 `ue_speed_kmh=0`；零速时每 UE 多轮会因重复矩阵被拒绝。
 
 ### scenario 设成 *_LOS 不会让 los_ratio 变成 1
 

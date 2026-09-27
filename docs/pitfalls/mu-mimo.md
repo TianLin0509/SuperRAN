@@ -81,11 +81,11 @@ MU 准入还有三层显式门：`min_pairing_mcs` 默认 4，低于该档的用
 `NotImplementedError`，绝不静默退回 `select`。这些是准入门，不替代最终的小区谱效或
 队列封顶 useful-bytes 方案比较；设 `min_pairing_mcs=0,pf_gain_threshold=0` 可复现旧准入。
 
-**−3.01 dB 只是记账标签，不是近似。** 按定义 `CorrLoss = pred_MU − pred_SU −
-PowerLoss`，所以决策里真正用的平移量 `CorrLoss + PowerLoss` 恒等于
-`pred_MU − pred_SU`，那个常数精确抵消。单列 PowerLoss 只为诊断能分开看
-「功率分摊占多少、相关性损失占多少」。**这条只在当前支持的 2 用户 × rank2 下
-成立**，扩到 3/4 用户或不等流数时标签本身要重新定义。
+**当前 MU 支持两用户、每用户 rank 1–2，含不等 rank。** 默认预编码为 EZF，
+ZF/RZF 可显式选择。功率按层等分，`PowerLoss_u = 10log10(rank_u / sum(rank))`：
+rank2+rank2 时两侧均为 −3.0103 dB，rank1+rank2 时为 −4.7712/−1.7609 dB。
+预测端把它与残余相关性损失加到 SU 基线上；真实接收 SINR 独立按实际信道与发射权计算，
+不能把预测侧相关性损失解释成真实接收干扰损失。
 
 实测在 10 用户 / 64 端口下 **MU/SU 比值 < 1**（密集城区 0.755、城区宏站 0.917），
 自适应因此全程选 SU。这不是 bug：SU 无干扰且能到 rank4，

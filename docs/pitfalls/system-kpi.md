@@ -5,17 +5,14 @@
 
 **什么时候读**：改 `system.py` / `experience.py` / `scheduler_*.py` / `traffic.py` / `kpi_*.py`，或报系统级 KPI。
 
-### 仿真粒度降到 RBG 是安全的
+### 信道采样粒度与 SINR 聚合不能混为一谈
 
-一个 RBG 内的 16 个 RB 共用同一个 MCS、同一次调度决策、同一个预编码，
-**RB 级的分辨率没有任何已实现的算法在用**。降到 RBG（272 → 17）实测
-rank 与 MCS **逐位相同**、谱效差 0.1%，建表快一倍。
+当前系统已实现逐 RBG 频选调度及 SRS 跳频资源，不能再写“频选和导频图案还没做”。
+同一 RBG 共用调度资源，并不意味着其 RB 的接收 SINR 可以任取一个代表。
 
-聚合方式是 RBG 内**取中间那个 RB 作代表**，不是平均。平均会把频选衰落抹平、
-让奇异值分布变平（信道条件数被人为改善），进而**高估 rank**。
-
-会受影响的只有频选调度与导频图案，两者都还没做。真要做时把
-`rb_per_rbg=1` 设回去就退回 RB 粒度。
+当前单码字口径是：逐 RB、逐流计算接收 SINR，先转 dB 再在 RBG 内平均，最后在
+实际授予的 RBG 与流之间做 dB 平均。复信道采样、预编码方向选择和 SINR 聚合是不同步骤；
+历史“取中间 RB”或 RBG 内线性平均的说明不能替代当前聚合合同。
 
 ### TDD 系统栅格是固定产品合同，不允许拿链路级带宽混跑
 
@@ -269,7 +266,7 @@ full_buffer 下只有这几个键留 `None`，因为它们**明确需要 burst �
 `evaluation_mode`、`traffic_model="bimodal"`（连同 `p_small_rbg`/`p_full_rbg`/
 `p_idle_tti`/`expected_prb_util`）、`KpiConfig.trim`/`min_burst_tti`、
 `mu_accounting="se_ratio_legacy"`、`pf_accounting="legacy_best_se"`、
-`max_mu_users`/`mu_rank_per_user` 的非 2 取值、`simulate(mu_se_ratio=...)`。
+`max_mu_users` 的非 2 取值、`mu_rank_per_user` 超出 1–2 的取值、`simulate(mu_se_ratio=...)`。
 现网两头高中间低的话务画像迁到 `traffic_model="cdf"`，CDF 文件在
 `presets/traffic_cdf/`，由 `scripts/make_field_bimodal_cdf.py` 生成。
 

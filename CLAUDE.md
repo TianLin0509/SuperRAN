@@ -216,7 +216,7 @@ KaTeX 未必收，光看 Python 源码看不出来。
 
 触发：改 `system.py` / `experience.py` / `scheduler_*.py` / `traffic.py` / `kpi_*.py`，或报系统级 KPI。
 
-- 仿真粒度降到 RBG 是安全的 —— RBG 内共用 MCS/调度/预编码；代表 RB 取中间不平均（条目附整理注：部分表述疑似过时）
+- 信道采样粒度与 SINR 聚合不能混为一谈 —— 接收 SINR 在 RBG 内、实际授予 RBG 与流之间按 dB 平均
 - TDD 系统栅格是固定产品合同，不允许拿链路级带宽混跑 —— 只收 100 MHz/30 kHz/272 RB/17×16；通用 `CarrierGrid` 只服务链路级
 - 速率统计口径：buffer 在发送时扣减，不看这个 TB 对不对 —— 发送即扣 buffer；重传对队列空操作；`acked_goodput` 下 NACK 给 0
 - 系统仿真入口的两道硬校验（2026-08-17 第三轮审查） —— SRS provenance 校验；样本→UE 布局错位直接报错
@@ -232,7 +232,7 @@ KaTeX 未必收，光看 Python 源码看不出来。
 - MU 的预编码矩阵只能表示方向，功率要单独给 —— `(W, p)` 分开；总功率归一到 1，别照搬 `tr(GG^H)=K`
 - MU-MIMO 在导频污染下掉一半 —— `h_true` 预编码的 MU 增益不可信；测 CSI 敏感性要用多小区
 - "不配对"不一定更差 —— 端口富余时全选可能高于 SUS，别读成配对没用
-- MU 是空间复用，不是频率复用 —— 每人全带宽；`pair_table` 记账两半；`se_ratio_legacy` 已删；准入三层门；R4 CorrLoss 口径
+- MU 是空间复用，不是频率复用 —— 两用户各 rank1–2，按层数分功率；`pair_table` 记账两半；`se_ratio_legacy` 已删；准入三层门；R4 CorrLoss 口径
 - 测试信道所有用户统计相同时，MU/SU 比值是个死数 —— 测 MU 必须给各 UE 不同路损
 - 报"容量上界"必须开 MU —— `mu_enabled` 默认 False 不要改；问容量上界必须开 MU；MU 主要给容量不给边缘
 

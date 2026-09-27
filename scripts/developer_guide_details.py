@@ -106,8 +106,10 @@ def render_detail(key: str, title: str) -> str:
 
 DETAIL_SPECS: dict[str, DetailSpec] = {
     "overview": DetailSpec(
-        promise="把 SuperRAN 看成一条把问题编译成可复核证据的流水线，而不是一组彼此无关的无线算法。读完后应能判断一个结果究竟来自物理信道、系统调度，还是统计与呈现层。",
+        promise="理解一次无线实验怎样从问题走到结论：条件在哪里生效，用户数据怎样发送，结果由哪些证据支持。",
         principles=(
+            "复用旧实验时，先判断改动发生在哪一层。资源预算或 SINR 聚合变化，需要重建链路表并重跑系统结果；散射体连续性或运动方向变化，需要重新生成信道。仅增加一个测量量，则通常可对已有数据重新取数。每次都核对数据来源与当前运行版本，不能因为文件仍能读就默认物理口径兼容。",
+            "已有独立接口不等于系统已经使用它。SRS 开环功控预算可以单独复算，但当前没有驱动信道生成器和调度；29 档参考 TBS 可独立对拍，但所需分块 BLER 曲线尚缺，不能替换系统表 3。说明结果时应明确输入经过了哪些环节，未接通的环节不能用来解释吞吐变化。",
             "平台的窄腰是<strong>数据合同与证据合同</strong>。上游默认是本仓 first-party source，可选接 direct Sionna RT；下游可以换预编码、接收机、调度器与 KPI，但中间必须始终说清 <code>h_true</code>、<code>h_est</code>、功率参考面、随机种子、样本单位和统计窗口。只要这些角色没有混在一起，同一实验才有可能复现；一旦把估计信道偷换成真值，后续再漂亮的曲线也失去解释力。",
             "一次可信实验同时包含三条链。<strong>物理链</strong>回答信号如何经过阵列、传播和干扰；<strong>决策链</strong>回答 gNB 在当时信息下如何选 rank、MCS、SU/MU 与资源；<strong>证据链</strong>回答样本是否独立、比较是否配对、统计是否跨过预热窗口。三条链最终在 manifest、逐样本结果和 Gate 报告中会合，结论才不仅是一次脚本输出。",
             "系统级只有一条评估路径，靠话务配置区分问题：满缓冲（<code>traffic_model=\"full_buffer\"</code>）回答“持续有数据时空口能做多快”，有限到达（ftp3/cbr/mixed/cdf）回答“用户实际等多久、拿到多少有效字节”。两者共用同一套 FIFO、空闲 TTI、按需 RBG 与尾料逻辑——满缓冲只是队列永不排空，调度器始终有足量数据填满全部 RBG，不需要任何特例分支。反过来说，KPI 口径必须写死：满缓冲下 TS 28.552 的忙期样本不会形成，标准字段只能空着，能报的是工程口径。",
@@ -458,7 +460,7 @@ DETAIL_SPECS.update({
         principles=(
             "BF Gain 是基站决策时的可知量，不是事后用 <code>h_true</code> 算出的实际增益。两套权都在同一份 <code>h_prec</code> 上设计和评估：一条是实际发送方向（默认 SVD），另一条是 Type-I-style 宽带 PMI 参照方向。如果 SRS 估计陈旧，两边都只能看陈旧 CSI。",
             "“方向”和“空间功率约束”是两个轴：默认物理 TX 是 SVD+NEBF，称 <code>SINR_NEBF</code>；显式选 PEBF/EBF 时称 <code>SINR_PEBF/SINR_EBF</code>。PMI 参照也施加完全相同的约束，只保留 <code>SINR_PMI</code> 这个业务名字。公平对照要求同 rank、同总功率、同约束、同损伤和同经典 MMSE，唯一改变方向。",
-            "聚合顺序不能换。每条流先得到逐 RB 线性 post-MMSE SINR；RBG 内在线性域平均 RB，再转 dB；RBG 内各流和全带各 RBG 最后在 dB 域算术平均。这是当前单码字宽带工程口径，不冒充已标定的 EESM/MIESM。",
+            "聚合顺序不能换。每条流先得到逐 RB 线性 post-MMSE SINR，转 dB 后在 RBG 内平均，再在实际授予的 RBG 与流之间做 dB 平均。这是当前单码字宽带工程口径，不冒充已标定的 EESM/MIESM。",
             "必须分开三个量：<code>SINR_NEBF,gNB−SINR_PMI,gNB</code> 形成 BF Gain；<code>Γ(MCS(CQI))+G_BF</code> 只是 <code>SINR_AMC_PRED</code>，负责无 OLLA MCS 反折；同一个 Q 打到 <code>h_true</code> 才得到 <code>SINR_NEBF,RX</code>，只有它能和最终 MCS 一起查 BLER。",
         ),
         implementation=(
@@ -494,7 +496,7 @@ DETAIL_SPECS.update({
             "CQI 是接收侧基于过去测量形成的量化反馈，本 profile 使用内部 0..14 离散表映射 MCS。BF gain 是基站基于当前可见 CSI 预测的波束增益。系统先用不含 OLLA 的基准 SINR查预置表并记录 mcs_without_olla，再把 ACK/NACK 学到的连续 MCS-index OLLA 加到该基准 MCS，floor 并钳位。传输之后，真实 H、真实干扰和实际 Q 给出接收侧 SINR，BLER 曲线把它变成错误概率；抽样 ACK/NACK 再更新 OLLA。",
             "MU 不是在 SU MCS 上只减一个固定余量。它至少增加残留相关性损失、同 RBG 总功率在并发 rank 间平分的损失以及用户级 MU OLLA。MU OLLA 对每个用户维护，但不按配对对象再分状态：A 与 B 配对失败、A 与 C 配对失败，都会更新 A 的同一份 MU 偏置。SU 与 MU 状态分开，避免一种传输的误差污染另一种。",
             "TBS 经过 38.214 离散量化和码块对齐，只近似随 RBG 线性。即使 17 个 RBG 的 TBS 比单 RBG×17 高 1%，用除法反推也可能少给一个 RBG，使当前包无法完成。正确实现为每个 slot/MCS/rank 预生成各 RBG 前缀查表，验证单调不减，并用 <code>searchsorted(side='left')</code> 找第一个够用值。量化平台合法，资源增加却令 TBS 下降才是硬错误。",
-            "BLER 与 HARQ 的边界要写清。当前体验仿真在 NACK 后冻结 MCS、RBG 数、rank 与 TBS，并只给一次 IR/CC 重传机会；IR/CC 是基于 NewTx 曲线的系统级 BLER 抽象。它仍不等同于完整 NR HARQ 进程：RV、LLR、并行 process 与标准时序没有展开。",
+            "BLER 与 HARQ 的边界要写清。当前体验仿真在 NACK 后冻结 MCS、PRB 数、rank、TBS 与时隙类型，并只给一次 IR/CC 重传机会；IR/CC 是基于 NewTx 曲线的系统级 BLER 抽象。当前已支持默认 8 个并行 HARQ 进程，但 RV、LLR 合并与完整标准时序没有展开。",
         ),
         implementation=(
             ("形成发送侧预测", "链路表同时保存历史CQI表行和上报4-bit codepoint、基础门限与BF gain；先由SINR反折无OLLA基准MCS，再加用户级MCS-domain OLLA。MU先在SINR域加CorrLoss/powerLoss反折基准MCS，再加SU/MU OLLA。"),
@@ -502,10 +504,10 @@ DETAIL_SPECS.update({
             ("执行真实传输", "按实际分配 RBG 查 TB bytes，用码字级有效 SINR+最终发送 MCS 查预置 BLER 曲线并从独立 BLER 随机流抽 ACK/NACK；NACK 后只允许一次 IR/CC 重传。"),
             ("闭环更新", "ACK/NACK 只更新对应用户、对应 SU/MU 状态；PF credit 按配置使用 scheduled_tbs 或 acked_goodput，绝不回到全带估计。"),
         ),
-        example_title="17 RBG 的 29,722 B 为什么不能除以 17",
+        example_title="为什么要按整行 TBS 表反查所需 RBG",
         example=(
-            "<p>在一个已核实的 MCS12/rank2 条件下，单 RBG TBS 为 1,729 B，线性外推 17 倍是 29,393 B；真实 17 RBG TBS 为 29,722 B，多 1.1%。若队列剩余 29,500 B，按总量比例或单 RBG 除法可能给 16 个 RBG，但真实 16 RBG 表项未必够。</p>"
-            "<p><code>required_rbg</code> 直接在这行 17 项表中找第一个 ≥29,500 的值。大包找不到时钳到 17，排第一便自然吃完整 band；小包则只拿恰够资源。测试除检查单调，还应把除法算法故意换回去，证明边界包会出现未完成或多一次等待。</p>"
+            "<p>固定 MCS、rank 和时隙类型后，依次计算分配 1 到 17 个 RBG 时的 TBS。由于传输块要量化，相邻表项的差值不恒定：全带 TBS 除以 17，不能代表单个 RBG 的字节数。正文的实算例子直接从当前资源预算生成，避免资源口径改变后仍引用旧数字。</p>"
+            "<p><code>required_rbg</code> 找第一个不小于队列净荷的表项；全带也不够时返回全部 RBG，并明确标记本次不能装完。量化平台允许多个资源量对应同一 TBS，反查应选第一个够用的值。</p>"
         ),
         checks=(
             ("因果信息", "MCS 只读过去/当前可用 CQI、BF 预测和 OLLA，实际 ACK 前不接触真值结果。"),
@@ -651,7 +653,7 @@ DETAIL_SPECS.update({
             "MU 资源统计按物理 PRB 计一次。两个用户在同一 RBG 配对，已用 PRB 仍是一份；用户级 attribution 可以各记 grant 或按用户数分摊，但小区 <code>MU PRB/已用 PRB</code> 的分子分母不能把同一 RBG 双计。",
             "配对的代价有两半，任何评估路径都必须同时记账，否则结果只会朝一个方向偏。第一半是<b>发送侧变保守</b>：配对后每流只分到 P/(K·rank) 的功率，还要吃零陷残余，AMC 坐标应当整体下移，选出的 MCS 因此更低。第二半是<b>接收侧更容易错</b>：即使 MCS 已经降过，同一档在配对状态下的误块概率仍高于单用户——因为真实接收 SINR 是把 ZF 权（按基站可能已老化的 CSI 算出）打到双方 h_true 上、再把对方的流放进干扰协方差得到的，它不等于任何 dB 项的简单相加。只记第一半会低估吞吐、只记第二半会高估 MCS，而历史 capacity 两半都没记：它按 SU 坐标选 MCS、按 SU 真值抽签，只把 TB 大小乘一个建表阶段测出的标量比值，等价于宣称「配对让包变小但一点也不更容易错」。",
             "因此 MU 一律读同一张 pair 表（<code>mu_accounting=\"pair_table\"</code>，唯一口径）。矩阵运算全部留在建表阶段，主循环只查表：实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s，与主循环十万 TTI 的开销相比可以忽略。历史的标量口径 <code>se_ratio_legacy</code> 已于 2026-09-04 删除，选中时直接报错，不再作为静默兜底存在。它系统性乐观，旧结果不可与 pair 表口径的新结果拼进同一张趋势图。",
-            "<code>PowerLoss = −10log10(2) = −3.0103 dB</code> 是<b>记账标签而不是近似</b>。pair 表按 <code>CorrLoss ≜ pred_MU − pred_SU − PowerLoss</code> 定义，所以决策里真正生效的平移量 <code>CorrLoss + PowerLoss</code> 恒等于 <code>pred_MU − pred_SU</code>，那个常数在代数上精确抵消；单列它只是为了让诊断能分开回答「功率分摊占多少、相关性损失占多少」。这条恒等式只在当前支持的 2 用户 × 每用户 rank2 下成立：扩到 3/4 用户或不等流数时，等功率分流的常数本身要按实际流数重新定义，届时必须同时更新标签与它在诊断里的解读，不能只改数值。",
+            "总功率按层等分，用户 u 的功率损失为 <code>10log10(rank_u / sum(rank))</code>。rank2+rank2 时两侧均为 −3.0103 dB，rank1+rank2 时为 −4.7712/−1.7609 dB。当前支持两用户、每用户 rank 1–2，默认 EZF；不能把 −3.01 dB 作为所有配对的常数。预测端相关性损失按每条流的残余项计算、再按 dB 求和；真实接收 SINR 则从实际发射权和真实信道独立计算。",
             "SU/MU 判决是逐 TTI 做的，不依赖任何全程标量。锚点固定为 PF 第一名，先按准入判据筛伙伴（与 experience 相同：两侧的<b>预测</b> BLER 都不得超过 0.5），再在通过准入的伙伴里取聚合谱效最高的那个，最后还要赢过锚点单发的 SU 方案才真配对。满缓冲下全带调度时同一 TTI 的 RE 数对 SU/MU 完全相同，所以比较 <code>Σ rank × MCS 谱效</code> 与有限话务下比较 useful bytes 是同一件事。拒配对的原因计入 <code>mu_candidate_scoring.rejection_reasons</code>，判单发更划算的 TTI 数计入 <code>su_mu_plan.su_selected</code>，不静默退回。",
             "重传恒按 SU 重发。HARQ 的合同是冻结发送身份（MCS/RBG 数/rank/TBS），而配对会同时改变真实 SINR 与 TBS，两者直接冲突。把重传也做成 MU 需要先定义「配对状态属不属于冻结身份的一部分」，这是尚未确认的现场口径，因此当前显式选择更保守的一侧，并在文档与 notes 里写清楚，而不是让它成为一个没人知道的隐含假设。",
         ),
@@ -684,7 +686,7 @@ DETAIL_SPECS.update({
             "用 sum(TBS) 而非 min(queue,TBS) 比较，padding 把 MU 方案虚增。",
             "SU 已经清空全部可服务包仍强制 MU，只为了提高 MU 配对比例。",
             "只把配对代价记在 TB 大小上，误块抽签仍用 SU 真值——配对越激进结果越乐观，而且 KPI 上完全看不出来。",
-            "把 −3.01 dB 当成一个可以直接套用到 3/4 用户或不等流数的物理近似；它在当前实现里只是 2×rank2 下会被精确抵消的记账标签。",
+            "给 rank1+rank2 的两名用户都减 3.01 dB；正确份额取决于各自层数。当前两用户实现也不能外推成支持 3/4 用户配对。",
             "拿 <code>se_ratio_legacy</code>（已删除）时代的旧结果和 <code>pair_table</code> 的新结果放进同一张趋势图。",
         ),
         source_paths=("src/superran/experience.py", "src/superran/mumimo.py", "src/superran/system.py"),
@@ -1588,13 +1590,13 @@ DETAIL_SPECS.update({
         promise="把载波资源表、TDD 时隙、SSB/Gold/SRS/CSI-RS 序列与波束选择放在同一物理基线中，解释这些工具函数怎样支撑估计和测量，又为何“序列相关低”并不自动等于现场导频无污染。",
         principles=(
             "NR RB 数必须查 38.104 频率范围对应表，不能用带宽除以子载波间隔后取整。相同 50/100 MHz 与 60 kHz 在 FR1/FR2 可得到不同 RB 数；项目预置基线又显式从标准 273 RB 截成 272 RB，以形成 17 个完整 16-RB RBG。参考信号、SRS 轮转和调度必须共享同一载波对象，否则频域索引会差一个 RB。",
-            "TDD 可用下行比例来自 D/U/S pattern 和特殊时隙 symbol 划分。一个 S slot 不能粗暴按完整 DL 或完整 UL 计；DL fraction 为普通 D slot 加上特殊时隙中 DL symbols 的比例，再除以周期总 slot。部分历史算法说明仍出现 0.7 工程值，正式系统和文档应从同一 pattern/special-slot 配置派生，并把固定值视为待迁移兼容边界。",
+            "帧结构的符号划分与系统净资源预算是两种口径。当前系统显式读取 <code>s_slot_dl_fraction</code>，默认 0.715；报告名义下行比例与 PRB 等效资源使用这一权重。S 时隙 TBS 则用 <code>floor(D净RE × 系数)</code>，每 PRB 取整后再乘 PRB 数。符号占比可以用于解释帧结构，但不会自动替换系统配置。",
             "SSB 与 Gold/SRS 序列的作用首先是资源和相关性合同。PSS/SSS/PBCH-DMRS 使用各自序列结构与 cell identity，SRS 通过端口/循环移位/频域轮转区分资源。归一化相关可发现实现级冲突，但真实污染还取决于同步误差、功控、近远效应、频率选择性和复用拓扑；不能因为理想序列互相关低就宣称 LS 不受定向干扰。",
             "CSI-RS DFT 波束扫描与 PMI Type-I-style 是两套对象。前者的候选通常按 <code>[beam, port]</code> 存储，用 <code>argmax ||H w_i||²</code> 选接收功率最大波束；后者是 <code>[port, column]</code>，还涉及双极化共相、多层选择和反馈索引。两套实现都可能含 DFT，但 shape、用途、规模和时序不能互换。",
             "LS/LMMSE 估计不会决定干扰有没有方向性；方向性来自污染信号经过空间信道和导频投影后的协方差。LS 直接把相关干扰留在估计误差里，LMMSE 借助信道/噪声协方差抑制不可信方向。若给 LMMSE 的协方差是单位阵或错误维度，它会退化甚至误导，因此估计模式、协方差来源和序列资源必须共同记录。",
         ),
         implementation=(
-            ("建立载波与 TDD", "<code>nr_rb_count()</code> 按 FR1/FR2 表查询；<code>tdd_pattern_info()</code> 展开 D/U/S 与特殊时隙的 DL/UL symbol 数，GP 缺省时由 14−DL−UL 推出，调用者据此导出 DL fraction。"),
+            ("建立载波与 TDD", "<code>nr_rb_count()</code> 按 FR1/FR2 表查询；<code>tdd_pattern_info()</code> 展开符号划分。系统另外用 <code>SystemConfig.s_slot_dl_fraction</code> 计算名义下行比例，用 <code>PdschOverhead</code> 算净 RE；两种口径需分别展示。"),
             ("生成同步与参考序列", "<code>physical.py</code> 生成 PSS/SSS、PBCH DMRS、Gold sequence 与 SRS 基序列/循环移位，显式保持 cell/port/length 参数。"),
             ("验证相关合同", "<code>sequence_correlation()</code> 比较自相关峰、旁瓣和不同端口/小区互相关；测试覆盖循环移位与长度不一致处理。"),
             ("映射 SRS 频域轮转", "预置基线 C_SRS=63、B_SRS=1 每次覆盖 16 RB，17 次覆盖 272 RB；测量链按周期收集，不使用“年龄”作为周期名称。"),
@@ -1603,7 +1605,7 @@ DETAIL_SPECS.update({
         ),
         example_title="17 次 SRS 轮转、一个特殊时隙和两套 DFT 码本",
         example=(
-            "<p>100 MHz 预置基线实际调度 272 RB。SRS 每次覆盖 16 RB，因此 17 次恰好覆盖全带；若误用标准表的 273 RB，第 18 次只剩一个残块，测量与 17-RBG 调度无法一一对齐。再假设 TDD 周期有 7 个 D、2 个 U、1 个 S，S 中 6/14 个 symbol 为 DL，则可用 DL 比例是 (7+6/14)/10，而不是写死 0.7 或把 S 整个算成 DL。</p>"
+            "<p>100 MHz 预置基线调度 272 RB，每次 SRS 覆盖 16 RB，17 次覆盖全带。默认 DDDSU 中有 3 个 D、1 个 S、1 个 U，名义下行比例为 (3+0.715)/5=0.743。净 RE 另算：D 为 132 RE/PRB，S 为 floor(132×0.715)=94 RE/PRB；TBS 还要经过编码量化。</p>"
             "<p>同一个 64 端口阵列可生成 64 个 CSI-RS DFT 扫描波束，数组形状为 beam×port；PMI Type-I-style 则可能有 2048 个 port×column 候选，并含 +45/−45° 共相结构。二者都调用复指数并不意味着 index 17 指向同一个物理对象。文档和 API 必须标出 shape 与角色。</p>"
         ),
         checks=(
@@ -1616,7 +1618,7 @@ DETAIL_SPECS.update({
         ),
         pitfalls=(
             "用带宽除以 SCS 猜 RB 数，忽略 guard band 与 FR1/FR2 表差异。",
-            "把特殊时隙完整计为 DL，或在算法说明里永久写死 0.7。",
+            "把特殊时隙完整计为 DL，或把符号占比、名义资源权重、净 RE 比与吞吐比混成一个数。",
             "把 SRS 周期称作 SRS 年龄；真正可定义年龄的是当前 CSI 距离最后一次可用测量的 elapsed time。",
             "用理想序列低互相关证明现场不存在导频污染和方向性干扰。",
             "把 CSI-RS DFT beam index 当成 PMI Type-I column index。",
@@ -1634,10 +1636,10 @@ DETAIL_SPECS.update({
             "38.214 规定的是 CQI/MCS 表、谱效率和 TBS 过程，不提供一套可直接套用所有接收机的“标准 BLER 曲线”。<code>BlerModel</code> 用有限码长与实现损失构造分析瀑布；<code>preset_20b_256qam</code> 是内置表驱动 profile。两者都可以服务系统抽象，但报告必须带 backend/model_version，不能把分析模型或预置数据写成 3GPP 真值。",
             "预置表口径明确：误块事件是<strong>一个已调度 TTI 中该用户的单码字 TB</strong>，系统不另外暴露 CBLER。BLER 查询只使用跨 RBG、跨 rank stream 做 dB 平均后的码字级有效 SINR与选定 MCS；一次查询只形成一次 TB ACK/NACK。TBS、RE、rank、场景和码字数不作为曲线轴，物理编码内部即使分成多个 CB，也不应在预置表 3 路径上再次套 <code>1-(1-p)^C</code>。",
             "QAM 互信息首先依赖噪声约定。它服务表 1/2 的分析 BLER 与显式链路级 MIESM 调用，不进入当前 experience_v2+预置表 3 主链。代码使用复基带平均能量归一与 σ²=1/γ；若把实维高斯求积尺度误写成 √(2γ) 等价形式而未匹配方差，会引入约 3 dB 偏移。",
-            "MIESM 先把逐 RE/RB SINR 映射成对应 QAM 互信息，平均后反解等效 AWGN SINR；EESM 用指数平均并由 β 控制曲率。二者都让深衰落比线性功率平均更重要，但 EESM β 必须按 MCS/链路曲线标定。库中已有两种实现，不代表 experience_v2 已使用：当前体验链仍是 RBG 内线性聚合、跨已分配 RBG 做项目既有 dB 平均近似。",
+            "MIESM 按 QAM 互信息映射和反解等效 SINR，EESM 用带 β 参数的指数平均；参数需按链路曲线标定。两者虽有独立实现，当前系统表 3 并不使用：RB 先转 dB，在每个 RBG 内平均，再在实际分配的 RBG 与流之间做 dB 平均。这是当前单码字工程口径。",
             "<code>bler_data_20b.py</code> 保存 MCS0..27 的 NewTx/ReTx 原始点；当前系统有意只消费 28 条 NewTx 曲线。<code>_bler_lookup(mcs, codeword_sinr_db)</code> 不接收 TBS/rank/场景，是已确认的通用曲线合同，不再标成导入缺口。TBS 仍参与字节承载、padding、PF credit 和重传身份冻结，但不改变 BLER。",
             "分析后端的 CB→TB 合成假设码块错误近似独立，TB BLER 为一减全部码块成功概率。它仅用于表 1/2；预置表 3 不区分 CB/TB 接口，因此不能读取同一条预置 TBLER 后再暗加一次 CB 合成。",
-            "原始 ReTx 曲线不等于标准 HARQ 状态机，也不进入当前系统判错。初传 NACK 后只允许一次重传：默认 IR 把原 MCS 谱效除以 2，映射到不超过半谱效的最高等效 MCS并在原 SINR 上查 NewTx 曲线；CC 保持同档曲线并把 SINR 增加 10log10(2)。等效 MCS 只用于 BLER lookup，空口 MCS、RBG 数、rank 与 TBS 全部冻结。仍不能声称实现 RV、LLR、并行 process 或标准 timing。",
+            "原始 ReTx 曲线不进入系统判错。初传 NACK 后最多一次重传：IR 用不超过原谱效一半的最高等效 MCS 查 NewTx；CC 用原 MCS、SINR 加 10log10(2)。空口 MCS、PRB 数、rank、TBS 和时隙类型冻结。当前已有默认 8 个并行 HARQ 进程，但没有实现逐 RV/LLR 合并或完整标准 k1/k2 时序。",
         ),
         implementation=(
             ("解析标准链路表", "<code>linkadapt.py</code> 维护 CQI/MCS/TBS 规则，TBS 对 RBG 数用表驱动反查；不能用全带字节除以 17 估计所需 RBG。"),
@@ -1669,8 +1671,8 @@ DETAIL_SPECS.update({
         ),
         pitfalls=(
             "把 38.214 的 MCS/TBS 表称为 3GPP BLER 曲线。",
-            "按 <code>12 子载波 × 12 符号 = 144 RE/PRB</code> 算 TBS，等于假设 DM-RS 与 PDCCH 都不占资源，TBS 系统性偏大约 12.5%。",
-            "把 S 时隙的 RE 直接写成 <code>D × 0.7</code>：固定开销不随下行符号数缩水，这样算会少扣一次开销。",
+            "继续用旧 144 或 126 RE/PRB 算当前默认 TBS。当前 D 时隙净资源为 132；资源比例不能直接解释为吞吐变化百分比。",
+            "先按 S 系数折符号、再扣固定开销。当前合同是先扣完 D 开销，再用系数折算净 RE，每 PRB 向下取整。",
             "QAM MI 的实/复噪声方差约定不匹配，造成整体约 3 dB 偏移。",
             "看到 <code>effective_sinr()</code> 已存在，就宣称体验系统已改成 MIESM/EESM。",
             "把含NaN/Inf的逐RB数组过滤后继续映射；这会系统性删除最差或未知RB并高估码字能力。",
@@ -2064,11 +2066,11 @@ FORMULA_SPECS: dict[str, FormulaSpec] = {
     ),
     "F_RX_BLER": FormulaSpec(
         "最终 BLER 必须落到真实接收 SINR",
-        "gNB 设计出的同一个物理 Q 作用到 h_true 后，按同一经典 MMSE 公式得到逐 RB/流 SINR，再按 RBG 内线性、RBG/流 dB 平均形成单码字有效 SINR。只有这个接收端量和最终发送 MCS 才能查询 NewTx 曲线；仅有 CQI/BF/OLLA 时 BLER 是 unknown。",
+        "gNB 设计出的同一个物理 Q 作用到 h_true 后，按经典 MMSE 公式得到逐 RB/流 SINR。先转 dB，在 RBG 内平均，再跨实际授予的 RBG 与流平均。只有这个接收端量和最终发送 MCS 才能查 NewTx 曲线；仅有 CQI/BF/OLLA 时 BLER 是 unknown。",
         (("γ<sub>RX</sub>", "当前 TB 在真实接收信道上的单码字有效 SINR。"),
          ("H<sub>true</sub>", "当前时刻真实信道，只用于接收评估，不回填当次 BF/MCS 决策。"),
          ("Q<sub>SVD+C</sub>", "gNB 在 h_prec 上设计、并按选定功率约束 C 形成的实际发射矩阵。"),
-         ("A<sub>RBG,stream</sub>", "RBG 内线性平均，再跨 RBG/stream 做 dB 算术平均的聚合算子。"),
+         ("A<sub>RBG,stream</sub>", "先在 RBG 内、再跨已分配 RBG/stream 做 dB 算术平均的聚合算子。"),
          ("m<sub>final</sub>", "CQI→BF→MCS→OLLA→floor/clip 后真正发出的 MCS。"),
          ("C<sub>m</sub>(·)", "预置 profile 中 MCS m 的 NewTx BLER 插值曲线。"),
          ("P<sub>TB,error</sub>", "本用户本 TTI 单码字 TB 的误块概率。")),
@@ -2080,13 +2082,14 @@ FORMULA_SPECS: dict[str, FormulaSpec] = {
          ("Γ(MCS(CQI))", "CQI 给出的 SU 基准 SINR 门限。"),
          ("G<sub>BF</sub>", "基于可见 CSI 的波束赋形增益。"),
          ("L<sub>corr</sub>", "配对用户残留相关性/零陷不完美造成的 dB 损失。"),
-         ("L<sub>power</sub>", "MU 同资源上总功率在更多流之间平分造成的 dB 损失。")),
+         ("L<sub>power,u</sub>", "MU 同资源上总功率在更多流之间平分造成的 dB 损失。")),
     ),
     "F_POWER_LOSS": FormulaSpec(
-        "MU 并发用户数带来的等功率损失",
-        "若同一 RBG 总功率固定并在 K_MU 个等 rank 用户之间均分，则每个用户相对 SU 少 10log10(K_MU) dB。两个用户时就是 −3.01 dB。",
-        (("L<sub>power</sub>", "MU 相对 SU 的每用户功率损失，单位 dB，取非正值。"),
-         ("K<sub>MU</sub>", "同一资源上并发、分享总功率的 MU 用户数。"),
+        "MU 按层等分功率后，每个用户分到多少",
+        "总功率按所有用户的流等分，用户 u 分到 rank_u/sum(rank)。两名等 rank 用户各减 3.01 dB；rank1+rank2 时分别减 4.77/1.76 dB。",
+        (("L<sub>power,u</sub>", "MU 相对 SU 的每用户功率损失，单位 dB，取非正值。"),
+         ("r<sub>u</sub>", "用户 u 的发送层数，当前每用户支持 1–2 层。"),
+         ("Σ<sub>v</sub>r<sub>v</sub>", "本配对所有用户的总层数。"),
          ("log<sub>10</sub>", "功率比例到 dB 的十进对数。")),
     ),
     "F_CQI_IIR": FormulaSpec(
@@ -2220,7 +2223,7 @@ FORMULA_SPECS: dict[str, FormulaSpec] = {
          ("m<sub>base,SU</sub>/m<sub>base,MU</sub>", "SU/MU 各自在完成 SINR 域增益/损失后反折的无 OLLA 基准档，结果字段为 mcs_without_olla。"),
          ("m<sub>tx,SU</sub>/m<sub>tx,MU</sub>", "本 TTI 真正写入 grant 的最终发送 MCS。"),
          ("Δ<sub>SU</sub>/Δ<sub>MU</sub>", "用户级 SU/MU OLLA 连续 MCS-index 状态。"),
-         ("L<sub>corr</sub>/L<sub>power</sub>", "MU 残留相关性与并发 rank 功率分摊损失，通常≤0 dB。"),
+         ("L<sub>corr</sub>/L<sub>power,u</sub>", "MU 残留相关性与并发 rank 功率分摊损失，通常≤0 dB。"),
          ("p<sub>target</sub>", "MCS 查表的目标初传 BLER，默认 10%。"),
          ("⌊·⌋ / clip", "先向下取整连续 MCS offset，再限制到当前 profile 的 MCS 上下界。")),
     ),
@@ -2638,12 +2641,10 @@ FORMULA_SPECS.update({
     ),
     "F_TDD_FRACTION": FormulaSpec(
         "普通下行时隙与特殊时隙共同形成可用下行比例",
-        "D slot 全部计入，U slot 不计，S slot 只按其中下行 OFDM symbol 的比例计入。页面和系统仿真必须从同一 pattern/special-slot 配置导出，不能长期写死 0.7。",
+        "D 权重 1，U 权重 0，S 权重来自显式配置，默认 0.715。它是名义净资源折算系数，不是直接从特殊时隙 DL 符号数推导的值。实际 S 时隙 RE 还要逐 PRB 向下取整，TBS 另做量化。",
         (("ρ<sub>DL</sub>", "一个 TDD pattern 周期内的下行资源比例。"),
          ("N<sub>D</sub>/N<sub>S</sub>/N<sub>U</sub>", "周期内普通下行/特殊/普通上行时隙数。"),
-         ("f<sub>S</sub>", "一个特殊时隙中可用于下行的 symbol 比例。"),
-         ("N<sub>DL,sym</sub>", "特殊时隙里的下行 OFDM symbol 数。"),
-         ("N<sub>sym/slot</sub>", "每时隙总 OFDM symbol 数，常规 CP 通常为 14。")),
+         ("f<sub>S</sub>", "s_slot_dl_fraction：S 时隙相对 D 时隙的名义净资源权重。")),
     ),
     "F_QAM_MI": FormulaSpec(
         "有限 QAM 星座的对称互信息",
@@ -2698,7 +2699,7 @@ FORMULA_SPECS.update({
         "SuperRAN 当前预置表口径先在每个 RBG 内对 RB 的线性 SINR逐流平均，再转 dB；随后对选定 rank 的所有 stream 与实际 grant 的所有 RBG 做 dB 算术平均。这个透明基线不是已标定的 EESM/MIESM。",
         (("γ<sub>b,s</sub>", "RB b、stream s 的线性 SINR。"),
          ("B<sub>g</sub>", "第 g 个 RBG 所包含的 RB 索引集合；固定系统中每组 16 RB。"),
-         ("γ<sub>g,s</sub><sup>dB</sup>", "RBG g、stream s 在 RBG 内线性平均后转成的 dB SINR。"),
+         ("γ<sub>g,s</sub><sup>dB</sup>", "RBG g、stream s 内各 RB 先转 dB 后取算术平均的 SINR。"),
          ("N<sub>G</sub>", "本 TB 实际获配的 RBG 数，不一定是全带 17。"),
          ("N<sub>s</sub>", "选定 rank 的 stream 数；不是 rank1/2/3/4 四个候选之间求平均。"),
          ("γ<sub>cw</sub><sup>dB</sup>", "最终用于预置 BLER 曲线查询的唯一单码字有效 SINR。")),
