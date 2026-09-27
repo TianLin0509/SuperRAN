@@ -173,6 +173,8 @@ for q in prop["design_questions"]:
     print(f"           why: {q['why'][:66]}…")
     print(f"           例:  {' / '.join(q['examples'][:3])}")
 check(len(prop["design_questions"]) >= 2, "提供了实验设计层问题")
+check("num_samples" not in [q["key"] for q in prop["questions"]],
+      "样本数由试点方差算，不问用户")
 check(all(q["why"] and q["examples"] for q in prop["design_questions"]), "设计问题都带 why 和示例")
 
 print(f"\n  第 {prop['round']} 轮 · {prop['round_focus']}")
@@ -186,9 +188,10 @@ print("      或者你直接说")
 
 n_this_round = len(prop["design_questions"]) + len(prop["questions"])
 print(f"\n    本轮 {n_this_round} 问，还剩 {prop['remaining_count']} 项")
-check(2 <= n_this_round <= 6, f"一轮问 2~6 个（实际 {n_this_round}）")
-check(all(3 <= len(q["options"]) <= 4 for q in prop["design_questions"] + prop["questions"]),
-      "每个问题 3~4 个选项")
+# 2026-09-26 访谈改造：每轮只问 ≤3 个前沿问题；二选一的问题不硬凑第三项。
+check(1 <= n_this_round <= 3, f"一轮问 1~3 个（实际 {n_this_round}）")
+check(all(2 <= len(q["options"]) <= 4 for q in prop["design_questions"] + prop["questions"]),
+      "每个问题 2~4 个选项")
 check(all(any(o.get("recommended") for o in q["options"])
           for q in prop["design_questions"] + prop["questions"] if not q.get("optional")),
       "必答问题都标出了推荐项")

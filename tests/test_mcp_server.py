@@ -236,8 +236,11 @@ async def main() -> None:
                     star = "  ← 推荐" if o.get("recommended") else ""
                     print(f"        {i}) {o['label']}{star}")
             print(f"\n  还能调（只给名字）：{'、'.join(prop['also_configurable'][:11])}…")
-            check(2 <= len(rq) <= 4, f"一轮 2~4 问（实际 {len(rq)}）")
-            check(all(3 <= len(q["options"]) <= 4 for q in rq), "每题 3~4 个选项")
+            check(1 <= len(rq) <= 3, f"一轮 1~3 问（实际 {len(rq)}；只问前沿问题）")
+            # 二选一的问题（如要不要关自适应周期）不硬凑第三项。
+            check(all(2 <= len(q["options"]) <= 4 for q in rq), "每题 2~4 个选项")
+            check(all(sum(o.get("recommended", False) for o in q["options"]) == 1 for q in rq),
+                  "每题恰好一个推荐项")
             check(all(q.get("why") for q in rq), "每题都带 why")
             check(len(prop["also_configurable"]) >= 10, "给出可配项关键词列表")
             check(prop["ready_to_go"] and prop["can_generate_now"], "未表态也可直接生成")

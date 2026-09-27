@@ -8,7 +8,7 @@
   "member_skill": "skills/superran-member-task/SKILL.md",
   "lead_skill": "skills/superran-lead/SKILL.md",
   "simulation_skill": "skills/channel-sim/SKILL.md",
-  "mcp_tool_count": 35,
+  "mcp_tool_count": 36,
   "rehearsal_title_prefix": "[REHEARSAL]",
   "rehearsal_merge_allowed": false,
   "author_modes": {

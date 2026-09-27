@@ -3,15 +3,15 @@
 # 用法： powershell -File C:\Vibe\Wireless\SuperRAN\scripts\superran_company_zip.ps1
 #
 # 做三件事：
-#   1. 从 GitHub 下载最新的 main 分支快照
-#   2. 把 SHA 写进文件名——GitHub 的 zip 里没有 git 信息，文件名是最省事的版本标记
+#   1. 从阿里云取得指定分支（默认 develop）的确定提交
+#   2. 从该提交导出 zip，文件名和包内目录写明版本
 #   3. 打印出你要发给内网 Agent 的那句话
 #
-# 只读远端，不改本地任何分支或文件。
+# 只读远端；更新 FETCH_HEAD 与对象缓存，不改本地分支、索引或工作文件。
 
 param(
     [string]$OutDir = "$env:USERPROFILE\Desktop\claude-artifacts",
-    [string]$Branch = "main"
+    [string]$Branch = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,22 +19,37 @@ $repo = Split-Path -Parent $PSScriptRoot
 
 Push-Location $repo
 try {
-    Write-Host "正在查最新版本..." -ForegroundColor DarkGray
-    git fetch origin --quiet --prune
-    $sha = (git rev-parse "origin/$Branch").Trim()
-    if (-not $sha) { throw "拿不到 origin/$Branch 的 SHA，检查网络或分支名" }
+    $project = Get-Content -LiteralPath (Join-Path $repo '.agents/project.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not $Branch) { $Branch = $project.trunk }
+    $remote = $project.cloudRepository.remote
+    $expectedUrl = $project.cloudRepository.url
+    if (-not $remote -or -not $expectedUrl) { throw '缺少阿里云仓库配置' }
+    $actualUrl = @(git remote get-url --all $remote)
+    if ($LASTEXITCODE -ne 0 -or $actualUrl.Count -ne 1 -or $actualUrl[0] -ne $expectedUrl) {
+        throw '日常远端未切换到阿里云，请先运行 scripts/agent_repo.py init'
+    }
+    git check-ref-format "refs/heads/$Branch"
+    if ($LASTEXITCODE -ne 0) { throw '分支名称不合法' }
+    Write-Host "正在从阿里云核对 $Branch ..." -ForegroundColor DarkGray
+    $advertised = @(git ls-remote --heads $remote "refs/heads/$Branch")
+    if ($LASTEXITCODE -ne 0 -or $advertised.Count -ne 1) { throw '未取得唯一云端分支版本' }
+    $sha = ($advertised[0] -split '\s+')[0]
+    if ($sha -notmatch '^[0-9a-f]{40}$') { throw '未取得确定的完整版本' }
+    # FETCH_HEAD 是同仓库各 worktree 共用的临时文件，不能用它重新选择版本。
+    git fetch --quiet --no-tags $remote $sha
+    if ($LASTEXITCODE -ne 0) { throw '取回确定云端版本失败，未打包' }
     $short = $sha.Substring(0, 7)
     $date = Get-Date -Format "yyyyMMdd"
 
     if (-not (Test-Path -LiteralPath $OutDir)) {
         New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
     }
-    $zip = Join-Path $OutDir "SuperRAN-$date-$short.zip"
+    $zip = Join-Path $OutDir "$date-SuperRAN-$short-company.zip"
+    if (Test-Path -LiteralPath $zip) { throw "目标文件已存在，保留原文件：$zip" }
 
-    Write-Host "正在下载 $short ..." -ForegroundColor DarkGray
-    # 按 SHA 下载：解压后的目录名就是完整 SHA，内网 Agent 一眼能看出基线
-    Invoke-WebRequest -Uri "https://github.com/TianLin0509/SuperRAN/archive/$sha.zip" `
-                      -OutFile $zip -UseBasicParsing
+    Write-Host "正在导出 $short ..." -ForegroundColor DarkGray
+    git -c core.autocrlf=false archive --format=zip "--prefix=SuperRAN-$sha/" "--output=$zip" $sha
+    if ($LASTEXITCODE -ne 0) { throw '导出失败，现有文件不能作为有效审核包' }
 
     $size = [math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 1)
 

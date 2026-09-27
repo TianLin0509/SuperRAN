@@ -192,17 +192,16 @@ multicell_7site:
   label: 多小区 · 7 站 21 扇区
   summary: 密集城区，中心小区被一圈邻区包围，干扰环境完整。
   typical_for: [干扰协调, 调度, 切换]
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
-    iot_dl_db: 27.16      # 高干扰
-    iot_ul_db: 0.89
-    sinr_db: 14.75
-    sir_db: 14.84
-    pathloss_db: 92.76
-    distance_m: 86.21
-    los_ratio: 0.46
+    iot_dl_db: 37.71      # 极高干扰
+    sinr_db: 6.5
+    sir_db: 6.5
+    pathloss_db: 89.06
+    distance_m: 118.02
+    los_ratio: 0.571
     doppler_hz: 9.72
-    ms_per_sample: 444
+    ms_per_sample: 789
   config:
     source: internal_sim
     scenario: UMi_NLOS
@@ -227,17 +226,16 @@ multicell_19site:
   label: 多小区 · 19 站 57 扇区（38.901 Case 1）
   summary: 两圈邻区的标准宏站基准，中心小区干扰最完整。耗时约为 7 站的三倍。
   typical_for: [干扰协调, 系统级评估, 论文对标]
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 114 样本，与 sr_generate 同一套默认阵列
     cells: 57
-    iot_dl_db: 14.68      # 较高干扰
-    iot_ul_db: 0.14
-    sinr_db: 16.56
-    sir_db: 18.06
-    pathloss_db: 116.71
-    distance_m: 213.09
-    los_ratio: 0.159
+    iot_dl_db: 26.22      # 高干扰
+    sinr_db: 5.45
+    sir_db: 5.46
+    pathloss_db: 113.79
+    distance_m: 247.01
+    los_ratio: 0.404
     doppler_hz: 9.72
-    ms_per_sample: 920
+    ms_per_sample: 835
   config:
     source: internal_sim
     scenario: UMa_NLOS
@@ -362,17 +360,16 @@ indoor_factory:
   label: 室内工厂 · InF
   summary: 38.901 §7.2 室内工厂场景，时延扩展与城区差别明显。
   typical_for: [室内定位, 工业物联]
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 72 样本，与 sr_generate 同一套默认阵列
     cells: 4
-    iot_dl_db: 46.94      # 极高干扰
-    iot_ul_db: 45.45
-    sinr_db: 6.45
-    sir_db: 6.45
-    pathloss_db: 70.16
-    distance_m: 29.97
-    los_ratio: 0.206
+    iot_dl_db: 36.92      # 极高干扰
+    sinr_db: 12.91
+    sir_db: 12.91
+    pathloss_db: 71.48
+    distance_m: 37.98
+    los_ratio: 1.0
     doppler_hz: 5.56
-    ms_per_sample: 179
+    ms_per_sample: 135
   config:
     source: internal_sim
     scenario: InF
@@ -403,23 +400,22 @@ indoor_factory:
 high_iot_dense:
   group: 干扰场景
   label: 高干扰 · 密集城区 21 小区 · ISD 150 m
-  summary: 密集城区微站，站间距 150 m，21 个小区互相干扰。发射功率走 UMi 的
-    33 dBm 默认值——**不要为了凑高 IoT 去堆 46 dBm**，那是宏站功率，
-    配 150 m 站距在物理上讲不通（实测会把 IoT 推到 48.8 dB，等效负载 0.99999）。
+  summary: 密集城区微站，站间距 150 m，21 个小区互相干扰。设计意图是 UMi 微站
+    33 dBm——**但本预设没有显式设功率，而当前内核对所有场景默认 46 dBm**，
+    所以实际跑在宏站功率上（2026-09-26 重测 IoT 中位 46.6 dB）。150 m 站距配宏站
+    功率在物理上讲不通；要恢复设计意图需显式设 tx_power_dbm，待维护者决定。
   typical_for: [干扰抑制, 干扰协调, 链路自适应鲁棒性, 边缘用户]
   verify: sr_probe_scenario 看 interference.dl_iot.median_db，应落在高干扰档
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
-    iot_dl_db: 35.76      # 极高干扰
-    iot_ul_db: 2.89
-    sinr_db: 13.01
-    sir_db: 13.01
-    pathloss_db: 86.78
-    distance_m: 70.51
-    los_ratio: 0.587
+    iot_dl_db: 46.62      # 极高干扰
+    sinr_db: 8.35
+    sir_db: 8.35
+    pathloss_db: 84.48
+    distance_m: 86.86
+    los_ratio: 0.81
     doppler_hz: 9.72
-    snr_clamped_out: 3   # 探测口径下撞 +50 dB 夹逼，SNR 分布已剔除这些样本
-    ms_per_sample: 847
+    ms_per_sample: 722
   config:
     source: internal_sim
     scenario: UMi_NLOS
@@ -443,27 +439,26 @@ low_iot_reference:
   group: 干扰场景
   label: 去邻站对照 · 同小区尺寸（SNR 对齐的干扰消融）
   summary: high_iot_dense 的干净对照：**只改一件事——把 7 站减成 1 站**。
-    小区半径、功率、天线、频点全部不变。实测两组 SNR 中位数 30.5 vs 29.4 dB
-    （只差 1.1 dB），IoT 20.3 vs 35.8 dB（差 15.5 dB）——**变量分离得很干净**。
+    小区半径、功率、天线、频点全部不变。旧内核实测两组 SNR 中位数只差 1.1 dB。
+    **2026-09-26 在当前内核重测：SNR 中位 51.2 vs 58.8 dB（差 7.6 dB），IoT 35.8 vs
+    46.6 dB——SNR 已不再对齐，“只改一件事”的前提需要复核后才能当消融对照用。**
     作为对照：早先那版用 ISD 800 m 拉低干扰，两组 SNR 差了 45 dB，根本不是同一个工况。
-    注意剩下的 2 个同站扇区仍会互扰，IoT 不归零，20.3 dB 按现场口径**仍算高干扰**。
+    注意剩下的 2 个同站扇区仍会互扰，IoT 不归零（当前内核 35.8 dB，**仍算高干扰**）。
   typical_for: [干扰场景对照, 消融实验]
   verify: 与 high_iot_dense 并排 sr_compare_scenarios，看 IoT 拉开而 SNR 基本齐平
   caveat: 在这套模型里 **IoT 与 SNR 无法完全解耦** —— 两者都含热噪声 N。
     靠拉大站间距来降 IoT 会同时把 SNR 拉低（实测 ISD 800 m 时 SNR 中位数 -5.9 dB），
     那样的"对照组"混了两个变量。减站数是能想到的最干净的做法。
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 3
-    iot_dl_db: 20.31      # 高干扰
-    iot_ul_db: 16.71
-    sinr_db: 26.95
-    sir_db: 28.81
-    pathloss_db: 83.76
-    distance_m: 65.35
-    los_ratio: 0.556
+    iot_dl_db: 35.78      # 极高干扰
+    sinr_db: 16.79
+    sir_db: 16.79
+    pathloss_db: 86.38
+    distance_m: 73.1
+    los_ratio: 0.524
     doppler_hz: 9.72
-    snr_clamped_out: 8   # 探测口径下撞 +50 dB 夹逼，SNR 分布已剔除这些样本
-    ms_per_sample: 345
+    ms_per_sample: 577
   config:
     source: internal_sim
     scenario: UMi_NLOS
@@ -489,18 +484,17 @@ high_iot_uplink:
   summary: 上行 IoT 是干扰抬升的经典口径（基站侧噪声抬升）。邻区每小区多个 UE 满负载同发。
   typical_for: [上行干扰, 功控, 上行调度, 接收机算法]
   verify: sr_interference_report 看 traffic_domain.ul.iot；上行 IoT 由 pusch_load 乘每小区 UE 数决定
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 105 样本，与 sr_generate 同一套默认阵列
     cells: 21
-    iot_dl_db: 23.68      # 高干扰
-    iot_ul_db: 6.25
-    sinr_db: 13.99
-    sir_db: 14.14
-    pathloss_db: 94.36
-    distance_m: 86.94
-    los_ratio: 0.413
+    iot_dl_db: 39.9      # 极高干扰
+    sinr_db: 5.87
+    sir_db: 5.87
+    pathloss_db: 91.13
+    distance_m: 99.79
+    los_ratio: 0.571
     doppler_hz: 9.72
     srs_meas_sir_db: -9.88   # 测量已失效
-    ms_per_sample: 1150
+    ms_per_sample: 750
   config:
     source: internal_sim
     scenario: UMi_NLOS
@@ -535,18 +529,17 @@ srs_congested:
   summary: 每个邻区 24 个 UE 同时发 SRS，comb=2、关掉组跳与序列跳，导频碰撞最严重。
   typical_for: [信道估计鲁棒性, SRS 容量, 导频污染, 上行 CSI 获取]
   verify: sr_interference_report 看 measurement_domain.ul_srs.sir_dB 中位数与 nmse_floor_db
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
-    iot_dl_db: 29.08      # 高干扰
-    iot_ul_db: 1.06
-    sinr_db: 15.57
-    sir_db: 15.7
-    pathloss_db: 92.76
-    distance_m: 86.21
-    los_ratio: 0.46
+    iot_dl_db: 37.71      # 极高干扰
+    sinr_db: 6.5
+    sir_db: 6.5
+    pathloss_db: 89.06
+    distance_m: 118.02
+    los_ratio: 0.571
     doppler_hz: 9.72
     srs_meas_sir_db: -10.5   # 测量已失效
-    ms_per_sample: 1333
+    ms_per_sample: 746
   config:
     source: internal_sim
     scenario: UMi_NLOS
@@ -576,18 +569,17 @@ srs_clean_reference:
   summary: 与 srs_congested 配对。邻区只有 2 个 UE 发 SRS，comb=4 并开组跳变。
   typical_for: [测量干扰对照, 消融实验]
   verify: 与 srs_congested 只差导频配置，两者 measurement_domain 之差就是导频方案的净效应
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
-    iot_dl_db: 29.02      # 高干扰
-    iot_ul_db: 1.44
-    sinr_db: 14.6
-    sir_db: 14.6
-    pathloss_db: 92.76
-    distance_m: 86.21
-    los_ratio: 0.46
+    iot_dl_db: 37.71      # 极高干扰
+    sinr_db: 6.5
+    sir_db: 6.5
+    pathloss_db: 89.06
+    distance_m: 118.02
+    los_ratio: 0.571
     doppler_hz: 9.72
     srs_meas_sir_db: 7.37   # 测量严重受损
-    ms_per_sample: 594
+    ms_per_sample: 748
   config:
     source: internal_sim
     scenario: UMi_NLOS
@@ -618,7 +610,7 @@ srs_hopping_partial_band:
     低功率 UE 的常规做法，代价是拼出的信道跨越多个时刻、动了就不准。
   typical_for: [SRS 跳频, 信道老化, 时变信道估计, TDD 互易性]
   verify: 与 srs_clean_reference 比 h_est 的 NMSE；跳频的损失随速度放大
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 未重测：当前主干探测即报错（SRS 周期 5 ms 不受资源分配器支持），下列为旧内核数字
     cells: 21
     iot_dl_db: 26.66      # 高干扰
     iot_ul_db: 1.57
@@ -668,17 +660,16 @@ large_isd_1732m:
   typical_for: [覆盖分析, 边缘用户, 低信噪比算法, 上行受限]
   verify: sr_interference_report 的 IoT 应当明显低于密集城区；SNR 分布左移
   caveat: 用的是 UMa_NLOS 路损公式，不是 RMa。站间距是农村口径，传播模型不是。
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
-    iot_dl_db: 2.47      # 轻载
-    iot_ul_db: 0.03
-    sinr_db: 15.57
-    sir_db: 20.98
-    pathloss_db: 128.92
-    distance_m: 709.46
-    los_ratio: 0.032
+    iot_dl_db: 2.49      # 噪声受限
+    sinr_db: 0.99
+    sir_db: 6.47
+    pathloss_db: 133.79
+    distance_m: 904.97
+    los_ratio: 0.0
     doppler_hz: 5.83
-    ms_per_sample: 413
+    ms_per_sample: 506
   config:
     source: internal_sim
     scenario: UMa_NLOS
@@ -707,17 +698,16 @@ large_isd_5km:
   typical_for: [极限覆盖, 低频段, 广域物联]
   verify: 路损分布与距离分布；这个场景多数样本是噪声受限的
   caveat: 同 large_isd_1732m —— 用的是 UMa_NLOS 路损公式，不是 RMa。
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
-    iot_dl_db: 3.55      # 低干扰
-    iot_ul_db: 0.01
-    sinr_db: 11.69
-    sir_db: 16.3
-    pathloss_db: 136.93
-    distance_m: 2046.08
-    los_ratio: 0.0
+    iot_dl_db: 2.26      # 噪声受限
+    sinr_db: -0.29
+    sir_db: 5.29
+    pathloss_db: 142.26
+    distance_m: 2610.99
+    los_ratio: 0.048
     doppler_hz: 1.94
-    ms_per_sample: 293
+    ms_per_sample: 227
   config:
     source: internal_sim
     scenario: UMa_NLOS
@@ -749,17 +739,16 @@ vehicular_120kmh:
   summary: 3.5 GHz 下多普勒约 389 Hz，相干时间约 1 ms。CSI 老化开始明显。
   typical_for: [信道预测, CSI 老化, 多普勒鲁棒性, 波束跟踪]
   verify: meta__doppler_hz 分布；与静止场景比 h_est 的 NMSE
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
-    iot_dl_db: 2.59      # 轻载
-    iot_ul_db: 0.14
-    sinr_db: 19.06
-    sir_db: 20.84
-    pathloss_db: 112.55
-    distance_m: 205.93
-    los_ratio: 0.19
-    doppler_hz: 388.89   # 解析值 |v|/λ（120 km/h @ 3.5 GHz）；旧值 265.11 是双重投影 bug 修复前的探测残留
-    ms_per_sample: 1031
+    iot_dl_db: 24.07      # 高干扰
+    sinr_db: 8.87
+    sir_db: 9.11
+    pathloss_db: 112.79
+    distance_m: 253.98
+    los_ratio: 0.333
+    doppler_hz: 388.89
+    ms_per_sample: 1045
   config:
     source: internal_sim
     scenario: UMa_NLOS
@@ -789,17 +778,16 @@ highspeed_350kmh:
     一个时隙内信道已经变了。用来压测预测与跟踪类算法。
   typical_for: [高铁, 信道预测极限, 多普勒补偿]
   verify: meta__doppler_hz 中位数应接近 1100 Hz
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
-    iot_dl_db: 0.59      # 轻载
-    iot_ul_db: 0.02
-    sinr_db: 13.78
-    sir_db: 22.17
-    pathloss_db: 124.96
-    distance_m: 409.86
-    los_ratio: 0.048
-    doppler_hz: 1134.26   # 解析值 |v|/λ（350 km/h @ 3.5 GHz）；旧值 773.28 同上
-    ms_per_sample: 581
+    iot_dl_db: 2.06      # 噪声受限
+    sinr_db: 0.58
+    sir_db: 6.87
+    pathloss_db: 127.72
+    distance_m: 551.31
+    los_ratio: 0.095
+    doppler_hz: 1134.26
+    ms_per_sample: 553
   config:
     source: internal_sim
     scenario: UMa_NLOS
@@ -838,17 +826,16 @@ umi_los_canyon:
     路损公式（不看逐链路的 is_los），但数据里的 is_los 仍按几何视距概率抽样——
     实测 los_ratio 是 0.46 而不是 1。判断这批数据是不是视距的，看 scenario 字段，
     不看 los_ratio。
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     cells: 21
-    iot_dl_db: 38.57      # 极高干扰
-    iot_ul_db: 14.83
-    sinr_db: 11.45
-    sir_db: 11.45
-    pathloss_db: 83.56
-    distance_m: 86.21
-    los_ratio: 0.46
+    iot_dl_db: 56.68      # 极高干扰
+    sinr_db: 1.35
+    sir_db: 1.35
+    pathloss_db: 85.71
+    distance_m: 113.56
+    los_ratio: 1.0
     doppler_hz: 9.72
-    ms_per_sample: 643
+    ms_per_sample: 547
   config:
     source: internal_sim
     scenario: UMi_LOS
@@ -870,22 +857,25 @@ umi_los_canyon:
 
 hotspot_cluster:
   group: 传播条件
-  label: 热点聚集 · UE 非均匀分布
-  summary: UE 聚成热点而非均匀撒点，同一小区内用户信道高度相关。
-    均匀撒点会高估空分复用的收益，这个场景是它的对照。
+  label: 热点聚集（热点撒点未实现，实际为均匀撒点）
+  summary: 设计意图是让 UE 聚成热点、同小区用户信道高度相关，作为均匀撒点的对照。
+    **当前内核不读 ue_distribution，实际仍是均匀撒点，数据与 multicell_7site 相同**；
+    在热点撒点实现之前，不能用它得出任何“热点 vs 均匀”的结论。
+  caveat: ue_distribution=hotspot 不生效（sr_list_presets 的 not_effective 与探测的
+    not_modeled 会列出）。
   typical_for: [MU-MIMO 配对, 用户相关性, 调度公平性]
   verify: ue_position 的空间分布；同小区用户信道相关性
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
+    # 注意：当前内核不读 ue_distribution，本预设实际是均匀撒点，数据与 multicell_7site 相同
     cells: 21
-    iot_dl_db: 26.03      # 高干扰
-    iot_ul_db: 1.26
-    sinr_db: 12.78
-    sir_db: 12.87
-    pathloss_db: 93.21
-    distance_m: 88.82
-    los_ratio: 0.429
+    iot_dl_db: 37.71      # 极高干扰
+    sinr_db: 6.5
+    sir_db: 6.5
+    pathloss_db: 89.06
+    distance_m: 118.02
+    los_ratio: 0.571
     doppler_hz: 9.72
-    ms_per_sample: 494
+    ms_per_sample: 880
   config:
     source: internal_sim
     scenario: UMi_NLOS
@@ -919,18 +909,17 @@ massive_mimo_256t:
     F 尺寸 1536x256 且每列 6 个非零；
     再看干扰与波束 KPI。旧 expect 来自“256 个独立端口”的 legacy 模型，已失效，
     真实 1驱6 模型完成重测前不得复用旧数值。
-  expect:   # 旧 legacy_64 探测，仅保留为迁移警示，不能作真实 256T 基线
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
     status: stale_legacy_independent_ports
     cells: 21
-    iot_dl_db: 44.68      # 极高干扰
-    iot_ul_db: 2.02
-    sinr_db: 20.56
-    sir_db: 20.56
-    pathloss_db: 83.91
-    distance_m: 86.21
-    los_ratio: 0.587
+    iot_dl_db: 42.24      # 极高干扰
+    sinr_db: 6.85
+    sir_db: 6.85
+    pathloss_db: 86.77
+    distance_m: 118.02
+    los_ratio: 0.571
     doppler_hz: 9.72
-    ms_per_sample: 874
+    ms_per_sample: 2660
   config:
     source: internal_sim
     scenario: UMa_NLOS
@@ -965,26 +954,25 @@ massive_mimo_256t:
 
 hst_350kmh:
   group: 高铁
-  label: 高铁沿线 · 350 km/h · 车体穿透 20 dB
-  summary: 站点沿轨道两侧交错、间距 580 m、垂距 30 m。UE 在 400 m 长的车厢内撒点，
-    整列车 350 km/h 移动。车体穿透损耗 20 dB 是高铁场景与普通高速移动最大的区别——
-    它把链路预算整体压低 20 dB，很多在开阔地成立的结论到车厢里就不成立了。
-  typical_for: [高铁, 切换, 多普勒补偿, 车体穿透, 沿线覆盖]
-  verify: sr_probe_scenario 看多普勒中位数与路损；路损应明显高于同距离的开阔场景
+  label: 高铁沿线 · 350 km/h（车体穿透未实现）
+  summary: 站点沿轨道两侧交错、间距 580 m、轨道偏移 30 m，350 km/h 线性移动——这两项生效。
+    **车体穿透损耗 20 dB 与车厢内撒点（train_length_m / train_width_m）当前内核不读，
+    未生效**：链路预算没有被压低 20 dB，结论只代表开阔地高速场景。
+  typical_for: [高铁, 切换, 多普勒补偿, 沿线覆盖]
+  verify: sr_probe_scenario 看多普勒中位数；路损与开阔地相同（车体穿透未生效），不要按“车厢内”解读
   caveat: 不是 38.104 HST-SFN 一致性配置（那套是单频网合并）。
-    穿透损耗是配置项不是模型，改 train_penetration_loss_db 直接平移路损。
-  expect:   # 实测，63 样本 · sr_probe_scenario
+    train_penetration_loss_db、train_length_m、train_width_m 当前不生效。
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
+    # 注意：当前内核不读 train_penetration_loss_db，车体穿透损耗未生效
     cells: 21
-    iot_dl_db: 1.92      # 轻载
-    iot_ul_db: 0.99
-    sinr_db: 22.96
-    sir_db: 23.23
-    pathloss_db: 101.76
-    distance_m: 125.37
-    los_ratio: 0.333
-    doppler_hz: 842.59   # 解析值 |v|/λ（350 km/h @ 2.6 GHz）；旧值 817.95 同上
-    snr_clamped_out: 3   # 探测口径下撞 +50 dB 夹逼，SNR 分布已剔除这些样本
-    ms_per_sample: 548
+    iot_dl_db: 34.91      # 极高干扰
+    sinr_db: 7.15
+    sir_db: 7.16
+    pathloss_db: 89.24
+    distance_m: 252.39
+    los_ratio: 1.0
+    doppler_hz: 842.59
+    ms_per_sample: 356
   config:
     source: internal_sim
     scenario: UMa_LOS
@@ -1015,26 +1003,25 @@ hst_350kmh:
 
 hst_hypercell_comp:
   group: 高铁
-  label: 高铁超级小区 · 3 站同 PCI 联合发送
-  summary: 与 hst_350kmh 同一条线，但把相邻 3 个站编成同一个 PCI（超级小区），
-    并让最强的 2 个 TRP 联合发送。沿线切换次数大幅减少，代价是小区变大、
-    小区内干扰变成同频叠加。
-  typical_for: [超级小区, CoMP 联合发送, 切换优化, 单频网]
-  verify: 与 hst_350kmh 并排 sr_compare_scenarios，看 IoT 与 SINR 的变化方向
-  caveat: 联合发送在这套引擎里是把多个 TRP 的信道按天线维拼接、接收功率相加，
-    不含相位对齐误差与时延差建模。
-  expect:   # 实测，63 样本 · sr_probe_scenario
+  label: 高铁超级小区（超级小区与联合发送未实现）
+  summary: 设计意图是在 hst_350kmh 基础上把相邻 3 站编成同一个 PCI（超级小区），
+    并让最强的 2 个 TRP 联合发送。**当前内核不读 hypercell_size 与 joint_trp_count，
+    超级小区与联合发送都未生效，数据与 hst_350kmh 相同**；车体穿透同样未生效。
+  typical_for: [高铁, 沿线覆盖（超级小区与联合发送待实现）]
+  verify: 当前数据与 hst_350kmh 相同；在超级小区/联合发送实现前不做并排对比
+  caveat: hypercell_size、joint_trp_count、train_penetration_loss_db 当前不生效；
+    不能用本预设比较超级小区或联合发送的收益。
+  expect:   # 2026-09-26 重测：sr_probe_scenario 63 样本，与 sr_generate 同一套默认阵列
+    # 注意：当前内核不读 train_penetration_loss_db / hypercell_size，穿透损耗与超级小区均未生效
     cells: 21
-    iot_dl_db: 2.13      # 轻载
-    iot_ul_db: 2.53
-    sinr_db: 23.52
-    sir_db: 24.91
-    pathloss_db: 101.76
-    distance_m: 125.37
-    los_ratio: 0.333
-    doppler_hz: 842.59   # 解析值 |v|/λ（350 km/h @ 2.6 GHz）；旧值 817.95 同上
-    snr_clamped_out: 3   # 探测口径下撞 +50 dB 夹逼，SNR 分布已剔除这些样本
-    ms_per_sample: 567
+    iot_dl_db: 34.91      # 极高干扰
+    sinr_db: 7.15
+    sir_db: 7.16
+    pathloss_db: 89.24
+    distance_m: 252.39
+    los_ratio: 1.0
+    doppler_hz: 842.59
+    ms_per_sample: 343
   config:
     source: internal_sim
     scenario: UMa_LOS

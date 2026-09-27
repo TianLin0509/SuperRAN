@@ -246,7 +246,14 @@ sect("7  设计提示")
 
 hint = itf.design_hint(20.0)
 check(hint["band"] == "高干扰", "目标 20 dB 归入高干扰档")
-check(abs(hint["equivalent_load"] - 0.99) < 1e-3, "20 dB 对应等效负载 0.99")
+check(abs(hint["noise_sinr_loss_db"] - 10 * math.log10(100 / 99)) < 1e-3,
+      "20 dB 时噪声只让 SINR 比 SIR 低 0.044 dB（下行口径，不再折算上行负载）")
+check("equivalent_load" not in hint, "下行设计提示不再给上行口径的等效负载")
+check(all(not str(x["key"]).startswith(("pusch_load", "num_interfering_ues"))
+          for x in hint["levers"]), "只做下行：不列上行旋钮")
+check("33 dBm" in hint["levers_measured_under"],
+      "旋钮实测数字带着测量条件一起给，不被当成任意场景的预期")
+check(any("O2I" in x for x in hint["not_modeled"]), "设计提示列出未建模的室内/O2I")
 check(len(hint["levers"]) >= 5, "至少列出 5 个旋钮")
 check(all({"key", "direction", "why", "note"} <= set(x) for x in hint["levers"]),
       "每个旋钮都说清方向、原因与注意事项")
@@ -274,7 +281,9 @@ iot_block = summ.get("iot")
 check(isinstance(iot_block, dict) and "dl" in iot_block, "summary 里有 iot 块")
 dl = iot_block["dl"]
 print(f"  下行 IoT 中位数 {dl['median_db']} dB，{dl['classification']['band']}，"
-      f"等效负载 {dl['classification']['equivalent_load']}")
+      f"噪声令 SINR 低于 SIR {dl['classification']['noise_sinr_loss_db']} dB")
+check("ul" not in iot_block and iot_block.get("scope") == "downlink",
+      "数据集摘要只给下行 IoT，不给占位值推出的上行 IoT")
 check(dl["n_valid"] > 0, "有有效 IoT 样本")
 check(dl["median_db"] is not None and dl["median_db"] > 0,
       "多小区场景的 IoT 大于 0 dB（干扰确实存在）")
@@ -290,6 +299,11 @@ rep = itf.interference_report(summ["dataset_id"])
 check(rep["traffic_domain"]["dl"]["iot"]["n_valid"] > 0, "报告里有业务域 IoT")
 check(rep["iot_exact"] is True, "num_slots_per_sample=1 时 IoT 标为精确")
 check(isinstance(rep["notes"], list), "报告带 notes")
+check(rep["scope"] == "downlink" and "ul" not in rep["traffic_domain"],
+      "报告只含下行业务域")
+check(any("O2I" in x for x in rep["not_modeled"])
+      and any("负载" in x for x in rep["not_modeled"]),
+      "报告列出会改变下行 IoT 但未建模的室内/O2I 与邻区负载")
 
 # 新增的测量域列即使在 DL-only 场景下也要存在（值为 nan），
 # 否则并行合并时两块的字段集会不一致。
@@ -432,20 +446,22 @@ rep2 = itf.interference_report(summ2["dataset_id"])
 
 md = rep2.get("measurement_domain", {})
 print("  测量域：" + ", ".join(md) if md else "  测量域：空")
-check("ul_srs" in md, "paired 模式下拿到了 SRS 测量域 SIR")
+check("ul_srs" in md, "paired 模式下有 SRS 测量域一栏")
 if "ul_srs" in md:
     srs = md["ul_srs"]
-    print(f"  SRS 测量 SIR 中位数 {srs['sir_dB']['median']} dB -> "
-          f"{srs['classification']['band']}；NMSE 底 {srs['nmse_floor_db']} dB")
-    check(srs["sir_dB"]["n"] > 0, "SRS 测量 SIR 有有效样本")
-    check(srs["nmse_floor_db"] is not None, "给出了估计 NMSE 下限")
-
-# 业务域与测量域是两个独立的量，不该恰好相等
-if "ul_srs" in md and rep2["traffic_domain"].get("dl"):
-    a = md["ul_srs"]["sir_dB"]["median"]
-    b = rep2["traffic_domain"]["dl"]["sir_dB"]["median"]
-    check(a is not None and b is not None and abs(a - b) > 0.01,
-          f"测量域 SIR({a}) 与业务域 SIR({b}) 是不同的量")
+    # 当前 first-party 源的 SRS 导频 SIR 是 10 - 10·log10(干扰 UE 数) 的解析式，
+    # 不随几何变化。报告必须如实标注，不能再给它分级、算 NMSE 底。
+    want = 10.0 - 10.0 * math.log10(int(cfg2["num_interfering_ues"]))
+    print(f"  SRS 测量 SIR 中位数 {srs['sir_dB']['median']} dB（解析式 {want:.2f}）"
+          f" -> model={srs.get('model')}")
+    check(abs(srs["sir_dB"]["median"] - want) < 0.01, "SRS 导频 SIR 等于按干扰 UE 数的解析式")
+    check(srs.get("model") == "analytic_placeholder", "SRS 导频 SIR 被标为解析占位")
+    check("classification" not in srs and "nmse_floor_db" not in srs,
+          "占位值不分级、不给 NMSE 下限")
+    check(any("ul_srs" in x for x in rep2["not_modeled"]), "not_modeled 里点名 SRS 导频")
+if "dl_csirs" in md:
+    check(md["dl_csirs"].get("model") == "same_as_traffic_sir",
+          "CSI-RS 导频 SIR 逐样本等于业务域 SIR 时标为复用、不分级")
 
 # ---------------------------------------------------------------------------
 sect("9.5  本地硬件：64T 1驱3 + 图示 256T 1驱6 / 0.67λ")
@@ -1110,6 +1126,126 @@ _skill_claims = {
 print(f"  channel-sim Skill 写的 sr_ 工具数 {sorted(_skill_claims)}")
 check(bool(_skill_claims) and _skill_claims == {n_tools},
       f"channel-sim Skill 声称的 MCP 工具数等于 {n_tools}")
+
+# ---------------------------------------------------------------------------
+sect("11  影响因子表与仿真器对账（表里的说法必须是仿真器的真实行为）")
+
+from superran import decisions as _dec  # noqa: E402
+from superran import factors as fx  # noqa: E402
+
+_fx_base = {
+    "scenario": "UMa_NLOS", "channel_model": "CDL-C", "num_sites": 7,
+    "sectors_per_site": 3, "isd_m": 300.0, "num_ues": 7, "seed": 11,
+    "num_bs_tx_ant": 4, "num_bs_rx_ant": 4, "bs_panel": [2, 1, 2],
+    "antenna_model_mode": "legacy_64", "num_ue_tx_ant": 4, "num_ue_rx_ant": 4,
+    "bandwidth_hz": 100e6, "subcarrier_spacing": 30000, "num_rb": 24,
+    "carrier_freq_hz": 2.6e9, "link": "DL", "num_interfering_ues": 0,
+    "measurements": {"ssb_rsrp": False}, "num_samples": 7,
+}
+
+
+def _fx_run(cfg):
+    rows = [(float(s.sir_dB), float(s.sinr_dB))
+            for s, _ in zip(ch.iter_samples("internal_sim", dict(cfg)), range(7))]
+    sir_v, sinr_v = np.array(rows).T
+    iot_lin = 10 ** (itf.iot_db(sinr_v, sir_v) / 10)
+    return sir_v, 10 * np.log10(iot_lin - 1.0)   # SIR, I/N（dB）
+
+
+_verified = [f for f in fx.factors_for("dl_interference") if f.verify]
+check(len(_verified) >= 3, f"至少 3 条说法有对账（实际 {len(_verified)}）")
+for f in _verified:
+    v = f.verify
+    sir0, in0 = _fx_run({**_fx_base, **v["base"]})
+    sir1, in1 = _fx_run({**_fx_base, **v["set"]})
+    d_in, d_sir = in1 - in0, sir1 - sir0
+    print(f"  {f.label}：I/N 逐样本变化 {np.round(d_in, 6).tolist()}，"
+          f"SIR 最大变化 {float(np.max(np.abs(d_sir))):.2e} dB")
+    check(np.allclose(d_in, v["in_shift_db"], atol=1e-6),
+          f"{f.label}：I/N 逐样本变化 {v['in_shift_db']:+g} dB，与表中说法一致")
+    check(np.allclose(d_sir, v["sir_shift_db"], atol=1e-9),
+          f"{f.label}：SIR 变化 {v['sir_shift_db']:+g} dB，与表中说法一致")
+
+# 仿真器从不读取的键：源码静态核对。哪天信道生成路径开始读它，这里变红，
+# 逼着把它从 INERT_CONFIG_KEYS 拿掉、同时改因子表与提问。
+_sim_src = "\n".join(
+    (ROOT / "src" / "superran" / name).read_text(encoding="utf-8")
+    for name in ("native.py", "channelhub.py", "generate.py", "sionna_rt.py", "scenario.py")
+)
+for _k in fx.INERT_CONFIG_KEYS:
+    check(re.search(rf"[\"']{_k}[\"']", _sim_src) is None,
+          f"{_k} 确实不被信道生成路径读取（与“不生效”的声明一致）")
+_iss_inert = _dec.check_guards(_dec.classify_intent("下行干扰评估"), {"num_sites": 7, "ue_distribution": "hotspot",
+                                        "train_penetration_loss_db": 20.0})
+check({"ue_distribution", "train_penetration_loss_db"} <= {i["key"] for i in _iss_inert},
+      "用户设了不生效的键时当场警告")
+
+_nl = next(f for f in fx.factors_for("dl_interference") if f.key == "neighbor_load")
+check(_nl.status == fx.NOT_MODELED and _nl.verify is not None,
+      "邻区负载标为未建模，且这个“未建模”本身有对账（改负载逐位不变）")
+_cl = fx.checklist("dl_interference")
+check({"室内用户比例与穿透损耗（O2I）", "邻区负载（邻区有多少资源在发）"}
+      <= set(_cl["must_disclose"]), "未建模且影响大的因素被列入必须告知")
+check(bool(_cl["expectation_question"]["question"]), "清单带“先写下预期”的问题")
+
+# 用这次暴露问题的原话走一遍提问：必须识别为干扰画像，第一轮先问扫描取值、
+# 能不能要配对结论、对标哪种部署（部署一题定下场景与功率），预期留到后面的轮次；
+# 不问码本基线或信道层无效的负载率。
+_prof = _dec.classify_intent("我想用superRAN来做一个无线仿真，来对比下站间距下的干扰变化情况")
+check(_prof.task == "interference_scan", f"站间距-干扰意图识别为干扰画像（实际 {_prof.task}）")
+_d, _p = pl.create_draft("对比下站间距下的干扰变化情况")
+_prop = pl.build_proposal(_d, _p)
+_keys = [q["key"] for q in _prop["round_questions"]]
+print(f"  第 1 轮问题：{_keys}")
+check("deployment" in _keys and any("生成层变量" in n for n in _prop["upfront_notices"]),
+      "第 1 轮就问部署类型（定场景与功率），并声明站距换数据集、无配对判决")
+check("baseline" not in _keys and "prb_utilization" not in _keys,
+      "不问码本基线，也不问信道层无效的负载率")
+check(_prop["factor_checklist"] and _prop["factor_checklist"]["must_disclose"],
+      "提案附带影响因子清单")
+_iss = _dec.check_guards(_p, {"num_sites": 7, "prb_utilization": 0.3})
+check(any(i["key"] == "prb_utilization" and "满载" in i["message"] for i in _iss),
+      "用户设部分负载时当场说明信道层按满载算")
+
+# 敏感度实测：同一批位置上只换一个假设。功率 -13 dB 在强干扰下几乎全落在 I/N 上，
+# SIR 一点不动；负载与撒点仿真器不读，必须测出恰好 0（inert）。
+from superran import interview as _iv  # noqa: E402
+
+_sens = _iv.measure_sensitivity(
+    {**_fx_base, "tx_power_dbm": 46.0}, keys=["tx_power_dbm", "neighbor_load", "ue_distribution"],
+    num_samples=7)
+_rows = {r["factor"]: r for r in _sens["rows"]}
+print(f"  敏感度：{[(k, r['delta']['iot_dl_db'], r['inert']) for k, r in _rows.items()]}")
+check(_rows["tx_power_dbm"]["delta"]["sir_db"] == 0.0
+      and _rows["tx_power_dbm"]["delta"]["iot_dl_db"] < -10.0,
+      "敏感度实测：功率 46→33 dBm 时 IoT 大降、SIR 不变")
+check(_rows["neighbor_load"]["inert"] and _rows["ue_distribution"]["inert"],
+      "敏感度实测：负载与撒点被识别为仿真器不读（inert）")
+
+# 预设里写了、仿真器却不读的键：必须机器可见地披露（审核 F11），不能只写在 YAML 注释。
+_sums = {s["preset"]: s for s in pl.preset_summaries()}
+for _name, _keys in (("hotspot_cluster", ["ue_distribution"]),
+                     ("hst_350kmh", ["train_penetration_loss_db"]),
+                     ("hst_hypercell_comp", ["hypercell_size", "joint_trp_count"])):
+    _ne = " ".join(_sums[_name].get("not_effective", []))
+    check(all(k in _ne for k in _keys), f"sr_list_presets 对 {_name} 列出不生效的 {_keys}")
+    _text = _sums[_name]["label"] + _sums[_name]["summary"]
+    check("未实现" in _text or "未生效" in _text or "不读" in _text,
+          f"{_name} 的标签/说明不再宣称未实现的机制有效")
+_probe_inert = sc.probe({**_fx_base, "num_ues": 3, "train_penetration_loss_db": 20.0,
+                         "hypercell_size": 3}, num_samples=3)
+_nm = " ".join(_probe_inert["interference"]["not_modeled"])
+check("train_penetration_loss_db" in _nm and "hypercell_size" in _nm,
+      "探测结果点名配置里不生效的键")
+# 审核 R2-1：单小区（不算邻区干扰）的数据，摘要也必须永久带着“未生效”说明
+_sc_sum = gen.generate({**_fx_base, "num_sites": 1, "sectors_per_site": 1, "num_ues": 1,
+                        "ue_distribution": "hotspot"}, num_samples=1, workers=1)
+_persisted = gen.load_summary(_sc_sum["dataset_id"])
+check(any("ue_distribution" in x for x in _persisted.get("not_effective_config", [])),
+      "单小区热点数据的持久摘要保留 ue_distribution 未生效的说明")
+check(any("ue_distribution" in x
+          for x in itf.interference_report(_sc_sum["dataset_id"]).get("not_effective_config", [])),
+      "干扰报告对单小区数据也列出未生效的键")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 70)

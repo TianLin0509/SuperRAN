@@ -3156,6 +3156,40 @@ def test_r1_historical_srs_uses_resolved_direction():
     np.testing.assert_array_equal(a, b)
 
 
+def test_probe_uses_the_same_antenna_budget_as_generation():
+    """探测与正式生成必须看到同一个接收功率；只有 RB 数不同。
+
+    旧探测漏了真实 AAU 阵列默认：阵元峰值 + 1 驱 3 子阵增益 12.77 dB 不进
+    链路预算，SIR 逐位相同，SNR/IoT 却整体偏低。"""
+    from superran import hardware as hw
+    from superran import scenario as sc
+
+    cfg = {
+        "scenario": "UMa_NLOS", "channel_model": "CDL-C", "num_sites": 7,
+        "sectors_per_site": 3, "isd_m": 500, "num_ues": 3, "seed": 7,
+        "num_bs_tx_ant": 64, "num_bs_rx_ant": 64, "num_ue_tx_ant": 4,
+        "num_ue_rx_ant": 4, "bandwidth_hz": 100e6, "subcarrier_spacing": 30000,
+        "num_rb": 272, "carrier_freq_hz": 2.6e9, "link": "DL",
+        "num_interfering_ues": 0, "measurements": {"ssb_rsrp": False},
+    }
+    probe_cfg, _, _ = sc.probe_config(cfg)
+    full = dict(cfg)
+    gen._ensure_bs_panel(full)
+    hw.apply_array_defaults(full)
+    hw.strip_markers(full)
+
+    def rx(c):
+        c = dict(c, num_samples=3)
+        return [s.meta["rx_power_serving_dbm"]
+                for s, _ in zip(chub.iter_samples("internal_sim", c), range(3))]
+
+    probe_rx, full_rx = rx(probe_cfg), rx(full)
+    assert full["antenna_model_mode"] == "effective_subarray"
+    assert probe_cfg.get("antenna_model_mode") == full["antenna_model_mode"]
+    np.testing.assert_allclose(probe_rx, full_rx, atol=1e-9, rtol=0)
+
+
+test_probe_uses_the_same_antenna_budget_as_generation()
 test_r1_doppler_uses_spatial_ray_aoa()
 test_r1_space_time_transport_uses_same_rays()
 test_r1_motion_and_doppler_share_velocity()

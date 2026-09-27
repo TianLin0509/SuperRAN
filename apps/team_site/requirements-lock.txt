@@ -1,0 +1,4 @@
+# Versions used for this implementation's local validation.
+fastapi==0.135.3
+uvicorn==0.43.0
+pydantic==2.12.5

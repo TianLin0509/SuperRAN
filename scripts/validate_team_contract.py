@@ -42,7 +42,7 @@ def validate() -> list[str]:
         "development_branch": "develop",
         "release_branch": "main",
         "merge_method": "squash",
-        "mcp_tool_count": 35,
+        "mcp_tool_count": 36,
         "rehearsal_merge_allowed": False,
     }
     for key, value in expected.items():
@@ -160,7 +160,7 @@ def validate() -> list[str]:
 
     install_text = _read("INSTALL_AGENT.md")
     tool_count = re.search(r"# 期望：tools: (\d+)", install_text)
-    if not tool_count or int(tool_count.group(1)) != 35:
+    if not tool_count or int(tool_count.group(1)) != 36:
         errors.append("INSTALL_AGENT MCP tool count drift")
     for item in ("--role member", "--role lead", "probe_source_contract"):
         if item not in install_text:

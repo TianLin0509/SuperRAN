@@ -11,6 +11,20 @@
 | [superpowers brainstorming](https://github.com/obra/superpowers/blob/b36e0829c6d0140e93cfef2ca599b1b07d4a7797/skills/brainstorming/SKILL.md) | 先理解目标约束，给推荐与取舍，按 spike/bounded/architectural 范围调节设计深度 | 概念解释、数据交付、探索试点、正式比较采用不同完成条件 | 不要求每批 PDP 都经历软件设计、计划和实现仪式 |
 | [Spec Kit clarify](https://github.com/github/spec-kit/blob/d848fb4e18f44640ad6b42e60a280551ee90cdce/templates/commands/clarify.md) | 内部覆盖扫描，按影响×不确定性选问题；逐次写回对应条款、删除冲突、验证可判定性 | 覆盖物理条件、指标分母、随机性、预算；回答同步到生成/系统参数 | 不照搬五题或一次一题模板，不运行软件项目 hooks |
 
+## 2026-09-26：让仿真器自己决定问什么
+
+用 5 句真实表述做基线（站距-干扰、密集城区 SINR 分布、CSI 压缩对比、20 个 PDP、
+SRS 10/20 ms 边缘速率），旧流程每句都问错：不读原话（给了基线还问）、结论模板只有
+“方法对基线”一种（交付数据被问指标、扫站距被问码本）、按关键词分任务（“SINR 分布”
+落到单小区）、平台替人拍的假设没有台账。改法：
+
+| 借鉴 | 落点 |
+|---|---|
+| grilling 的决策树与前沿 | `interview.frontier`：先定结果形态，形态必需项其次，再是沉默假设，最后预期；每轮 ≤3 |
+| grilling 的“可查事实自己查”“不留沉默假设” | 原话解析 `read_brief`、假设台账 `ledger`；未实现项进结论边界 |
+| superpowers 的“先复述理解”“按任务轻重分路径” | `restatement`；四种结果形态各有完成条件，数据交付零提问 |
+| 仿真器自知（本仓库独有） | 因子表（可对账）、`sr_sensitivity` 实测每个假设的影响、`expectation_check` 解释预期偏差 |
+
 ## 原有基础与最短改进路径
 
 SuperRAN 已有任务槽位、草稿与修订、场景预设、配置说明、生成前预注册、数据体检和

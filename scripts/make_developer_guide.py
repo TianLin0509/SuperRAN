@@ -44,7 +44,7 @@ except ModuleNotFoundError:  # importing as scripts.make_developer_guide
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "superran"
 OUT = ROOT / "docs" / "index.html"
-GITHUB = "https://github.com/TianLin0509/superran/blob/main/"
+SOURCE_BASE = "https://ai.lt-stockpartner.tech/repos/superran/SuperRAN/src/branch/develop/"
 UI_ASSETS = ROOT / "docs" / "assets" / "ui"
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -366,7 +366,7 @@ F_MU_SINR = M(
     r"\gamma_{\mathrm{tx,MU}}=\Gamma(\mathrm{MCS}(\mathrm{CQI}))+G_{\mathrm{BF}}"
     r"+L_{\mathrm{corr}}+L_{\mathrm{power}}",
 )
-F_POWER_LOSS = M(r"L_{\mathrm{power}}=-10\log_{10}K_{\mathrm{MU}}\ \mathrm{dB}")
+F_POWER_LOSS = M(r"L_{\mathrm{power},u}=10\log_{10}\frac{r_u}{\sum_v r_v}\ \mathrm{dB}")
 F_CQI_IIR = M(
     r"s_k=\begin{cases}x_k,&k=0\\ s_{k-1}+\lambda\,(x_k-s_{k-1}),&k>0\end{cases}"
     r"\qquad \mathrm{CQI}_{\mathrm{rep}}=\lfloor s_k\rfloor",
@@ -542,8 +542,7 @@ F_BEAM_SELECT = M(
 )
 F_TDD_FRACTION = M(
     r"\rho_{\mathrm{DL}}=\frac{N_D+f_S N_S}"
-    r"{N_D+N_S+N_U},\qquad"
-    r" f_S=\frac{N_{\mathrm{DL,sym}}}{N_{\mathrm{sym/slot}}}",
+    r"{N_D+N_S+N_U},\qquad f_S=0.715\ \text{(default)}",
 )
 F_QAM_MI = M(
     r"\begin{aligned}"
@@ -670,7 +669,7 @@ def source_line(rel: str, needle: str) -> int:
 def source_ref(rel: str, needle: str, label: str | None = None) -> str:
     line = source_line(rel, needle)
     text = label or f"{rel}:{line}"
-    href = GITHUB + rel.replace("\\", "/") + f"#L{line}"
+    href = SOURCE_BASE + rel.replace("\\", "/") + f"#L{line}"
     return f'<a class="src" href="{esc(href)}" target="_blank" rel="noreferrer">{esc(text)}</a>'
 
 
@@ -2025,7 +2024,7 @@ def link_flow_svg() -> str:
 def mu_decision_svg() -> str:
     body = svg_box(25, 25, 220, 72, "PF 排序一次", "得到 anchor → candidates", "accent")
     body += svg_box(315, 25, 220, 72, "构造 SU plan", "按序给最小够用 RBG", "b")
-    body += svg_box(605, 25, 220, 72, "构造 MU plan", "真实 pair 表；2UE×rank2", "b")
+    body += svg_box(605, 25, 220, 72, "构造 MU plan", "真实 pair 表；2UE×rank1–2", "b")
     body += svg_box(895, 25, 220, 72, "比较 useful bytes", "超出队列的 padding 不计", "good")
     body += arrow(245, 61, 315, 61)
     body += arrow(535, 61, 605, 61)
@@ -2164,6 +2163,60 @@ def product_surfaces_showcase() -> str:
 """
 
 
+def current_implementation_summary() -> str:
+    """Reader-facing baseline; resource numbers come from the runtime contract."""
+    from superran.system import SystemConfig
+
+    cfg = SystemConfig()
+    overhead = cfg.pdsch_overhead
+    fraction = cfg.s_slot_dl_fraction
+    d_re = overhead.re_per_prb("D")
+    s_re = overhead.re_per_prb("S", fraction)
+    return (
+        '<section class="current-baseline"><h2>复用旧实验前，先核对当前口径</h2>'
+        '<p>近期改动涉及资源预算、信道时间轴和多载波调度。先确认旧配置是否仍表达同一个实验，'
+        '再读收益数字；实现通过测试不等于完成现场标定。</p>'
+        + table(["环节", "当前实现", "使用时注意"], [
+            ("下行资源", f"D：{d_re} RE/PRB；S：floor({d_re} × {fraction:g}) = {s_re} RE/PRB",
+             "先扣开销，再折算 S 时隙；TBS 另做量化。旧 126/78 RE 数值需重跑。"),
+            ("SINR 与 MU", "RBG 内、已授予 RBG 与流之间均按 dB 平均；MU 相关损失按流求和",
+             "发送端用预测量选 MCS，接收端用真实量判错，两者不能互换。"),
+            ("MU 支持范围", "两用户，每用户 rank 1–2；默认 ezf，支持不等 rank",
+             "按用户层数占比分功率；rank1+rank2 的功率损失分别约 −4.77/−1.76 dB。"),
+            ("时间轴", "同 UE 快照沿同一散射体实现推进，逐径 Doppler 与运动方向一致",
+             "static 固定位置，不自动清零速度；相邻快照不是独立信道样本。"),
+            ("载波聚合", "显式 CA 路径支持同站同步 30 kHz 多载波，已有 100+20 MHz 示例",
+             "共享业务队列，逐载波维护反馈；普通单载波入口仍限定 100 MHz。"),
+            ("SRS 与参考 TBS", "SRS 功控计入 SCS；29 档参考 TBS 可独立对拍",
+             "功控预算尚未驱动生成/调度；参考 TBS 尚未接入系统 AMC/BLER。"),
+        ])
+        + '<p><a href="#/linkadapt">资源与 TBS</a> · <a href="#/mu">MU</a> · '
+          '<a href="#/channel">信道时钟</a> · <a href="#/carrier-aggregation">载波聚合</a> · '
+          '<a href="#/srs">SRS 测量</a></p></section>'
+    )
+
+
+def tbs_quantization_example() -> str:
+    """Recompute the teaching example when the TBS/resource profile changes."""
+    from superran.experience import TbsLookup
+
+    lookup = TbsLookup.build(17, 16)
+    one = lookup.tbs_bytes("D", 12, 2, 1)
+    full = lookup.tbs_bytes("D", 12, 2, 17)
+    linear = 17 * one
+    payload = min(linear, full) + 1
+    needed, fits = lookup.required_rbg("D", 12, 2, payload)
+    return (
+        '<div class="toy"><div><b>当前配置实算：MCS 12 / rank 2 / D slot</b>'
+        f'<p>1 RBG 为 {one:,} B；乘 17 得 {linear:,} B。实际 17 RBG 为 '
+        f'{full:,} B，差值 {full - linear:+,} B。数字由当前 TBS 表生成。</p></div>'
+        '<div><b>按队列水量查表</b>'
+        f'<p>队列有 {payload:,} B 时，反查返回 {needed} 个 RBG，'
+        f'本次能否装下：{"能" if fits else "不能"}。资源增加时 TBS 有量化台阶，'
+        '不能按单组字节数线性外推。</p></div></div>'
+    )
+
+
 def overview_page(modules: list[ModuleDoc], tools: list[SymbolDoc], tests: list[dict[str, Any]],
                   skills: list[dict[str, Any]]) -> Page:
     source_lines = sum(m.lines for m in modules)
@@ -2185,6 +2238,7 @@ def overview_page(modules: list[ModuleDoc], tools: list[SymbolDoc], tests: list[
   </div>
 </section>
 """
+    body += current_implementation_summary()
     body += metric_cards((
         ("源码模块", str(len(modules)), f"{source_lines:,} 行 Python"),
         ("公开顶层 API", str(top_symbols), f"另含 {nested_members} 个公开成员/字段"),
@@ -2197,10 +2251,9 @@ def overview_page(modules: list[ModuleDoc], tools: list[SymbolDoc], tests: list[
     body += """
 <h2>一句话定位</h2>
 <p><strong>SuperRAN 是给 Agent 使用的无线仿真实验编排与证据平台。</strong>
-它把本仓 first-party 统计信道物理内核包装成稳定的数据合同、MCP 工具、系统仿真和三道证据门；
-Sionna RT 是唯一的可选 direct adapter（QuaDRiGa 路线已明确不做并删除）。
-它的目标不是“能画一条曲线”，而是让配置、真值、估计、随机数、统计和结论都能回溯；
-交互配置 Mock 与 KPI 工作台分别承载运行前确认和运行后解释。</p>
+你给出通信问题，平台生成信道、运行算法与业务调度，再检查比较条件和统计证据。
+默认统计信道由本仓维护，也可显式选择 Sionna RT。运行前用配置工作台核对条件，
+运行后用 KPI 工作台查看用户分布、资源占用和调度轨迹；每个结论都要能回到对应数据。</p>
 """
     body += callout(
         "warn", "最重要的边界",
@@ -3502,8 +3555,10 @@ TDD pattern、SRS/SSB/Gold 序列、序列相关、CSI-RS DFT 扫描、干扰投
     body += """
 <p><code>tdd_pattern_info()</code> 返回周期内 D/S/U 时隙和特殊时隙的 DL/UL symbol 数；后端若显式
 提供 GP 也一并返回，否则由 14−DL−UL 推出 guard symbols。
-系统层的可用下行 RE、PRB utilization 与 TDD 归一都应从它派生。项目某些历史推导用 0.7 折算
-S slot，那只是特定 pattern 的工程值；只要特殊时隙配置可读，就不应把 0.7 扩写成 NR 常数。</p>
+符号表描述帧结构；系统资源预算另读 <code>s_slot_dl_fraction</code>，默认 0.715。
+它作用于扣完开销的 D 时隙净 RE，不能用 DL 符号占比悄悄替换。
+默认 DDDSU 的名义下行比例为 (3+0.715)/5=0.743；S 时隙实际净 RE 为
+floor(132×0.715)=94。前者是报告权重，后者还经过取整，都不直接等于吞吐比例。</p>
 <h2>序列、资源图案和估计器是三层</h2>
 """ + F_SEQUENCE_CORR + F_SRS_RX + F_LS
     body += table(
@@ -4338,12 +4393,16 @@ MCS-domain OLLA。历史 <code>*_before_db</code> 字段名仅为 API 兼容保�
 只用于显式链路级分析，不能接入当前系统 TBLER profile。</p></div></aside>
 <h2>TBS 为什么不能用除法反推 RBG</h2>
 """ + F_TBS + F_RBG_SEARCH
-    body += """
-<div class="toy"><div><b>实算：MCS 12 / rank 2 / D slot</b>
-<p>1 RBG = 1,729 B；若线性外推，17×1,729 = 29,393 B；38.214 量化后的真实 17 RBG
-= 29,722 B，偏 +1.119%。</p></div><div><b>会怎样错</b><p>payload=29,394 B 时，除法会认为“17 个也不够”或在其他边界少给一个；
-<code>searchsorted(side='left')</code> 在单调不减表上准确返回第一个够用的 17 且可装下。</p></div></div>
-"""
+    body += tbs_quantization_example()
+    body += callout(
+        "note", "系统资源预算与独立参考 TBS 是两个入口",
+        "<p>当前 D 时隙从 14×12 RE 中扣等效 DM-RS 24 RE、PDCCH 12 RE，得到 132 RE/PRB；"
+        "S 时隙先算 floor(132×0.715)=94，再乘实际 PRB 数，不能先折符号再扣一次开销。"
+        "24 RE 是两个完整符号的工程预留，不是单端口 type-1 DM-RS 的实际导频数。</p>"
+        "<p><code>calc_tbs_reference</code> 使用独立 29 档谱效与 <code>fg_adjust_tbs</code>，"
+        "供参考实现对拍，尚未接入系统 AMC/BLER。该分支没有标准低码率分支与 3840 下限，"
+        "也不保证跨分段边界单调；不能替换系统的 TBS 反查表，更不能按其索引套用旧 28 档曲线。</p>",
+    )
     body += callout(
         "good", "表合同",
         "<p><code>TbsLookup</code> 建 2×28×4×17 = 3,808 个 int64（D/S 两类 slot）。"
@@ -4727,7 +4786,7 @@ Qm 内检查。这个分析后端用于表 1/2，不描述预置表 3 的运行�
         "并在相同 D/S slot 类型上发送。默认 IR 把初传 MCS 的谱效除以 2，再用"
         " <code>searchsorted</code> 式的向下查表得到等效 MCS；CC 保持原档并增加 3.0103 dB。"
         "两者都只查询 NewTx 曲线。payload 在首传发送时离开 DRB 队列；末次失败只进 residual_bler，不回队列；"
-        "不会发生第二次重传。当前仍未展开 RV、软比特、并行 process 和标准 HARQ timing。</p>",
+        "不会发生第二次重传。当前已有默认 8 个并行 HARQ 进程；仍未展开 RV、软比特合并和完整标准 HARQ timing。</p>",
     )
     body += (
         '<p>标准边界可直接回查 ETSI 发布的 '
@@ -4795,12 +4854,12 @@ def mu_page() -> Page:
 <p>SU 链先得到 CQI + BF + SU OLLA。MU 再加三项：用户间残留相关性折算的
 <code>CorrLoss≤0</code>；同一 RBG 总功率在全部 MU layers/users 间平分的
 <code>PowerLoss</code>（两个 rank2 用户相对单用户 rank2 为 −3 dB）；以及独立的用户级 MU OLLA。
-真实接收 SINR来自 pair 信道、ZF/RZF 权和当前 h_true，仍不等于这些 dB 项的简单和。</p>
+真实接收 SINR 来自 pair 信道、实际 EZF/ZF/RZF 发射权和当前 h_true，仍不等于这些预测项的简单和。</p>
 <h2>Phase A 的真实 pair 表</h2>
 """
     body += steps((
         ("候选对", "<p>按用户有效信道相关性与门限筛选，两用户一组。</p>"),
-        ("预编码", "<p>当前 experience 边界为 2 用户、每用户 rank2，使用 ZF 或带噪声/CSI-error loading 的 RZF。</p>"),
+        ("预编码", "<p>当前支持 2 用户，每用户 rank 1–2，包含 rank1+rank2。默认 EZF，可显式选择 ZF 或带噪声/CSI-error loading 的 RZF；各层数组合在建表时准备好。</p>"),
         ("双视角", "<p>在 gNB 估计 CSI 上得到预测 CorrLoss/MCS 输入；在真实当前信道上得到逐用户/逐 RBG SINR 与 BLER 输入。</p>"),
         ("持久表", "<p>保存 correlation、CorrLoss、PowerLoss、true/predicted SINR 与可选逐 RBG 数组；Phase B 不做矩阵求逆。</p>"),
     ))
@@ -4846,8 +4905,8 @@ MU计划交付79,927 B，最终走MU。若SU在本TTI能清空全部队列，则
             ("用户 exposure", "每个配对用户都暴露于该 MU RBG", "误以为每人只拿一半频域"),
             ("用户归因", "共享 RBG 在两 UE 间等分，跨用户可加", "把 exposure 相加做小区资源"),
             ("MU OLLA", "每用户一条、所有 pair 共用", "误称为 pair-specific OLLA"),
-            ("capacity MU（默认）", "读 pair 表：MCS 与误块抽签都用真值",
-             "以为 capacity 只有标量近似"),
+            ("满缓冲下显式开启 MU", "读 pair 表：预测量选 MCS，真实接收量判错",
+             "误把真实信道用于发送决策；MU 默认仍关闭"),
             ("se_ratio_legacy", "已于 2026-09-04 删除，选中直接报错",
              "以为它还能用来复现旧结果"),
         ],
@@ -4890,17 +4949,16 @@ TTI）。历史标量口径下同一组配置是 22.68 → 22.69——<strong>�
 <p>把两个 UE 的空间相关系数拉到 0.999，ZF 无处零陷：配对占比
 <strong>0%</strong>，对应数量的 TTI 被显式记为「单发更划算」（<code>su_mu_plan.su_selected</code>），
 不是静默不配。</p></div></div>
-<p><strong>−3.01&nbsp;dB 只是记账标签，不是近似。</strong>按 pair 表的定义，
-<code>CorrLoss = pred_MU − pred_SU − PowerLoss</code>，所以决策里真正用到的平移量
-<code>CorrLoss + PowerLoss</code> 恒等于 <code>pred_MU − pred_SU</code>——那个常数
-精确抵消，实际生效的是矩阵算出来的差。把 PowerLoss 单列只是为了让诊断能分开看
-「功率分摊占多少、相关性损失占多少」。<strong>但这条只在当前支持的 2 用户 ×
-rank2 下成立</strong>；扩到 3/4 用户或不等流数时，这个常数标签本身要重新定义。</p>
+<p><strong>功率份额随两名用户的层数变化。</strong>当前实现按
+<code>PowerLoss_u = 10log10(rank_u / sum(rank))</code> 计算：rank2+rank2 时两侧
+都是 −3.0103 dB，rank1+rank2 时分别为 −4.7712/−1.7609 dB。
+预测端把这一项与逐流残余相关性损失加到 SU 基线上。接收端独立计算实际发射权作用于
+真实信道后的 SINR，因此预测损失不能当作实测干扰损失。</p>
 """
     body += callout(
-        "decision", "下一阶段 MU 细化",
-        "<p>当前落地的是可验证的最小真实 MU：2UE×rank2、ZF/RZF、用户级 MU OLLA。"
-        "一般 rank 组合、3/4 用户、pair-specific OLLA、HARQ 进程与更大候选图仍需业务/性能约束后再扩展。</p>",
+        "decision", "当前 MU 边界",
+        "<p>已支持两用户 rank 1–2 组合、EZF/ZF/RZF、用户级 MU OLLA，并复用默认 8 进程的 HARQ 状态机。"
+        "3/4 用户配对、每用户 rank 大于 2 与 pair-specific OLLA 尚未实现。重传仍按 SU 发送。</p>",
     )
     body += ("<p class=source-row>pair 表："
              + source_ref("src/superran/system.py", "def build_mu_pair_tables")
@@ -5052,7 +5110,7 @@ def experience_page() -> Page:
     )
     body += """
 <div class="toy"><div><b>正确记账</b><p>若 TPF=100、旧 R̄=1,000 B、用户只获 1 RBG，
-MCS12/rank2 的 TBS=1,729 B：新 R̄=0.99×1,000+0.01×1,729=<strong>1,007.29 B</strong>。</p></div>
+假设本次 TBS=1,600 B：新 R̄=0.99×1,000+0.01×1,600=<strong>1,006 B</strong>。这是解释滤波的算术例子，不指定某个 MCS 的当前 TBS。</p></div>
 <div><b>旧全带 bug</b><p>若误记 17 RBG 的 29,722 B：新 R̄=<strong>1,287.22 B</strong>。
 同一次 1-RBG 服务把平均速率抬高约 40 倍增量，后续 PF metric 被过度压低，小包用户被饿死。</p></div></div>
 """
@@ -5136,7 +5194,7 @@ PDCCH/CCE 按已确认范围暂不建模；除此之外，物理 RBG、逐 RBG �
                 "MU 全伙伴评分",
                 "当前基线完成",
                 "固定 PF anchor；枚举全部伙伴；相关性/层数/预测 BLER 门；useful bytes/RBG 评分",
-                "当前固定两用户、每用户 rank2；>2 UE MU 和更一般空间分组未实现",
+                "当前两用户、每用户 rank 1–2，允许不等 rank；>2 UE MU 尚未实现",
             ),
             (
                 "GrantFinalizer",
@@ -5169,7 +5227,7 @@ PDCCH/CCE 按已确认范围暂不建模；除此之外，物理 RBG、逐 RBG �
             ("SU串行分配", "_build_su_plan + frequency selector", "核心承载",
              "按需最小够用RBG并重算单码字TBS；不是固定RBG顺序的原样复刻"),
             ("空域/频域MU", "_build_mu_plan + MuPairLink + 全伙伴评分", "典型范围承载",
-             "固定两用户rank2；没有五种波束分组、>2用户MU和频域并行单元公式"),
+             "两用户rank 1–2；没有五种波束分组、>2用户MU和频域并行单元公式"),
             ("SU/MU自适应", "两套完整plan比较queue-limited useful bytes", "按用户规则重写",
              "SU能清空全部队列时强制SU；否则MU≥SU才选MU，不使用固定TBS比值门限"),
             ("BF、MCS与TBS后处理", "pair link + GrantFinalizer", "核心承载",
@@ -6193,7 +6251,7 @@ def limitations_page() -> Page:
             ("PMI/RI", "Type-I-style 宽带列集合、端口置换与独立 rank 选择", "严格 38.214 多层/子带/subset restriction/反馈比特与 RI pipeline"),
             ("RB 功控算法", "给定 profile 的守恒、逐小区耦合与逐 RBG 调度已实现", "跨小区闭环优化目标、约束信令与现场策略；当前不是自动功控算法"),
             ("MU", "SUS + ZF/RZF、pair table、用户级 MU-OLLA", "现场配对细则、最大用户/层数、接收机与 CSI error 标定"),
-            ("BLER/HARQ", "预置通用 NewTx 曲线；每 TB 最多一次 IR/CC，空口身份冻结", "若升级为标准 HARQ，再补 RV、LLR、并行 process 与严格 timing"),
+            ("BLER/HARQ", "预置通用 NewTx 曲线；每 TB 最多一次 IR/CC，空口身份冻结", "已有默认 8 个 HARQ 进程；RV、LLR 与完整标准时序仍未实现"),
             ("话务 CDF", "可插拔经验 CDF + 标量 size/interval 校准", "实测视频/XR/FTP CDF 文件与用户 mix"),
             ("CDL 几何", "标准 profile 的 20-ray 相对几何旋到实际链路；仍非场景确定性 ray tracing", "Sionna RT Paths 或实测 CIR/角度"),
             ("RT 快速探测", "InternalSim 有几何 probe；Sionna RT 只能减少 UE/drop 跑小 N 完整路径", "若后端提供路径缓存/增量求解，再单独定义可验证 RT probe"),

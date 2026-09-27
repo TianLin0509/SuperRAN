@@ -8,7 +8,7 @@ description: >
 
 # SuperRAN 仿真 Agent 手册
 
-手册修订：2026-09-12。配合 `superran` MCP（35 个 `sr_*` 工具）使用。
+手册修订：2026-09-12。配合 `superran` MCP（36 个 `sr_*` 工具）使用。
 仓库 `skills/channel-sim/` 是内容真源；`superran` 是由安装器生成的显式点名入口，
 正文与参考文件相同，只有名称和触发范围不同。不得手工维护另一份正文。
 安装与校验见仓库 `INSTALL_AGENT.md`；当前能力以工具 schema、配置回显及本次证据为准。
@@ -33,9 +33,13 @@ description: >
 ## 需求落实成实验约定
 
 开始实跑前读 `references/asking.md` 与 `references/experiment-agreement.md`。
-只问会改变通信解释或实验公平性的未决条件，通常一轮不超过三个关键问题。
+只问会改变通信解释或实验公平性的未决条件，一轮不超过三个关键问题。
+`sr_plan` 先读原话（已给的条件不再问）、判断结果形态（交付 / 刻画 / 扫条件 / 比较方法），
+给出 `restatement` 与假设台账；问什么由目标量的影响因子表决定，拿不准先后时用
+`sr_sensitivity` 让仿真器实测每个假设的影响。先复述、再问、再请用户写预期。
 有依赖就先问上游；能从现有数据、能力、场景查到的事实由 Agent 查。不要机械转发
 `round_questions`；工具可能重复询问已答条件，或把“调度”识别成泛化干扰任务。
+干扰画像类意图（站距/IoT/干扰水平）会走 `interference_scan`，第一轮先问预期与模型假设。
 
 把问题、研究机制、改变/固定条件、指标口径、合理性检查、预算与结论边界写成一页约定。
 每次回答立即更新对应正文；复用已有授权，不额外设置批准仪式。用户说“默认”后停止追问，
@@ -90,6 +94,12 @@ description: >
 
 ## 通信口径与当前能力边界
 
+- **只仿下行业务。** 上行业务与上行 IoT 不在范围内，不要向用户提问或报告；
+  SRS 只作为下行预编码的信道估计来源。导频干扰目前是解析占位，不能比较场景。
+- **结论落在某个物理量上时，先对齐决定它的假设。** `sr_plan` 的 `factor_checklist`
+  按影响列出因素与平台取值（下行干扰：发射功率、室内/O2I、邻区负载、站距、统计对象）。
+  未建模的因素（全室外、信道层邻区恒满发）必须告诉用户会让结果偏向哪边；
+  先让用户写下预期，再用探测对照，偏差大先查假设再正式生成。
 - **谱效、业务吞吐、体验速率不同。** 高斯码本谱效不能直接乘带宽冒充业务 Mbps；
   吞吐需经过调制编码、传输块、误块率与资源开销。链路用 `sr_throughput`，
   小区用户竞争、话务、等待和完成时延用系统仿真。不存在通用的“再低百分之几”。
@@ -138,12 +148,12 @@ description: >
 需求入口：`references/asking.md` → `references/experiment-agreement.md`。
 方法来源：`references/clarification-sources.md`；载波聚合：`references/carrier-aggregation.md`。
 
-**35 个 `sr_*` 工具全在这张表里。** 每份 reference 开头写了"什么时候读这一份"，低频细节需要时读那一份，**不要凭印象答**。压力测试记录见 `references/pressure-tests.md`。
+**36 个 `sr_*` 工具全在这张表里。** 每份 reference 开头写了"什么时候读这一份"，低频细节需要时读那一份，**不要凭印象答**。压力测试记录见 `references/pressure-tests.md`。
 
 | 在哪一步 | 工具 | 细节 |
 |---|---|---|
 | 0 环境自查 | `sr_capabilities` | — |
-| 1 对齐目标 | `sr_list_datasets` `sr_missing_slots` `sr_plan` `sr_revise` `sr_lock_analysis` `sr_spec_sheet` `sr_await_config` | `asking.md` `spec-sheet.md` |
+| 1 对齐目标 | `sr_list_datasets` `sr_missing_slots` `sr_plan` `sr_revise` `sr_sensitivity` `sr_lock_analysis` `sr_spec_sheet` `sr_await_config` | `asking.md` `spec-sheet.md` |
 | 2 生成数据 | `sr_list_presets` `sr_list_scenes` `sr_probe_scenario` `sr_compare_scenarios` `sr_generate` `sr_gate` `sr_validate` `sr_calibrate` `sr_describe_dataset` `sr_deliver` | `scenarios-and-interference.md`（含射线追踪）`default-hardware.md` `performance.md` |
 | 3 对比 · 链路级 | `sr_sample_size` `sr_link_performance` `sr_compare_arms` `sr_throughput` `sr_sweep_snr` `sr_mcs_info` `sr_bler_curve` `sr_tdd_mcs` | `gates-and-stats.md`（**18 项体检**明细、Wilcoxon、预注册、「声称与证据」表）`link-adaptation.md` |
 | 3 对比 · 系统级 | `sr_system_scene` `sr_system_sim` `sr_compare_system_results` | `system-sim.md` |

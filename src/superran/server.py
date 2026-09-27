@@ -342,6 +342,7 @@ def sr_capabilities() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         models = {"error": str(exc)}
     from . import hardware as hw
+    from . import interference as itf
 
     return {
         "physical_core": "superran-first-party",
@@ -355,6 +356,16 @@ def sr_capabilities() -> dict[str, Any]:
         "channel_models": models,
         # 本地默认硬件与载波。**面板是 8x4x2 时自动生效**，不需要调用方写。
         "default_hardware": hw.describe(),
+        # 能力边界：Agent 读到 link=BOTH、上行天线数等字段时，最容易误以为上行
+        # 业务也能仿。这里写死范围，并列出会影响下行结论但尚未建模的机制。
+        "scope": {
+            "traffic_direction": "downlink_only",
+            "uplink_note": (
+                "上行只作为下行预编码的 SRS 信道估计来源存在；上行业务、上行 IoT、"
+                "上行功控/调度都不在当前范围，不要向用户询问或报告上行干扰。"
+            ),
+            "not_modeled_dl_interference": list(itf.DL_IOT_NOT_MODELED),
+        },
         "note": (
             "CDL 系列含每条径的角度（AoD/AoA/ZoD/ZoA），TDL 系列没有。"
             "凡是依赖角度的课题（波束管理、定位）必须用 CDL。"
@@ -490,6 +501,7 @@ def sr_revise(
     draft_id: str,
     overrides: dict[str, Any] | None = None,
     design: dict[str, str] | None = None,
+    accept_recommended: bool = False,
 ) -> dict[str, Any]:
     """差分修正一份提案——用户只说改什么，不必重述整个需求。
 
@@ -500,11 +512,15 @@ def sr_revise(
         sr_revise(draft_id, design={"baseline": "3GPP Type II 码本",
                                      "metric": "NMSE 与频谱效率损失"})
 
-    design 不影响任何仿真参数，但会写进计划书——三个月后回看时，
-    这部分比参数值有用得多。
+    design 会写进计划书；选项自带的配置改动（例如“街道微站”→ UMi + 33 dBm）当场生效。
+
+    accept_recommended=True 对应用户说“按推荐跑”：所有待问问题（含后续轮次）
+    一律取推荐项并逐条列进 changes。用户只说“默认”时不要用它，但返回里的
+    ``blocking_defaults`` 必须改为推荐值——那些默认会让这次研究失效。
     """
     try:
-        draft, profile, changes = pl.revise_draft(draft_id, overrides, design)
+        draft, profile, changes = pl.revise_draft(
+            draft_id, overrides, design, accept_recommended=accept_recommended)
     except (KeyError, ValueError) as exc:
         return {"error": str(exc)}
     proposal = pl.build_proposal(draft, profile, max_questions=5)
@@ -597,6 +613,30 @@ async def sr_generate(
     return out
 
 
+def _auto_serving_cell(cell_ids_by_ue: list[int], sectors_per_site: int,
+                       topology_layout: str = "hexagonal") -> tuple[int | None, str]:
+    """按实际撒点挑服务小区：优先中心站（站 0）的扇区，取 UE 最多且 ≥2 个的那个。
+
+    没有 wrap-around，边缘站邻区不完整会低估干扰，所以先看中心站；中心站扇区都不足
+    2 个 UE 时退到全网 UE 最多的小区，并如实说明它不是中心站。
+    """
+    if topology_layout != "hexagonal":
+        return None, (f"serving_cell=auto 只支持已知站 0 为中心的 hexagonal 拓扑；"
+                      f"当前拓扑为 {topology_layout!r}，请按实际站点位置显式指定 serving_cell。")
+    counts = {c: cell_ids_by_ue.count(c) for c in sorted(set(cell_ids_by_ue))}
+    center = {c: n for c, n in counts.items() if c < max(int(sectors_per_site), 1) and n >= 2}
+    if center:
+        best = max(center, key=lambda c: (center[c], -c))
+        return best, f"自动选中心站扇区 {best}（{center[best]} 个 UE；各小区 UE 数 {counts}）"
+    ok = {c: n for c, n in counts.items() if n >= 2}
+    if ok:
+        best = max(ok, key=lambda c: (ok[c], -c))
+        return best, (f"中心站扇区都不足 2 个 UE，退选小区 {best}（{ok[best]} 个 UE，不是中心站，"
+                      f"邻区可能不完整）；各小区 UE 数 {counts}")
+    return None, (f"没有任何小区有 ≥2 个 UE，测不出调度；各小区 UE 数 {counts}。"
+                  "请提高撒点密度（每扇区约 10 个 UE）后重新生成")
+
+
 def _generate_sync(
     *,
     draft_id: str | None,
@@ -623,7 +663,7 @@ def _generate_sync(
     else:
         raise ValueError("需要 draft_id 或 intent 其中之一")
 
-    issues = dec.check_guards(profile, draft.params)
+    issues = pl.draft_issues(draft, profile, num_samples)
     blockers = [i for i in issues if i["severity"] == "block"]
     if blockers:
         return _jsonable(
@@ -1570,10 +1610,12 @@ def sr_interference_report(dataset_id: str) -> dict[str, Any]:
 
     **业务域和测量域是两回事**，报告分开给：
 
-    * ``traffic_domain``——PDSCH/PUSCH 受到的干扰，用 IoT（噪声抬升 (I+N)/N）
-      刻画。20 dB 以上算高干扰，同时给出等效小区负载。
-    * ``measurement_domain``——SRS / CSI-RS 导频受到的干扰，决定信道估计精度。
-      给出估计 NMSE 的下限。这两列只在 ``link="BOTH"`` 生成的数据里有。
+    * ``traffic_domain.dl``——PDSCH 受到的干扰，用 IoT（(I+N)/N）刻画；20 dB
+      以上算高干扰，并给出噪声还让 SINR 比 SIR 低多少。**只做下行**，不输出上行 IoT。
+    * ``measurement_domain``——导频 SIR。只有逐样本仿真的量才分级；按干扰 UE 数
+      的解析占位（SRS）或复用业务域 SIR（CSI-RS）会标 ``model`` 并说明，不分级。
+    * ``not_modeled``——会改变下行 IoT 但当前没有建模的机制（室内/O2I、信道层
+      邻区负载、拓扑边缘）。**解读 IoT 绝对值前必须先看这一栏。**
 
     IoT 由几何 SIR 与 SINR 推出（``IoT = SIR/(SIR-SINR)``，线性域）。
     当前 first-party ``snr_dB`` / ``sinr_dB`` 共享预数字波束、每 RB 参考，
@@ -1597,11 +1639,11 @@ def sr_iot_convert(
     """IoT 相关的换算与分级。三种用法，给哪组参数就算哪个。
 
     * 给 ``sinr_db`` + ``sir_db``：算这一点的 IoT（两者必须来自同一几何预算）。
-    * 给 ``iot_db``：分级 + 换成等效小区负载。
-    * 给 ``load``：由等效负载反推 IoT。
+    * 给 ``iot_db``：分级，并给出噪声让 SINR 比 SIR 低多少。
+    * 给 ``load``：按**上行**极点容量关系 ``IoT = 1/(1-load)`` 反推 IoT。
 
-    等效负载用的是上行极点容量关系 ``IoT = 1/(1-load)``，是**解释性**换算，
-    帮助把 "IoT 20 dB" 读成 "等效 99% 负载"，不代表仿真真按这个负载调度。
+    ``load`` 换算只是上行口径的教学用途：SuperRAN 当前只仿下行，下行 IoT 不能
+    读成小区负载（下行邻区负载在信道层没有建模）。
     """
     from . import interference as itf
 
@@ -1616,6 +1658,7 @@ def sr_iot_convert(
     if load is not None:
         out["from_load"] = {
             "load": load,
+            "applies_to": "上行噪声抬升（极点容量）；下行 IoT 不能按它读成负载",
             **itf.classify_iot(itf.iot_from_load(float(load))),
         }
     if not out:
@@ -1651,6 +1694,7 @@ async def sr_probe_scenario(
     preset: str | None = None,
     config: dict[str, Any] | None = None,
     num_samples: int = 30,
+    expectation: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """花几十秒看清一个场景长什么样，再决定要不要花几十分钟正式跑。
 
@@ -1660,7 +1704,8 @@ async def sr_probe_scenario(
     再与不变 SIR 重算 SINR/IoT。20-ray 内核的已测基准约 1.80×，不是固定 SLA。
 
     回的是：干扰画像（IoT，多小区才有）、链路预算（SNR/SINR/SIR 分布）、
-    几何量（路损、距离、视距比例、多普勒）、测量域导频 SIR（link=BOTH 才有）。
+    几何量（路损、距离、视距比例、多普勒）、``not_modeled``（会影响下行 IoT 但未建模的机制）。
+    只做下行；与 ``sr_generate`` 用同一套默认 AAU 阵列，IoT/SNR 与正式生成逐位一致。
 
     ``not_available`` 里明确列出探测模式**给不了**的量——谱效、吞吐、时延扩展
     估计、宽带预编码。这些必须跑正式生成，别拿探测结果替代。
@@ -1670,6 +1715,9 @@ async def sr_probe_scenario(
     preset : 预设名（sr_list_presets 查）。与 config 二选一。
     config : 直接给配置。给了 preset 时作为覆盖项。
     num_samples : 探测样本数。30 看中位数够用，看 5% 分位建议 100 以上。
+    expectation : 用户事先写下的预期，例如 ``{"iot_dl_db": 10, "sinr_db": 5}``。
+        给了就回 ``expectation_check``：差多少、哪些假设（功率、室内、负载、统计
+        对象）方向对且量级够、能解释这个差距。**差距大时先对齐假设再正式生成。**
     """
     from . import scenario as sc
 
@@ -1690,6 +1738,52 @@ async def sr_probe_scenario(
     out["preset"] = preset
     if dep_notes:
         out["dependent_override_notes"] = dep_notes
+    if expectation:
+        from . import factors as fx
+
+        measured = {
+            "iot_dl_db": ((out.get("interference") or {}).get("dl_iot") or {}).get("median_db"),
+            "sinr_db": out["link_budget"]["sinr_dB"].get("median"),
+            "sir_db": out["link_budget"]["sir_dB"].get("median"),
+            "snr_db": out["link_budget"]["snr_dB"].get("median"),
+        }
+        checks = []
+        for key, want in expectation.items():
+            got = measured.get(key)
+            if got is None:
+                checks.append({"metric": key, "error": f"探测不给 {key}；可比的有 {sorted(measured)}"})
+            else:
+                checks.append(fx.explain_gap(key, float(want), float(got), cfg=cfg))
+        out["expectation_check"] = checks
+    return _jsonable(out)
+
+
+@tool()
+async def sr_sensitivity(
+    draft_id: str,
+    num_samples: int = 21,
+    keys: list[str] | None = None,
+) -> dict[str, Any]:
+    """**哪个假设最要紧，让仿真器自己量。** 在草稿当前配置上，把发射功率、场景、
+    站数、站距、噪声系数、邻区负载、撒点各换一种取值，用探测模式实测下行 IoT /
+    SIR / SINR 中位变多少，按影响排序。
+
+    用途是决定先问用户什么：变化大的必须对齐；变化为 0（``inert``）说明仿真器根本
+    不读这个键，不用问但要写进结论边界。每个变体跑一次探测，19 站配置下每个约
+    二三十秒；只想看几项时用 ``keys`` 限定（取值见返回的 ``factor``）。
+    """
+    from . import interview as iv
+
+    try:
+        d = pl.load_draft(draft_id)
+    except (KeyError, ValueError) as exc:
+        return {"error": str(exc)}
+    cfg, _ = pl.resolved_config(d)
+    sweep_key = (d.sweep or {}).get("key")
+    out = await anyio.to_thread.run_sync(functools.partial(
+        iv.measure_sensitivity, cfg, sweep_key=sweep_key, keys=keys,
+        num_samples=max(7, int(num_samples))))
+    out["draft_id"] = draft_id
     return _jsonable(out)
 
 
@@ -2013,7 +2107,7 @@ def sr_system_sim(
     tti_trace_max_points: int = 256,
     kpi_focus: list[str] | None = None,
     kpi_intent: str = "",
-    serving_cell: int | None = None,
+    serving_cell: int | str | None = None,
     ca_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """**系统级仿真：连续几秒钟的 TTI，出体验速率等现网 KPI，全部带置信区间。**
@@ -2127,7 +2221,9 @@ def sr_system_sim(
     serving_cell : 多小区数据集里只取这个 serving cell 的 UE 做单小区调度。
         **3GPP TR 36.814 的标准撒点密度是每扇区 10 个 UE**，7 站 21 扇区就要撒
         210 个；而本仿真器一次只调度一个小区，所以必须能挑出属于某个小区的那批。
-        不给（默认）时，多小区数据集仍按原来那样硬失败。
+        不给（默认）时，多小区数据集仍按原来那样硬失败。给 ``"auto"`` 时按实际撒点
+        在中心站扇区里挑 UE 最多且 ≥2 个的小区（都不足时退选全网 UE 最多的小区并说明），
+        理由写进 ``serving_cell_selection.auto_reason``。
         挑哪个小区是**物理选择**：拓扑没有 wrap-around，边缘站的邻区不完整、
         干扰被低估，应当挑被邻区包围最完整的中心站小区；结果里的
         ``serving_cell_selection`` 会回报实际选中的小区、它有几个 UE，以及
@@ -2427,10 +2523,18 @@ def sr_system_sim(
 
     # --- 按 serving cell 挑出单小区的那批 UE ------------------------------
     serving_cell_selection: dict[str, Any] | None = None
+    auto_reason = None
+    if isinstance(serving_cell, str) and serving_cell.strip().lower() == "auto":
+        serving_cell, auto_reason = _auto_serving_cell(
+            serving_cell_ids_by_ue, int(ds.config.get("sectors_per_site", 1) or 1),
+            "custom" if ds.config.get("custom_site_positions")
+            else str(ds.config.get("topology_layout", "hexagonal")))
+        if serving_cell is None:
+            return {"error": auto_reason}
     if serving_cell is not None:
         if (isinstance(serving_cell, bool)
                 or not isinstance(serving_cell, (int, np.integer))):
-            return {"error": "serving_cell 必须是整数小区编号或 None"}
+            return {"error": "serving_cell 必须是整数小区编号、\"auto\" 或 None"}
         # _flag 在下面才定义；这里内联同一判据（"off"/"false"/"0" 等字符串
         # 直接 bool() 会是真值，开关会无声失灵）。
         _rbpc_raw = rb_power_control_enabled
@@ -2507,6 +2611,7 @@ def sr_system_sim(
                     _iot_note = "选中小区所有样本 SIR<=SINR，IoT 无有限值"
         serving_cell_selection = {
             "requested": target_cell,
+            "auto_reason": auto_reason,
             "ues_in_cell": len(selected_ues),
             "ues_in_dataset": int(n_ue),
             "cells_in_dataset": len(set(serving_cell_ids_by_ue)),

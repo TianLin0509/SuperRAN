@@ -68,6 +68,33 @@ class CloudWorkflow(unittest.TestCase):
     def agent(self, cwd, *args, **kwargs):
         return self.cmd(cwd, sys.executable, "scripts/agent_repo.py", *args, **kwargs)
 
+    def disturbed_agent(self, cwd, competing_branch, *args, ok=True):
+        """Another real Git process overwrites FETCH_HEAD at the race boundary.
+
+Only scheduling is injected: both fetches use real Git and the fixture server.
+The competitor completes after our fetch and before the client's next command.
+"""
+        script = self.root / "perturb-fetch.py"
+        marker = self.root / "perturb-fetch.json"
+        script.write_text(
+            "import json,sys\nsys.dont_write_bytecode=True\nfrom pathlib import Path\n"
+            "sys.path.insert(0,str(Path.cwd()/'scripts'))\nimport agent_repo as agent\n"
+            "original=agent.git\nfired=False\n"
+            "def disturbed(*args):\n"
+            "    global fired\n"
+            "    value=original(*args)\n"
+            "    if args[0]=='fetch' and not fired:\n"
+            "        fired=True\n"
+            f"        original('fetch','--no-tags','origin','refs/heads/{competing_branch}')\n"
+            f"        Path({str(marker)!r}).write_text(json.dumps({{'fetch_head':original('rev-parse','FETCH_HEAD')}}),encoding='utf-8')\n"
+            "    return value\nagent.git=disturbed\nraise SystemExit(agent.main())\n",
+            encoding="utf-8")
+        result = self.cmd(cwd, sys.executable, str(script), *args, ok=ok)
+        self.assertTrue(marker.exists(), "the competing Git fetch must actually execute")
+        observed = json.loads(marker.read_text(encoding="utf-8"))["fetch_head"]
+        self.assertEqual(observed, self.candidate if competing_branch == "feat/fixture" else self.base)
+        return result
+
     def submit_fetch(self):
         self.agent(self.task, "submit", "--base", self.base)
         result = self.agent(self.reviewer, "fetch-candidate", "feat/fixture", "--sha", self.candidate)
@@ -151,6 +178,25 @@ class CloudWorkflow(unittest.TestCase):
         self.assertEqual(actual, "disabled://github-archive")
         actual = self.cmd(self.author, "git", "config", "--get", "branch.develop.remote").stdout.strip()
         self.assertEqual(actual, "origin")
+
+    def test_start_ignores_competing_fetch_head(self):
+        self.agent(self.task, "submit", "--base", self.base)
+        target = self.root / "second-task"
+        result = self.disturbed_agent(self.author, "feat/fixture", "start", "feat/second", str(target))
+        self.assertEqual(json.loads(result.stdout)["base"], self.base)
+        self.assertEqual(self.cmd(target, "git", "rev-parse", "HEAD").stdout.strip(), self.base)
+        self.assertNotEqual(self.base, self.candidate)
+
+    def test_submit_rejects_candidate_as_base_despite_competing_fetch(self):
+        self.agent(self.task, "submit", "--base", self.base)
+        # FETCH_HEAD is changed to candidate; it must not masquerade as develop.
+        self.disturbed_agent(self.task, "feat/fixture", "submit", "--base", self.candidate, ok=False)
+
+    def test_fetch_candidate_ignores_competing_fetch_head(self):
+        self.agent(self.task, "submit", "--base", self.base)
+        result = self.disturbed_agent(self.reviewer, "develop", "fetch-candidate", "feat/fixture", "--sha", self.candidate)
+        branch = result.stdout.strip()
+        self.assertEqual(self.cmd(self.reviewer, "git", "rev-parse", branch).stdout.strip(), self.candidate)
 
 
 if __name__ == "__main__":

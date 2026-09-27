@@ -284,7 +284,7 @@ MCP 冒烟：
 import asyncio; from superran import server
 print('tools:', len(asyncio.run(server.mcp.list_tools())), 'mcp major:', server.MCP_MAJOR)
 "
-# 期望：tools: 35
+# 期望：tools: 36
 ```
 
 ---
@@ -335,7 +335,7 @@ rm -rf ~/.codex/skills/channel-sim ~/.codex/skills/superran-member-task ~/.codex
 用户提一个无线算法优化思路，它给出可信的信道场景实例、配套物理观察量，
 以及 SINR / 谱效的完整评价链路，并用三道门拦住站不住的结论。
 
-- 35 个 MCP 工具，从探能力、问需求、生成、取货，到 BLER/TDD AMC、3GPP 校准、三道评审门
+- 36 个 MCP 工具，从探能力、问需求、生成、取货，到 BLER/TDD AMC、3GPP 校准、三道评审门
 - **数据永远不进对话** —— MCP 只回句柄、统计摘要和可运行的取货代码
 - 详见 `SETUP.html`（组成与用法）、`CAPABILITIES.html`（能力边界）、
   `SHOWCASE.html`（实测演示）

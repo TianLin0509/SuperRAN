@@ -28,12 +28,12 @@
 ```
 你在群里打一句要干什么
     ↓
-① 工作位  开自己的 worktree → 实现 → 自测 → 本地提交并交完整 SHA
+① 工作位  从阿里云开自己的 worktree → 实现 → 自测 → 上传候选并交完整 SHA
           交四行人话：干了什么 / 验了什么 / 有什么风险 / 报告在哪
     ↓
 ② 合并位  独立跑一遍验证（不采信①说的）
           物理 bug 还要做棘轮反证：新测试跑未修复主干必须变红
-          PASS → 由它执行合并；FAIL → 交回 BLOCKERS
+          PASS → 由它执行合并并发布云端 develop；FAIL → 交回 BLOCKERS
     ↓
 ③ 工作位  只修 BLOCKERS 列的，提交同一分支并交新 SHA → 回到 ②
 ```
@@ -54,11 +54,11 @@
 
 ## 唯一可信的地方
 
-- **主线**：`C:\Vibe\Wireless\SuperRAN`（分支 `develop`；`main` 只在明确发布时更新）。
-- **任务工作区**：`C:\Vibe\Worktrees\SuperRAN\<任务名>-<席位>`。用完即弃。
-- **禁止**再 clone 一份 SuperRAN 到别处。要并行就用 `git worktree add`。
-- **上游**：`https://github.com/TianLin0509/SuperRAN.git`，只在你明确说「同步 GitHub」时才动。
-  日常合并**不经过 GitHub**，全在本地。
+- **权威主线**：[阿里云私有仓库](https://ai.lt-stockpartner.tech/repos/superran/SuperRAN) 的 `develop`；`main` 只在明确发布时更新。
+- **本机主仓库**：每台电脑 clone 一份，路径由本机选择；维护者现有目录为 `C:\Vibe\Wireless\SuperRAN`。
+- **任务工作区**：本机主仓库外的独立 worktree，名称带任务和席位；保留在途内容，清理前核对归属。
+- **跨电脑交接**：`scripts/agent_repo.py` 的 start / submit / fetch-candidate；详见 `SYNC.md`。
+- **历史**：GitHub 仅保留读取，本地 `github-archive` 关闭推送；日常维护不依赖 GitHub。
 
 ## 三条铁律（Agent 违反即返工）
 
@@ -78,18 +78,20 @@ python scripts/merge_task.py <分支> --expected-head <任务SHA> --expected-tru
 ```
 
 它会核对本地 SHA → 试合（先不提交）→ **亲自跑流程验证与全量仿真测试** → 过了才提交。失败且现场未变化时撤销试合；发现额外暂存、文件变更或冲突时保留现场并非零退出，先核对归属再处理。
-不执行远端同步；已有未提交内容时拒绝并保留现场。
+实际合并用 `agent_repo.py merge` 包装上述闸门，成功后生成版本绑定回执；
+再由 `agent_repo.py publish` 核对云端基线并发布。已有未提交内容时拒绝并保留现场。
 必须在主工作目录跑（worktree 里的导入会解析到主仓库，证据是假的）。
 
 两个钩子守着这条唯一入口：
 
 - `.githooks/pre-commit` —— 拒绝在主工作目录提交，逼 Agent 去开自己的 worktree
-- `.githooks/pre-push` —— 拒绝直推 `develop` / `main`；只有维护者另行授权的同步才可放行
+- `.githooks/pre-push` —— develop 发布须有匹配回执和云端基线；main 保持独立发布边界
 
 新机器上装一次（worktree 自动继承）：
 
 ```
-git config core.hooksPath .githooks
+python scripts/agent_repo.py init
+python scripts/agent_repo.py doctor --online
 ```
 
 说清它的边界：**拦得住「提交到主工作区」，拦不住「在主工作区改文件」。**
@@ -111,7 +113,7 @@ git config core.hooksPath .githooks
 - `project.json` — 项目配置。主干名、闸门跑哪些测试、worktree 放哪。**钩子和合并脚本都读它**
 - `TESTING.md` — 怎么跑测试。**两个坑会让 Agent 得出假的「测试通过」**，两个席位都必读
 - `RISK.md` — 风险分档（按文件路径写死，Agent 不许自己判断）
-- `SYNC.md` — 对外改动文档与批次记录
+- `SYNC.md` — 阿里云跨电脑交接、发布与改动记录
 - `INTEGRATOR.md` — 多条并行开发线合到一起时用（日常单条任务不需要）
 - `COMPANY.md` — 内网 Agent **通审整个仓库**的合同，**含保密红线**
 - `COMPANY_REVIEW.md` — 内网 Agent **审一次具体改动**的合同，打包时会自动放进审核包
