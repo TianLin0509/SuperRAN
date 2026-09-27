@@ -1,5 +1,8 @@
 # SuperRAN
 
+Agent 开发入口：[安装与接入](INSTALL_AGENT.md) → [协作合同](AGENTS.md) → [跨电脑交接](.agents/SYNC.md)。
+日常代码以 [阿里云私有仓库](https://ai.lt-stockpartner.tech/repos/superran/SuperRAN) 为准；GitHub 仅保留历史。
+
 SuperRAN 用来研究无线算法：生成信道，模拟用户业务与调度，再检查观察到的差异是否足以支持结论。你可以直接调用 Python，也可以让 Agent 通过 MCP（模型上下文协议）完成配置、运行和取数。
 
 统计信道、阵列、参考信号、估计器与系统仿真由本仓维护。默认使用 CDL（簇时延线）信道；Sionna RT 是显式选择的可选射线追踪后端。
@@ -135,7 +138,7 @@ python scripts/install_agent_skills.py --role simulation --check
 
 根目录旧版专题 HTML 为历史快照；当前算法与接口以 `docs/index.html` 为准。重新生成主手册：`python scripts/make_developer_guide.py`。
 
-## MCP 工具（35 个）
+## MCP 工具（36 个）
 
 工具按需求与配置、信道生成与体检、链路测量、系统仿真与比较、外部结果、干扰诊断分组。完整签名从源码自动生成，见[工具索引](docs/index.html#/tools)；运行时以 `sr_capabilities` 和客户端实际工具 schema 为准。
 
@@ -148,7 +151,7 @@ python scripts/install_agent_skills.py --role simulation --check
 
 ## 开发与验证
 
-`develop` 是开发主线；任务在独立 worktree 中修改和本地提交，交由另一合并位验证。日常不推送、不建 PR；远端同步与发布需维护者明确发起。历史 `superran-lead` / `superran-member-task` 流程已废弃，按 `.agents/` 工作。
+阿里云 `develop` 是开发主线；每台电脑保留一份主仓库，任务在独立 worktree 中修改和自测，上传候选分支后交由另一合并位验证。合并位通过完整版本闸门后发布到云端。历史 `superran-lead` / `superran-member-task` 流程已废弃，按 `.agents/` 工作。
 
 当前共 **30 个可执行测试文件**。先将 `PYTHONPATH` 指向本次工作区的 `src`，检查 `superran.__file__` 确认导入正确，再跑相关文件。聚合入口按文件执行并核对注册集：
 

@@ -12,10 +12,10 @@
 
 ## 一、先开自己的 worktree
 
-主工作区 `C:\Vibe\Wireless\SuperRAN` **不是干活的地方**，`.githooks/pre-commit` 会拒绝在那里提交。
+本机主仓库（首次从阿里云 clone 的目录）**不是干活的地方**，`.githooks/pre-commit` 会拒绝在那里提交。
 
 ```bash
-git worktree add C:/Vibe/Worktrees/SuperRAN/<日期>-<任务简称>-<你的席位> -b <分支名> develop
+python scripts/agent_repo.py start <feat|fix|chore>/<任务名-日期-席位> <仓库外的新目录>
 ```
 
 - 目录名带**席位**（`claude1` / `codex1`），并行的几个人才不会互相踩
@@ -24,7 +24,7 @@ git worktree add C:/Vibe/Worktrees/SuperRAN/<日期>-<任务简称>-<你的席�
 ### 开跑前必做这一步，不做等于白测
 
 ```bash
-export PYTHONPATH='C:\Vibe\Worktrees\SuperRAN\<你的目录>\src'
+export PYTHONPATH="$(pwd)/src"  # Git Bash；PowerShell 用 (Join-Path (Get-Location) 'src')
 python -c "import superran; print(superran.__file__)"
 ```
 
@@ -81,8 +81,10 @@ python scripts/run_test_matrix.py --tier full     # 全量 29 个文件，约 7 
 
 在自己的 worktree 本地提交，并读取 `git rev-parse HEAD` 和 `git rev-parse develop`。
 把本地分支名、任务完整 SHA、基于哪个主干 SHA、风险档和报告交给合并位。
-共享 Git 仓库能直接读取本地分支，无需远端传递。任务交付后保持该提交不变，等审核意见。
-工作位不执行合并；远端同步只在维护者明确授权后另走 `SYNC.md`。
+同机共享 Git 仓库可直接读取本地分支；不同电脑必须通过阿里云传递。
+执行 `python scripts/agent_repo.py submit --base <开工记录的完整基线SHA>`，交付输出中的
+候选完整 SHA、基线、风险档和验证证据。任务交付后保持该提交不变，等审核意见。
+工作位不执行合并，不持有合并身份的凭据；详见 `SYNC.md`。
 
 ---
 
