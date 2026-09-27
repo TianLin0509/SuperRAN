@@ -18,6 +18,12 @@
     # 加 --dry-run 只验不合；本地入口不执行 fetch/push 或推进发布分支。
 
 项目差异全部读 .agents/project.json，本脚本对项目一无所知。
+
+版本号（versionBump / versionFiles）：
+    配了 versionBump 时，合进工作区之后、跑测试之前执行抬版本命令，
+    把 versionFiles 暂存进同一个合并提交；分支本身不改版本号。
+    原因：版本号那几行是所有并行分支都要改的同几行，分支无从知道自己
+    是第几个合进去的，只有持锁串行的合并入口知道。没配就整段不生效。
 """
 import argparse
 import json
@@ -115,6 +121,8 @@ def main():
     name = cfg.get("name") or REPO.name
     tests = cfg.get("test") or []
     after = cfg.get("afterMerge") or []
+    version_bump = cfg.get("versionBump") or []
+    version_files = cfg.get("versionFiles") or []
     branch = args.branch
 
     say(f"── {name} · 合并 {branch} → {trunk} ──")
@@ -139,6 +147,12 @@ def main():
     ):
         say("✗ 项目必须配置非空测试命令，不能无测试合并。")
         return 2
+    if (not isinstance(version_bump, list) or not isinstance(version_files, list)
+            or any(not isinstance(c, str) or not c.strip() for c in version_bump)
+            or any(not isinstance(p, str) or not p.strip() for p in version_files)
+            or bool(version_bump) != bool(version_files)):
+        say("✗ versionBump 与 versionFiles 必须同时为空或同时配置非空字符串列表。")
+        return 2
     if git("branch", "--show-current") != trunk:
         say(f"✗ 主工作目录必须已在 {trunk}，本脚本不切换别人的工作分支。")
         return 2
@@ -153,6 +167,9 @@ def main():
         return 2
 
     say(f"① 记下回滚点：{trunk} = {original[:12]}")
+    child_env = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    if (REPO / "src").is_dir():
+        child_env["PYTHONPATH"] = str(REPO / "src")
 
     bypass = {"HUB_ALLOW_MAIN_COMMIT": "1"}
     merged_sha = None
@@ -204,14 +221,35 @@ def main():
         merged_tree = git("write-tree")
         say("   已合进工作区，主干提交历史暂未改变")
 
-        # ⑤ 亲自跑测试 —— 不采信任何 Agent 的说法
-        say(f"③ 跑测试（{len(tests)} 条）")
+        # ③ 抬版本号 —— 放在测试之前，让版本一致性测试也守着这一步的结果。
+        #    抬完只暂存 versionFiles 并把它记成新的「已知试合结果」：回滚仍能
+        #    识别这是本次自己的改动而安全撤销；动到别的文件就按未知变化保留现场。
+        if version_bump:
+            say("③ 抬版本号（合并入口串行执行，分支本身不改版本号）")
+            pre_bump_tree = merged_tree
+            failed = None
+            for cmd in version_bump:
+                say(f"   {cmd}")
+                if run(cmd, env=child_env, check=False, capture=False).returncode != 0:
+                    failed = cmd
+                    break
+            run(["git", "add", "--", *version_files])
+            merged_tree = git("write-tree")
+            if failed:
+                raise RuntimeError(f"抬版本号失败：{failed}")
+            changed = set(git("diff-tree", "-r", "--name-only", pre_bump_tree, merged_tree).splitlines())
+            stray = git("diff", "--name-only") or git("ls-files", "--others", "--exclude-standard")
+            if stray:
+                raise RuntimeError(f"抬版本号改动了 versionFiles 以外的文件：{stray.splitlines()[:5]}")
+            if changed != set(version_files):
+                raise RuntimeError(
+                    f"抬版本号应恰好改动 {sorted(version_files)}，实际改动 {sorted(changed)}。")
+
+        # ④ 亲自跑测试 —— 不采信任何 Agent 的说法
+        say(f"④ 跑测试（{len(tests)} 条）")
         for i, t in enumerate(tests, 1):
             say(f"   [{i}/{len(tests)}] {t}")
-            test_env = {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-            if (REPO / "src").is_dir():
-                test_env["PYTHONPATH"] = str(REPO / "src")
-            r = run(t, env=test_env, check=False, capture=False)
+            r = run(t, env=child_env, check=False, capture=False)
             if r.returncode != 0:
                 raise RuntimeError(f"测试没过：{t}")
         say("   全部通过")
@@ -226,7 +264,7 @@ def main():
 
         if args.dry_run:
             say()
-            say("④ --dry-run，撤销不真合")
+            say("⑤ --dry-run，撤销不真合")
             rollback()
             say(f"   已回到 {original[:12]}")
             say()
@@ -253,11 +291,11 @@ def main():
         say("这个分支还在，改完再跑一次本脚本即可。")
         return 1
 
-    say("④ 本地合并完成；远端及发布分支保持独立，由维护者另行发起同步。")
+    say("⑤ 本地合并完成；远端及发布分支保持独立，由维护者另行发起同步。")
 
     # ⑦ 合并后动作 —— 项目专属的东西全在这里，脚本本身不知道是什么
     if after:
-        say(f"⑤ 合并后动作（{len(after)} 条）")
+        say(f"⑥ 合并后动作（{len(after)} 条）")
         for a in after:
             cmd = a.replace("{branch}", branch).replace("{sha}", merged_sha or "")
             say(f"   {cmd}")

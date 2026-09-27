@@ -60,7 +60,11 @@ git diff develop...<分支>
 python scripts/merge_task.py <分支> --expected-head <任务完整SHA> --expected-trunk <主干完整SHA> --dry-run
 ```
 
-这条命令会：核对本地主干与任务 SHA → 试合（不提交）→ **亲自跑 `.agents/project.json` 里的测试** → 回滚。
+这条命令会：核对本地主干与任务 SHA → 试合（不提交）→ 抬版本号 → **亲自跑 `.agents/project.json` 里的测试** → 回滚。
+抬版本号（2026-09-27 维护者决定）：按 `versionBump` 把 `versionFiles` 两处的 patch 位 +1，
+写进同一个合并提交，所以合并提交比两个父提交多出这两行版本改动属正常。
+分支本身不许改版本号；diff 里看到任务分支动了这两行，除非维护者同意了 minor/major，
+否则算夹带写进 BLOCKERS。
 自动撤销仅限索引、文件与本次试合结果一致的现场。退出码 2 若提示未知变化或冲突，必须保留索引、文件和 MERGING 状态，核对归属后再处理；不得直接补一条 `merge --abort` 或 `reset` 抹掉他人内容。
 云端候选先按 `SYNC.md` 拉取并核对完整 SHA；云端主干若变化，重新审核。
 主工作目录不干净或已有合并锁时会拒绝，保留现场。

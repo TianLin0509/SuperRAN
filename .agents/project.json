@@ -14,9 +14,14 @@
   ],
   "$comment_afterMerge": "留空是刻意的。给内网打审核 zip 不是流水线的一环，是两个独立任务之间的动作，由维护者在他想送审时手动做。",
   "afterMerge": [],
-  "$comment_version": "本次只整理开发流程，不改 Python API 包版本；完整代码身份用 Git SHA。未来发布的版本策略由维护者单独发起，不套用 npm 版本脚本。",
-  "versionFiles": [],
-  "versionBump": [],
+  "$comment_version": "2026-09-27 维护者决定：每次合入 develop 由 merge_task.py 在试合之后、跑测试之前执行 versionBump（patch +1），把 versionFiles 两处同步写进合并提交；任务分支不改版本号，避免并行分支撞同一行。minor/major 用 scripts/bump_version.py --set x.y.z，须维护者同意。版本号给人确认跑的是哪一版；完整代码身份仍以 Git SHA 为准。",
+  "versionFiles": [
+    "pyproject.toml",
+    "src/superran/__init__.py"
+  ],
+  "versionBump": [
+    "python scripts/bump_version.py"
+  ],
   "contracts": {
     "author": ".agents/AUTHOR.md",
     "merger": ".agents/MERGER.md"

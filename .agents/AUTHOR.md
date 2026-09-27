@@ -86,6 +86,11 @@ python scripts/run_test_matrix.py --tier full     # 全量 29 个文件，约 7 
 候选完整 SHA、基线、风险档和验证证据。任务交付后保持该提交不变，等审核意见。
 工作位不执行合并，不持有合并身份的凭据；详见 `SYNC.md`。
 
+**分支不改版本号。** `pyproject.toml` 与 `src/superran/__init__.py` 里的版本号
+（2026-09-27 维护者决定）由合并入口在每次合入 develop 时自动 patch +1，
+并行分支都去改这同两行必然互相冲突。维护者同意的 minor/major 升级才用
+`python scripts/bump_version.py --set x.y.z`，且合并入口仍会在其上再 +1。
+
 ---
 
 ## 五、最后交这四行人话（标签固定，一个字都别改）
