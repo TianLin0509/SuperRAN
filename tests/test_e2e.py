@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import subprocess
 import sys
 import tempfile
@@ -539,6 +540,20 @@ _r = _rv(_p["draft_id"], design={"sweep_values": "0.02/0.1 GHz"}, accept_recomme
 check(_r["brief"]["sweep"]["values"] == [20e6, 100e6], "R4：后续回答复用原话的共享单位规则")
 check(bool(iv.parse_sweep_values("33dBm/20MHz", "tx_power_dbm")[1]),
       "R4：后续回答量纲不匹配必须报错")
+_p = srv.sr_plan("对比发射功率对SINR的影响")
+_r = _rv(_p["draft_id"], design={"sweep_values": "33 dBm/20 MHz"})
+check(not _r["ready_to_go"] and any(x["key"] == "sweep_values" for x in _r["issues"]),
+      "R4：错误扫描回答持久阻断，而不只是返回一条修改提示")
+_r = _rv(_p["draft_id"], accept_recommended=True)
+check(not _r["ready_to_go"] and pl.load_draft(_p["draft_id"]).sweep_error is not None,
+      "R4：错误扫描回答重新加载和按推荐跑后仍阻断")
+_g = asyncio.run(srv.sr_generate(draft_id=_p["draft_id"], num_samples=2))
+check(_g.get("status") == "blocked" and any(x["key"] == "sweep_values" for x in _g["issues"]),
+      "R4：实际生成入口拒绝带无效扫描回答的草稿")
+_r = _rv(_p["draft_id"], design={"sweep_values": "33/53 dBm"}, accept_recommended=True)
+check(_r["ready_to_go"] and pl.load_draft(_p["draft_id"]).sweep_error is None
+      and _r["brief"]["sweep"]["values"] == [33.0, 53.0],
+      "R4：用户补合法档位后自动解除扫描阻断")
 check(iv.parse_sweep_values("20MHz/0.1GHz", "bandwidth_hz")[0] == [20e6, 100e6],
       "R4：显式混合频率单位分别换算")
 check(iv.read_brief("对比带宽20 vs 100 MHz下的SINR").sweep["values"] == [20e6, 100e6],

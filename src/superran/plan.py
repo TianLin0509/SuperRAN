@@ -227,6 +227,7 @@ class Draft:
     form: str | None = None            # 结论形态
     family: str | None = None          # 目标量属于哪张因子表
     sweep: dict[str, Any] | None = None  # 扫描变量与取值
+    sweep_error: str | None = None  # 无效回答持久阻断，必须由用户重新给合法档位解除
     provenance: dict[str, str] = field(default_factory=dict)  # 键 → 谁定的
     brief_evidence: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)  # 原话里平台做不到的条件
@@ -247,6 +248,7 @@ class Draft:
             "form": self.form,
             "family": self.family,
             "sweep": self.sweep,
+            "sweep_error": self.sweep_error,
             "provenance": self.provenance,
             "brief_evidence": self.brief_evidence,
             "blockers": self.blockers,
@@ -438,7 +440,7 @@ def _scenario_height(d: Draft) -> None:
         d.provenance["tx_height_m"] = iv.SOURCE_DERIVED
 
 
-def _apply_answer(d: Draft, key: str, value: Any, changes: list[str]) -> None:
+def _apply_answer(d: Draft, key: str, value: Any, changes: list[str], *, recommended: bool = False) -> None:
     """把一个设计层回答落到草稿：记录、生效选项改动、更新扫描计划。所有入口共用这一条路径。
 
     审核 F3/F4/F7 的教训：回答只记进 design 而不进执行配置，历史与实际就会分叉。
@@ -448,12 +450,16 @@ def _apply_answer(d: Draft, key: str, value: Any, changes: list[str]) -> None:
     if value is None or value == "":  # False / 0 是合法回答（例如“关掉自适应”）
         return
     if key == "sweep_values":
+        if recommended and d.sweep_error:
+            return  # 推荐不能替用户纠正有歧义或量纲错误的输入。
         skey = (d.sweep or {}).get("key") or iv.sweep_key_from_intent(d.intent, iv.Brief()) or "?"
         nums, problems = iv.parse_sweep_values(str(value), skey)
         if not nums or problems:
-            changes.append(f"扫描取值「{value}」" + ("；".join(problems) if problems else "里没有具体数值")
-                           + "，未记为已答；请给出合法数值")
+            d.sweep_error = (f"扫描取值「{value}」" + ("；".join(problems) if problems else "里没有具体数值")
+                             + "，未记为已答；请给出合法数值")
+            changes.append(d.sweep_error)
             return
+        d.sweep_error = None
         old = (d.sweep or {}).get("values")
         d.sweep = {"key": skey, "values": nums}
         changes.append(f"扫描 {skey}: {old} → {nums}")
@@ -547,7 +553,7 @@ def revise_draft(
                         d.user_set.append(q.key)
                     d.provenance[q.key] = iv.SOURCE_ANSWERED
                 else:
-                    _apply_answer(d, q.key, rec, changes)
+                    _apply_answer(d, q.key, rec, changes, recommended=True)
             if not progressed:
                 break
         for adj in required_adjustments(d):
@@ -613,6 +619,9 @@ def required_adjustments(d: Draft) -> list[dict[str, Any]]:
 def interview_blockers(d: Draft, num_samples: int | None = None) -> list[dict[str, str]]:
     """访谈层发现、会让这次实验答非所问的阻断项。提案与 sr_generate 共用。"""
     out: list[dict[str, str]] = []
+    if d.sweep_error:
+        out.append({"severity": "block", "key": "sweep_values", "message": d.sweep_error,
+                    "suggestion": "请通过 sr_revise 的 sweep_values 重新给出合法档位；按推荐跑不会替换这次无效回答"})
     for msg in d.blockers:
         out.append({"severity": "block", "key": "request", "message": msg,
                     "suggestion": "改成支持的条件，或确认放弃这一项"})
