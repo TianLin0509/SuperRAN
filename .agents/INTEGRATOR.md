@@ -9,7 +9,7 @@
 
 1. **先锁定输入**：把每条线的完整 SHA 记下来。集成过程中别人可能还在推新提交，
    不锁定就会基准漂移。
-2. 建集成工作区：`git worktree add -b integration/<日期> <目录> develop`
+2. 建集成工作区：`git worktree add -b chore/integration-<日期>-<席位> <目录> develop`
 3. **一条一条合**，每合一条单独验证一次。不要一次全合上去再一起查。
 
 ## 解冲突的三条规则
@@ -48,24 +48,17 @@ A + B + C       -> 挂的集合有没有变？
 
 ## 验证
 
-按 `.agents/TESTING.md` 跑，**两种执行方式都要跑**（`pytest tests/` 只覆盖 28 个
-测试文件里的 16 个，另外 12 个必须走 `__main__` 入口）。
-
-集成的最终回归**建议直接在主工作区 `C:\Vibe\Wireless\SuperRAN` 跑**——
-那里 editable 安装的导入天然与代码一致，少一个出错的机会。
+按 `.agents/TESTING.md` 绑定自己的源码导入路径，执行相关测试。
+完整验收使用 `scripts/run_test_matrix.py --tier full`，不得用 pytest 收集量替代文件覆盖。
+集成作者只在自己的 worktree 修改与自测；最终主目录闸门由独立合并位执行。
 
 ## 上线
 
-`develop` 是保护分支：必须走 PR + `validate` CI，**只允许 squash 合并**，不能直推。
-
-squash 的两个后果要处理：
-
-1. 来源 PR 的提交不会成为 `develop` 的祖先，GitHub **不会**自动标为 merged。
-   要**逐文件核对内容确实没丢**（比对每个 `src/` 与 `tests/` 文件是否逐字节一致，
-   多方都改过的文件应是并集），然后手动关闭并留言说明去向。
-2. 逐条提交历史被压缩。在 squash 的提交信息里写清每条来源分支的完整 SHA。
-
-合完把本地 `develop` reset 到 `origin/develop`，再把 `main` 快进上来，四点保持一致。
+按 `.agents/MERGER.md` 与 `.agents/SYNC.md`：冻结综合候选与主干完整 SHA，
+交独立合并位审核。红档仍需独立 Physics / Integration 两个角色。
+通过 dry-run 后，由合并位使用 `agent_repo.py merge` 调用完整闸门、保留合并父提交，
+再凭同一版本回执发布阿里云 develop。来源分支祖先关系必须可追溯；不推 GitHub。
+不 reset 主干、不覆盖在途改动，main 只在明确发布时另行处理。
 
 ## 交付
 

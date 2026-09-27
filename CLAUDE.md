@@ -82,7 +82,7 @@ python tests/test_power_control.py          # EBF/PEBF/NEBF 与逐 RB 功率耦�
 python tests/test_physics_contract_extensions.py # 快照时钟、SRS测量口径与场景资产合同
 python tests/test_physics_invariants.py     # 极化、子阵、SRS/LMMSE 物理不变量
 python tests/test_channel_generation_contract.py # first-party 信道生成合同与最小网格
-python tests/test_native_independence.py       # 外部根/导入阻断、v1/v2互易、35工具
+python tests/test_native_independence.py       # 外部根/导入阻断、v1/v2互易、工具清单
 python tests/test_developer_guide.py         # 开发者文档覆盖、离线结构与漂移检查
 python tests/test_carrier.py                 # 载波栅格、Type-0 边界、本地 TDD 合同
 python tests/test_ca.py                      # 共享队列 CA、整数分流、CORT 扩容与跨载波隔离

@@ -2,7 +2,7 @@
 
 仅在成员已配置 `SUPERRAN_REPORT_CONFIG`（私有 JSON 文件路径）时启用。
 成员配置表示授权把本项 SuperRAN 工作的简短进展发往配置中的团队站点。
-首次接入先核对 `site` 是负责人指定的站点；不得上传源代码、会话全文、密钥、原始数据或未获授权的公司材料。
+首次接入先核对 `site` 是负责人指定的站点；不得上传源代码、会话全文、密钥、原始数据或未获授权的内部材料。
 
 ## 何时主动更新
 
@@ -22,7 +22,7 @@ python apps/team_site/report.py --config $env:SUPERRAN_REPORT_CONFIG flush
 
 命令返回的 `work_id` 必须立刻写入本任务工作笔记或交接材料，继续工作沿用。
 创建前也可自己生成并先保存 UUID，再传 `start --work-id`，避免中途退出丢失编号。
-公司 agent 用 `--source company-agent`，个人 Codex 用 `--source codex`；两者是更新来源，不是新角色。
+内网 agent 用 `--source company-agent`，个人 Codex 用 `--source codex`；两者是更新来源，不是新角色。
 多行文字用 UTF-8 文件与 `--progress-file`，避免 shell 引号误执行。
 
 ## 同步规则
@@ -37,4 +37,4 @@ python apps/team_site/report.py --config $env:SUPERRAN_REPORT_CONFIG flush
 - Agent 不能修改别人记录、解除人工保护、执行审核或合并。网站本身不做真实性审核。
 
 这里只依赖 agent 在工作节点主动调用命令，不声称所有产品都有通用结束钩子。
-公司工具若不读取 AGENTS.md，需将本段接入约定放到该工具的项目指令中；公司网络到站点的连通性须在该电脑实测。
+内网工具若不读取 AGENTS.md，需将本段接入约定放到该工具的项目指令中；内网到站点的连通性须在该电脑实测。

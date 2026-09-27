@@ -651,7 +651,7 @@ DETAIL_SPECS.update({
             "比较指标是队列封顶后的真实有效 payload，而不是满业务谱效或 grant TBS。若某个小包只剩 500 B，给它 5,000 B 的 TB 仍只贡献 500 useful bytes。这样，MU 只有在同一物理 RBG 上真正多送业务时才胜出，不会因为 padding 伪造收益。若 SU 方案已经能传完所有可服务用户队列，则默认 SU：此时 MU 没有额外用户体验收益，却增加相关性、功率损失和实现复杂度。",
             "Phase A 需要预先产生真实用户对信息：候选 pair、rank、预编码器、残留相关性/干扰损失及可支持状态。Phase B 不能凭一个平均 MU 增益临时假造配对。当前可以先使用 ZF/RZF 和明确的候选规则，但 pair table 必须来自真实 h_est 设计并能在 h_true 上复评。",
             "MU 资源统计按物理 PRB 计一次。两个用户在同一 RBG 配对，已用 PRB 仍是一份；用户级 attribution 可以各记 grant 或按用户数分摊，但小区 <code>MU PRB/已用 PRB</code> 的分子分母不能把同一 RBG 双计。",
-            "配对的代价有两半，任何评估路径都必须同时记账，否则结果只会朝一个方向偏。第一半是<b>发送侧变保守</b>：配对后每流只分到 P/(K·rank) 的功率，还要吃零陷残余，AMC 坐标应当整体下移，选出的 MCS 因此更低。第二半是<b>接收侧更容易错</b>：即使 MCS 已经降过，同一档在配对状态下的误块概率仍高于单用户——因为真实接收 SINR 是把 ZF 权（按基站可能已老化的 CSI 算出）打到双方 h_true 上、再把对方的流放进干扰协方差得到的，它不等于任何 dB 项的简单相加。只记第一半会低估吞吐、只记第二半会高估 MCS，而历史 capacity 两半都没记：它按 SU 坐标选 MCS、按 SU 真值抽签，只把 TB 大小乘一个建表阶段测出的标量比值，等价于宣称「配对让包变小但一点也不更容易错」。",
+            "配对的代价有两半，任何评估路径都必须同时记账，否则结果只会朝一个方向偏。第一半是<b>发送侧变保守</b>：配对后每流只分到 P/sum(rank) 的功率，还要吃零陷残余，AMC 坐标应当整体下移，选出的 MCS 因此更低。第二半是<b>接收侧更容易错</b>：即使 MCS 已经降过，同一档在配对状态下的误块概率仍高于单用户——因为真实接收 SINR 是把实际 EZF/ZF/RZF 权（按基站可能已老化的 CSI 算出）打到双方 h_true 上、再把对方的流放进干扰协方差得到的，它不等于任何 dB 项的简单相加。只记第一半会低估吞吐、只记第二半会高估 MCS，而历史 capacity 两半都没记：它按 SU 坐标选 MCS、按 SU 真值抽签，只把 TB 大小乘一个建表阶段测出的标量比值，等价于宣称「配对让包变小但一点也不更容易错」。",
             "因此 MU 一律读同一张 pair 表（<code>mu_accounting=\"pair_table\"</code>，唯一口径）。矩阵运算全部留在建表阶段，主循环只查表：实测约 3.8 ms/pair/快照，12 UE × 40 快照约 10 s，与主循环十万 TTI 的开销相比可以忽略。历史的标量口径 <code>se_ratio_legacy</code> 已于 2026-09-04 删除，选中时直接报错，不再作为静默兜底存在。它系统性乐观，旧结果不可与 pair 表口径的新结果拼进同一张趋势图。",
             "总功率按层等分，用户 u 的功率损失为 <code>10log10(rank_u / sum(rank))</code>。rank2+rank2 时两侧均为 −3.0103 dB，rank1+rank2 时为 −4.7712/−1.7609 dB。当前支持两用户、每用户 rank 1–2，默认 EZF；不能把 −3.01 dB 作为所有配对的常数。预测端相关性损失按每条流的残余项计算、再按 dB 求和；真实接收 SINR 则从实际发射权和真实信道独立计算。",
             "SU/MU 判决是逐 TTI 做的，不依赖任何全程标量。锚点固定为 PF 第一名，先按准入判据筛伙伴（与 experience 相同：两侧的<b>预测</b> BLER 都不得超过 0.5），再在通过准入的伙伴里取聚合谱效最高的那个，最后还要赢过锚点单发的 SU 方案才真配对。满缓冲下全带调度时同一 TTI 的 RE 数对 SU/MU 完全相同，所以比较 <code>Σ rank × MCS 谱效</code> 与有限话务下比较 useful bytes 是同一件事。拒配对的原因计入 <code>mu_candidate_scoring.rejection_reasons</code>，判单发更划算的 TTI 数计入 <code>su_mu_plan.su_selected</code>，不静默退回。",
@@ -2696,7 +2696,7 @@ FORMULA_SPECS.update({
     ),
     "F_CODEWORD_SINR": FormulaSpec(
         "逐 RB、逐流 SINR 压成单码字有效 SINR",
-        "SuperRAN 当前预置表口径先在每个 RBG 内对 RB 的线性 SINR逐流平均，再转 dB；随后对选定 rank 的所有 stream 与实际 grant 的所有 RBG 做 dB 算术平均。这个透明基线不是已标定的 EESM/MIESM。",
+        "SuperRAN 当前预置表口径先把每个 RB、每条流的 SINR 转为 dB，再在每个 RBG 内逐流平均；随后对选定 rank 的所有 stream 与实际 grant 的所有 RBG 做 dB 算术平均。这个透明基线不是已标定的 EESM/MIESM。",
         (("γ<sub>b,s</sub>", "RB b、stream s 的线性 SINR。"),
          ("B<sub>g</sub>", "第 g 个 RBG 所包含的 RB 索引集合；固定系统中每组 16 RB。"),
          ("γ<sub>g,s</sub><sup>dB</sup>", "RBG g、stream s 内各 RB 先转 dB 后取算术平均的 SINR。"),

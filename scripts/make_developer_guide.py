@@ -44,7 +44,7 @@ except ModuleNotFoundError:  # importing as scripts.make_developer_guide
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src" / "superran"
 OUT = ROOT / "docs" / "index.html"
-GITHUB = "https://github.com/TianLin0509/superran/blob/main/"
+SOURCE_BASE = "https://ai.lt-stockpartner.tech/repos/superran/SuperRAN/src/branch/develop/"
 UI_ASSETS = ROOT / "docs" / "assets" / "ui"
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -669,7 +669,7 @@ def source_line(rel: str, needle: str) -> int:
 def source_ref(rel: str, needle: str, label: str | None = None) -> str:
     line = source_line(rel, needle)
     text = label or f"{rel}:{line}"
-    href = GITHUB + rel.replace("\\", "/") + f"#L{line}"
+    href = SOURCE_BASE + rel.replace("\\", "/") + f"#L{line}"
     return f'<a class="src" href="{esc(href)}" target="_blank" rel="noreferrer">{esc(text)}</a>'
 
 
