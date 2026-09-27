@@ -421,8 +421,21 @@ def create_draft(
         brief_evidence=list(brief.evidence),
         blockers=list(brief.unsupported),
     )
+    _scenario_height(d)
     save_draft(d)
     return d, profile
+
+
+def _scenario_height(d: Draft) -> None:
+    """原话直接指定场景也落实站高；显式用户站高始终保留。"""
+    from . import interview as iv  # noqa: PLC0415
+
+    scenario = str(d.params.get("scenario", ""))
+    height = 10.0 if scenario.startswith("UMi") else 25.0 if scenario.startswith("UMa") else None
+    if height is not None and ("tx_height_m" not in d.params
+                               or d.provenance.get("tx_height_m") == iv.SOURCE_DERIVED):
+        d.params["tx_height_m"] = height
+        d.provenance["tx_height_m"] = iv.SOURCE_DERIVED
 
 
 def _apply_answer(d: Draft, key: str, value: Any, changes: list[str]) -> None:
@@ -542,6 +555,7 @@ def revise_draft(
             d.params[adj["key"]] = adj["to"]
             changes.append(f"{adj['key']}: {old!r} → {adj['to']!r}（{adj['why']}）")
 
+    _scenario_height(d)
     # 用户回应过一轮就推进轮次；即使只是“确认默认值”也要推进，否则会重复问。
     if overrides or design or accept_recommended:
         d.round_no += 1
@@ -625,6 +639,10 @@ def interview_blockers(d: Draft, num_samples: int | None = None) -> list[dict[st
     from . import interview as _iv  # noqa: PLC0415
 
     _skey = (d.sweep or {}).get("key") or _iv.sweep_key_from_intent(d.intent, _iv.Brief())
+    if d.sweep:
+        for problem in _iv.sweep_value_issues(d.sweep.get("values", []), _skey):
+            out.append({"severity": "block", "key": "sweep_values", "message": problem,
+                        "suggestion": "通过 sweep_values 给出合法档位；原话中的越界值不会被推荐覆盖"})
     if _skey == "load?" and d.form == "sweep_condition":
         out.append({"severity": "block", "key": "load_owner",
                     "message": "原话里的“负载”没说是本小区还是邻区：前者改变排队竞争，后者改变干扰。",

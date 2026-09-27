@@ -102,12 +102,32 @@ _SWEEP_RANGE = {
 }
 
 
-def parse_sweep_values(text: str, key: str) -> tuple[list[float], list[str]]:
+def sweep_value_issues(values: list[Any], key: str) -> list[str]:
+    """验证已换算到配置单位的档位；原话和后续回答共用。"""
+    if key == "antenna_preset":
+        from .plan import _ANTENNA_PRESETS  # noqa: PLC0415
+
+        bad = [v for v in values if v not in _ANTENNA_PRESETS]
+        return [f"不支持的阵型档位：{bad}"] if bad else []
+    lo, hi = _SWEEP_RANGE.get(key, (float("-inf"), float("inf")))
+    if key == "load?":
+        lo, hi = 0.0, 1.0
+    try:
+        bad = [v for v in values if not (lo <= float(v) <= hi)]
+    except (TypeError, ValueError):
+        return [f"{key} 的档位必须是具体数值"]
+    return [f"{key} 的取值 {bad} 超出合法范围 [{lo:g}, {hi:g}]"] if bad else []
+
+
+def parse_sweep_values(text: str, key: str) -> tuple[list[Any], list[str]]:
     """把扫描取值换算到配置单位：保留科学计数法、百分比、MHz/GHz/km/h（审核 R2-4）。
 
     返回 (取值, 问题)。问题非空时说明有数值越界或无法换算，调用方不应记为已答。
     """
     raw = str(text).lower().replace("−", "-")
+    if key == "antenna_preset":
+        labels = [f"{a}T{b}R" for a, b in re.findall(r"(\d+)\s*t\s*(\d+)\s*r", raw)]
+        return labels, sweep_value_issues(labels, key)
     tokens = re.findall("(" + _NUM + r")\s*(%|mhz|ghz|khz|hz|ms|km/h|dbm|m)?", raw)
     vals: list[float] = []
     for num, unit in tokens:
@@ -117,12 +137,7 @@ def parse_sweep_values(text: str, key: str) -> tuple[list[float], list[str]]:
         elif key == "bandwidth_hz":
             v *= {"ghz": 1e9, "mhz": 1e6, "khz": 1e3, "hz": 1.0}.get(unit, 1e6 if v < 1e4 else 1.0)
         vals.append(v)
-    problems = []
-    lo, hi = _SWEEP_RANGE.get(key, (float("-inf"), float("inf")))
-    bad = [v for v in vals if not (lo <= v <= hi)]
-    if bad:
-        problems.append(f"{key} 的取值 {bad} 超出合法范围 [{lo:g}, {hi:g}]")
-    return vals, problems
+    return vals, sweep_value_issues(vals, key)
 
 
 def read_brief(intent: str) -> Brief:
@@ -216,6 +231,15 @@ def read_brief(intent: str) -> Brief:
     if m:
         b.sweep = {"key": "srs_period_ms", "values": [float(m.group(1)), float(m.group(2))]}
         b.evidence.append(f"「{m.group(0)}」→ 扫 SRS 周期 {b.sweep['values']} ms")
+
+    m = re.search(r"(?:发射)?功率\s*(" + _NUM + r"\s*(?:dbm)?\s*"
+                  r"(?:(?:和|与|到|至|vs\.?|/|、|,)\s*" + _NUM
+                  + r"\s*(?:dbm)?\s*)+)dbm", text)
+    if m:
+        vals, _ = parse_sweep_values(m.group(1), "tx_power_dbm")
+        b.sweep = {"key": "tx_power_dbm", "values": vals}
+        b.params.pop("tx_power_dbm", None)
+        b.evidence.append(f"「{m.group(0)}」→ 扫发射功率 {vals} dBm")
 
     # 原话里的硬要求：与选项回答走同一套阻断检查，推荐项不能替用户放弃（审核 R2-2）。
     if re.search(r"(必须|需要|要|考虑|包含|带)[^，,。]{0,8}(室内穿透|穿透损耗|o2i|室内用户)", text):

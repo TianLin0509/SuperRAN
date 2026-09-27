@@ -401,9 +401,25 @@ check(iv.read_brief("发射功率 -10 dBm").params.get("tx_power_dbm") == -10.0
       "原话解析：负功率与紧贴中文的 UMi")
 
 # ---- 审核第二轮（codex1 R2）：改口、分轮补答、单位换算、原话硬要求 ----
+for _power_text in ("对比发射功率33和53 dBm下的SINR", "比较功率33 dBm/53 dBm的SINR"):
+    _pd, _pp, _, _ = _final(_power_text, accept_recommended=True)
+    check(_pd.sweep == {"key": "tx_power_dbm", "values": [33.0, 53.0]},
+          "R4：原话功率扫描保留 33 与 53 dBm 两档")
+for _bad_text in ("对比本小区负载30%到150%时的边缘速率", "对比站距0/500/1000m下的干扰"):
+    _bd, _bp, _, _ = _final(_bad_text, accept_recommended=True)
+    check("sweep_values" in _blocks(_bd, _bp), "R4：原话越界档位在按推荐后仍阻断")
+    _bd, _bp, _ = pl.revise_draft(_bd.draft_id, design={"sweep_values": "0.3/0.9"
+                                  if "负载" in _bad_text else "200/500/1000"})
+    check("sweep_values" not in _blocks(_bd, _bp), "R4：修正档位后解除对应阻断")
+_ad, _ap, _, _ = _final("对比64T和256T下的SINR", design={"sweep_values": "4T4R/64T4R"})
+check(_ad.sweep["values"] == ["4T4R", "64T4R"], "R4：阵型档位按完整标签保存")
 for _scenario in ("UMa_LOS", "UMa_NLOS", "UMi_LOS", "UMi_NLOS", "RMa_LOS", "RMa_NLOS"):
     _sd, _sp, _sc, _ = _final(f"给我2个4T4R {_scenario} 信道，不做算法对比")
     check(_sc["scenario"] == _scenario, f"R4：原话 {_scenario} 的 LOS/NLOS 限定进入执行配置")
+_hd, _hp, _hc, _ = _final("帮我看下 UMi 场景的 SIR 分布，站距200m", accept_recommended=True)
+check(_hc["tx_height_m"] == 10.0, "R4：原话 UMi 的推荐落实 10m 站高")
+_hd, _, _ = pl.revise_draft(_hd.draft_id, overrides={"tx_height_m": 15.0, "scenario": "UMa_LOS"})
+check(pl.resolved_config(_hd)[0]["tx_height_m"] == 15.0, "R4：场景切换保留显式站高")
 
 def _rv(did, **kw):
     return srv.sr_revise(did, **kw)
@@ -450,6 +466,9 @@ check(srv._auto_serving_cell([0, 0, 3, 7, 7, 7], 3)[0] == 0,
 check(srv._auto_serving_cell([1, 3, 7, 7, 7], 3)[0] == 7,
       "R2-7：中心站扇区都不足 2 个 UE 时退选 UE 最多的小区并说明")
 check(srv._auto_serving_cell([0, 1, 2], 3)[0] is None, "R2-7：没有小区 ≥2 个 UE 时报错而不是硬选")
+for _layout in ("linear", "custom"):
+    check(srv._auto_serving_cell([0, 0, 9, 9, 9], 3, _layout)[0] is None,
+          f"R4：{_layout} 拓扑自动选中心站必须拒绝并要求显式小区")
 
 # “按推荐跑”：所有待问问题取推荐项；False 也是合法回答；预期只能由用户本人给
 d_acc, _, _ = pl.revise_draft(d_srs.draft_id, accept_recommended=True)

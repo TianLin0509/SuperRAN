@@ -613,12 +613,16 @@ async def sr_generate(
     return out
 
 
-def _auto_serving_cell(cell_ids_by_ue: list[int], sectors_per_site: int) -> tuple[int | None, str]:
+def _auto_serving_cell(cell_ids_by_ue: list[int], sectors_per_site: int,
+                       topology_layout: str = "hexagonal") -> tuple[int | None, str]:
     """按实际撒点挑服务小区：优先中心站（站 0）的扇区，取 UE 最多且 ≥2 个的那个。
 
     没有 wrap-around，边缘站邻区不完整会低估干扰，所以先看中心站；中心站扇区都不足
     2 个 UE 时退到全网 UE 最多的小区，并如实说明它不是中心站。
     """
+    if topology_layout != "hexagonal":
+        return None, (f"serving_cell=auto 只支持已知站 0 为中心的 hexagonal 拓扑；"
+                      f"当前拓扑为 {topology_layout!r}，请按实际站点位置显式指定 serving_cell。")
     counts = {c: cell_ids_by_ue.count(c) for c in sorted(set(cell_ids_by_ue))}
     center = {c: n for c, n in counts.items() if c < max(int(sectors_per_site), 1) and n >= 2}
     if center:
@@ -2522,7 +2526,8 @@ def sr_system_sim(
     auto_reason = None
     if isinstance(serving_cell, str) and serving_cell.strip().lower() == "auto":
         serving_cell, auto_reason = _auto_serving_cell(
-            serving_cell_ids_by_ue, int(ds.config.get("sectors_per_site", 1) or 1))
+            serving_cell_ids_by_ue, int(ds.config.get("sectors_per_site", 1) or 1),
+            str(ds.config.get("topology_layout", "hexagonal")))
         if serving_cell is None:
             return {"error": auto_reason}
     if serving_cell is not None:
